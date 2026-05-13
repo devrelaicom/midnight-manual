@@ -18,9 +18,12 @@ CREATE TABLE rate_limit_override (
     created_at timestamptz NOT NULL DEFAULT now()
 );
 
+-- Plain btree on expires_at — queries filter `WHERE expires_at > now()` at
+-- query time. A partial index with `WHERE expires_at > now()` would be
+-- rejected (now() is not IMMUTABLE) and is the wrong semantics anyway: the
+-- predicate would be frozen at index-creation time.
 CREATE INDEX idx_rate_limit_override_active
-    ON rate_limit_override (expires_at)
-    WHERE expires_at > now();
+    ON rate_limit_override (expires_at);
 
 -- ============================================================================
 -- Reserved tables (not used in v1; documented for forward compatibility)

@@ -48,7 +48,7 @@ tower-http       = { version = "0.6", features = ["cors", "limit", "trace", "set
 hyper            = "1"
 
 # Storage
-sqlx             = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio-rustls", "macros", "uuid", "time", "json"] }
+sqlx             = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio-rustls", "macros", "uuid", "time", "json", "migrate"] }
 pgvector         = { version = "0.4", features = ["sqlx", "postgres"] }
 
 # Serialization & schemas
