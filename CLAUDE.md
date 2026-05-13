@@ -6,7 +6,7 @@ See `CONSTITUTION.md` for non-negotiable principles. See `specs/001-rag-platform
 
 ## Active Technologies
 
-**Language**: Rust stable (MSRV 1.83, pinned in `Cargo.toml`).
+**Language**: Rust stable (MSRV 1.85, pinned in `Cargo.toml`). MSRV bumped from 1.83 → 1.85 in Phase 1 because transitive deps (`aligned`, `time`, others) require the `edition2024` Cargo feature which stabilized in 1.85.
 
 **Workspace crates** (10 total — 8 lib + 2 bin; see `specs/001-rag-platform/plan.md`):
 - `mn-core` — types, errors, config (D17/D18), auth.toml (D28), scoring policy (D24), model-id wire format

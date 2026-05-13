@@ -41,7 +41,7 @@ jobs:
       MIDNIGHT_MANUAL_DISABLE_TELEMETRY: "0"
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.83.0
+      - uses: dtolnay/rust-toolchain@1.85.0
       - uses: Swatinem/rust-cache@v2
       - name: Run canary integration tests (capture all output)
         run: |

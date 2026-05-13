@@ -1,11 +1,13 @@
 # See https://rust-lang.github.io/rustfmt/
+#
+# Stable-only formatting policy. `imports_granularity` and `group_imports`
+# are nightly-only and intentionally omitted so stable-channel fmt-check
+# stays warning-free; revisit when those settings reach stable.
 
 edition = "2021"
 max_width = 100
 fn_call_width = 80
 struct_lit_width = 30
-imports_granularity = "Module"
-group_imports = "StdExternalCrate"
 reorder_imports = true
 newline_style = "Unix"
 use_field_init_shorthand = true

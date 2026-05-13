@@ -16,14 +16,17 @@ workspace = true
 [features]
 integration = []
 
-# Two binary names from one crate, per D16 / Story 10.
+# Two binary names from one crate, per D16 / Story 10. Cargo dislikes pointing two
+# bin targets at the same file, so `mnm` is a thin shim in src/bin/mnm.rs that defers
+# to `midnight_manual::run()` once the CLI lib is added; for now both stubs
+# print a placeholder message.
 [[bin]]
 name = "midnight-manual"
 path = "src/main.rs"
 
 [[bin]]
 name = "mnm"
-path = "src/main.rs"
+path = "src/bin/mnm.rs"
 
 [dependencies]
 mn-core       = { path = "../mn-core" }
