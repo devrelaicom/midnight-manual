@@ -27,6 +27,7 @@ pub fn build(pool: PgPool, cfg: ServerConfig) -> Router {
         .merge(crate::routes::health::router())
         .merge(crate::routes::sources::router())
         .merge(crate::routes::models::router())
+        .merge(crate::routes::search::router())
         .layer(axum::middleware::from_fn(request_id::layer))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
