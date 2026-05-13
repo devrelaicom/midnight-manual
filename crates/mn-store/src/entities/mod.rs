@@ -1,0 +1,15 @@
+//! Entity modules — one per table in `data-model.md` §0002 + §0004.
+//!
+//! Doc-markdown lint allowed crate-wide for these modules because their docs
+//! describe SQL schema concepts using snake_case identifiers in prose; wrapping
+//! every column name in backticks would harm readability without adding signal.
+
+#![allow(clippy::doc_markdown)]
+
+pub mod chunk;
+pub mod document;
+pub mod embedding_model;
+pub mod node;
+pub mod package;
+pub mod source;
+pub mod source_version;
