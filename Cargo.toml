@@ -103,6 +103,7 @@ indicatif        = "0.17"
 proptest         = "1"
 testcontainers   = "0.23"
 insta            = "1"
+tempfile         = "3"
 
 # CLI command convenience for the workspace itself
 # (not a runtime dep; surfaced for documentation only)

@@ -1,10 +1,21 @@
 //! `mn-core` — shared primitives for the midnight-manual workspace.
 //!
-//! See [`specs/001-rag-platform/plan.md`](../../../specs/001-rag-platform/plan.md) for the crate's
-//! intended responsibilities. This is the workspace skeleton produced by `/sdd:plan` Phase 2;
-//! implementation modules will land via `/sdd:tasks` → `/sdd:implement`.
+//! Phase 2 lands the foundational shared types: typed error envelope
+//! ([`error`]), embedding-model wire id ([`model_id`]), provenance / content
+//! / source / chunk types ([`provenance`], [`types`]), XDG config discovery
+//! ([`config`]), auth-file reader ([`auth_file`]), and the scoring-policy
+//! loader ([`scoring_policy`]). Each module is independently usable and
+//! independently testable.
 
 #![doc(html_root_url = "https://docs.rs/mn-core/0.1.0")]
+
+pub mod auth_file;
+pub mod config;
+pub mod error;
+pub mod model_id;
+pub mod provenance;
+pub mod scoring_policy;
+pub mod types;
 
 /// Crate version stamped at build time.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
