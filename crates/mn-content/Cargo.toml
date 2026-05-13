@@ -24,6 +24,7 @@ tree-sitter-rust      = { workspace = true }
 tree-sitter-typescript = { workspace = true }
 tree-sitter-javascript = { workspace = true }
 serde                 = { workspace = true }
+serde_json            = { workspace = true }
 serde_yaml            = { workspace = true }
 thiserror             = { workspace = true }
 sha2                  = { workspace = true }
