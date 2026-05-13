@@ -1,0 +1,27 @@
+[package]
+name = "mn-embedding"
+description = "fastembed-rs wrapper for the bge-base-en-v1.5 embedder and bge-reranker-base reranker."
+
+version       = { workspace = true }
+edition       = { workspace = true }
+rust-version  = { workspace = true }
+license       = { workspace = true }
+authors       = { workspace = true }
+repository    = { workspace = true }
+homepage      = { workspace = true }
+
+[lints]
+workspace = true
+
+[features]
+integration = []
+
+[dependencies]
+mn-core      = { path = "../mn-core" }
+fastembed    = { workspace = true }
+once_cell    = { workspace = true }
+sha2         = { workspace = true }
+serde        = { workspace = true }
+thiserror    = { workspace = true }
+tracing      = { workspace = true }
+tokio        = { workspace = true }

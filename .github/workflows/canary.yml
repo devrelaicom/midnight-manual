@@ -19,6 +19,10 @@ jobs:
   canaries:
     name: canary tests
     runs-on: ubuntu-latest
+    # Canary infrastructure lands in Phase 12 (US11). Until tests/canary/canary.rs
+    # exists this job is a no-op skip — keeps CI green for earlier phases without
+    # weakening the privacy gate once it lands.
+    if: ${{ hashFiles('tests/canary/canary.rs') != '' }}
     services:
       postgres:
         image: pgvector/pgvector:pg16

@@ -1,16 +1,15 @@
 [workspace]
 members = [
     "crates/mn-core",
-    # Future members (added by /sdd:tasks → /sdd:implement):
-    # "crates/mn-store",
-    # "crates/mn-retrieval",
-    # "crates/mn-content",
-    # "crates/mn-embedding",
-    # "crates/mn-auth",
-    # "crates/mn-telemetry",
-    # "crates/mn-mcp",
-    # "crates/mn-cli",
-    # "crates/mn-server",
+    "crates/mn-store",
+    "crates/mn-retrieval",
+    "crates/mn-content",
+    "crates/mn-embedding",
+    "crates/mn-auth",
+    "crates/mn-telemetry",
+    "crates/mn-mcp",
+    "crates/mn-cli",
+    "crates/mn-server",
 ]
 resolver = "2"
 
@@ -68,8 +67,8 @@ directories      = "5"
 # Auth & crypto
 ed25519-dalek    = { version = "2", features = ["rand_core", "pkcs8"] }
 jsonwebtoken     = "9"
-oauth2           = "4"
-octocrab         = "0.39"
+oauth2           = "5"
+octocrab         = "0.50"
 sha2             = "0.10"
 base64           = "0.22"
 

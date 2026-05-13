@@ -1,0 +1,44 @@
+[package]
+name = "mn-cli"
+description = "midnight-manual CLI binary (also installed as `mnm`); exposes `mcp serve` subcommand."
+
+version       = { workspace = true }
+edition       = { workspace = true }
+rust-version  = { workspace = true }
+license       = { workspace = true }
+authors       = { workspace = true }
+repository    = { workspace = true }
+homepage      = { workspace = true }
+
+[lints]
+workspace = true
+
+[features]
+integration = []
+
+# Two binary names from one crate, per D16 / Story 10.
+[[bin]]
+name = "midnight-manual"
+path = "src/main.rs"
+
+[[bin]]
+name = "mnm"
+path = "src/main.rs"
+
+[dependencies]
+mn-core       = { path = "../mn-core" }
+mn-auth       = { path = "../mn-auth" }
+mn-content    = { path = "../mn-content" }
+mn-embedding  = { path = "../mn-embedding" }
+mn-mcp        = { path = "../mn-mcp" }
+mn-telemetry  = { path = "../mn-telemetry" }
+clap          = { workspace = true }
+serde         = { workspace = true }
+serde_json    = { workspace = true }
+toml          = { workspace = true }
+tokio         = { workspace = true }
+tracing       = { workspace = true }
+tracing-subscriber = { workspace = true }
+directories   = { workspace = true }
+anyhow        = { workspace = true }
+indicatif     = { workspace = true }
