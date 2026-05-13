@@ -52,6 +52,8 @@ pub enum Command {
     Versions(commands::versions::Args),
     /// Show or edit the resolved config.
     Config(commands::config::Args),
+    /// MCP server (stdio JSON-RPC) and related tooling.
+    Mcp(commands::mcp::Args),
 }
 
 /// Parse argv and dispatch.
@@ -73,6 +75,7 @@ pub async fn run() -> Result<()> {
             commands::versions::run(args, cli.server.as_deref(), cli.json).await
         }
         Command::Config(args) => commands::config::run(args, cli.config.as_deref(), cli.json).await,
+        Command::Mcp(args) => commands::mcp::run(args).await,
     }
 }
 

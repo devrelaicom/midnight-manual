@@ -1,0 +1,272 @@
+//! Minimal MCP / JSON-RPC 2.0 types (FR-036).
+//!
+//! The Model Context Protocol speaks JSON-RPC 2.0 over a transport (stdio in
+//! our case, per US5). We hand-roll the types here rather than depend on an
+//! external MCP SDK — those crates are still moving fast in 2026 (per
+//! research.md R-2). The 7-tool surface our server exposes is small enough
+//! that the wire types fit in this module.
+
+use serde::{Deserialize, Serialize};
+
+/// JSON-RPC 2.0 protocol version sentinel.
+pub const JSONRPC: &str = "2.0";
+
+/// MCP protocol version we declare in the `initialize` response.
+pub const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
+
+/// Request id: per JSON-RPC 2.0, either a string or a number (or null in a
+/// notification, but we don't model that distinction here — see [`Notification`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum RequestId {
+    /// Numeric id.
+    Number(i64),
+    /// String id.
+    String(String),
+}
+
+/// Incoming JSON-RPC request from the client.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Request {
+    /// MUST be "2.0".
+    #[allow(dead_code)]
+    pub jsonrpc: String,
+    /// The method name (e.g. "initialize", "tools/list", "tools/call").
+    pub method: String,
+    /// Method-specific parameters; left as raw Value for now and decoded per-method.
+    #[serde(default)]
+    pub params: serde_json::Value,
+    /// Request id (must be set for non-notification requests).
+    pub id: RequestId,
+}
+
+/// Incoming notification (no `id`, no expected response).
+#[derive(Debug, Clone, Deserialize)]
+pub struct Notification {
+    /// MUST be "2.0".
+    #[allow(dead_code)]
+    pub jsonrpc: String,
+    /// The notification method name.
+    pub method: String,
+    /// Optional payload.
+    #[serde(default)]
+    pub params: serde_json::Value,
+}
+
+/// JSON-RPC envelope: either a Request (with id) or a Notification (without).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum Incoming {
+    /// A regular request expecting a response.
+    Request(Request),
+    /// A fire-and-forget notification.
+    Notification(Notification),
+}
+
+/// Outgoing JSON-RPC response shape.
+#[derive(Debug, Clone, Serialize)]
+pub struct Response {
+    /// MUST be "2.0".
+    pub jsonrpc: &'static str,
+    /// Mirrors the request id.
+    pub id: RequestId,
+    /// Method result on success.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<serde_json::Value>,
+    /// Error envelope on failure.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<JsonRpcError>,
+}
+
+impl Response {
+    /// Build a success response.
+    #[must_use]
+    pub const fn success(id: RequestId, result: serde_json::Value) -> Self {
+        Self {
+            jsonrpc: JSONRPC,
+            id,
+            result: Some(result),
+            error: None,
+        }
+    }
+
+    /// Build an error response.
+    #[must_use]
+    pub fn err(id: RequestId, code: ErrorCode, message: impl Into<String>) -> Self {
+        Self {
+            jsonrpc: JSONRPC,
+            id,
+            result: None,
+            error: Some(JsonRpcError {
+                code: code as i32,
+                message: message.into(),
+                data: None,
+            }),
+        }
+    }
+}
+
+/// JSON-RPC error envelope.
+#[derive(Debug, Clone, Serialize)]
+pub struct JsonRpcError {
+    /// Numeric code (see [`ErrorCode`]).
+    pub code: i32,
+    /// Operator-facing summary.
+    pub message: String,
+    /// Optional structured data.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Value>,
+}
+
+/// JSON-RPC standard error codes plus MCP-extension space.
+#[derive(Debug, Clone, Copy)]
+#[repr(i32)]
+pub enum ErrorCode {
+    /// Parse error (invalid JSON).
+    ParseError = -32_700,
+    /// Invalid request (not conformant to the spec).
+    InvalidRequest = -32_600,
+    /// Method not found.
+    MethodNotFound = -32_601,
+    /// Invalid params for the requested method.
+    InvalidParams = -32_602,
+    /// Internal error (catchall).
+    InternalError = -32_603,
+    /// Tool not found (MCP-specific).
+    ToolNotFound = -32_001,
+    /// Tool call failed at runtime (MCP-specific).
+    ToolFailed = -32_002,
+}
+
+/// Server capabilities advertised in the `initialize` response.
+#[derive(Debug, Serialize)]
+pub struct ServerCapabilities {
+    /// Tool support.
+    pub tools: ToolsCapability,
+}
+
+/// Tool capability flags.
+#[derive(Debug, Serialize)]
+pub struct ToolsCapability {
+    /// Whether tool descriptions can change at runtime.
+    #[serde(rename = "listChanged")]
+    pub list_changed: bool,
+}
+
+/// `initialize` response payload.
+#[derive(Debug, Serialize)]
+pub struct InitializeResult {
+    /// MCP protocol version we speak.
+    #[serde(rename = "protocolVersion")]
+    pub protocol_version: &'static str,
+    /// What we support.
+    pub capabilities: ServerCapabilities,
+    /// Server identity.
+    #[serde(rename = "serverInfo")]
+    pub server_info: ServerInfo,
+}
+
+/// Server identity block.
+#[derive(Debug, Serialize)]
+pub struct ServerInfo {
+    /// Human-readable server name.
+    pub name: &'static str,
+    /// Crate version.
+    pub version: &'static str,
+}
+
+/// One tool declaration in `tools/list` response.
+#[derive(Debug, Serialize)]
+pub struct ToolDescription {
+    /// Tool name (e.g. "search").
+    pub name: &'static str,
+    /// Human-readable description (shown by AI clients).
+    pub description: &'static str,
+    /// JSON Schema for the tool's input parameters.
+    #[serde(rename = "inputSchema")]
+    pub input_schema: serde_json::Value,
+}
+
+/// `tools/list` response payload.
+#[derive(Debug, Serialize)]
+pub struct ToolsListResult {
+    /// All available tools.
+    pub tools: Vec<ToolDescription>,
+}
+
+/// `tools/call` request params.
+#[derive(Debug, Deserialize)]
+pub struct ToolCallParams {
+    /// Tool name to invoke.
+    pub name: String,
+    /// Tool-specific arguments.
+    #[serde(default)]
+    pub arguments: serde_json::Value,
+}
+
+/// `tools/call` response payload.
+#[derive(Debug, Serialize)]
+pub struct ToolCallResult {
+    /// Output content blocks (we always emit a single `text` block).
+    pub content: Vec<ContentBlock>,
+    /// Set when the tool reported an error condition (vs. a hard JSON-RPC error).
+    #[serde(rename = "isError", skip_serializing_if = "std::ops::Not::not")]
+    pub is_error: bool,
+}
+
+/// One content block in a tool call response.
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum ContentBlock {
+    /// Plain-text block.
+    Text {
+        /// The text content.
+        text: String,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_id_round_trips() {
+        let n = serde_json::to_value(RequestId::Number(7)).unwrap();
+        assert_eq!(n, serde_json::json!(7));
+        let s = serde_json::to_value(RequestId::String("abc".into())).unwrap();
+        assert_eq!(s, serde_json::json!("abc"));
+    }
+
+    #[test]
+    fn response_success_omits_error() {
+        let r = Response::success(RequestId::Number(1), serde_json::json!({ "ok": true }));
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["jsonrpc"], "2.0");
+        assert_eq!(v["id"], 1);
+        assert_eq!(v["result"]["ok"], true);
+        assert!(v.get("error").is_none());
+    }
+
+    #[test]
+    fn response_err_omits_result() {
+        let r = Response::err(RequestId::String("x".into()), ErrorCode::ToolNotFound, "boom");
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["error"]["code"], -32001);
+        assert_eq!(v["error"]["message"], "boom");
+        assert!(v.get("result").is_none());
+    }
+
+    #[test]
+    fn incoming_distinguishes_request_from_notification() {
+        let req_json = r#"{"jsonrpc":"2.0","method":"tools/list","id":1}"#;
+        let n_json = r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
+        assert!(matches!(
+            serde_json::from_str::<Incoming>(req_json).unwrap(),
+            Incoming::Request(_)
+        ));
+        assert!(matches!(
+            serde_json::from_str::<Incoming>(n_json).unwrap(),
+            Incoming::Notification(_)
+        ));
+    }
+}
