@@ -32,14 +32,15 @@ fn unit_vector(seed: f32) -> Vec<f32> {
 }
 
 async fn seed(pool: &sqlx::PgPool) -> (Uuid, Uuid) {
-    // Returns (chunk_id_a, chunk_id_b).
+    // Returns (chunk_id_a, chunk_id_b). Slug is randomized per call so parallel
+    // CI test runs don't collide on the unique constraint.
     let model_id = embedding_model::upsert(pool, "bge-base-en-v1.5", 1, 768, "baai")
         .await
         .unwrap();
-    let source_id =
-        source::insert(pool, "search-route-test", "Search", SourceKind::DocsSite, None, 5)
-            .await
-            .unwrap();
+    let slug = format!("search-route-test-{}", Uuid::new_v4());
+    let source_id = source::insert(pool, &slug, "Search", SourceKind::DocsSite, None, 5)
+        .await
+        .unwrap();
     let (sv_id, _) = source_version::create_building(pool, source_id, model_id, "0.1.0", "h")
         .await
         .unwrap();

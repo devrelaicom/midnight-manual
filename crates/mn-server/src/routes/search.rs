@@ -94,8 +94,8 @@ pub struct SearchResult {
 /// Score breakdown — additive; new fields are appended in later phases.
 #[derive(Debug, Serialize)]
 pub struct ScoreBreakdown {
-    /// Raw similarity from pgvector cosine distance, normalized to [0,1]
-    /// (1 - distance for cosine).
+    /// Raw similarity from pgvector cosine distance, normalized to
+    /// 0..=1 (1 - distance for cosine).
     pub vector_similarity: f64,
 }
 
