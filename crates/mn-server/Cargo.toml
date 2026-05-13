@@ -20,6 +20,10 @@ integration = []
 name = "midnight-manual-server"
 path = "src/main.rs"
 
+[dev-dependencies]
+testcontainers = { workspace = true }
+tower          = { workspace = true }
+
 [dependencies]
 mn-core        = { path = "../mn-core" }
 mn-auth        = { path = "../mn-auth" }
@@ -41,6 +45,7 @@ metrics        = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 utoipa         = { workspace = true }
 anyhow         = { workspace = true }
+thiserror      = { workspace = true }
 uuid           = { workspace = true }
 time           = { workspace = true }
 ipnet          = { workspace = true }
