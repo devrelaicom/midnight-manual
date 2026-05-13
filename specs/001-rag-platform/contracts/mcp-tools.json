@@ -1,0 +1,257 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "midnight-manual MCP tools",
+  "description": "MCP tool input/output schemas for the 7 tools exposed by `mnm mcp serve`. Each tool's description is treated as part of the public contract per Constitution I and FR-037.",
+  "version": "1.0.0",
+  "tools": {
+    "search": {
+      "description": "Hybrid (FTS + vector) retrieval over the Midnight corpus with optional cross-encoder reranking and trust-aware confidence scoring.\n\n**Patterns** (FR-091):\n- `hyde`: pass the user's question AND an LLM-generated hypothetical answer as two queries.\n- `multi_query`: pass 2–3 paraphrases of the question (different vocabulary).\n- `step_back`: pass the user's question AND a more abstract version of it.\nSee docs/cookbook/query-enhancement.md for worked examples.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Single-query convenience form (mutually exclusive with queries)."
+          },
+          "queries": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 50,
+            "items": { "type": "string", "minLength": 1 },
+            "description": "Multi-query input for HyDE / expansion / step-back patterns."
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50,
+            "default": 10,
+            "description": "Max results returned. Capped at 50 to keep reranker latency within the 1s p95 budget."
+          },
+          "rerank": {
+            "type": "boolean",
+            "default": true,
+            "description": "Apply local cross-encoder reranking. Disable for ultra-low-latency callers."
+          },
+          "sort_by": {
+            "type": "string",
+            "enum": ["confidence", "trust", "relevance", "score"],
+            "default": "confidence"
+          },
+          "min_confidence": {
+            "type": "number",
+            "minimum": 0.0,
+            "maximum": 1.0,
+            "default": 0.0
+          },
+          "filters": {
+            "type": "object",
+            "description": "Same shape as cloud /v1/search filters.",
+            "additionalProperties": false,
+            "properties": {
+              "source_slug": { "type": "array", "items": { "type": "string" } },
+              "attribution": { "type": "array", "items": { "type": "string" } },
+              "verified": { "type": "boolean" },
+              "content_type": { "type": "array", "items": { "type": "string" } },
+              "language_target": {
+                "type": "object",
+                "properties": {
+                  "name": { "type": "string" },
+                  "version_constraint_satisfies": { "type": "string" }
+                }
+              },
+              "sdk_dependency": {
+                "type": "object",
+                "properties": {
+                  "kind": { "type": "string" },
+                  "name": { "type": "string" },
+                  "version_constraint_satisfies": { "type": "string" }
+                }
+              },
+              "package": {
+                "type": "object",
+                "properties": {
+                  "kind": { "type": "string" },
+                  "name": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "oneOf": [
+          { "required": ["query"] },
+          { "required": ["queries"] }
+        ]
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "results": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/ChunkResult" }
+          },
+          "search_metadata": { "type": "object" },
+          "corpus_embedding_model": { "type": "string" }
+        }
+      }
+    },
+
+    "get_chunk": {
+      "description": "Fetch one chunk by id with full metadata, parent chain, and navigation pointers.",
+      "input_schema": {
+        "type": "object",
+        "required": ["id"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" }
+        }
+      },
+      "output_schema": { "$ref": "#/$defs/ChunkResult" }
+    },
+
+    "get_chunk_siblings": {
+      "description": "Fetch every chunk from the same document as the given chunk, ordered by chunk_index. Useful for reconstructing a full page from any starting point.",
+      "input_schema": {
+        "type": "object",
+        "required": ["id"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" }
+        }
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "chunks": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/ChunkResult" }
+          }
+        }
+      }
+    },
+
+    "get_chunk_parents": {
+      "description": "Walk the parent chain from a chunk up to its source-version root. Returns nodes from immediate parent to root.",
+      "input_schema": {
+        "type": "object",
+        "required": ["id"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" }
+        }
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "parents": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/Node" }
+          }
+        }
+      }
+    },
+
+    "list_sources": {
+      "description": "Enumerate the corpus's available sources so an agent can narrow filters.",
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "sources": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "slug": { "type": "string" },
+                "display_name": { "type": "string" },
+                "kind": { "type": "string" },
+                "active_revision": { "type": "integer" }
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "pull_models": {
+      "description": "Download or update the local embedding and reranker models. Required on first use and after a corpus-side model migration (signalled by an `embedding_model_mismatch` error from search).",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Specific model name to pull. Omit to pull whichever model the corpus is currently using."
+          }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "embedding_model": { "type": "string" },
+          "reranker_model": { "type": "string" },
+          "total_bytes": { "type": "integer" },
+          "took_ms": { "type": "integer" }
+        }
+      }
+    },
+
+    "status": {
+      "description": "Report health and model state. Works without models loaded.",
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "server_version": { "type": "string" },
+          "cloud_reachable": { "type": "boolean" },
+          "corpus_embedding_model": { "type": "string" },
+          "local_embedding_model": { "type": "string", "nullable": true },
+          "local_reranker_model": { "type": "string", "nullable": true },
+          "model_state": {
+            "type": "string",
+            "enum": ["ready", "missing", "stale", "loading", "corrupt"]
+          },
+          "rate_limit_tier": {
+            "type": "string",
+            "enum": ["anonymous", "read_uplift", "cidr_override"]
+          },
+          "admin_visibility_resolved_from": { "type": "string", "enum": ["env", "config", "default"] }
+        }
+      }
+    }
+  },
+
+  "$defs": {
+    "ChunkResult": {
+      "type": "object",
+      "description": "Single search result. Same shape as cloud /v1/search per-result, plus rerank_score when rerank=true.",
+      "properties": {
+        "chunk": { "type": "object" },
+        "document": { "type": "object" },
+        "source": { "type": "object" },
+        "source_version": { "type": "object" },
+        "package": { "type": "object", "nullable": true },
+        "parent_chain": { "type": "array" },
+        "navigation": { "type": "object" },
+        "scores": { "type": "object" },
+        "trust_score": { "type": "number" },
+        "confidence": { "type": "number" },
+        "confidence_factors": { "type": "object" },
+        "rerank_score": { "type": "number", "nullable": true }
+      }
+    },
+    "Node": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "format": "uuid" },
+        "parent_node_id": { "type": "string", "format": "uuid", "nullable": true },
+        "kind": { "type": "string", "enum": ["root", "group", "document", "chunk"] },
+        "name": { "type": "string" },
+        "order_index": { "type": "integer" }
+      }
+    }
+  }
+}

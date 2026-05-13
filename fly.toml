@@ -1,0 +1,46 @@
+# fly.toml — midnight-manual-server
+# See https://fly.io/docs/reference/configuration/
+
+app            = "midnight-manual"
+primary_region = "lhr"
+
+[build]
+dockerfile = "Dockerfile.server"
+
+[env]
+RUST_LOG = "info"
+MIDNIGHT_MANUAL_AUTO_MIGRATE = "true"
+
+[http_service]
+internal_port       = 8080
+force_https         = true
+auto_stop_machines  = false
+auto_start_machines = true
+min_machines_running = 1
+
+[[http_service.checks]]
+type     = "http"
+interval = "10s"
+timeout  = "2s"
+path     = "/readyz"
+method   = "GET"
+
+[[http_service.checks]]
+type     = "http"
+interval = "30s"
+timeout  = "2s"
+path     = "/healthz"
+method   = "GET"
+
+[[vm]]
+size = "shared-cpu-1x"
+memory = "1gb"
+
+# Secrets (set via `fly secrets set …`) — referenced for documentation only:
+#   DATABASE_URL
+#   MIDNIGHT_MANUAL_JWT_SECRET
+#   MIDNIGHT_MANUAL_USER_STORE
+#   MIDNIGHT_MANUAL_GITHUB_OAUTH_CLIENT_ID
+#   MIDNIGHT_MANUAL_GITHUB_OAUTH_CLIENT_SECRET
+#   MIDNIGHT_MANUAL_GITHUB_ORG
+#   MIDNIGHT_MANUAL_SCORING_POLICY (optional; falls back to compiled defaults)

@@ -1,0 +1,42 @@
+# Rust
+/target
+**/*.rs.bk
+Cargo.lock.bak
+
+# sqlx offline cache (committed except for the per-developer scratch)
+.sqlx-scratch/
+
+# Local env / secrets
+.env
+.env.local
+.env.*.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*~
+
+# Build artifacts
+*.tar.gz
+*.zip
+dist/
+target/distrib/
+
+# Local Postgres data
+postgres-data/
+
+# Local models (downloaded by `mnm models pull`)
+~/.local/share/midnight-manual/
+
+# spec-writer + sdd intermediate files (specs/ is committed; tasks.md will be added by /sdd:tasks)
+**/*.backup
+discovery/.claude/
+
+# Per-user / per-machine plugin state (don't commit; users have their own)
+.claude/
+.midnight-expert/
