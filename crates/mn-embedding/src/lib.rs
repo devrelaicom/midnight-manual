@@ -1,10 +1,21 @@
-//! `mn-embedding` — fastembed-rs wrapper for embedder and cross-encoder reranker.
+//! `mn-embedding` — fastembed-rs wrapper for the bge-base-en-v1.5 embedder and
+//! the bge-reranker-base cross-encoder.
 //!
-//! Phase-3 (US2) lands the embedder for `bge-base-en-v1.5`. Phase-5 (US5) adds the
-//! `bge-reranker-base` cross-encoder used by the local MCP server. See
-//! [`specs/001-rag-platform/tasks.md`](../../../specs/001-rag-platform/tasks.md).
+//! Phase 3b lands the wrappers + lazy `tokio::sync::OnceCell` singletons.
+//! Actual model-load tests are gated behind the `models` feature so default
+//! CI doesn't have to download ~700 MB of ONNX files on every run.
 
 #![doc(html_root_url = "https://docs.rs/mn-embedding/0.1.0")]
+#![allow(clippy::doc_markdown, clippy::useless_vec)]
+
+pub mod cache;
+pub mod embedder;
+pub mod error;
+pub mod reranker;
+
+pub use embedder::{Embedder, BGE_BASE_DIM, MODEL_NAME as EMBEDDER_MODEL_NAME};
+pub use error::{EmbeddingError, Result};
+pub use reranker::{RerankResult, Reranker, MODEL_NAME as RERANKER_MODEL_NAME};
 
 /// Crate version stamped at build time.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

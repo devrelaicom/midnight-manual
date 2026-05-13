@@ -15,6 +15,9 @@ workspace = true
 
 [features]
 integration = []
+# Enable model-load integration tests (downloads ~700MB of ONNX files on first
+# run). Default-off so unit CI stays fast.
+models = []
 
 [dependencies]
 mn-core      = { path = "../mn-core" }
