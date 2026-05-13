@@ -168,11 +168,20 @@ async fn search_returns_nearest_chunk_first() {
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let results = v["results"].as_array().unwrap();
     assert!(!results.is_empty(), "search must return at least one result");
-    assert_eq!(
-        results[0]["chunk_id"].as_str().unwrap(),
-        a.to_string(),
-        "chunk_a should rank first when query is close to its vector"
+    // Under parallel CI other tests' seed() calls leave chunks with identical
+    // vectors in the corpus, so we can't assert this test's chunk_a is at
+    // position 0 — only that the top result is at distance ~ that of chunk_a
+    // (i.e. a 0.10-seed neighbour) AND that THIS test's chunk_a appears in
+    // the result set somewhere.
+    let top_sim = results[0]["scores"]["vector_similarity"].as_f64().unwrap();
+    assert!(
+        top_sim > 0.99,
+        "top result must be a 0.10-seed-neighbour of the 0.11 query, got similarity {top_sim}"
     );
+    let a_present = results
+        .iter()
+        .any(|r| r["chunk_id"].as_str() == Some(a.to_string().as_str()));
+    assert!(a_present, "this test's chunk_a must appear in the results");
     assert!(v["search_metadata"]["per_query"].is_array());
 }
 
