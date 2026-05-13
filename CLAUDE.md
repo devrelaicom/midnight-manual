@@ -6,7 +6,7 @@ See `CONSTITUTION.md` for non-negotiable principles. See `specs/001-rag-platform
 
 ## Active Technologies
 
-**Language**: Rust stable (MSRV 1.85, pinned in `Cargo.toml`). MSRV bumped from 1.83 → 1.85 in Phase 1 because transitive deps (`aligned`, `time`, others) require the `edition2024` Cargo feature which stabilized in 1.85.
+**Language**: Rust stable (MSRV 1.91, pinned in `Cargo.toml`). MSRV bumped from 1.83 → 1.91 during Phase 1 because the transitive-dep ecosystem has moved well past 1.83: `cargo-platform 0.3.x` needs 1.91, `jsonwebtoken 10.x` / `time 0.3.47` / `image 0.25.x` / `darling 0.23.x` need 1.88, and `cargo-platform 0.3.3` (pulled by `cargo-metadata`) needs 1.91. 1.91 is the smallest version that satisfies the full graph.
 
 **Workspace crates** (10 total — 8 lib + 2 bin; see `specs/001-rag-platform/plan.md`):
 - `mn-core` — types, errors, config (D17/D18), auth.toml (D28), scoring policy (D24), model-id wire format
