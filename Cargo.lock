@@ -2633,6 +2633,7 @@ dependencies = [
  "mn-embedding",
  "mn-mcp",
  "mn-telemetry",
+ "reqwest",
  "serde",
  "serde_json",
  "tokio",
