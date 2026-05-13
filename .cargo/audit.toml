@@ -1,0 +1,39 @@
+# cargo-audit configuration for midnight-manual.
+#
+# Each ignore entry MUST cite:
+#   - the advisory ID and a one-line summary,
+#   - the dependency path bringing the affected crate into our graph,
+#   - why our codepath is not exposed (or, if it is, what mitigates it),
+#   - the upgrade path or revisit trigger.
+#
+# Reviewed every release; entries decay back to zero as upstreams fix.
+
+[advisories]
+ignore = [
+  # RUSTSEC-2023-0071 — rsa: Marvin Attack timing sidechannel on private-key decryption.
+  # Path: rsa -> jsonwebtoken (latest 10.x) -> octocrab (latest 0.50.x) -> mn-auth.
+  # Justification: octocrab only uses rsa for GitHub App keypair authentication; we use
+  # the user-OAuth web/device flow (per FR-115 / D11), which does not touch RSA decryption.
+  # No fix is available upstream as of 2026-05. Revisit when `rsa` ships the timing-safe
+  # implementation tracked in https://github.com/RustCrypto/RSA/issues/19 .
+  "RUSTSEC-2023-0071",
+
+  # RUSTSEC-2025-0111 — tokio-tar 0.3.1: PAX extended header parsing allows file smuggling.
+  # Path: tokio-tar -> testcontainers (dev-dependency only) -> bollard.
+  # Justification: testcontainers is a dev-dependency, only invoked from `cargo test
+  # --features integration`. We launch known Docker images (pgvector/pgvector:pg16) and
+  # do not unpack untrusted tar streams. Not in any release-build code path. Revisit
+  # when testcontainers upgrades bollard past the unmaintained tokio-tar dep.
+  "RUSTSEC-2025-0111",
+
+  # === Unmaintained-crate warnings (3) ===
+  #
+  # RUSTSEC-2024-0436 (paste) — declarative macro lib, no replacement; everywhere via
+  # metrics + utoipa-gen. No exploit, advisory is "no longer maintained".
+  "RUSTSEC-2024-0436",
+  # RUSTSEC-2025-0119 (number_prefix) — pulled transitively by indicatif; no exploit.
+  "RUSTSEC-2025-0119",
+  # RUSTSEC-2025-0134 (rustls-pemfile) — pulled by bollard/testcontainers and
+  # rustls-native-certs; upstream migration to rustls-pki-types is in flight.
+  "RUSTSEC-2025-0134",
+]

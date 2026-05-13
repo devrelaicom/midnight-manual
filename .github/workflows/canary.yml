@@ -1,0 +1,63 @@
+name: Privacy canaries
+
+# Enforces FR-112 / SC-061: forbidden strings (query content, tokens, chunk content,
+# file paths, env values, PII) MUST NEVER appear in any log file or telemetry row.
+#
+# This workflow is a release gate. It runs the canary test suite, captures all
+# stdout/stderr from every component, dumps telemetry_event_raw via SQL, and greps
+# for the canary set. Any match fails the build.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 6 * * *" # daily sanity sweep
+
+jobs:
+  canaries:
+    name: canary tests
+    runs-on: ubuntu-latest
+    # Canary infrastructure lands in Phase 12 (US11). Until tests/canary/canary.rs
+    # exists this job is a no-op skip — keeps CI green for earlier phases without
+    # weakening the privacy gate once it lands.
+    if: ${{ hashFiles('tests/canary/canary.rs') != '' }}
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: dev
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://postgres:dev@localhost:5432/postgres
+      RUST_LOG: info
+      MIDNIGHT_MANUAL_DISABLE_TELEMETRY: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.91.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Run canary integration tests (capture all output)
+        run: |
+          cargo test --workspace --features canary --test canary -- --nocapture 2>&1 | tee canary-output.log
+
+      - name: Dump telemetry_event_raw and aggregate logs
+        run: |
+          psql "$DATABASE_URL" -c "COPY (SELECT row_to_json(t) FROM telemetry_event_raw t) TO STDOUT" > telemetry-dump.ndjson
+          cat canary-output.log telemetry-dump.ndjson > all-captured.txt
+
+      - name: Grep for canary strings (fails on any match)
+        run: |
+          # The canary set MUST NEVER appear in any captured output.
+          # Update tests/canary/canaries.txt when adding new canary strings.
+          if grep -F -f tests/canary/canaries.txt all-captured.txt; then
+            echo "❌ PRIVACY CANARY VIOLATION: forbidden string appeared in logs or telemetry"
+            exit 1
+          fi
+          echo "✓ No canary strings found in any captured output"

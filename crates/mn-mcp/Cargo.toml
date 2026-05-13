@@ -1,0 +1,29 @@
+[package]
+name = "mn-mcp"
+description = "MCP JSON-RPC server over stdio with seven retrieval tools."
+
+version       = { workspace = true }
+edition       = { workspace = true }
+rust-version  = { workspace = true }
+license       = { workspace = true }
+authors       = { workspace = true }
+repository    = { workspace = true }
+homepage      = { workspace = true }
+
+[lints]
+workspace = true
+
+[features]
+integration = []
+
+[dependencies]
+mn-core       = { path = "../mn-core" }
+mn-embedding  = { path = "../mn-embedding" }
+mn-retrieval  = { path = "../mn-retrieval" }
+mn-telemetry  = { path = "../mn-telemetry" }
+serde         = { workspace = true }
+serde_json    = { workspace = true }
+thiserror     = { workspace = true }
+tracing       = { workspace = true }
+tokio         = { workspace = true }
+once_cell     = { workspace = true }

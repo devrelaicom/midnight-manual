@@ -1,0 +1,28 @@
+[package]
+name = "mn-retrieval"
+description = "Hybrid (FTS + vector) retrieval, RRF merging, and trust × relevance scoring."
+
+version       = { workspace = true }
+edition       = { workspace = true }
+rust-version  = { workspace = true }
+license       = { workspace = true }
+authors       = { workspace = true }
+repository    = { workspace = true }
+homepage      = { workspace = true }
+
+[lints]
+workspace = true
+
+[features]
+integration = []
+
+[dependencies]
+mn-core      = { path = "../mn-core" }
+mn-store     = { path = "../mn-store" }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+thiserror    = { workspace = true }
+tracing      = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

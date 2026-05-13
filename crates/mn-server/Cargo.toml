@@ -1,0 +1,47 @@
+[package]
+name = "mn-server"
+description = "midnight-manual cloud server binary (Fly.io deployment target)."
+
+version       = { workspace = true }
+edition       = { workspace = true }
+rust-version  = { workspace = true }
+license       = { workspace = true }
+authors       = { workspace = true }
+repository    = { workspace = true }
+homepage      = { workspace = true }
+
+[lints]
+workspace = true
+
+[features]
+integration = []
+
+[[bin]]
+name = "midnight-manual-server"
+path = "src/main.rs"
+
+[dependencies]
+mn-core        = { path = "../mn-core" }
+mn-auth        = { path = "../mn-auth" }
+mn-store       = { path = "../mn-store" }
+mn-retrieval   = { path = "../mn-retrieval" }
+mn-telemetry   = { path = "../mn-telemetry" }
+axum           = { workspace = true }
+tokio          = { workspace = true }
+tower          = { workspace = true }
+tower-http     = { workspace = true }
+hyper          = { workspace = true }
+serde          = { workspace = true }
+serde_json     = { workspace = true }
+sqlx           = { workspace = true }
+pgvector       = { workspace = true }
+tracing        = { workspace = true }
+tracing-subscriber = { workspace = true }
+metrics        = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
+utoipa         = { workspace = true }
+anyhow         = { workspace = true }
+uuid           = { workspace = true }
+time           = { workspace = true }
+ipnet          = { workspace = true }
+url            = { workspace = true }

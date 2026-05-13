@@ -1,0 +1,31 @@
+[package]
+name = "mn-content"
+description = "Markdown chunking, code chunking (tree-sitter), and package detection."
+
+version       = { workspace = true }
+edition       = { workspace = true }
+rust-version  = { workspace = true }
+license       = { workspace = true }
+authors       = { workspace = true }
+repository    = { workspace = true }
+homepage      = { workspace = true }
+
+[lints]
+workspace = true
+
+[features]
+integration = []
+
+[dependencies]
+mn-core               = { path = "../mn-core" }
+pulldown-cmark        = { workspace = true }
+tree-sitter           = { workspace = true }
+tree-sitter-rust      = { workspace = true }
+tree-sitter-typescript = { workspace = true }
+tree-sitter-javascript = { workspace = true }
+serde                 = { workspace = true }
+serde_yaml            = { workspace = true }
+thiserror             = { workspace = true }
+sha2                  = { workspace = true }
+tracing               = { workspace = true }
+regex                 = { workspace = true }

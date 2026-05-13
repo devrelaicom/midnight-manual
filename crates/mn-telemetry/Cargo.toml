@@ -1,0 +1,27 @@
+[package]
+name = "mn-telemetry"
+description = "Opt-out telemetry event schemas, batching client, and three-mechanism opt-out."
+
+version       = { workspace = true }
+edition       = { workspace = true }
+rust-version  = { workspace = true }
+license       = { workspace = true }
+authors       = { workspace = true }
+repository    = { workspace = true }
+homepage      = { workspace = true }
+
+[lints]
+workspace = true
+
+[features]
+integration = []
+
+[dependencies]
+mn-core      = { path = "../mn-core" }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+jsonschema   = { workspace = true }
+thiserror    = { workspace = true }
+tracing      = { workspace = true }
+tokio        = { workspace = true }
+time         = { workspace = true }

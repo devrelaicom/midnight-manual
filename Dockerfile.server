@@ -1,0 +1,34 @@
+# Multi-stage build for midnight-manual-server (FR-102, SC-058: <50MB compressed)
+
+# ----- builder stage -----
+FROM rust:1.83-bookworm AS builder
+
+WORKDIR /app
+
+# cargo-chef for layer caching of dependency build
+RUN cargo install cargo-chef --locked --version 0.1.68
+
+# Plan: capture the dep tree
+COPY Cargo.toml Cargo.lock* ./
+COPY crates/ ./crates/
+RUN cargo chef prepare --recipe-path recipe.json
+
+# Cook: build deps from the plan
+RUN cargo chef cook --release --recipe-path recipe.json -p mn-server
+
+# Build: actual server binary
+COPY . .
+RUN cargo build --release --bin midnight-manual-server
+
+# ----- runtime stage -----
+FROM gcr.io/distroless/cc-debian12 AS runtime
+
+# Per FR-102: server image contains only the server binary; CLI binaries are absent.
+COPY --from=builder /app/target/release/midnight-manual-server /usr/local/bin/midnight-manual-server
+
+# Migrations baked in
+COPY --from=builder /app/crates/mn-store/migrations /migrations
+
+EXPOSE 8080
+
+ENTRYPOINT ["/usr/local/bin/midnight-manual-server"]
