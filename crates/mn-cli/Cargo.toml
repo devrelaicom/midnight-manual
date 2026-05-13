@@ -45,3 +45,4 @@ tracing-subscriber = { workspace = true }
 directories   = { workspace = true }
 anyhow        = { workspace = true }
 indicatif     = { workspace = true }
+reqwest       = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
