@@ -41,8 +41,17 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
         toolchain: ["1.91.0", "stable"]
+    env:
+      # rust-toolchain.toml pins channel=1.91.0 for local dev; in CI we want
+      # the matrix toolchain to win. RUSTUP_TOOLCHAIN overrides the file.
+      # Without this, the rustup install path interacts poorly with
+      # dtolnay/rust-toolchain on macOS-stable runners (intermittent
+      # "unexpected argument 'test' found" rustup-init failures).
+      RUSTUP_TOOLCHAIN: ${{ matrix.toolchain }}
     steps:
       - uses: actions/checkout@v4
+      - name: Remove rust-toolchain.toml so the matrix toolchain wins
+        run: rm -f rust-toolchain.toml
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.toolchain }}
