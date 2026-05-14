@@ -27,3 +27,10 @@ thiserror     = { workspace = true }
 tracing       = { workspace = true }
 tokio         = { workspace = true }
 once_cell     = { workspace = true }
+reqwest       = { workspace = true }
+url           = { workspace = true }
+uuid          = { workspace = true }
+
+[dev-dependencies]
+wiremock      = { workspace = true }
+tempfile      = { workspace = true }

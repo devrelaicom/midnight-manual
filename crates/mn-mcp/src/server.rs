@@ -4,31 +4,74 @@
 //! Logging goes to stderr (FR-021): stdout is reserved for the MCP wire.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use tokio::io::{stdin, stdout, Stdin, Stdout};
 use tracing::{debug, info, warn};
 
+use crate::cloud_client::{CloudClient, CloudError};
 use crate::protocol::{
-    ContentBlock, ErrorCode, Incoming, InitializeResult, RequestId, Response, ServerCapabilities,
-    ServerInfo, ToolCallParams, ToolCallResult, ToolsCapability, MCP_PROTOCOL_VERSION,
+    ContentBlock, ErrorCode, Incoming, InitializeResult, JsonRpcError, RequestId, Response,
+    ServerCapabilities, ServerInfo, ToolCallParams, ToolCallResult, ToolsCapability, JSONRPC,
+    MCP_PROTOCOL_VERSION,
 };
 use crate::tools;
 use crate::transport::{FrameReader, FrameWriter};
 
-/// Per-instance server config (mostly the model cache path).
+/// Per-instance server config.
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     /// Where the embedder / reranker store their ONNX files.
     pub cache_dir: PathBuf,
+    /// Base URL of the cloud server (`https://manual.midnight.network` in
+    /// production). Tools call this for everything except `status` /
+    /// `pull_models`.
+    pub cloud_url: String,
+    /// Optional read-uplift bearer to forward as `Authorization: Bearer ...`
+    /// on every cloud request. `None` means the MCP server is running in
+    /// anonymous read mode.
+    pub bearer_token: Option<String>,
+    /// `{name}@{revision}` model identifier the cloud expects clients to
+    /// declare on every search. For the v1 corpus this is
+    /// `"bge-base-en-v1.5@1"` (seeded by migration 0006). Configurable here
+    /// so tests can pin a different value.
+    pub client_embedding_model: String,
+}
+
+impl ServerConfig {
+    /// Build a config with the production defaults: production cloud URL,
+    /// no bearer, and the seeded `bge-base-en-v1.5@1` model id.
+    #[must_use]
+    pub fn with_defaults(cache_dir: PathBuf) -> Self {
+        Self {
+            cache_dir,
+            cloud_url: "https://manual.midnight.network".to_owned(),
+            bearer_token: None,
+            client_embedding_model: "bge-base-en-v1.5@1".to_owned(),
+        }
+    }
+}
+
+/// Shared per-process state — the cloud HTTP client lives here so we don't
+/// rebuild it on every tool call.
+#[derive(Clone)]
+struct ServerState {
+    cfg: ServerConfig,
+    cloud: Arc<CloudClient>,
 }
 
 /// Run the MCP server until EOF on stdin.
 ///
 /// # Errors
 ///
-/// Returns the underlying io error if stdin or stdout fails. JSON-RPC and
-/// tool-level errors are translated into wire responses and do NOT bubble up.
-pub async fn run(cfg: ServerConfig) -> std::io::Result<()> {
+/// Returns the underlying io error if stdin or stdout fails, or a string
+/// error if the cloud client cannot be built. JSON-RPC and tool-level errors
+/// are translated into wire responses and do NOT bubble up.
+pub async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let cloud = CloudClient::new(&cfg.cloud_url, cfg.bearer_token.clone())
+        .map_err(|e| format!("build cloud client: {e}"))?;
+    let state = ServerState { cfg, cloud: Arc::new(cloud) };
+
     let stdin: Stdin = stdin();
     let stdout: Stdout = stdout();
     let mut reader = FrameReader::new(stdin);
@@ -37,7 +80,7 @@ pub async fn run(cfg: ServerConfig) -> std::io::Result<()> {
     info!("mn-mcp server: handshake ready, awaiting initialize");
 
     while let Some(body) = reader.next_message().await? {
-        let response_body = match handle_message(&body, &cfg).await {
+        let response_body = match handle_message(&body, &state).await {
             Some(bytes) => bytes,
             None => continue, // notification — no response
         };
@@ -50,12 +93,10 @@ pub async fn run(cfg: ServerConfig) -> std::io::Result<()> {
 
 /// Decode and dispatch a single framed message. Returns `Some(response_bytes)`
 /// for a request and `None` for a notification.
-async fn handle_message(body: &[u8], cfg: &ServerConfig) -> Option<Vec<u8>> {
+async fn handle_message(body: &[u8], state: &ServerState) -> Option<Vec<u8>> {
     let incoming: Incoming = match serde_json::from_slice(body) {
         Ok(v) => v,
         Err(e) => {
-            // Per JSON-RPC 2.0, a parse error gets id=null; we don't have a
-            // null variant in RequestId, so use the placeholder Number(0).
             warn!(error = %e, "parse error");
             let resp = Response::err(RequestId::Number(0), ErrorCode::ParseError, e.to_string());
             return Some(serde_json::to_vec(&resp).expect("serialize parse-err response"));
@@ -63,7 +104,7 @@ async fn handle_message(body: &[u8], cfg: &ServerConfig) -> Option<Vec<u8>> {
     };
 
     match incoming {
-        Incoming::Request(req) => Some(handle_request(req, cfg).await),
+        Incoming::Request(req) => Some(handle_request(req, state).await),
         Incoming::Notification(n) => {
             debug!(method = %n.method, "notification");
             None
@@ -71,7 +112,7 @@ async fn handle_message(body: &[u8], cfg: &ServerConfig) -> Option<Vec<u8>> {
     }
 }
 
-async fn handle_request(req: crate::protocol::Request, cfg: &ServerConfig) -> Vec<u8> {
+async fn handle_request(req: crate::protocol::Request, state: &ServerState) -> Vec<u8> {
     let id = req.id.clone();
     let response = match req.method.as_str() {
         "initialize" => Response::success(
@@ -93,7 +134,7 @@ async fn handle_request(req: crate::protocol::Request, cfg: &ServerConfig) -> Ve
             serde_json::to_value(tools::list()).expect("serialize tool list"),
         ),
         "tools/call" => match serde_json::from_value::<ToolCallParams>(req.params.clone()) {
-            Ok(params) => dispatch_tool(id.clone(), params, cfg).await,
+            Ok(params) => dispatch_tool(id.clone(), params, state).await,
             Err(e) => Response::err(id.clone(), ErrorCode::InvalidParams, e.to_string()),
         },
         // Pings and shutdown follow MCP convention.
@@ -105,25 +146,130 @@ async fn handle_request(req: crate::protocol::Request, cfg: &ServerConfig) -> Ve
     serde_json::to_vec(&response).expect("serialize response")
 }
 
-async fn dispatch_tool(id: RequestId, params: ToolCallParams, cfg: &ServerConfig) -> Response {
-    let result_text = match params.name.as_str() {
+async fn dispatch_tool(id: RequestId, params: ToolCallParams, state: &ServerState) -> Response {
+    let outcome = match params.name.as_str() {
         "status" => {
-            let out = tools::run_status(Some(&cfg.cache_dir));
-            serde_json::to_string(&out).unwrap_or_else(|e| format!("serialize status: {e}"))
+            let out = tools::run_status(Some(&state.cfg.cache_dir));
+            Ok(serde_json::to_string(&out).unwrap_or_else(|e| format!("serialize status: {e}")))
         }
-        "pull_models" => match tools::run_pull_models(cfg.cache_dir.clone()).await {
-            Ok(out) => serde_json::to_string(&out).unwrap_or_else(|e| format!("serialize: {e}")),
-            Err(msg) => {
-                return Response::err(id, ErrorCode::ToolFailed, msg);
-            }
+        "pull_models" => tools::run_pull_models(state.cfg.cache_dir.clone())
+            .await
+            .map(|out| serde_json::to_string(&out).unwrap_or_else(|e| format!("serialize: {e}")))
+            .map_err(|msg| Response::err(id.clone(), ErrorCode::ToolFailed, msg)),
+        "search" => run_search_dispatch(&id, &params, state).await,
+        "get_chunk" => {
+            run_passthrough_dispatch(&id, &params, state, tools::PassthroughKind::Chunk).await
+        }
+        "get_chunk_siblings" => {
+            run_passthrough_dispatch(&id, &params, state, tools::PassthroughKind::Siblings).await
+        }
+        "get_chunk_parents" => {
+            run_passthrough_dispatch(&id, &params, state, tools::PassthroughKind::Parents).await
+        }
+        "list_sources" => match state.cloud.list_sources().await {
+            Ok(v) => Ok(v.to_string()),
+            Err(CloudError::NotFound(msg)) => Err(Response::err(
+                id.clone(),
+                ErrorCode::ToolFailed,
+                format!("not found: {msg}"),
+            )),
+            Err(e) => Err(Response::err(id.clone(), ErrorCode::ToolFailed, e.to_string())),
         },
         other => {
             return Response::err(id, ErrorCode::ToolNotFound, format!("unknown tool: {other}"));
         }
     };
-    let result = ToolCallResult {
-        content: vec![ContentBlock::Text { text: result_text }],
-        is_error: false,
-    };
-    Response::success(id, serde_json::to_value(result).expect("serialize result"))
+    match outcome {
+        Ok(result_text) => {
+            let result = ToolCallResult {
+                content: vec![ContentBlock::Text { text: result_text }],
+                is_error: false,
+            };
+            Response::success(id, serde_json::to_value(result).expect("serialize result"))
+        }
+        Err(resp) => resp,
+    }
+}
+
+async fn run_search_dispatch(
+    id: &RequestId,
+    params: &ToolCallParams,
+    state: &ServerState,
+) -> Result<String, Response> {
+    match tools::run_search(&params.arguments, &state.cfg, &state.cloud).await {
+        Ok(out) => Ok(out.to_string()),
+        Err(tools::SearchError::InvalidInput(msg)) => {
+            Err(Response::err(id.clone(), ErrorCode::InvalidParams, msg))
+        }
+        Err(tools::SearchError::Mismatch {
+            corpus_model,
+            client_model,
+            message,
+            remediation,
+        }) => Err(mismatch_response(
+            id.clone(),
+            &corpus_model,
+            &client_model,
+            &message,
+            &remediation,
+        )),
+        Err(tools::SearchError::Cloud(msg)) => {
+            Err(Response::err(id.clone(), ErrorCode::ToolFailed, msg))
+        }
+    }
+}
+
+async fn run_passthrough_dispatch(
+    id: &RequestId,
+    params: &ToolCallParams,
+    state: &ServerState,
+    kind: tools::PassthroughKind,
+) -> Result<String, Response> {
+    match tools::run_passthrough_id(&params.arguments, &state.cloud, kind).await {
+        Ok(v) => Ok(v.to_string()),
+        Err(tools::PassthroughError::InvalidInput(msg)) => {
+            Err(Response::err(id.clone(), ErrorCode::InvalidParams, msg))
+        }
+        Err(tools::PassthroughError::NotFound(msg)) => Err(Response::err(
+            id.clone(),
+            ErrorCode::ToolFailed,
+            format!("not found: {msg}"),
+        )),
+        Err(tools::PassthroughError::Cloud(msg)) => {
+            Err(Response::err(id.clone(), ErrorCode::ToolFailed, msg))
+        }
+    }
+}
+
+/// Build a JSON-RPC error response for the cloud's 409 embedding-model
+/// mismatch, putting the corpus + client model in the `data` field so an AI
+/// client can render a structured remediation (US5 acceptance #6).
+fn mismatch_response(
+    id: RequestId,
+    corpus_model: &str,
+    client_model: &str,
+    message: &str,
+    remediation: &str,
+) -> Response {
+    let data = serde_json::json!({
+        "kind": "embedding_model_mismatch",
+        "corpus_model": corpus_model,
+        "client_model": client_model,
+        "remediation": remediation,
+        "next_tool": "pull_models",
+    });
+    Response {
+        jsonrpc: JSONRPC,
+        id,
+        result: None,
+        error: Some(JsonRpcError {
+            code: ErrorCode::ToolFailed as i32,
+            message: if message.is_empty() {
+                format!("embedding model mismatch: corpus={corpus_model} client={client_model}")
+            } else {
+                message.to_owned()
+            },
+            data: Some(data),
+        }),
+    }
 }
