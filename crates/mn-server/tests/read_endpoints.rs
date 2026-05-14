@@ -23,12 +23,8 @@ async fn healthz_returns_200() {
     let app = app::build(
         h.pool.clone(),
         ServerConfig {
-            database_url: String::new(),
-            port: 0,
-            auto_migrate: false,
             corpus_model: None,
-            user_store_body: None,
-            jwt_secret: None,
+            ..Default::default()
         },
     )
     .expect("build app");
@@ -51,12 +47,8 @@ async fn readyz_returns_200_when_pgvector_present() {
     let app = app::build(
         h.pool.clone(),
         ServerConfig {
-            database_url: String::new(),
-            port: 0,
-            auto_migrate: false,
             corpus_model: None,
-            user_store_body: None,
-            jwt_secret: None,
+            ..Default::default()
         },
     )
     .expect("build app");
@@ -83,12 +75,8 @@ async fn active_model_returns_seeded_row() {
     let app = app::build(
         h.pool.clone(),
         ServerConfig {
-            database_url: String::new(),
-            port: 0,
-            auto_migrate: false,
             corpus_model: None,
-            user_store_body: None,
-            jwt_secret: None,
+            ..Default::default()
         },
     )
     .expect("build app");
@@ -129,12 +117,8 @@ async fn sources_list_includes_inserted_row_and_show_round_trips() {
     let app = app::build(
         h.pool.clone(),
         ServerConfig {
-            database_url: String::new(),
-            port: 0,
-            auto_migrate: false,
             corpus_model: None,
-            user_store_body: None,
-            jwt_secret: None,
+            ..Default::default()
         },
     )
     .expect("build app");
@@ -186,12 +170,8 @@ async fn unknown_source_returns_404() {
     let app = app::build(
         h.pool.clone(),
         ServerConfig {
-            database_url: String::new(),
-            port: 0,
-            auto_migrate: false,
             corpus_model: None,
-            user_store_body: None,
-            jwt_secret: None,
+            ..Default::default()
         },
     )
     .expect("build app");
@@ -218,12 +198,8 @@ async fn x_request_id_is_echoed() {
     let app = app::build(
         h.pool.clone(),
         ServerConfig {
-            database_url: String::new(),
-            port: 0,
-            auto_migrate: false,
             corpus_model: None,
-            user_store_body: None,
-            jwt_secret: None,
+            ..Default::default()
         },
     )
     .expect("build app");

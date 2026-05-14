@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use axum::extract::DefaultBodyLimit;
 use axum::Router;
-use mn_auth::{ChallengeStore, SigningSecret, UserStore};
+use mn_auth::{ChallengeStore, OAuthStateStore, SigningSecret, UserStore};
 use sqlx::PgPool;
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::TraceLayer;
@@ -42,6 +42,35 @@ pub struct AuthState {
     pub jwt_secret: SigningSecret,
     /// In-memory challenge nonce store (FR-056). One per process.
     pub challenges: ChallengeStore,
+    /// GitHub OAuth subsystem (FR-062, FR-115, FR-117). `None` when the
+    /// GitHub-OAuth env vars are not all present — `/v1/auth/github/*`
+    /// returns 503 in that case.
+    pub github_oauth: Option<GithubOAuthState>,
+}
+
+/// Configured GitHub OAuth subsystem. Held inside [`AuthState`] so it
+/// inherits the JWT-secret + user-store boot gate.
+#[derive(Debug)]
+pub struct GithubOAuthState {
+    /// GitHub OAuth App client id.
+    pub client_id: String,
+    /// GitHub OAuth App client secret.
+    pub client_secret: String,
+    /// Public callback URL registered with the GitHub OAuth App.
+    pub redirect_url: String,
+    /// Required GitHub org. Only `active` members of this org receive a
+    /// read-uplift bearer (FR-062).
+    pub org: String,
+    /// Read-uplift JWT TTL.
+    pub read_token_ttl: time::Duration,
+    /// Authorize URL base (production: `https://github.com/login/oauth/authorize`).
+    pub authorize_url: String,
+    /// Token-exchange URL (production: `https://github.com/login/oauth/access_token`).
+    pub token_url: String,
+    /// GitHub REST API base URL (production: `https://api.github.com`).
+    pub api_base_url: String,
+    /// CSRF / cli-port state store.
+    pub states: OAuthStateStore,
 }
 
 /// All the ways `AuthState` construction can fail at boot.
@@ -56,28 +85,50 @@ pub enum AuthStateError {
 }
 
 impl AuthState {
-    /// Build the auth subsystem from raw env values. Returns `None` when
-    /// either input is absent — auth endpoints then 503 cleanly.
+    /// Build the auth subsystem from a `ServerConfig`. Returns `None` when
+    /// the user-store body or JWT secret env is absent — auth endpoints then
+    /// 503 cleanly. The GitHub OAuth subsystem is layered on top: it's only
+    /// populated when all four GitHub env vars (client id, secret, redirect
+    /// URL, org) are present alongside the JWT secret + user store.
     ///
     /// # Errors
     ///
     /// Returns [`AuthStateError`] when one input is present but malformed.
     /// "Missing" is allowed (read-only deployments); "garbage" is not.
-    pub fn from_env_values(
-        user_store_body: Option<&str>,
-        jwt_secret_bytes: Option<&[u8]>,
-    ) -> Result<Option<Self>, AuthStateError> {
-        let (Some(body), Some(bytes)) = (user_store_body, jwt_secret_bytes) else {
+    pub fn from_config(cfg: &ServerConfig) -> Result<Option<Self>, AuthStateError> {
+        let (Some(body), Some(bytes)) = (cfg.user_store_body.as_deref(), cfg.jwt_secret.as_deref())
+        else {
             return Ok(None);
         };
         let user_store = UserStore::parse(body)?;
         let jwt_secret = SigningSecret::from_bytes(bytes.to_vec())?;
+        let github_oauth = build_github_oauth(cfg);
         Ok(Some(Self {
             user_store,
             jwt_secret,
             challenges: ChallengeStore::new(),
+            github_oauth,
         }))
     }
+}
+
+fn build_github_oauth(cfg: &ServerConfig) -> Option<GithubOAuthState> {
+    let client_id = cfg.github_oauth_client_id.as_ref()?.clone();
+    let client_secret = cfg.github_oauth_client_secret.as_ref()?.clone();
+    let redirect_url = cfg.github_oauth_redirect_url.as_ref()?.clone();
+    let org = cfg.github_org.as_ref()?.clone();
+    let read_token_ttl = time::Duration::days(cfg.read_token_ttl_days);
+    Some(GithubOAuthState {
+        client_id,
+        client_secret,
+        redirect_url,
+        org,
+        read_token_ttl,
+        authorize_url: cfg.github_authorize_url.clone(),
+        token_url: cfg.github_token_url.clone(),
+        api_base_url: cfg.github_api_base_url.clone(),
+        states: OAuthStateStore::new(),
+    })
 }
 
 /// Build the full axum app: routes + middleware + state.
@@ -89,9 +140,7 @@ impl AuthState {
 /// `MIDNIGHT_MANUAL_JWT_SECRET` is shorter than 32 bytes). When BOTH are
 /// absent the server boots with `auth = None`.
 pub fn build(pool: PgPool, cfg: ServerConfig) -> Result<Router, AuthStateError> {
-    let auth =
-        AuthState::from_env_values(cfg.user_store_body.as_deref(), cfg.jwt_secret.as_deref())?
-            .map(Arc::new);
+    let auth = AuthState::from_config(&cfg)?.map(Arc::new);
     let state = AppState { pool, cfg: Arc::new(cfg), auth };
 
     Ok(Router::new()
@@ -101,6 +150,7 @@ pub fn build(pool: PgPool, cfg: ServerConfig) -> Result<Router, AuthStateError> 
         .merge(crate::routes::search::router())
         .merge(crate::routes::chunks::router())
         .merge(crate::routes::auth::router())
+        .merge(crate::routes::github::router())
         // Bound the body size at the boundary — refuses oversize payloads
         // before any handler-side validation runs.
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))

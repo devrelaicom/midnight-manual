@@ -24,6 +24,7 @@
 pub mod challenge;
 pub mod jwt;
 pub mod keypair;
+pub mod oauth_state;
 pub mod role;
 pub mod user;
 
@@ -35,6 +36,10 @@ pub use jwt::{
 pub use keypair::{
     encode_public_wire, parse_public_key_wire, verify_signature, KeyError, Keypair,
     ED25519_WIRE_PREFIX, PUBLIC_KEY_LEN, SIGNATURE_LEN, SIGNING_KEY_LEN,
+};
+pub use oauth_state::{
+    OAuthState, OAuthStateError, OAuthStateStore, DEFAULT_TTL as OAUTH_STATE_DEFAULT_TTL,
+    MAX_TTL as OAUTH_STATE_MAX_TTL,
 };
 pub use role::{Role, Tier};
 pub use user::{User, UserStore, UserStoreError, SCHEMA_VERSION as USER_STORE_SCHEMA_VERSION};

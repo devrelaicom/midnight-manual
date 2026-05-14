@@ -117,12 +117,8 @@ async fn seed_two_chunks(pool: &sqlx::PgPool) -> (Uuid, Uuid, Uuid) {
 
 fn cfg() -> ServerConfig {
     ServerConfig {
-        database_url: String::new(),
-        port: 0,
-        auto_migrate: false,
         corpus_model: None,
-        user_store_body: None,
-        jwt_secret: None,
+        ..Default::default()
     }
 }
 
