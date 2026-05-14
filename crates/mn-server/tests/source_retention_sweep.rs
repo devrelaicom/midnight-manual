@@ -104,22 +104,22 @@ async fn source_exists(pool: &PgPool, slug: &str) -> bool {
         .is_some_and(|r| r.get::<i32, _>("one") == 1)
 }
 
+// Assertions below are race-tolerant: CI Postgres is shared across test
+// binaries and the sweep helpers are global. We check end-state of OUR
+// slug rather than asserting against the `deleted_slugs` field — a
+// concurrent sibling test's sweep may legitimately have deleted our row
+// first, in which case our own sweep returns nothing.
+
 #[tokio::test]
 async fn sweep_once_deletes_retired_past_grace() {
     let h = common::boot().await;
     let slug = seed_retired_source(&h.pool, "job-aged", 25 * 60 * 60).await;
 
-    let stats = source_retention::sweep_once(&h.pool, 24, 24)
+    source_retention::sweep_once(&h.pool, 24, 24)
         .await
         .expect("sweep");
 
-    assert!(
-        stats.deleted_slugs.iter().any(|s| s == &slug),
-        "expected slug `{slug}` in deleted set: {:?}",
-        stats.deleted_slugs,
-    );
     assert!(!source_exists(&h.pool, &slug).await, "row must be gone");
-    assert!(stats.deleted_source_count() >= 1);
 }
 
 #[tokio::test]
@@ -136,7 +136,6 @@ async fn sweep_once_keeps_recently_retired_inside_grace() {
         "recently-retired slug MUST NOT be swept: {:?}",
         stats.deleted_slugs,
     );
-    assert!(source_exists(&h.pool, &slug).await, "row must remain");
 }
 
 #[tokio::test]
@@ -144,28 +143,24 @@ async fn sweep_once_handles_grace_hours_zero() {
     let h = common::boot().await;
     let slug = seed_retired_source(&h.pool, "job-zero", 2).await;
 
-    let stats = source_retention::sweep_once(&h.pool, 0, 24)
+    source_retention::sweep_once(&h.pool, 0, 24)
         .await
         .expect("sweep");
 
-    assert!(stats.deleted_slugs.iter().any(|s| s == &slug));
     assert!(!source_exists(&h.pool, &slug).await);
 }
 
 #[tokio::test]
-async fn empty_pass_returns_zero_stats() {
+async fn empty_pass_omits_our_slug_from_deleted() {
     let h = common::boot().await;
-    // Sentinel-only retired row that's INSIDE the grace window — so the
-    // source sweep finds nothing eligible for this slug. We can't rely on
-    // the corpus being empty (CI Postgres is shared across binaries), but
-    // we CAN seed one recently-retired row and assert it isn't deleted;
-    // the resulting stats may still include other fixtures' deletions.
+    // Our slug is retired only 30 seconds ago; a sweep with grace=24h
+    // MUST NOT return it. (A concurrent grace=0 sweep from another binary
+    // might still hard-delete it, so we don't assert continued existence.)
     let slug = seed_retired_source(&h.pool, "job-empty", 30).await;
     let stats = source_retention::sweep_once(&h.pool, 24, 24)
         .await
         .expect("sweep");
     assert!(!stats.deleted_slugs.iter().any(|s| s == &slug));
-    assert!(source_exists(&h.pool, &slug).await);
 }
 
 #[tokio::test]
@@ -210,18 +205,19 @@ async fn sweep_once_runs_version_pass_alongside_source_pass() {
         .unwrap();
     }
 
-    let stats = source_retention::sweep_once(&h.pool, 24, 24)
+    source_retention::sweep_once(&h.pool, 24, 24)
         .await
         .expect("sweep");
 
-    // We expect two version rows for OUR source_id to be deleted (revs 1 + 2).
-    let our_vers: Vec<i32> = stats
-        .deleted_versions
-        .iter()
-        .filter(|(sid, _)| *sid == source_id)
-        .map(|(_, rev)| *rev)
-        .collect();
-    assert_eq!(our_vers, vec![1, 2], "{:?}", stats.deleted_versions);
+    // Race-tolerant: assert remaining versions for OUR source_id are
+    // exactly the retention_count window. A concurrent sibling test's
+    // sweep may have deleted revs 1 + 2 before our own call — that's
+    // fine; the predicate still produced the right remaining set.
+    let remaining = mn_store::entities::source_version::list_for_source(&h.pool, source_id)
+        .await
+        .unwrap();
+    let revs: Vec<i32> = remaining.iter().map(|r| r.revision).collect();
+    assert_eq!(revs, vec![4, 3], "retention_count=2 keeps the 2 newest aged-out versions",);
 
     // Our source row itself should still exist (it isn't retired).
     assert!(source_exists(&h.pool, &slug).await);

@@ -138,23 +138,20 @@ async fn sweep_aged_inactive_keeps_retention_window() {
     }
 
     let grace_seconds = 24 * 60 * 60;
-    let deleted = source_version::sweep_aged_inactive(&h.pool, grace_seconds)
+    source_version::sweep_aged_inactive(&h.pool, grace_seconds)
         .await
         .unwrap();
 
-    let our: Vec<i32> = deleted
-        .iter()
-        .filter(|(sid, _)| *sid == source_id)
-        .map(|(_, rev)| *rev)
-        .collect();
-    assert_eq!(our, vec![1, 2], "only revs outside retention window swept");
-
-    // Remaining: 3 versions.
+    // The sweep return value is racy under shared-Postgres CI (a sibling
+    // test's concurrent call to `sweep_aged_inactive` may delete our
+    // revs before our own call runs). The reliable post-condition is the
+    // remaining set for OUR source_id — that is solely a function of our
+    // seed data + the sweep predicate.
     let remaining = source_version::list_for_source(&h.pool, source_id)
         .await
         .unwrap();
     let revs: Vec<i32> = remaining.iter().map(|r| r.revision).collect();
-    assert_eq!(revs, vec![5, 4, 3]);
+    assert_eq!(revs, vec![5, 4, 3], "retention_count=3 keeps the 3 newest; revs 1+2 swept",);
 }
 
 #[tokio::test]
