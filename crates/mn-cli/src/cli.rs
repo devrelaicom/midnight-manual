@@ -78,6 +78,8 @@ pub enum Command {
     Config(commands::config::Args),
     /// MCP server (stdio JSON-RPC) and related tooling.
     Mcp(commands::mcp::Args),
+    /// Local model management — `mnm models {pull,active}`.
+    Models(commands::models::Args),
     /// GitHub OAuth read-uplift flow + local auth-file inspection.
     Auth(commands::auth::Args),
     /// Telemetry opt-out toggle and status.
@@ -146,6 +148,10 @@ pub async fn run() -> Result<()> {
         }
         Command::Config(args) => commands::config::run(args, cli.config.as_deref(), cli.json).await,
         Command::Mcp(args) => commands::mcp::run(args).await,
+        Command::Models(args) => {
+            commands::models::run(args, cli.server.as_deref(), &telemetry, crate::VERSION, cli.json)
+                .await
+        }
         Command::Auth(args) => commands::auth::run(args, cli.server.as_deref(), cli.json).await,
         Command::Telemetry(args) => commands::telemetry::run(&args, cli.json),
         Command::Keys(args) => commands::keys::run(args, cli.json),
@@ -191,6 +197,7 @@ const fn cli_command_name(cmd: &Command) -> CliCommandName {
         Command::Sources(_) | Command::Versions(_) => CliCommandName::Sources,
         Command::Config(_) => CliCommandName::Config,
         Command::Mcp(_) => CliCommandName::Mcp,
+        Command::Models(_) => CliCommandName::Models,
         Command::Auth(_) | Command::Login(_) | Command::Keys(_) | Command::Users(_) => {
             CliCommandName::Auth
         }
