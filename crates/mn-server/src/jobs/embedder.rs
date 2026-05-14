@@ -67,7 +67,25 @@ pub async fn embed_once(
     model_id: Uuid,
     batch_size: i64,
 ) -> Result<usize, mn_store::StoreError> {
-    let batch = chunk::list_embed_failed_batch(pool, model_id, batch_size).await?;
+    embed_once_scoped(pool, embed_fn, model_id, None, batch_size).await
+}
+
+/// Variant of [`embed_once`] with an optional `source_version_id` filter —
+/// intended for integration tests against a shared CI Postgres where
+/// concurrent sibling tests would otherwise pollute the batch.
+///
+/// # Errors
+///
+/// Same as [`embed_once`].
+pub async fn embed_once_scoped(
+    pool: &PgPool,
+    embed_fn: &dyn EmbedFn,
+    model_id: Uuid,
+    source_version_filter: Option<Uuid>,
+    batch_size: i64,
+) -> Result<usize, mn_store::StoreError> {
+    let batch =
+        chunk::list_embed_failed_batch(pool, model_id, source_version_filter, batch_size).await?;
     if batch.is_empty() {
         return Ok(0);
     }

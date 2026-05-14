@@ -104,6 +104,11 @@ pub struct EmbedFailedChunk {
 /// Fetch up to `limit` `embed_failed` chunks whose `embedding_model_id`
 /// matches `model_id`. Used by the background embedder worker.
 ///
+/// `source_version_filter` is `None` in production (the worker drains every
+/// pending chunk across all source_versions sharing the model). Integration
+/// tests pass `Some(sv_id)` so a concurrent sibling test running against the
+/// same shared CI Postgres doesn't pollute the batch.
+///
 /// Rows are ordered by `created_at ASC` so older work goes first
 /// (fair-queue semantics — a fresh ingest doesn't starve an in-flight one).
 ///
@@ -113,15 +118,18 @@ pub struct EmbedFailedChunk {
 pub async fn list_embed_failed_batch(
     pool: &PgPool,
     model_id: Uuid,
+    source_version_filter: Option<Uuid>,
     limit: i64,
 ) -> Result<Vec<EmbedFailedChunk>> {
     let rows: Vec<(Uuid, String, Uuid)> = sqlx::query_as(
         "SELECT id, content, embedding_model_id FROM chunk \
          WHERE status = 'embed_failed' AND embedding_model_id = $1 \
+           AND ($2::uuid IS NULL OR source_version_id = $2::uuid) \
          ORDER BY created_at ASC \
-         LIMIT $2",
+         LIMIT $3",
     )
     .bind(model_id)
+    .bind(source_version_filter)
     .bind(limit)
     .fetch_all(pool)
     .await?;
