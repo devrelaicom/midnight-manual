@@ -2685,18 +2685,21 @@ name = "mn-content"
 version = "0.1.0"
 dependencies = [
  "mn-core",
+ "proptest",
  "pulldown-cmark",
  "regex",
  "serde",
  "serde_json",
  "serde_yaml",
  "sha2 0.10.9",
+ "tempfile",
  "thiserror 2.0.18",
  "tracing",
  "tree-sitter",
  "tree-sitter-javascript",
  "tree-sitter-rust",
  "tree-sitter-typescript",
+ "uuid",
 ]
 
 [[package]]
