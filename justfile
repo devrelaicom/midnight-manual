@@ -9,8 +9,10 @@ default:
 check: fmt-check clippy test
     @echo "✓ All checks passed"
 
+# MSRV is pinned to 1.91.0 in rust-toolchain.toml, Cargo.toml, and clippy.toml.
+# Keep this version in sync with those three files when bumping.
 check-msrv:
-    rustup run 1.83.0 cargo check --workspace --all-targets
+    rustup run 1.91.0 cargo check --workspace --all-targets --all-features
 
 fmt:
     cargo fmt --all

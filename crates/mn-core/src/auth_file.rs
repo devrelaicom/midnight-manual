@@ -67,8 +67,13 @@ impl AuthFile {
     /// [`AuthFileError::SchemaVersionMismatch`] if `schema_version` is not
     /// [`SCHEMA_VERSION`].
     pub fn read_optional(path: &Path) -> Result<Option<Self>, AuthFileError> {
-        match std::fs::read_to_string(path) {
-            Ok(body) => {
+        match std::fs::metadata(path) {
+            Ok(md) => {
+                check_permissions(path, &md)?;
+                let body = std::fs::read_to_string(path).map_err(|e| AuthFileError::Io {
+                    path: path.to_path_buf(),
+                    message: e.to_string(),
+                })?;
                 let file: Self = toml::from_str(&body).map_err(|e| AuthFileError::Parse {
                     path: path.to_path_buf(),
                     message: e.to_string(),
@@ -141,6 +146,37 @@ pub enum AuthFileError {
         /// The version we expected.
         expected: u32,
     },
+    /// File permissions are too permissive (group- or world-readable). Bearer
+    /// tokens MUST be `chmod 0600` per D28; we refuse to load any wider mode
+    /// so a leaked file (e.g. copied into a shared dir, baked into an image)
+    /// does not silently authenticate as the user.
+    #[error(
+        "auth file `{}` has insecure permissions ({mode:#o}); expected 0o600. Run `chmod 600 \"{}\"` and retry.",
+        path.display(), path.display()
+    )]
+    InsecurePermissions {
+        /// The file path that failed the permission check.
+        path: PathBuf,
+        /// The mode bits we observed.
+        mode: u32,
+    },
+}
+
+#[cfg(unix)]
+fn check_permissions(path: &Path, md: &std::fs::Metadata) -> Result<(), AuthFileError> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let mode = md.permissions().mode() & 0o777;
+    // Any group / world bits set is a refusal.
+    if mode & 0o077 != 0 {
+        return Err(AuthFileError::InsecurePermissions { path: path.to_path_buf(), mode });
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn check_permissions(_path: &Path, _md: &std::fs::Metadata) -> Result<(), AuthFileError> {
+    // Windows / WASI: rely on the user's NTFS ACLs or platform-equivalent.
+    Ok(())
 }
 
 #[cfg(test)]
@@ -216,5 +252,21 @@ expires_at = "2026-05-13T15:30:00Z"
         let f = write_tempfile("definitely := not = toml\n");
         let err = AuthFile::read_optional(f.path()).unwrap_err();
         assert!(matches!(err, AuthFileError::Parse { .. }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_group_readable_file() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let f = write_tempfile("schema_version = 1\n");
+        // tempfile defaults to 0600 — widen to 0640 (group-readable) to
+        // simulate an exported / leaked file.
+        std::fs::set_permissions(f.path(), std::fs::Permissions::from_mode(0o640))
+            .expect("chmod tempfile");
+        let err = AuthFile::read_optional(f.path()).unwrap_err();
+        assert!(
+            matches!(err, AuthFileError::InsecurePermissions { mode: 0o640, .. }),
+            "expected InsecurePermissions, got {err:?}"
+        );
     }
 }
