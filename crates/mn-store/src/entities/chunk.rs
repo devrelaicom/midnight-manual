@@ -89,6 +89,76 @@ pub async fn insert(pool: &PgPool, c: NewChunk<'_>) -> Result<Uuid> {
     Ok(row.0)
 }
 
+/// One row returned by [`list_embed_failed_batch`] — the minimum needed for
+/// the embedder worker to encode the text and write the vector back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmbedFailedChunk {
+    /// Chunk id (PK).
+    pub id: Uuid,
+    /// Verbatim chunk content to embed.
+    pub content: String,
+    /// Owning embedding model — guards a cross-model write.
+    pub embedding_model_id: Uuid,
+}
+
+/// Fetch up to `limit` `embed_failed` chunks whose `embedding_model_id`
+/// matches `model_id`. Used by the background embedder worker.
+///
+/// Rows are ordered by `created_at ASC` so older work goes first
+/// (fair-queue semantics — a fresh ingest doesn't starve an in-flight one).
+///
+/// # Errors
+///
+/// Returns [`crate::error::StoreError::Database`] on driver failure.
+pub async fn list_embed_failed_batch(
+    pool: &PgPool,
+    model_id: Uuid,
+    limit: i64,
+) -> Result<Vec<EmbedFailedChunk>> {
+    let rows: Vec<(Uuid, String, Uuid)> = sqlx::query_as(
+        "SELECT id, content, embedding_model_id FROM chunk \
+         WHERE status = 'embed_failed' AND embedding_model_id = $1 \
+         ORDER BY created_at ASC \
+         LIMIT $2",
+    )
+    .bind(model_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, content, embedding_model_id)| EmbedFailedChunk {
+            id,
+            content,
+            embedding_model_id,
+        })
+        .collect())
+}
+
+/// Set the embedding bytes and flip `status` to `ready` for one chunk.
+///
+/// No-ops (returns `Ok(false)`) if the row is no longer in `embed_failed` —
+/// another worker may have raced us, or the chunk may have been demoted to
+/// `deprecated`. The `trg_chunk_embedding_model_match` trigger is honoured
+/// by only updating the embedding column (the column under cross-check is
+/// never mutated by this query).
+///
+/// # Errors
+///
+/// Returns [`crate::error::StoreError::Database`] on driver failure (e.g.
+/// vector dimensionality mismatch).
+pub async fn set_embedding(pool: &PgPool, id: Uuid, vector: Vec<f32>) -> Result<bool> {
+    let result = sqlx::query(
+        "UPDATE chunk SET embedding = $1, status = 'ready' \
+         WHERE id = $2 AND status = 'embed_failed'",
+    )
+    .bind(Vector::from(vector))
+    .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
 /// Fetch a chunk by id (status filter applied — embed_failed rows are excluded).
 ///
 /// # Errors

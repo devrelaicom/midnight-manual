@@ -5,4 +5,5 @@
 //! and the graceful-shutdown wiring; the jobs themselves are stateless
 //! between ticks.
 
+pub mod embedder;
 pub mod telemetry_sweep;

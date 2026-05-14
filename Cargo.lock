@@ -2780,6 +2780,7 @@ dependencies = [
  "metrics-exporter-prometheus",
  "mn-auth",
  "mn-core",
+ "mn-embedding",
  "mn-retrieval",
  "mn-store",
  "mn-telemetry",
