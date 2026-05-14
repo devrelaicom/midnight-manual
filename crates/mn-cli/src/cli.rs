@@ -4,9 +4,15 @@
 //! call into [`run`]. The global flags (D17/D18) — `--config`, `--server`,
 //! `--token`, `--json`, `--log-level`, `--no-telemetry` — are parsed at the
 //! top level and threaded into subcommands.
+//!
+//! Admin subcommands (`keys`, `login`, `users`) are hidden from `--help` by
+//! default (D23 / FR-066). Set `MIDNIGHT_MANUAL_SHOW_ADMIN_CMDS=1` (or
+//! `cli.show_admin_cmds = true` in `config.toml`) to surface them. The
+//! visibility gate never gates *invocation* — a hidden command still runs
+//! when called by name.
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory as _, FromArgMatches as _, Parser, Subcommand};
 
 use crate::commands;
 
@@ -15,7 +21,9 @@ use crate::commands;
 /// Telemetry is opt-out. To disable, do any of:
 ///
 /// 1. Set `MIDNIGHT_MANUAL_DISABLE_TELEMETRY=1` in the environment.
+///
 /// 2. Set `telemetry.enabled = false` in your `config.toml`.
+///
 /// 3. Run `mnm telemetry disable` (writes a runtime marker).
 ///
 /// When disabled, zero events leave your machine and no connection to the
@@ -64,7 +72,17 @@ pub enum Command {
     Config(commands::config::Args),
     /// MCP server (stdio JSON-RPC) and related tooling.
     Mcp(commands::mcp::Args),
+    /// Ed25519 keypair management (admin; hidden by default).
+    Keys(commands::keys::Args),
+    /// Admin login via challenge-response (admin; hidden by default).
+    Login(commands::login::Args),
+    /// Local user-store CRUD (admin; hidden by default).
+    Users(commands::users::Args),
 }
+
+/// Subcommand names that are admin-only and therefore hidden from `--help`
+/// unless `MIDNIGHT_MANUAL_SHOW_ADMIN_CMDS=1` is set (FR-066).
+const ADMIN_SUBCOMMANDS: &[&str] = &["keys", "login", "users"];
 
 /// Parse argv and dispatch.
 ///
@@ -72,7 +90,15 @@ pub enum Command {
 ///
 /// Returns `anyhow::Error` on argument-parse failures or subcommand failures.
 pub async fn run() -> Result<()> {
-    let cli = Cli::parse();
+    let show_admin = should_show_admin_cmds();
+    let mut cmd = Cli::command();
+    if !show_admin {
+        for name in ADMIN_SUBCOMMANDS {
+            cmd = cmd.mut_subcommand(*name, |c| c.hide(true));
+        }
+    }
+    let matches = cmd.get_matches();
+    let cli = Cli::from_arg_matches(&matches).map_err(anyhow::Error::from)?;
     init_logging(cli.log_level.as_deref());
 
     match cli.cmd {
@@ -86,7 +112,24 @@ pub async fn run() -> Result<()> {
         }
         Command::Config(args) => commands::config::run(args, cli.config.as_deref(), cli.json).await,
         Command::Mcp(args) => commands::mcp::run(args).await,
+        Command::Keys(args) => commands::keys::run(args, cli.json),
+        Command::Login(args) => commands::login::run(args, cli.server.as_deref(), cli.json).await,
+        Command::Users(args) => commands::users::run(args, cli.json),
     }
+}
+
+/// Resolve admin-visibility (D23 / FR-066).
+///
+/// Precedence: `MIDNIGHT_MANUAL_SHOW_ADMIN_CMDS` env > `cli.show_admin_cmds`
+/// config field > hidden.
+fn should_show_admin_cmds() -> bool {
+    if let Ok(v) = std::env::var("MIDNIGHT_MANUAL_SHOW_ADMIN_CMDS") {
+        // Match the same truthy-set the rest of the CLI uses (FR-016).
+        return matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES");
+    }
+    let env = mn_core::config::StdEnv;
+    let (cfg, _) = mn_core::config::Config::discover(None, &env).unwrap_or_default();
+    cfg.cli.show_admin_cmds
 }
 
 fn init_logging(level: Option<&str>) {

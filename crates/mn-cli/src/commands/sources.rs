@@ -29,7 +29,7 @@ pub enum SourcesCmd {
 ///
 /// Returns an error on network failure or unexpected non-2xx responses.
 pub async fn run(args: Args, server: Option<&str>, json: bool) -> Result<()> {
-    let server_url = resolve_server_url(server);
+    let server_url = crate::shared::resolve_server_url(server);
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
@@ -60,15 +60,6 @@ pub async fn run(args: Args, server: Option<&str>, json: bool) -> Result<()> {
         }
     }
     Ok(())
-}
-
-fn resolve_server_url(flag: Option<&str>) -> String {
-    if let Some(s) = flag {
-        return s.trim_end_matches('/').to_owned();
-    }
-    let env = mn_core::config::StdEnv;
-    let (cfg, _) = mn_core::config::Config::discover(None, &env).unwrap_or_default();
-    cfg.server.url
 }
 
 fn emit_value(v: &serde_json::Value, json: bool) {

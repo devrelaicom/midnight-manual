@@ -2657,8 +2657,10 @@ name = "mn-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "clap",
  "directories",
+ "ed25519-dalek",
  "indicatif",
  "mn-auth",
  "mn-content",
@@ -2669,11 +2671,13 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "tempfile",
  "time",
  "tokio",
  "toml",
  "tracing",
  "tracing-subscriber",
+ "wiremock",
 ]
 
 [[package]]

@@ -4,8 +4,6 @@
 //! their MCP transport. Stdout is the wire — only logging goes to stderr
 //! (FR-021).
 
-use std::path::PathBuf;
-
 use anyhow::{Context as _, Result};
 use clap::{Args as ClapArgs, Subcommand};
 use time::OffsetDateTime;
@@ -67,25 +65,10 @@ async fn serve() -> Result<()> {
 /// Look up the active read-uplift bearer in `$XDG_CONFIG_HOME/midnight-manual/auth.toml`.
 /// Absent or expired tokens degrade silently to anonymous mode.
 fn resolve_read_uplift_token() -> Option<String> {
-    let path = auth_file_path()?;
+    let path = mn_core::paths::auth_file_path(&mn_core::config::StdEnv)?;
     let file = mn_core::auth_file::AuthFile::read_optional(&path)
         .ok()
         .flatten()?;
     file.active_read_uplift_token(OffsetDateTime::now_utc())
         .map(str::to_owned)
-}
-
-fn auth_file_path() -> Option<PathBuf> {
-    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        return Some(PathBuf::from(xdg).join("midnight-manual").join("auth.toml"));
-    }
-    if let Ok(home) = std::env::var("HOME") {
-        return Some(
-            PathBuf::from(home)
-                .join(".config")
-                .join("midnight-manual")
-                .join("auth.toml"),
-        );
-    }
-    None
 }
