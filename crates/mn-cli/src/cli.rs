@@ -11,6 +11,16 @@ use clap::{Parser, Subcommand};
 use crate::commands;
 
 /// midnight-manual: a RAG platform for the Midnight Network.
+///
+/// Telemetry is opt-out. To disable, do any of:
+///
+/// 1. Set `MIDNIGHT_MANUAL_DISABLE_TELEMETRY=1` in the environment.
+/// 2. Set `telemetry.enabled = false` in your `config.toml`.
+/// 3. Run `mnm telemetry disable` (writes a runtime marker).
+///
+/// When disabled, zero events leave your machine and no connection to the
+/// telemetry endpoint is opened. See the README's 'Telemetry & Privacy'
+/// section for what is collected.
 #[derive(Debug, Parser)]
 #[command(name = "mnm", version, about, long_about = None)]
 pub struct Cli {
