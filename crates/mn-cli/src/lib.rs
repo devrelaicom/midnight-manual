@@ -16,6 +16,7 @@
 
 pub mod cli;
 pub mod commands;
+pub mod shared;
 
 /// Crate version stamped at build time.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
