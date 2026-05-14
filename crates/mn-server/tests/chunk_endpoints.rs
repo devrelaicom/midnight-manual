@@ -121,6 +121,8 @@ fn cfg() -> ServerConfig {
         port: 0,
         auto_migrate: false,
         corpus_model: None,
+        user_store_body: None,
+        jwt_secret: None,
     }
 }
 
@@ -128,7 +130,7 @@ fn cfg() -> ServerConfig {
 async fn get_chunk_round_trips() {
     let h = common::boot().await;
     let (_, a, _) = seed_two_chunks(&h.pool).await;
-    let app = app::build(h.pool.clone(), cfg());
+    let app = app::build(h.pool.clone(), cfg()).expect("build app");
     let resp = app
         .oneshot(
             Request::builder()
@@ -148,7 +150,7 @@ async fn get_chunk_round_trips() {
 #[tokio::test]
 async fn get_chunk_returns_404_for_unknown_id() {
     let h = common::boot().await;
-    let app = app::build(h.pool.clone(), cfg());
+    let app = app::build(h.pool.clone(), cfg()).expect("build app");
     let id = Uuid::new_v4();
     let resp = app
         .oneshot(
@@ -166,7 +168,7 @@ async fn get_chunk_returns_404_for_unknown_id() {
 async fn get_chunk_siblings_returns_both_chunks_in_order() {
     let h = common::boot().await;
     let (_, a, b) = seed_two_chunks(&h.pool).await;
-    let app = app::build(h.pool.clone(), cfg());
+    let app = app::build(h.pool.clone(), cfg()).expect("build app");
     let resp = app
         .oneshot(
             Request::builder()
@@ -189,7 +191,7 @@ async fn get_chunk_siblings_returns_both_chunks_in_order() {
 async fn get_chunk_parents_walks_to_root() {
     let h = common::boot().await;
     let (_root, a, _b) = seed_two_chunks(&h.pool).await;
-    let app = app::build(h.pool.clone(), cfg());
+    let app = app::build(h.pool.clone(), cfg()).expect("build app");
     let resp = app
         .oneshot(
             Request::builder()

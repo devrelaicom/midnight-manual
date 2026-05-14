@@ -46,7 +46,7 @@ async fn main() -> anyhow::Result<()> {
     let mut cfg = cfg;
     cfg.corpus_model = Some(resolved_corpus_model);
 
-    let app = app::build(pool, cfg.clone());
+    let app = app::build(pool, cfg.clone()).context("build app")?;
     let addr: SocketAddr = format!("0.0.0.0:{}", cfg.port)
         .parse()
         .context("parse listen address")?;

@@ -17,6 +17,13 @@ pub struct ServerConfig {
     /// `client_embedding_model` matches this canonical model identifier.
     /// Server resolves this from the active embedding_model row on boot.
     pub corpus_model: Option<String>,
+    /// `MIDNIGHT_MANUAL_USER_STORE` — the in-memory TOML body of the user
+    /// store. When `None`, the auth endpoints (FR-056 challenge / verify)
+    /// return 503 `service_unavailable` rather than refusing boot.
+    pub user_store_body: Option<String>,
+    /// `MIDNIGHT_MANUAL_JWT_SECRET` — HS256 signing key (32+ bytes).
+    /// Same optionality as `user_store_body`.
+    pub jwt_secret: Option<Vec<u8>>,
 }
 
 impl ServerConfig {
@@ -36,11 +43,17 @@ impl ServerConfig {
         let auto_migrate = env::var("MIDNIGHT_MANUAL_AUTO_MIGRATE")
             .map(|v| !matches!(v.as_str(), "0" | "false" | "no"))
             .unwrap_or(true);
+        let user_store_body = env::var("MIDNIGHT_MANUAL_USER_STORE").ok();
+        let jwt_secret = env::var("MIDNIGHT_MANUAL_JWT_SECRET")
+            .ok()
+            .map(String::into_bytes);
         Ok(Self {
             database_url,
             port,
             auto_migrate,
             corpus_model: None,
+            user_store_body,
+            jwt_secret,
         })
     }
 }
