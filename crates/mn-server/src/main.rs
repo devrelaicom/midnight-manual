@@ -60,6 +60,22 @@ async fn main() -> anyhow::Result<()> {
     let _sweep_handle =
         jobs::telemetry_sweep::spawn(pool.clone(), cfg.telemetry_raw_retention_days);
 
+    // Background: source-retention sweep (Phase 13). Hard-deletes sources
+    // whose `retired_at` is older than the configured grace window so
+    // `mnm sources retire`'s soft-delete eventually frees the slug.
+    let _source_retention_handle = if cfg.source_retirement_enabled {
+        Some(jobs::source_retention::spawn(
+            pool.clone(),
+            cfg.source_retirement_grace_hours,
+            cfg.source_retirement_interval_minutes,
+        ))
+    } else {
+        tracing::info!(
+            "source retention sweep disabled (MIDNIGHT_MANUAL_SOURCE_RETIREMENT_ENABLED=false)"
+        );
+        None
+    };
+
     // Background: embedder worker (Phase 11a / FR-038). Disabled in env when
     // the deployment has no GPU/CPU budget for ONNX; otherwise loads the
     // local model and starts polling for `embed_failed` chunks.

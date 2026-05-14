@@ -6,4 +6,5 @@
 //! between ticks.
 
 pub mod embedder;
+pub mod source_retention;
 pub mod telemetry_sweep;

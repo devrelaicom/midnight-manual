@@ -130,6 +130,34 @@ pub async fn update(pool: &PgPool, slug: &str, patch: SourcePatch) -> Result<Sou
     row.map_or(Err(crate::error::StoreError::NotFound), TryInto::try_into)
 }
 
+/// Hard-delete sources whose `retired_at` is older than `grace_seconds`.
+///
+/// Cascades through `source_version` → `chunk` / `document` / `node` /
+/// `package` via the existing `ON DELETE CASCADE` foreign keys, so one
+/// DELETE removes the whole subtree. Returns the slugs that were deleted
+/// (sorted ascending for stable logging).
+///
+/// # Errors
+///
+/// Returns [`crate::error::StoreError::Database`] on driver failure. A
+/// `grace_seconds` value of 0 means "delete anything currently retired";
+/// negative values are clamped to 0.
+pub async fn sweep_retired(pool: &PgPool, grace_seconds: i64) -> Result<Vec<String>> {
+    let grace = grace_seconds.max(0);
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "DELETE FROM source \
+         WHERE retired_at IS NOT NULL \
+           AND retired_at < now() - ($1::bigint * interval '1 second') \
+         RETURNING slug",
+    )
+    .bind(grace)
+    .fetch_all(pool)
+    .await?;
+    let mut slugs: Vec<String> = rows.into_iter().map(|(s,)| s).collect();
+    slugs.sort();
+    Ok(slugs)
+}
+
 /// Mark a source as retired (idempotent: setting an already-retired row is a no-op).
 ///
 /// # Errors
