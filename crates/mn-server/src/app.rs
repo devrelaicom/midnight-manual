@@ -152,6 +152,7 @@ pub fn build(pool: PgPool, cfg: ServerConfig) -> Result<Router, AuthStateError> 
         .merge(crate::routes::chunks::router())
         .merge(crate::routes::auth::router())
         .merge(crate::routes::admin_ingest::router())
+        .merge(crate::routes::admin_status::router())
         .merge(crate::routes::github::router())
         .merge(crate::routes::telemetry::router())
         .merge(crate::routes::metrics::router())
