@@ -86,11 +86,13 @@ pub enum Command {
     Login(commands::login::Args),
     /// Local user-store CRUD (admin; hidden by default).
     Users(commands::users::Args),
+    /// Run an admin ingest from a manifest (admin; hidden by default).
+    Ingest(commands::ingest::Args),
 }
 
 /// Subcommand names that are admin-only and therefore hidden from `--help`
 /// unless `MIDNIGHT_MANUAL_SHOW_ADMIN_CMDS=1` is set (FR-066).
-const ADMIN_SUBCOMMANDS: &[&str] = &["keys", "login", "users"];
+const ADMIN_SUBCOMMANDS: &[&str] = &["keys", "login", "users", "ingest"];
 
 /// Parse argv and dispatch.
 ///
@@ -143,6 +145,10 @@ pub async fn run() -> Result<()> {
         Command::Keys(args) => commands::keys::run(args, cli.json),
         Command::Login(args) => commands::login::run(args, cli.server.as_deref(), cli.json).await,
         Command::Users(args) => commands::users::run(args, cli.json),
+        Command::Ingest(args) => {
+            commands::ingest::run(args, cli.server.as_deref(), &telemetry, crate::VERSION, cli.json)
+                .await
+        }
     };
 
     let duration_ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
@@ -182,6 +188,7 @@ const fn cli_command_name(cmd: &Command) -> CliCommandName {
             CliCommandName::Auth
         }
         Command::Telemetry(_) => CliCommandName::Telemetry,
+        Command::Ingest(_) => CliCommandName::Ingest,
     }
 }
 

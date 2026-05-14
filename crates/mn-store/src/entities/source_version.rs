@@ -153,6 +153,23 @@ pub async fn get_active(pool: &PgPool, source_id: Uuid) -> Result<SourceVersion>
     row.try_into()
 }
 
+/// Fetch a source_version by id.
+///
+/// # Errors
+///
+/// Returns [`crate::error::StoreError::NotFound`] if id is unknown.
+pub async fn get_by_id(pool: &PgPool, id: Uuid) -> Result<SourceVersion> {
+    let row = sqlx::query_as::<_, SourceVersionRow>(
+        "SELECT id, source_id, revision, status, is_active, ingested_at, ingest_cli_version, \
+                embedding_model_id, content_hash, notes, retired_at \
+         FROM source_version WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_one(pool)
+    .await?;
+    row.try_into()
+}
+
 /// Fetch a source_version by its monotonic revision.
 ///
 /// # Errors

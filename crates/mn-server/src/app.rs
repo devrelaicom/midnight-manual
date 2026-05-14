@@ -12,11 +12,12 @@ use tower_http::trace::TraceLayer;
 use crate::config::ServerConfig;
 use crate::middleware::request_id;
 
-/// Cap for inbound request bodies. The largest legitimate body today is
-/// `POST /v1/search` carrying up to 50 query pairs × 768 dims × 4 bytes per
-/// f32 ≈ 150 KiB plus JSON overhead. 1 MiB gives us headroom for future
-/// fields without enabling a memory-exhaustion vector.
-pub const MAX_BODY_BYTES: usize = 1024 * 1024;
+/// Cap for inbound request bodies. The largest legitimate body today is the
+/// admin ingest `PUT .../documents` upload, which carries documents + chunk
+/// text for one batch — comfortably bounded by the CLI's batching logic but
+/// can reach several MiB on a one-shot upload of a docs site. 16 MiB gives
+/// the CLI headroom while staying well below a memory-exhaustion threshold.
+pub const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 
 /// Per-handler shared state — clonable cheaply.
 #[derive(Clone)]
@@ -150,6 +151,7 @@ pub fn build(pool: PgPool, cfg: ServerConfig) -> Result<Router, AuthStateError> 
         .merge(crate::routes::search::router())
         .merge(crate::routes::chunks::router())
         .merge(crate::routes::auth::router())
+        .merge(crate::routes::admin_ingest::router())
         .merge(crate::routes::github::router())
         .merge(crate::routes::telemetry::router())
         .merge(crate::routes::metrics::router())
