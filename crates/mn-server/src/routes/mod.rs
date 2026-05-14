@@ -1,6 +1,7 @@
 //! HTTP route modules.
 
 pub mod admin_ingest;
+pub mod admin_status;
 pub mod auth;
 pub mod chunks;
 pub mod github;
