@@ -78,6 +78,8 @@ pub enum Command {
     Mcp(commands::mcp::Args),
     /// GitHub OAuth read-uplift flow + local auth-file inspection.
     Auth(commands::auth::Args),
+    /// Telemetry opt-out toggle and status.
+    Telemetry(commands::telemetry::Args),
     /// Ed25519 keypair management (admin; hidden by default).
     Keys(commands::keys::Args),
     /// Admin login via challenge-response (admin; hidden by default).
@@ -111,10 +113,12 @@ pub async fn run() -> Result<()> {
     let env = mn_core::config::StdEnv;
     let (cfg, _) =
         mn_core::config::Config::discover(cli.config.as_deref(), &env).unwrap_or_default();
-    // The --no-telemetry / MIDNIGHT_MANUAL_DISABLE_TELEMETRY flag flips the
-    // resolver via the env var the clap arg is bound to. The config-side
-    // flag (config.telemetry.enabled) is the second mechanism; the runtime
-    // toggle (third mechanism) lives in `mn_telemetry::optout`.
+    // FR-107 mechanism #3: seed the runtime toggle from the persistent
+    // marker so a previous `mnm telemetry disable` survives invocation
+    // boundaries. The two other mechanisms are env (#1) and config (#2).
+    mn_telemetry::optout::load_persistent_marker(
+        mn_core::paths::telemetry_marker_path(&env).as_deref(),
+    );
     let cloud_url = cli.server.clone().unwrap_or_else(|| cfg.server.url.clone());
     let telemetry_url = format!("{}/v1/telemetry/events", cloud_url.trim_end_matches('/'));
     let config_enabled = cfg.telemetry.enabled && !cli.no_telemetry;
@@ -135,6 +139,7 @@ pub async fn run() -> Result<()> {
         Command::Config(args) => commands::config::run(args, cli.config.as_deref(), cli.json).await,
         Command::Mcp(args) => commands::mcp::run(args).await,
         Command::Auth(args) => commands::auth::run(args, cli.server.as_deref(), cli.json).await,
+        Command::Telemetry(args) => commands::telemetry::run(&args, cli.json),
         Command::Keys(args) => commands::keys::run(args, cli.json),
         Command::Login(args) => commands::login::run(args, cli.server.as_deref(), cli.json).await,
         Command::Users(args) => commands::users::run(args, cli.json),
@@ -176,6 +181,7 @@ const fn cli_command_name(cmd: &Command) -> CliCommandName {
         Command::Auth(_) | Command::Login(_) | Command::Keys(_) | Command::Users(_) => {
             CliCommandName::Auth
         }
+        Command::Telemetry(_) => CliCommandName::Telemetry,
     }
 }
 

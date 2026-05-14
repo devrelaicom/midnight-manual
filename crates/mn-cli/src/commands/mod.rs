@@ -7,6 +7,7 @@ pub mod keys;
 pub mod login;
 pub mod mcp;
 pub mod sources;
+pub mod telemetry;
 pub mod users;
 pub mod version;
 pub mod versions;

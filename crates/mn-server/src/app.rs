@@ -152,6 +152,7 @@ pub fn build(pool: PgPool, cfg: ServerConfig) -> Result<Router, AuthStateError> 
         .merge(crate::routes::auth::router())
         .merge(crate::routes::github::router())
         .merge(crate::routes::telemetry::router())
+        .merge(crate::routes::metrics::router())
         // Bound the body size at the boundary — refuses oversize payloads
         // before any handler-side validation runs.
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))

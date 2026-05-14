@@ -32,6 +32,12 @@ struct TelemetryReport {
     enabled: bool,
     /// Resolved sink URL, derived from `[server].url`.
     sink_url: String,
+    /// Resolved persistent-marker path (mechanism #3). `None` when no
+    /// `HOME` / `XDG_CONFIG_HOME` is set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    marker_path: Option<String>,
+    /// Whether the marker file exists at `marker_path`.
+    marker_present: bool,
     /// Per-mechanism disable status (env / config / runtime).
     disabled_by: DisabledBy,
 }
@@ -59,14 +65,21 @@ pub async fn run(args: Args, json: bool) -> Result<()> {
 
     let env = mn_core::config::StdEnv;
     let (cfg, path) = mn_core::config::Config::discover(None, &env)?;
+    // Seed the runtime toggle from the persistent marker so the doctor
+    // report reflects the same opt-out state every other invocation sees.
+    let marker = mn_core::paths::telemetry_marker_path(&env);
+    optout::load_persistent_marker(marker.as_deref());
     let env_disabled = std::env::var(optout::DISABLE_ENV_VAR)
         .ok()
         .is_some_and(|v| {
             matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
         });
+    let marker_present = marker.as_deref().is_some_and(std::path::Path::exists);
     let telemetry = TelemetryReport {
         enabled: optout::is_enabled(&optout::StdEnv, cfg.telemetry.enabled),
         sink_url: format!("{}/v1/telemetry/events", cfg.server.url.trim_end_matches('/')),
+        marker_path: marker.as_ref().map(|p| p.display().to_string()),
+        marker_present,
         disabled_by: DisabledBy {
             env: env_disabled,
             config: !cfg.telemetry.enabled,
@@ -104,6 +117,16 @@ pub async fn run(args: Args, json: bool) -> Result<()> {
             },
             report.telemetry.sink_url,
         );
+        if let Some(p) = report.telemetry.marker_path.as_deref() {
+            println!(
+                "    marker file:     {p} ({})",
+                if report.telemetry.marker_present {
+                    "present"
+                } else {
+                    "absent"
+                },
+            );
+        }
         if report.telemetry.disabled_by.env {
             println!("    - disabled by env ({})", optout::DISABLE_ENV_VAR);
         }

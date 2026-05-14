@@ -8,7 +8,7 @@
 use std::net::SocketAddr;
 
 use anyhow::Context as _;
-use mn_server::{app, config::ServerConfig};
+use mn_server::{app, config::ServerConfig, jobs};
 use tokio::signal;
 use tracing_subscriber::EnvFilter;
 
@@ -46,12 +46,17 @@ async fn main() -> anyhow::Result<()> {
     let mut cfg = cfg;
     cfg.corpus_model = Some(resolved_corpus_model);
 
-    let app = app::build(pool, cfg.clone()).context("build app")?;
+    let app = app::build(pool.clone(), cfg.clone()).context("build app")?;
     let addr: SocketAddr = format!("0.0.0.0:{}", cfg.port)
         .parse()
         .context("parse listen address")?;
 
     tracing::info!(addr = %addr, "starting midnight-manual-server");
+
+    // Background: telemetry retention sweep (FR-110 / SC-065). One task per
+    // process — the JoinHandle stays alive for the duration of the server.
+    let _sweep_handle =
+        jobs::telemetry_sweep::spawn(pool.clone(), cfg.telemetry_raw_retention_days);
 
     let listener = tokio::net::TcpListener::bind(addr)
         .await

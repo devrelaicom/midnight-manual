@@ -68,8 +68,11 @@ Three equivalent mechanisms; any one of them disables telemetry:
 1. **Environment**: set `MIDNIGHT_MANUAL_DISABLE_TELEMETRY=1` (truthy values:
    `1`, `true`, `yes`, `on`).
 2. **Config**: `telemetry.enabled = false` in `~/.config/midnight-manual/config.toml`.
-3. **Runtime**: `mnm telemetry disable` (writes a persistent marker; reverse
-   with `mnm telemetry enable`).
+3. **Runtime**: `mnm telemetry disable` writes a persistent marker at
+   `$XDG_CONFIG_HOME/midnight-manual/telemetry-disabled` (or
+   `$HOME/.config/midnight-manual/telemetry-disabled`). Every CLI / MCP
+   invocation reads it at startup. Reverse with `mnm telemetry enable`.
+   Inspect with `mnm telemetry status`.
 
 When disabled, the client never opens a connection to `/v1/telemetry`, any
 in-memory queued events are discarded (FR-108), and the dropped-by-optout
@@ -78,9 +81,14 @@ counter is exposed via the local client API.
 ### Retention
 
 - `telemetry_event_raw`: rolling **7 days** (configurable via
-  `MIDNIGHT_MANUAL_TELEMETRY_RAW_RETENTION_DAYS`), auto-deleted by the
-  cloud server's sweep job (FR-110).
+  `MIDNIGHT_MANUAL_TELEMETRY_RAW_RETENTION_DAYS`, clamped to `[1, 365]`).
+  The sweep job rolls expired rows into `telemetry_aggregate_daily` and
+  deletes them inside a single transaction — counters always reflect the
+  rows that were actually removed (SC-065).
 - `telemetry_aggregate_daily`: kept indefinitely; numeric counters only.
+  Exposed at `GET /metrics` as Prometheus counter rows
+  (`midnight_manual_telemetry_events_total{event_type,component}`) and a
+  same-shape `midnight_manual_telemetry_events_today` gauge.
 
 ### Privacy canary
 

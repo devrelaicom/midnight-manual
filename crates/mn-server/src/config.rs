@@ -43,6 +43,11 @@ pub struct ServerConfig {
     /// `MIDNIGHT_MANUAL_READ_TOKEN_TTL_DAYS` — read-uplift JWT TTL in days
     /// (FR-117). Defaults to 30; clamped to `[1, 90]`.
     pub read_token_ttl_days: i64,
+    /// `MIDNIGHT_MANUAL_TELEMETRY_RAW_RETENTION_DAYS` — rolling window after
+    /// which `telemetry_event_raw` rows are rolled up into
+    /// `telemetry_aggregate_daily` and deleted (FR-110). Defaults to 7;
+    /// clamped to `[1, 365]`.
+    pub telemetry_raw_retention_days: i64,
     /// GitHub API base URL. Defaults to `https://api.github.com`. Tests
     /// override this to point at a mock server.
     pub github_api_base_url: String,
@@ -71,6 +76,7 @@ impl Default for ServerConfig {
             github_oauth_redirect_url: None,
             github_org: None,
             read_token_ttl_days: 30,
+            telemetry_raw_retention_days: 7,
             github_api_base_url: "https://api.github.com".into(),
             github_authorize_url: "https://github.com/login/oauth/authorize".into(),
             github_token_url: "https://github.com/login/oauth/access_token".into(),
@@ -108,6 +114,10 @@ impl ServerConfig {
             .ok()
             .and_then(|s| s.parse::<i64>().ok())
             .map_or(30, |v| v.clamp(1, 90));
+        let telemetry_raw_retention_days = env::var("MIDNIGHT_MANUAL_TELEMETRY_RAW_RETENTION_DAYS")
+            .ok()
+            .and_then(|s| s.parse::<i64>().ok())
+            .map_or(7, |v| v.clamp(1, 365));
         Ok(Self {
             database_url,
             port,
@@ -120,6 +130,7 @@ impl ServerConfig {
             github_oauth_redirect_url,
             github_org,
             read_token_ttl_days,
+            telemetry_raw_retention_days,
             github_api_base_url: "https://api.github.com".into(),
             github_authorize_url: "https://github.com/login/oauth/authorize".into(),
             github_token_url: "https://github.com/login/oauth/access_token".into(),

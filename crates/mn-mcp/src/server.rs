@@ -85,6 +85,13 @@ struct ServerState {
 /// error if the cloud client cannot be built. JSON-RPC and tool-level errors
 /// are translated into wire responses and do NOT bubble up.
 pub async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // FR-107 mechanism #3: honour any previously-set persistent marker
+    // before constructing the telemetry client. Failing to resolve the
+    // marker path (no `HOME`) degrades to "no marker", which is correct.
+    let env = mn_core::config::StdEnv;
+    mn_telemetry::optout::load_persistent_marker(
+        mn_core::paths::telemetry_marker_path(&env).as_deref(),
+    );
     let cloud = CloudClient::new(&cfg.cloud_url, cfg.bearer_token.clone())
         .map_err(|e| format!("build cloud client: {e}"))?;
     let telemetry = TelemetryClient::boot(&cfg.telemetry_url, cfg.telemetry_enabled)
