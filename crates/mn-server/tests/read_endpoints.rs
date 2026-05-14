@@ -27,8 +27,11 @@ async fn healthz_returns_200() {
             port: 0,
             auto_migrate: false,
             corpus_model: None,
+            user_store_body: None,
+            jwt_secret: None,
         },
-    );
+    )
+    .expect("build app");
 
     let resp = app
         .oneshot(
@@ -52,8 +55,11 @@ async fn readyz_returns_200_when_pgvector_present() {
             port: 0,
             auto_migrate: false,
             corpus_model: None,
+            user_store_body: None,
+            jwt_secret: None,
         },
-    );
+    )
+    .expect("build app");
 
     let resp = app
         .oneshot(
@@ -81,8 +87,11 @@ async fn active_model_returns_seeded_row() {
             port: 0,
             auto_migrate: false,
             corpus_model: None,
+            user_store_body: None,
+            jwt_secret: None,
         },
-    );
+    )
+    .expect("build app");
 
     let resp = app
         .oneshot(
@@ -124,8 +133,11 @@ async fn sources_list_includes_inserted_row_and_show_round_trips() {
             port: 0,
             auto_migrate: false,
             corpus_model: None,
+            user_store_body: None,
+            jwt_secret: None,
         },
-    );
+    )
+    .expect("build app");
 
     // List
     let resp = app
@@ -178,8 +190,11 @@ async fn unknown_source_returns_404() {
             port: 0,
             auto_migrate: false,
             corpus_model: None,
+            user_store_body: None,
+            jwt_secret: None,
         },
-    );
+    )
+    .expect("build app");
 
     let resp = app
         .oneshot(
@@ -207,8 +222,11 @@ async fn x_request_id_is_echoed() {
             port: 0,
             auto_migrate: false,
             corpus_model: None,
+            user_store_body: None,
+            jwt_secret: None,
         },
-    );
+    )
+    .expect("build app");
 
     let resp = app
         .clone()

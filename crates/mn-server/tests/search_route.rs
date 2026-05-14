@@ -136,6 +136,8 @@ fn cfg() -> ServerConfig {
         // Tests bypass the boot-time resolver so we pin the corpus model
         // explicitly. Matches the seeded `embedding_model` row in migration 0006.
         corpus_model: Some("bge-base-en-v1.5@1".to_owned()),
+        user_store_body: None,
+        jwt_secret: None,
     }
 }
 
@@ -143,7 +145,7 @@ fn cfg() -> ServerConfig {
 async fn search_returns_nearest_chunk_first() {
     let h = common::boot().await;
     let (a, _b) = seed(&h.pool).await;
-    let app = app::build(h.pool.clone(), cfg());
+    let app = app::build(h.pool.clone(), cfg()).expect("build app");
 
     // Query vector very close to chunk_a's seed (0.10) — chunk_a should rank first.
     let body = serde_json::json!({
@@ -191,7 +193,7 @@ async fn search_returns_nearest_chunk_first() {
 async fn search_returns_409_on_model_mismatch() {
     let h = common::boot().await;
     let _ = seed(&h.pool).await;
-    let app = app::build(h.pool.clone(), cfg());
+    let app = app::build(h.pool.clone(), cfg()).expect("build app");
 
     let body = serde_json::json!({
         "queries": [{ "text": "x", "vector": unit_vector(0.0) }],
@@ -221,7 +223,7 @@ async fn search_returns_409_on_model_mismatch() {
 async fn search_returns_400_on_wrong_dim() {
     let h = common::boot().await;
     let _ = seed(&h.pool).await;
-    let app = app::build(h.pool.clone(), cfg());
+    let app = app::build(h.pool.clone(), cfg()).expect("build app");
 
     let body = serde_json::json!({
         "queries": [{ "text": "x", "vector": vec![0.0_f32; 128] }],
@@ -248,7 +250,7 @@ async fn search_returns_400_on_wrong_dim() {
 #[tokio::test]
 async fn search_returns_400_on_empty_queries() {
     let h = common::boot().await;
-    let app = app::build(h.pool.clone(), cfg());
+    let app = app::build(h.pool.clone(), cfg()).expect("build app");
 
     let body = serde_json::json!({
         "queries": [],
@@ -272,7 +274,7 @@ async fn search_returns_400_on_empty_queries() {
 async fn search_respects_limit_cap() {
     let h = common::boot().await;
     let _ = seed(&h.pool).await;
-    let app = app::build(h.pool.clone(), cfg());
+    let app = app::build(h.pool.clone(), cfg()).expect("build app");
 
     let body = serde_json::json!({
         "queries": [{ "text": "x", "vector": unit_vector(0.5) }],

@@ -1,6 +1,6 @@
-//! HTTP route modules. Read endpoints land in this phase; write endpoints (with
-//! auth wrappers) land in Phase 7 (US9).
+//! HTTP route modules.
 
+pub mod auth;
 pub mod chunks;
 pub mod health;
 pub mod models;
