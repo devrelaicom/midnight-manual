@@ -112,6 +112,162 @@ impl AuthFile {
             .filter(|r| now < r.expires_at)
             .map(|r| r.token.as_str())
     }
+
+    /// Serialize this auth file to a TOML body suitable for writing to disk.
+    /// Section order is `schema_version`, `[admin]`, `[read_uplift]` —
+    /// matching what `mnm login` / `mnm auth github` would have produced.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthFileError::Serialize`] on the (effectively never)
+    /// serialiser failure.
+    pub fn to_toml(&self) -> Result<String, AuthFileError> {
+        toml::to_string(self).map_err(|e| AuthFileError::Serialize(e.to_string()))
+    }
+
+    /// Atomically write the auth file to `path`, creating the file with
+    /// mode `0o600` (Unix) and refusing to write if an existing file has
+    /// looser permissions.
+    ///
+    /// Atomicity comes from a `path.tmp` sibling that is `rename(2)`'d into
+    /// place; concurrent readers will see either the previous file or the
+    /// new file but never a partial mid-write.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthFileError::Io`] on filesystem failure,
+    /// [`AuthFileError::Serialize`] on the (rare) TOML encode failure, or
+    /// [`AuthFileError::InsecurePermissions`] if an existing file at `path`
+    /// already has group- or world-readable bits set (we refuse to silently
+    /// re-narrow them).
+    pub fn write(&self, path: &Path) -> Result<(), AuthFileError> {
+        // Refuse to clobber a world-readable file — the operator likely
+        // didn't intend us to inherit those permissions, and our subsequent
+        // chmod could race with another reader.
+        if let Ok(md) = std::fs::metadata(path) {
+            check_permissions(path, &md)?;
+        }
+        let body = self.to_toml()?;
+        atomic_write(path, &body)?;
+        Ok(())
+    }
+
+    /// Read the existing file (or build a fresh empty one), update the
+    /// `[admin]` section with the supplied JWT + expiry, and persist back to
+    /// disk under the same permission discipline as [`AuthFile::write`].
+    ///
+    /// # Errors
+    ///
+    /// Returns any variant of [`AuthFileError`] that
+    /// [`AuthFile::read_optional`] or [`AuthFile::write`] can produce.
+    pub fn write_admin_token(
+        path: &Path,
+        user_id: impl Into<String>,
+        token: impl Into<String>,
+        expires_at: OffsetDateTime,
+    ) -> Result<(), AuthFileError> {
+        let mut file = Self::read_optional(path)?.unwrap_or_else(Self::empty);
+        file.admin = Some(AdminSection {
+            user_id: user_id.into(),
+            token: token.into(),
+            expires_at,
+        });
+        file.write(path)
+    }
+
+    /// Like [`AuthFile::write_admin_token`] but for the `[read_uplift]`
+    /// section, used by `mnm auth github`.
+    ///
+    /// # Errors
+    ///
+    /// See [`AuthFile::write_admin_token`].
+    pub fn write_read_uplift_token(
+        path: &Path,
+        github_login: impl Into<String>,
+        token: impl Into<String>,
+        expires_at: OffsetDateTime,
+    ) -> Result<(), AuthFileError> {
+        let mut file = Self::read_optional(path)?.unwrap_or_else(Self::empty);
+        file.read_uplift = Some(ReadUpliftSection {
+            github_login: github_login.into(),
+            token: token.into(),
+            expires_at,
+        });
+        file.write(path)
+    }
+
+    /// Fresh schema-versioned auth file with no sections populated.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION,
+            admin: None,
+            read_uplift: None,
+        }
+    }
+}
+
+/// Write `body` to `path` via a tmp-then-rename dance so the file is
+/// atomically replaced and never observed half-written. On Unix the file
+/// is created with mode `0o600`.
+fn atomic_write(path: &Path, body: &str) -> Result<(), AuthFileError> {
+    use std::io::Write as _;
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|e| AuthFileError::Io {
+                path: parent.to_path_buf(),
+                message: e.to_string(),
+            })?;
+        }
+    }
+    let tmp = path.with_extension("toml.tmp");
+    let file_handle = open_restricted(&tmp)?;
+    {
+        let mut bw = std::io::BufWriter::new(file_handle);
+        bw.write_all(body.as_bytes())
+            .map_err(|e| AuthFileError::Io {
+                path: tmp.clone(),
+                message: e.to_string(),
+            })?;
+        bw.flush().map_err(|e| AuthFileError::Io {
+            path: tmp.clone(),
+            message: e.to_string(),
+        })?;
+    }
+    std::fs::rename(&tmp, path).map_err(|e| AuthFileError::Io {
+        path: path.to_path_buf(),
+        message: format!("rename {} -> {}: {e}", tmp.display(), path.display()),
+    })?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn open_restricted(path: &Path) -> Result<std::fs::File, AuthFileError> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|e| AuthFileError::Io {
+            path: path.to_path_buf(),
+            message: e.to_string(),
+        })
+}
+
+#[cfg(not(unix))]
+fn open_restricted(path: &Path) -> Result<std::fs::File, AuthFileError> {
+    // Platform permission model is the user's NTFS ACL / equivalent.
+    std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(path)
+        .map_err(|e| AuthFileError::Io {
+            path: path.to_path_buf(),
+            message: e.to_string(),
+        })
 }
 
 /// All the ways auth.toml loading can fail.
@@ -160,6 +316,9 @@ pub enum AuthFileError {
         /// The mode bits we observed.
         mode: u32,
     },
+    /// TOML serialization failure on a write.
+    #[error("failed to serialize auth file: {0}")]
+    Serialize(String),
 }
 
 #[cfg(unix)]
@@ -266,6 +425,82 @@ expires_at = "2026-05-13T15:30:00Z"
         let err = AuthFile::read_optional(f.path()).unwrap_err();
         assert!(
             matches!(err, AuthFileError::InsecurePermissions { mode: 0o640, .. }),
+            "expected InsecurePermissions, got {err:?}"
+        );
+    }
+
+    fn rfc(s: &str) -> OffsetDateTime {
+        OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339).unwrap()
+    }
+
+    #[test]
+    fn writes_then_reads_admin_section() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.toml");
+        let exp = rfc("2026-05-14T01:30:00Z");
+        AuthFile::write_admin_token(&path, "aaron", "jwt-xyz", exp).expect("write");
+
+        let loaded = AuthFile::read_optional(&path).unwrap().unwrap();
+        let admin = loaded.admin.unwrap();
+        assert_eq!(admin.user_id, "aaron");
+        assert_eq!(admin.token, "jwt-xyz");
+        assert_eq!(admin.expires_at, exp);
+        assert!(loaded.read_uplift.is_none(), "writer must not invent unrelated sections");
+    }
+
+    #[test]
+    fn writes_then_reads_read_uplift_section() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.toml");
+        let exp = rfc("2026-06-14T00:00:00Z");
+        AuthFile::write_read_uplift_token(&path, "aaronbassett", "ru_abc", exp).expect("write");
+
+        let loaded = AuthFile::read_optional(&path).unwrap().unwrap();
+        let r = loaded.read_uplift.unwrap();
+        assert_eq!(r.github_login, "aaronbassett");
+        assert_eq!(r.token, "ru_abc");
+        assert_eq!(r.expires_at, exp);
+    }
+
+    #[test]
+    fn writing_admin_does_not_clobber_read_uplift() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.toml");
+        let ru_exp = rfc("2026-06-14T00:00:00Z");
+        AuthFile::write_read_uplift_token(&path, "aaronbassett", "ru_abc", ru_exp).unwrap();
+        let admin_exp = rfc("2026-05-14T01:30:00Z");
+        AuthFile::write_admin_token(&path, "aaron", "jwt-xyz", admin_exp).unwrap();
+
+        let loaded = AuthFile::read_optional(&path).unwrap().unwrap();
+        assert_eq!(loaded.read_uplift.unwrap().token, "ru_abc");
+        assert_eq!(loaded.admin.unwrap().token, "jwt-xyz");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writer_creates_file_with_0600() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.toml");
+        AuthFile::write_admin_token(&path, "aaron", "jwt", rfc("2026-05-14T01:30:00Z")).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "writer must create the file with 0o600");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writer_refuses_insecure_existing_file() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.toml");
+        // Seed an existing world-readable file and confirm we refuse to
+        // overwrite it (we'd inherit / fight its perms otherwise).
+        std::fs::write(&path, "schema_version = 1\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let err = AuthFile::write_admin_token(&path, "aaron", "jwt", rfc("2026-05-14T01:30:00Z"))
+            .unwrap_err();
+        assert!(
+            matches!(err, AuthFileError::InsecurePermissions { mode: 0o644, .. }),
             "expected InsecurePermissions, got {err:?}"
         );
     }
