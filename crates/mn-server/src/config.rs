@@ -57,6 +57,17 @@ pub struct ServerConfig {
     /// GitHub OAuth token-exchange URL. Defaults to
     /// `https://github.com/login/oauth/access_token`. Tests override.
     pub github_token_url: String,
+    /// `MIDNIGHT_MANUAL_EMBEDDER_ENABLED` — when true, spawns the
+    /// background embedder worker (Phase 11a). Defaults to true on
+    /// production; tests opt out with `false` so the ONNX bundle never
+    /// downloads inside CI.
+    pub embedder_enabled: bool,
+    /// `MIDNIGHT_MANUAL_EMBEDDER_INTERVAL_MS` — poll interval for the
+    /// embedder worker. Defaults to 30000 (30s); clamped to `[1_000, 600_000]`.
+    pub embedder_interval_ms: u64,
+    /// `MIDNIGHT_MANUAL_EMBEDDER_BATCH_SIZE` — chunks per worker tick.
+    /// Defaults to 16; clamped to `[1, 128]`.
+    pub embedder_batch_size: i64,
 }
 
 impl Default for ServerConfig {
@@ -80,6 +91,9 @@ impl Default for ServerConfig {
             github_api_base_url: "https://api.github.com".into(),
             github_authorize_url: "https://github.com/login/oauth/authorize".into(),
             github_token_url: "https://github.com/login/oauth/access_token".into(),
+            embedder_enabled: false,
+            embedder_interval_ms: 30_000,
+            embedder_batch_size: 16,
         }
     }
 }
@@ -118,6 +132,17 @@ impl ServerConfig {
             .ok()
             .and_then(|s| s.parse::<i64>().ok())
             .map_or(7, |v| v.clamp(1, 365));
+        let embedder_enabled = env::var("MIDNIGHT_MANUAL_EMBEDDER_ENABLED")
+            .map(|v| !matches!(v.as_str(), "0" | "false" | "no"))
+            .unwrap_or(true);
+        let embedder_interval_ms = env::var("MIDNIGHT_MANUAL_EMBEDDER_INTERVAL_MS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .map_or(30_000, |v| v.clamp(1_000, 600_000));
+        let embedder_batch_size = env::var("MIDNIGHT_MANUAL_EMBEDDER_BATCH_SIZE")
+            .ok()
+            .and_then(|s| s.parse::<i64>().ok())
+            .map_or(16, |v| v.clamp(1, 128));
         Ok(Self {
             database_url,
             port,
@@ -134,6 +159,9 @@ impl ServerConfig {
             github_api_base_url: "https://api.github.com".into(),
             github_authorize_url: "https://github.com/login/oauth/authorize".into(),
             github_token_url: "https://github.com/login/oauth/access_token".into(),
+            embedder_enabled,
+            embedder_interval_ms,
+            embedder_batch_size,
         })
     }
 }

@@ -32,6 +32,7 @@ mn-auth        = { path = "../mn-auth" }
 mn-store       = { path = "../mn-store" }
 mn-retrieval   = { path = "../mn-retrieval" }
 mn-telemetry   = { path = "../mn-telemetry" }
+mn-embedding   = { path = "../mn-embedding" }
 axum           = { workspace = true }
 tokio          = { workspace = true }
 tower          = { workspace = true }

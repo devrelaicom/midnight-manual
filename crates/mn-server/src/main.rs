@@ -6,6 +6,8 @@
 //! on `0.0.0.0:8080` (or the port from `PORT`).
 
 use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context as _;
 use mn_server::{app, config::ServerConfig, jobs};
@@ -57,6 +59,31 @@ async fn main() -> anyhow::Result<()> {
     // process — the JoinHandle stays alive for the duration of the server.
     let _sweep_handle =
         jobs::telemetry_sweep::spawn(pool.clone(), cfg.telemetry_raw_retention_days);
+
+    // Background: embedder worker (Phase 11a / FR-038). Disabled in env when
+    // the deployment has no GPU/CPU budget for ONNX; otherwise loads the
+    // local model and starts polling for `embed_failed` chunks.
+    let _embedder_handle = if cfg.embedder_enabled {
+        let cache_env = mn_embedding::cache::StdEnv;
+        let cache_dir = mn_embedding::cache::resolve(&cache_env).context(
+            "could not resolve model cache dir (MIDNIGHT_MANUAL_MODEL_CACHE_DIR or HOME)",
+        )?;
+        std::fs::create_dir_all(&cache_dir)
+            .with_context(|| format!("create model cache dir at {}", cache_dir.display()))?;
+        let local = jobs::embedder::LocalEmbedder::load(cache_dir)
+            .await
+            .map_err(|e| anyhow::anyhow!("load local embedder: {e}"))?;
+        Some(jobs::embedder::spawn(
+            pool.clone(),
+            Arc::new(local),
+            active.id,
+            Duration::from_millis(cfg.embedder_interval_ms),
+            cfg.embedder_batch_size,
+        ))
+    } else {
+        tracing::info!("embedder worker disabled (MIDNIGHT_MANUAL_EMBEDDER_ENABLED=false)");
+        None
+    };
 
     let listener = tokio::net::TcpListener::bind(addr)
         .await
