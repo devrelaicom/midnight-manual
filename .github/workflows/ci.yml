@@ -84,7 +84,17 @@ jobs:
           echo '=== ls -la ~/.rustup/toolchains ==='
           ls -la ~/.rustup/toolchains/ 2>/dev/null || echo 'no ~/.rustup/toolchains/'
 
+      # FIX-A: cache-bin: false — the default `cache-bin: true` archives
+      # ~/.cargo/bin (the rustup proxy + symlink chain). Restoring it
+      # appears to occasionally land a binary at ~/.cargo/bin/cargo that
+      # dispatches to rustup-init setup_mode rather than the cargo proxy
+      # (FR-066 / FR-117 OAuth integration tests caught this repeatedly
+      # across PRs 14–18). We don't use `cargo install <bin>` anywhere in
+      # CI, so caching ~/.cargo/bin gives us no value and is the only
+      # plausible source of the intermittent failure.
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
 
       # ───── Post-cache diagnostic — the boundary right before the failure ─────
       - name: Diag — post-cache state (smoking-gun boundary)
