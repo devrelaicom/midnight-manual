@@ -140,7 +140,9 @@ fn hash_of(s: &str) -> String {
     // collision resistance, because the server stores whatever we send.
     let mut acc: u64 = 1_469_598_103_934_665_603;
     for b in s.bytes() {
-        acc = acc.wrapping_mul(1_099_511_628_211).wrapping_add(u64::from(b));
+        acc = acc
+            .wrapping_mul(1_099_511_628_211)
+            .wrapping_add(u64::from(b));
     }
     format!("{acc:016x}")
 }
