@@ -2667,6 +2667,7 @@ dependencies = [
  "mn-core",
  "mn-embedding",
  "mn-mcp",
+ "mn-retrieval",
  "mn-telemetry",
  "reqwest",
  "serde",
