@@ -46,6 +46,7 @@ axum             = "0.7"
 tower            = "0.5"
 tower-http       = { version = "0.6", features = ["cors", "limit", "trace", "set-header"] }
 hyper            = "1"
+reqwest          = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 # Storage
 sqlx             = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio-rustls", "macros", "uuid", "time", "json", "migrate"] }
@@ -104,6 +105,7 @@ proptest         = "1"
 testcontainers   = "0.23"
 insta            = "1"
 tempfile         = "3"
+wiremock         = "0.6"
 
 # CLI command convenience for the workspace itself
 # (not a runtime dep; surfaced for documentation only)
