@@ -87,9 +87,14 @@ pub struct ServerConfig {
     /// demoted (`inactive` or `retired`) source_version that falls outside
     /// its source's `retention_count` window must wait before the sweep is
     /// allowed to hard-delete it (FR-063, Phase 14). Defaults to 24 hours;
-    /// clamped to `[1, 24 * 365]`. The daemon runs both passes on the
-    /// same tick.
+    /// clamped to `[1, 24 * 365]`. The daemon runs all three passes on
+    /// the same tick.
     pub source_version_sweep_grace_hours: i64,
+    /// `MIDNIGHT_MANUAL_ABORT_GRACE_HOURS` — how long an `aborted` ingest
+    /// run lingers before the sweep is allowed to hard-delete it (FR-063,
+    /// Phase 15). Defaults to 1 hour (the spec's
+    /// `MIDNIGHT_MANUAL_ABORT_GRACE` default). Clamped to `[1, 24 * 365]`.
+    pub abort_grace_hours: i64,
 }
 
 impl Default for ServerConfig {
@@ -120,6 +125,7 @@ impl Default for ServerConfig {
             source_retirement_grace_hours: 24,
             source_retirement_interval_minutes: 60,
             source_version_sweep_grace_hours: 24,
+            abort_grace_hours: 1,
         }
     }
 }
@@ -187,6 +193,10 @@ impl ServerConfig {
                 .ok()
                 .and_then(|s| s.parse::<i64>().ok())
                 .map_or(24, |v| v.clamp(1, 24 * 365));
+        let abort_grace_hours = env::var("MIDNIGHT_MANUAL_ABORT_GRACE_HOURS")
+            .ok()
+            .and_then(|s| s.parse::<i64>().ok())
+            .map_or(1, |v| v.clamp(1, 24 * 365));
         Ok(Self {
             database_url,
             port,
@@ -210,6 +220,7 @@ impl ServerConfig {
             source_retirement_grace_hours,
             source_retirement_interval_minutes,
             source_version_sweep_grace_hours,
+            abort_grace_hours,
         })
     }
 }

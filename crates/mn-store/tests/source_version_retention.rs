@@ -254,3 +254,108 @@ async fn sweep_aged_inactive_returns_pairs_sorted() {
     sorted.sort();
     assert_eq!(our, sorted);
 }
+
+// ===== Phase 15: sweep_aborted =====
+
+/// Create an aborted run for `source_id` and (optionally) backdate it.
+async fn seed_aborted_run(
+    pool: &PgPool,
+    source_id: Uuid,
+    model_id: Uuid,
+    content_hash: &str,
+    aged_seconds_ago: i64,
+) -> Uuid {
+    let (id, _rev) =
+        source_version::create_building(pool, source_id, model_id, "0.1.0", content_hash)
+            .await
+            .unwrap();
+    source_version::abort(pool, id).await.unwrap();
+    if aged_seconds_ago > 0 {
+        age_version(pool, id, aged_seconds_ago).await;
+    }
+    id
+}
+
+#[tokio::test]
+async fn sweep_aborted_hard_deletes_aged_aborted_runs() {
+    let h = common::boot().await;
+    let (source_id, model_id) = seed_source(&h.pool, "sv-abort-aged", 5).await;
+    let aborted_id = seed_aborted_run(&h.pool, source_id, model_id, "h-aged", 2 * 60 * 60).await;
+
+    // grace = 1h; the run is aged 2h → eligible.
+    source_version::sweep_aborted(&h.pool, 60 * 60)
+        .await
+        .unwrap();
+
+    // Race-tolerant post-condition: the specific aborted row is gone.
+    let row = source_version::get_by_id(&h.pool, aborted_id).await;
+    assert!(matches!(row, Err(mn_store::StoreError::NotFound)), "{row:?}");
+}
+
+#[tokio::test]
+async fn sweep_aborted_keeps_recent_aborted_runs() {
+    let h = common::boot().await;
+    let (source_id, model_id) = seed_source(&h.pool, "sv-abort-recent", 5).await;
+    // Aborted 30s ago; grace 1h → still inside the window.
+    let aborted_id = seed_aborted_run(&h.pool, source_id, model_id, "h-recent", 30).await;
+
+    let deleted = source_version::sweep_aborted(&h.pool, 60 * 60)
+        .await
+        .unwrap();
+    assert!(
+        !deleted.iter().any(|(_, rev)| *rev == 1),
+        "should not include OUR rev 1: {deleted:?}",
+    );
+
+    // Best-effort: row should still exist. (No other test would target
+    // this source_id; cross-test pollution is bounded to other
+    // source_ids' aborted rows.)
+    let row = source_version::get_by_id(&h.pool, aborted_id)
+        .await
+        .unwrap();
+    assert_eq!(row.status, SourceVersionStatus::Aborted);
+}
+
+#[tokio::test]
+async fn sweep_aborted_does_not_touch_active_or_inactive() {
+    let h = common::boot().await;
+    let (source_id, model_id) = seed_source(&h.pool, "sv-abort-isolated", 5).await;
+    // One active version + one inactive version, both aged past 24h.
+    let ids = seed_n_finalized(&h.pool, source_id, model_id, 2).await;
+    for id in &ids {
+        age_version(&h.pool, *id, 25 * 60 * 60).await;
+    }
+
+    // grace=0 → would delete EVERY aborted row; should leave non-aborted
+    // versions alone.
+    source_version::sweep_aborted(&h.pool, 0).await.unwrap();
+
+    let active = source_version::get_active(&h.pool, source_id)
+        .await
+        .unwrap();
+    assert_eq!(active.revision, 2);
+    let rev1 = source_version::get_by_revision(&h.pool, source_id, 1)
+        .await
+        .unwrap();
+    assert_eq!(rev1.status, SourceVersionStatus::Inactive);
+}
+
+#[tokio::test]
+async fn sweep_aborted_returns_pairs_sorted() {
+    let h = common::boot().await;
+    let (source_id, model_id) = seed_source(&h.pool, "sv-abort-sort", 5).await;
+    seed_aborted_run(&h.pool, source_id, model_id, "h-a", 2 * 60 * 60).await;
+    seed_aborted_run(&h.pool, source_id, model_id, "h-b", 2 * 60 * 60).await;
+
+    let deleted = source_version::sweep_aborted(&h.pool, 60 * 60)
+        .await
+        .unwrap();
+    let our: Vec<(Uuid, i32)> = deleted
+        .iter()
+        .copied()
+        .filter(|(sid, _)| *sid == source_id)
+        .collect();
+    let mut sorted = our.clone();
+    sorted.sort();
+    assert_eq!(our, sorted);
+}

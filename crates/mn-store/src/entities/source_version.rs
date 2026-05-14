@@ -303,6 +303,32 @@ pub async fn sweep_aged_inactive(pool: &PgPool, grace_seconds: i64) -> Result<Ve
     Ok(pairs)
 }
 
+/// Hard-delete aborted ingest runs older than `grace_seconds` (FR-063).
+///
+/// Targets `source_version` rows in `aborted` state whose `ingested_at`
+/// is past the grace window. Cascades through any nodes / documents /
+/// chunks the aborted run managed to upload before being aborted.
+/// Returns the deleted `(source_id, revision)` pairs sorted ascending.
+///
+/// # Errors
+///
+/// Returns [`crate::error::StoreError::Database`] on driver failure.
+pub async fn sweep_aborted(pool: &PgPool, grace_seconds: i64) -> Result<Vec<(Uuid, i32)>> {
+    let grace = grace_seconds.max(0);
+    let rows: Vec<(Uuid, i32)> = sqlx::query_as(
+        "DELETE FROM source_version \
+         WHERE status = 'aborted' \
+           AND ingested_at < now() - ($1::bigint * interval '1 second') \
+         RETURNING source_id, revision",
+    )
+    .bind(grace)
+    .fetch_all(pool)
+    .await?;
+    let mut pairs: Vec<(Uuid, i32)> = rows;
+    pairs.sort();
+    Ok(pairs)
+}
+
 /// Fetch a source_version by its monotonic revision.
 ///
 /// # Errors
