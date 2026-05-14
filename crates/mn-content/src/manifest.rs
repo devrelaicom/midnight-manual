@@ -63,12 +63,16 @@ impl Manifest {
     }
 
     /// Run pre-flight validations that don't require touching the filesystem:
-    /// - no file appears as a `file:` under more than one parent (EC-14)
+    /// - every `file:` / `path:` is relative, contains no `..` components, and
+    ///   contains no absolute / scheme prefix (path-traversal guard).
+    /// - no file appears as a `file:` under more than one parent (EC-14).
     ///
     /// # Errors
     ///
-    /// Returns [`ManifestError::DuplicateFile`] when a path is referenced twice.
+    /// Returns [`ManifestError::DuplicateFile`] when a path is referenced twice
+    /// or [`ManifestError::UnsafePath`] when a path escapes the source root.
     pub fn validate(&self) -> Result<(), ManifestError> {
+        check_paths(&self.root)?;
         let mut seen: HashSet<PathBuf> = HashSet::new();
         check_unique(&self.root, &mut seen)
     }
@@ -85,6 +89,38 @@ impl Manifest {
         gather_missing(&self.root, base, &mut missing);
         missing
     }
+}
+
+/// Reject any `file:` / `path:` that is absolute or contains parent-dir
+/// (`..`) components. Such paths could traverse outside the source root and
+/// pull arbitrary filesystem content into the ingest (e.g. `/etc/passwd`).
+fn check_paths(node: &ManifestNode) -> Result<(), ManifestError> {
+    for p in [node.path.as_ref(), node.file.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        if !is_safe_relative(p) {
+            return Err(ManifestError::UnsafePath(p.clone()));
+        }
+    }
+    for child in &node.children {
+        check_paths(child)?;
+    }
+    Ok(())
+}
+
+fn is_safe_relative(p: &Path) -> bool {
+    use std::path::Component;
+    if p.is_absolute() {
+        return false;
+    }
+    for c in p.components() {
+        match c {
+            Component::ParentDir | Component::Prefix(_) | Component::RootDir => return false,
+            Component::Normal(_) | Component::CurDir => {}
+        }
+    }
+    true
 }
 
 fn check_unique(node: &ManifestNode, seen: &mut HashSet<PathBuf>) -> Result<(), ManifestError> {
@@ -128,6 +164,10 @@ pub enum ManifestError {
     /// A file path was referenced under more than one parent (EC-14).
     #[error("file referenced under multiple parents: {0}")]
     DuplicateFile(PathBuf),
+    /// A `file:` or `path:` value is absolute, contains `..` components, or
+    /// otherwise escapes the source-root sandbox.
+    #[error("unsafe path {0:?}: must be a relative path with no `..` components")]
+    UnsafePath(PathBuf),
 }
 
 #[cfg(test)]
@@ -191,5 +231,44 @@ root:
         let m = Manifest::parse(body).unwrap();
         let missing = m.validate_files_exist(Path::new("."));
         assert_eq!(missing, vec![PathBuf::from("definitely/missing.md")]);
+    }
+
+    #[test]
+    fn validate_rejects_absolute_file_path() {
+        let body = r"
+manifest_version: 1
+root:
+  children:
+    - file: /etc/passwd
+";
+        let m = Manifest::parse(body).unwrap();
+        let err = m.validate().unwrap_err();
+        assert!(matches!(err, ManifestError::UnsafePath(_)));
+    }
+
+    #[test]
+    fn validate_rejects_parent_dir_components() {
+        let body = r"
+manifest_version: 1
+root:
+  children:
+    - file: ../../../etc/shadow
+";
+        let m = Manifest::parse(body).unwrap();
+        let err = m.validate().unwrap_err();
+        assert!(matches!(err, ManifestError::UnsafePath(_)));
+    }
+
+    #[test]
+    fn validate_rejects_unsafe_path_field() {
+        let body = r"
+manifest_version: 1
+root:
+  path: ../escape
+  children: []
+";
+        let m = Manifest::parse(body).unwrap();
+        let err = m.validate().unwrap_err();
+        assert!(matches!(err, ManifestError::UnsafePath(_)));
     }
 }

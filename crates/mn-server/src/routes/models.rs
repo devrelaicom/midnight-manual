@@ -2,7 +2,7 @@
 //! identifier (US4 acceptance #12, FR-039). Clients use this to detect they
 //! need to pull a different model before issuing queries.
 
-use axum::extract::State;
+use axum::extract::{Extension, State};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
@@ -11,6 +11,7 @@ use serde::Serialize;
 
 use crate::app::AppState;
 use crate::error;
+use crate::middleware::request_id::RequestId;
 
 /// Mount the models routes.
 #[must_use]
@@ -27,11 +28,11 @@ struct ActiveModelResponse {
     provider: String,
 }
 
-async fn active_model(State(state): State<AppState>) -> Response {
-    // Resolve via the canonical active-row lookup so this endpoint stays in
-    // sync with the model id the search handler enforces. When a future
-    // migration introduces multi-model corpora, `get_active` is where the
-    // per-source-version selection lands.
+async fn active_model(
+    State(state): State<AppState>,
+    Extension(req_id): Extension<RequestId>,
+) -> Response {
+    let rid = req_id.as_str();
     match embedding_model::get_active(&state.pool).await {
         Ok(m) => Json(ActiveModelResponse {
             name: m.name,
@@ -40,6 +41,9 @@ async fn active_model(State(state): State<AppState>) -> Response {
             provider: m.provider,
         })
         .into_response(),
-        Err(e) => error::service_unavailable(format!("active model lookup failed: {e}"), ""),
+        Err(e) => {
+            tracing::warn!(request_id = rid, error = %e, "active model lookup failed");
+            error::service_unavailable("active model lookup failed", rid)
+        }
     }
 }

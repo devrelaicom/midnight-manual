@@ -5,7 +5,7 @@
 //! across modes/queries lands in the follow-up PR; the structure here is
 //! deliberately set up to plug it in.
 
-use axum::extract::State;
+use axum::extract::{Extension, State};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
@@ -19,6 +19,7 @@ use uuid::Uuid;
 
 use crate::app::AppState;
 use crate::error;
+use crate::middleware::request_id::RequestId;
 
 /// Mount the search route.
 #[must_use]
@@ -120,7 +121,12 @@ pub struct PerQueryRecord {
 }
 
 #[allow(clippy::too_many_lines)]
-async fn search(State(state): State<AppState>, Json(req): Json<SearchRequest>) -> Response {
+async fn search(
+    State(state): State<AppState>,
+    Extension(req_id): Extension<RequestId>,
+    Json(req): Json<SearchRequest>,
+) -> Response {
+    let rid = req_id.as_str();
     // Validate request shape.
     if req.queries.is_empty() {
         return error::into_response(
@@ -128,7 +134,7 @@ async fn search(State(state): State<AppState>, Json(req): Json<SearchRequest>) -
                 .message("queries must contain at least one entry")
                 .remediation("supply one or more `{text, vector}` pairs in the `queries` array")
                 .build(),
-            "",
+            rid,
         );
     }
     let limit = req.limit.min(max_limit()).max(1);
@@ -141,7 +147,7 @@ async fn search(State(state): State<AppState>, Json(req): Json<SearchRequest>) -
     let Some(corpus_model_id) = state.cfg.corpus_model.clone() else {
         return error::service_unavailable(
             "server has no resolved corpus_model; check boot logs",
-            "",
+            rid,
         );
     };
     if req.client_embedding_model != corpus_model_id {
@@ -155,7 +161,7 @@ async fn search(State(state): State<AppState>, Json(req): Json<SearchRequest>) -
                 .context("corpus_model", corpus_model_id.clone())
                 .context("client_model", req.client_embedding_model.clone())
                 .build(),
-            "",
+            rid,
         );
     }
 
@@ -170,7 +176,7 @@ async fn search(State(state): State<AppState>, Json(req): Json<SearchRequest>) -
                     ))
                     .remediation("re-embed with bge-base-en-v1.5 (768 dims)")
                     .build(),
-                "",
+                rid,
             );
         }
     }
@@ -218,10 +224,10 @@ async fn search(State(state): State<AppState>, Json(req): Json<SearchRequest>) -
                 all_candidates.push(candidates);
             }
             Err(e) => {
-                tracing::warn!(error = %e, query_index = i, "vector search failed");
+                tracing::warn!(request_id = rid, error = %e, query_index = i, "vector search failed");
                 return error::service_unavailable(
-                    format!("vector search failed for query {i}: {e}"),
-                    "",
+                    format!("vector search failed for query {i}"),
+                    rid,
                 );
             }
         }
@@ -261,27 +267,25 @@ async fn search(State(state): State<AppState>, Json(req): Json<SearchRequest>) -
         .fetch_optional(&state.pool)
         .await;
         match row {
-            Ok(Some(r)) => {
-                let result = SearchResult {
-                    chunk_id: r.try_get("id").unwrap_or(chunk_id),
-                    content: r.try_get("content").unwrap_or_default(),
-                    document_id: r.try_get("document_id").unwrap_or(Uuid::nil()),
-                    source_version_id: r.try_get("source_version_id").unwrap_or(Uuid::nil()),
-                    chunk_index: r.try_get("chunk_index").unwrap_or(0),
-                    total_chunks: r.try_get("total_chunks").unwrap_or(1),
-                    created_at: r
-                        .try_get("created_at")
-                        .unwrap_or_else(|_| OffsetDateTime::now_utc()),
-                    scores: ScoreBreakdown { vector_similarity: similarity },
-                };
-                results.push(result);
-            }
+            Ok(Some(r)) => match decode_search_row(&r, similarity) {
+                Ok(result) => results.push(result),
+                Err(e) => {
+                    // Schema drift — log and skip, rather than insert a row
+                    // with Uuid::nil() + now() as silent placeholders.
+                    tracing::warn!(
+                        request_id = rid,
+                        chunk_id = %chunk_id,
+                        error = %e,
+                        "decode chunk row failed; skipping",
+                    );
+                }
+            },
             Ok(None) => {
                 // Chunk was deleted between candidate fetch and full-row fetch
                 // — skip silently and continue.
             }
             Err(e) => {
-                tracing::warn!(error = %e, chunk_id = %chunk_id, "fetch chunk failed");
+                tracing::warn!(request_id = rid, error = %e, chunk_id = %chunk_id, "fetch chunk failed");
             }
         }
     }
@@ -294,4 +298,23 @@ async fn search(State(state): State<AppState>, Json(req): Json<SearchRequest>) -
         search_metadata: SearchMetadata { per_query, total_candidates },
     })
     .into_response()
+}
+
+/// Decode a chunk row into a `SearchResult`. Every column is `try_get`'d so a
+/// schema mismatch surfaces as an `Err` for the caller to skip, rather than
+/// silently substituting `Uuid::nil()` / `OffsetDateTime::now_utc()`.
+fn decode_search_row(
+    r: &sqlx::postgres::PgRow,
+    similarity: f64,
+) -> Result<SearchResult, sqlx::Error> {
+    Ok(SearchResult {
+        chunk_id: r.try_get("id")?,
+        content: r.try_get("content")?,
+        document_id: r.try_get("document_id")?,
+        source_version_id: r.try_get("source_version_id")?,
+        chunk_index: r.try_get("chunk_index")?,
+        total_chunks: r.try_get("total_chunks")?,
+        created_at: r.try_get("created_at")?,
+        scores: ScoreBreakdown { vector_similarity: similarity },
+    })
 }
