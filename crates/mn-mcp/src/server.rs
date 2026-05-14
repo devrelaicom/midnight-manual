@@ -4,8 +4,12 @@
 //! Logging goes to stderr (FR-021): stdout is reserved for the MCP wire.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
+use mn_telemetry::events::{Component, EventPayload, McpToolName, ModelState, Outcome};
+use mn_telemetry::{Event, TelemetryClient};
 use tokio::io::{stdin, stdout, Stdin, Stdout};
 use tracing::{debug, info, warn};
 
@@ -36,18 +40,28 @@ pub struct ServerConfig {
     /// `"bge-base-en-v1.5@1"` (seeded by migration 0006). Configurable here
     /// so tests can pin a different value.
     pub client_embedding_model: String,
+    /// Resolved telemetry sink URL. Defaults to `{cloud_url}/v1/telemetry/events`.
+    pub telemetry_url: String,
+    /// Config-side master telemetry-enabled flag. The runtime opt-out
+    /// resolver still wins over this (FR-107).
+    pub telemetry_enabled: bool,
 }
 
 impl ServerConfig {
     /// Build a config with the production defaults: production cloud URL,
-    /// no bearer, and the seeded `bge-base-en-v1.5@1` model id.
+    /// no bearer, the seeded `bge-base-en-v1.5@1` model id, and telemetry
+    /// enabled (subject to the opt-out resolver).
     #[must_use]
     pub fn with_defaults(cache_dir: PathBuf) -> Self {
+        let cloud_url = "https://manual.midnight.network".to_owned();
+        let telemetry_url = format!("{cloud_url}/v1/telemetry/events");
         Self {
             cache_dir,
-            cloud_url: "https://manual.midnight.network".to_owned(),
+            cloud_url,
             bearer_token: None,
             client_embedding_model: "bge-base-en-v1.5@1".to_owned(),
+            telemetry_url,
+            telemetry_enabled: true,
         }
     }
 }
@@ -58,6 +72,9 @@ impl ServerConfig {
 struct ServerState {
     cfg: ServerConfig,
     cloud: Arc<CloudClient>,
+    telemetry: Arc<TelemetryClient>,
+    started_at: Arc<Instant>,
+    tools_served: Arc<AtomicU32>,
 }
 
 /// Run the MCP server until EOF on stdin.
@@ -70,7 +87,30 @@ struct ServerState {
 pub async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let cloud = CloudClient::new(&cfg.cloud_url, cfg.bearer_token.clone())
         .map_err(|e| format!("build cloud client: {e}"))?;
-    let state = ServerState { cfg, cloud: Arc::new(cloud) };
+    let telemetry = TelemetryClient::boot(&cfg.telemetry_url, cfg.telemetry_enabled)
+        .map_err(|e| format!("build telemetry client: {e}"))?;
+    let started_at = Arc::new(Instant::now());
+    // Emit `mcp_startup` right away. The `startup_ms` field measures
+    // process-start → here; for stdio MCP that's effectively 0 because the
+    // event fires before the first JSON-RPC frame.
+    let startup_ms = u32::try_from(started_at.elapsed().as_millis()).unwrap_or(u32::MAX);
+    telemetry
+        .emit(Event::new(
+            Component::Mcp,
+            crate::VERSION,
+            EventPayload::McpStartup {
+                startup_ms,
+                model_state: ModelState::Missing,
+            },
+        ))
+        .await;
+    let state = ServerState {
+        cfg,
+        cloud: Arc::new(cloud),
+        telemetry: Arc::new(telemetry),
+        started_at,
+        tools_served: Arc::new(AtomicU32::new(0)),
+    };
 
     let stdin: Stdin = stdin();
     let stdout: Stdout = stdout();
@@ -88,6 +128,17 @@ pub async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error + Se
     }
 
     info!("mn-mcp server: stdin EOF, shutting down");
+    let uptime_s = u32::try_from(state.started_at.elapsed().as_secs()).unwrap_or(u32::MAX);
+    let tools_served = state.tools_served.load(Ordering::Relaxed);
+    state
+        .telemetry
+        .emit(Event::new(
+            Component::Mcp,
+            crate::VERSION,
+            EventPayload::McpShutdown { uptime_s, tools_served },
+        ))
+        .await;
+    state.telemetry.flush().await;
     Ok(())
 }
 
@@ -147,6 +198,62 @@ async fn handle_request(req: crate::protocol::Request, state: &ServerState) -> V
 }
 
 async fn dispatch_tool(id: RequestId, params: ToolCallParams, state: &ServerState) -> Response {
+    let started = Instant::now();
+    let tool_name_for_event = tool_name_for_event(&params.name);
+    let rerank_on = params
+        .arguments
+        .get("rerank")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let response = dispatch_tool_inner(id, params, state).await;
+    let latency_ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
+    state.tools_served.fetch_add(1, Ordering::Relaxed);
+    if let Some(name) = tool_name_for_event {
+        let outcome = if response.error.is_some() {
+            Outcome::Error
+        } else {
+            Outcome::Ok
+        };
+        // We don't have access to the typed result count here without
+        // re-parsing; the search tool exposes it on its own. Default to 0
+        // for non-search tools — the spec lists result_count as 0 for those.
+        state
+            .telemetry
+            .emit(Event::new(
+                Component::Mcp,
+                crate::VERSION,
+                EventPayload::McpToolCall {
+                    tool_name: name,
+                    latency_ms,
+                    result_count: 0,
+                    model_state: ModelState::Missing,
+                    rerank_on,
+                    outcome,
+                },
+            ))
+            .await;
+    }
+    response
+}
+
+fn tool_name_for_event(name: &str) -> Option<McpToolName> {
+    match name {
+        "search" => Some(McpToolName::Search),
+        "get_chunk" => Some(McpToolName::GetChunk),
+        "get_chunk_siblings" => Some(McpToolName::GetChunkSiblings),
+        "get_chunk_parents" => Some(McpToolName::GetChunkParents),
+        "list_sources" => Some(McpToolName::ListSources),
+        "pull_models" => Some(McpToolName::PullModels),
+        "status" => Some(McpToolName::Status),
+        _ => None,
+    }
+}
+
+async fn dispatch_tool_inner(
+    id: RequestId,
+    params: ToolCallParams,
+    state: &ServerState,
+) -> Response {
     let outcome = match params.name.as_str() {
         "status" => {
             let out = tools::run_status(Some(&state.cfg.cache_dir));

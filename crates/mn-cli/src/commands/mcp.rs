@@ -53,6 +53,9 @@ async fn serve() -> Result<()> {
     let bearer_token = resolve_read_uplift_token();
 
     let mut server_cfg = mn_mcp::ServerConfig::with_defaults(cache_dir);
+    server_cfg.telemetry_url =
+        format!("{}/v1/telemetry/events", cfg.server.url.trim_end_matches('/'));
+    server_cfg.telemetry_enabled = cfg.telemetry.enabled;
     server_cfg.cloud_url = cfg.server.url;
     server_cfg.bearer_token = bearer_token;
 

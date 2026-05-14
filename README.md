@@ -52,10 +52,14 @@ boundary with a structured warning.
 
 ### Where it goes
 
-Events `POST` to `/v1/telemetry` on the configured cloud server (default
-`https://manual.midnight.network`). The endpoint is exempt from the regular
-rate-limit tiers, ignores any supplied bearer token (FR-116), and is the
-only auth-free POST in the surface.
+Events `POST` to `/v1/telemetry/events` on the configured cloud server (default
+`https://manual.midnight.network`). The endpoint is anonymous (no bearer
+required, any supplied bearer is ignored per FR-116), returns `202 Accepted`,
+and is the only auth-free POST in the surface. Client-side, events are
+batched in memory and flushed every 30 seconds OR every 100 events, whichever
+comes first. Failed flushes retry with jittered exponential backoff up to
+three attempts within a ten-second wall-clock budget; 4xx responses drop the
+batch immediately, since re-sending a malformed batch is futile.
 
 ### How to opt out
 
