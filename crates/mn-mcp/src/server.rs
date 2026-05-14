@@ -168,11 +168,9 @@ async fn dispatch_tool(id: RequestId, params: ToolCallParams, state: &ServerStat
         }
         "list_sources" => match state.cloud.list_sources().await {
             Ok(v) => Ok(v.to_string()),
-            Err(CloudError::NotFound(msg)) => Err(Response::err(
-                id.clone(),
-                ErrorCode::ToolFailed,
-                format!("not found: {msg}"),
-            )),
+            Err(CloudError::NotFound(msg)) => {
+                Err(Response::err(id.clone(), ErrorCode::ToolFailed, format!("not found: {msg}")))
+            }
             Err(e) => Err(Response::err(id.clone(), ErrorCode::ToolFailed, e.to_string())),
         },
         other => {
@@ -230,11 +228,9 @@ async fn run_passthrough_dispatch(
         Err(tools::PassthroughError::InvalidInput(msg)) => {
             Err(Response::err(id.clone(), ErrorCode::InvalidParams, msg))
         }
-        Err(tools::PassthroughError::NotFound(msg)) => Err(Response::err(
-            id.clone(),
-            ErrorCode::ToolFailed,
-            format!("not found: {msg}"),
-        )),
+        Err(tools::PassthroughError::NotFound(msg)) => {
+            Err(Response::err(id.clone(), ErrorCode::ToolFailed, format!("not found: {msg}")))
+        }
         Err(tools::PassthroughError::Cloud(msg)) => {
             Err(Response::err(id.clone(), ErrorCode::ToolFailed, msg))
         }
