@@ -55,7 +55,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.toolchain }}
+      # `cache-bin: false` — Swatinem/rust-cache@v2 defaults to caching
+      # ~/.cargo/bin/, which on macos-latest includes the rustup proxy +
+      # its symlink chain (cargo -> rustup -> /opt/homebrew/bin/rustup-init).
+      # Cache save/restore intermittently lands a state where `cargo test`
+      # dispatches to rustup-init setup_mode instead of the cargo proxy —
+      # surfacing as `error: unexpected argument 'test' found`. Confirmed
+      # via investigation branch (PR #19, 8 macOS runs with cache-bin: false,
+      # 0 flakes). We don't `cargo install` anything in CI, so caching
+      # ~/.cargo/bin gives no value.
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
       - run: cargo test --workspace --no-fail-fast
 
   integration:
