@@ -70,6 +70,66 @@ pub async fn list_active(pool: &PgPool) -> Result<Vec<Source>> {
     rows.into_iter().map(TryInto::try_into).collect()
 }
 
+/// List every source row, including retired ones, ordered by slug.
+///
+/// Distinct from [`list_active`] which filters out `retired_at IS NOT NULL`.
+/// Used by admin-tier endpoints that need full operator visibility.
+///
+/// # Errors
+///
+/// Returns [`crate::error::StoreError::Database`] on driver failure.
+pub async fn list_all(pool: &PgPool) -> Result<Vec<Source>> {
+    let rows = sqlx::query_as::<_, SourceRow>(
+        "SELECT id, slug, display_name, kind, origin_url, retention_count, created_at, retired_at \
+         FROM source ORDER BY slug",
+    )
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter().map(TryInto::try_into).collect()
+}
+
+/// Sparse patch applied by [`update`] — `Some(value)` updates the column,
+/// `None` leaves it untouched.
+#[derive(Debug, Default, Clone)]
+pub struct SourcePatch {
+    /// New display label, when set.
+    pub display_name: Option<String>,
+    /// New origin URL, when set. (Use `Some(None)` semantics by passing an
+    /// empty string here is NOT supported — `None` here means "no change".)
+    pub origin_url: Option<String>,
+    /// New retention count, when set. The DB CHECK constraint clamps to
+    /// `[1, 50]`; callers should validate before calling.
+    pub retention_count: Option<i32>,
+}
+
+/// Apply a sparse patch to one source by slug, returning the updated row.
+///
+/// Uses `COALESCE` per-column so a single `UPDATE ... RETURNING *` covers all
+/// patch shapes — no dynamic SQL.
+///
+/// # Errors
+///
+/// Returns [`crate::error::StoreError::NotFound`] if `slug` is unknown.
+/// Returns [`crate::error::StoreError::CheckViolation`] when `retention_count`
+/// falls outside `[1, 50]`.
+pub async fn update(pool: &PgPool, slug: &str, patch: SourcePatch) -> Result<Source> {
+    let row = sqlx::query_as::<_, SourceRow>(
+        "UPDATE source SET \
+            display_name = COALESCE($2, display_name), \
+            origin_url = COALESCE($3, origin_url), \
+            retention_count = COALESCE($4, retention_count) \
+         WHERE slug = $1 \
+         RETURNING id, slug, display_name, kind, origin_url, retention_count, created_at, retired_at",
+    )
+    .bind(slug)
+    .bind(patch.display_name)
+    .bind(patch.origin_url)
+    .bind(patch.retention_count)
+    .fetch_optional(pool)
+    .await?;
+    row.map_or(Err(crate::error::StoreError::NotFound), TryInto::try_into)
+}
+
 /// Mark a source as retired (idempotent: setting an already-retired row is a no-op).
 ///
 /// # Errors
