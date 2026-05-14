@@ -53,7 +53,12 @@ impl EmbedFn for FailingEmbedder {
 }
 
 async fn seed_embed_failed_chunks(pool: &PgPool, count: usize) -> (Uuid, Uuid, Vec<Uuid>) {
-    let model_id = embedding_model::upsert(pool, "bge-base-en-v1.5", 1, 768, "baai")
+    // Each test gets its own embedding_model row so list_embed_failed_batch
+    // (scoped by model_id) sees only this test's chunks. The CI Postgres is
+    // shared across test binaries — without per-test isolation the worker
+    // would pick up rows seeded by sibling tests.
+    let model_name = format!("test-emb-{}", Uuid::new_v4());
+    let model_id = embedding_model::upsert(pool, &model_name, 1, 768, "test")
         .await
         .unwrap();
     let slug = format!("embedder-test-{}", Uuid::new_v4());
@@ -177,10 +182,11 @@ async fn embed_once_respects_batch_size() {
 #[tokio::test]
 async fn embed_once_skips_chunks_with_different_model() {
     let h = common::boot().await;
-    let (_, _model_id, _) = seed_embed_failed_chunks(&h.pool, 3).await;
-    // Register a second model and ask the worker to process that one — there
-    // are no embed_failed chunks under the second model so promoted = 0.
-    let other_model = embedding_model::upsert(&h.pool, "fake-other", 1, 768, "test")
+    let (_, _seeded_model, _) = seed_embed_failed_chunks(&h.pool, 3).await;
+    // Register a second, unrelated model and ask the worker to process it —
+    // there are no embed_failed chunks under it so promoted = 0.
+    let other_name = format!("test-other-{}", Uuid::new_v4());
+    let other_model = embedding_model::upsert(&h.pool, &other_name, 1, 768, "test")
         .await
         .unwrap();
     let emb = ConstantEmbedder {
@@ -195,7 +201,11 @@ async fn embed_once_skips_chunks_with_different_model() {
 #[tokio::test]
 async fn empty_batch_returns_zero_without_calling_embedder() {
     let h = common::boot().await;
-    let model_id = embedding_model::upsert(&h.pool, "bge-base-en-v1.5", 1, 768, "baai")
+    // Use a fresh model id so there are guaranteed to be no chunks under it
+    // (the shared CI Postgres has rows from other tests under the canonical
+    // bge-base model).
+    let model_name = format!("test-empty-{}", Uuid::new_v4());
+    let model_id = embedding_model::upsert(&h.pool, &model_name, 1, 768, "test")
         .await
         .unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
