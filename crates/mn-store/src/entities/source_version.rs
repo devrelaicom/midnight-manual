@@ -170,6 +170,139 @@ pub async fn get_by_id(pool: &PgPool, id: Uuid) -> Result<SourceVersion> {
     row.try_into()
 }
 
+/// List every source_version for `source_id`, ordered by `revision DESC`
+/// (newest first). Excludes nothing — operators inspecting history want to
+/// see `aborted` and `retired` rows too.
+///
+/// # Errors
+///
+/// Returns [`crate::error::StoreError::Database`] on driver failure.
+pub async fn list_for_source(pool: &PgPool, source_id: Uuid) -> Result<Vec<SourceVersion>> {
+    let rows = sqlx::query_as::<_, SourceVersionRow>(
+        "SELECT id, source_id, revision, status, is_active, ingested_at, ingest_cli_version, \
+                embedding_model_id, content_hash, notes, retired_at \
+         FROM source_version WHERE source_id = $1 ORDER BY revision DESC",
+    )
+    .bind(source_id)
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter().map(TryInto::try_into).collect()
+}
+
+/// Promote a previously-active (now `inactive`) source_version back to
+/// active, demoting the currently-active version. Used for rollback
+/// (FR-072, US8 acceptance #8).
+///
+/// The target version must be in `inactive` state; `building`, `aborted`,
+/// `retired`, or the already-active version are rejected with
+/// [`crate::error::StoreError::CheckViolation`]. Returns
+/// `(promoted_revision, Some(demoted_revision))` on success;
+/// `demoted_revision` is `None` only in the corner case where no other
+/// version is currently active.
+///
+/// # Errors
+///
+/// Returns [`crate::error::StoreError::NotFound`] if no version with that
+/// `(source_id, revision)` pair exists; [`crate::error::StoreError::CheckViolation`]
+/// if the target is not in `inactive` state.
+pub async fn promote_by_revision(
+    pool: &PgPool,
+    source_id: Uuid,
+    revision: i32,
+) -> Result<(i32, Option<i32>)> {
+    let mut tx = pool.begin().await?;
+
+    // Resolve + lock the target row.
+    let row: (Uuid, String) = sqlx::query_as(
+        "SELECT id, status FROM source_version \
+         WHERE source_id = $1 AND revision = $2 FOR UPDATE",
+    )
+    .bind(source_id)
+    .bind(revision)
+    .fetch_one(&mut *tx)
+    .await?;
+    let (target_id, status) = row;
+    if status != "inactive" {
+        return Err(crate::error::StoreError::CheckViolation(format!(
+            "source_version revision {revision} is in `{status}` — \
+             only `inactive` versions can be promoted (active is already current)"
+        )));
+    }
+
+    // Demote any currently-active version for the same source.
+    let demoted: Option<(i32,)> = sqlx::query_as(
+        "UPDATE source_version SET is_active = false, status = 'inactive' \
+         WHERE source_id = $1 AND is_active = true AND id <> $2 \
+         RETURNING revision",
+    )
+    .bind(source_id)
+    .bind(target_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    // Promote the target. We do NOT update `ingested_at` — the row's
+    // identity is the historical content snapshot; only its current role
+    // changes.
+    sqlx::query(
+        "UPDATE source_version SET is_active = true, status = 'active', retired_at = NULL \
+         WHERE id = $1",
+    )
+    .bind(target_id)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    Ok((revision, demoted.map(|r| r.0)))
+}
+
+/// Hard-delete aged-out historical source_version rows (FR-063).
+///
+/// Targets `inactive` and `retired` rows that fall outside their source's
+/// `retention_count` window AND whose `ingested_at` is older than
+/// `grace_seconds`. The active version of each source is never swept;
+/// `building` and `aborted` versions are also left alone (the former is
+/// in-progress, the latter is handled by the aborted-ingest sweep).
+///
+/// Cascades through `node` / `package` / `document` / `chunk` via the
+/// existing `ON DELETE CASCADE` foreign keys.
+///
+/// Returns the deleted `(source_id, revision)` pairs sorted by source_id
+/// then revision for stable logging.
+///
+/// # Errors
+///
+/// Returns [`crate::error::StoreError::Database`] on driver failure.
+pub async fn sweep_aged_inactive(pool: &PgPool, grace_seconds: i64) -> Result<Vec<(Uuid, i32)>> {
+    let grace = grace_seconds.max(0);
+    let rows: Vec<(Uuid, i32)> = sqlx::query_as(
+        "WITH ranked AS ( \
+             SELECT sv.id, sv.source_id, sv.revision, sv.ingested_at, sv.status, \
+                    ROW_NUMBER() OVER ( \
+                        PARTITION BY sv.source_id ORDER BY sv.revision DESC \
+                    ) AS rn \
+             FROM source_version sv \
+             WHERE sv.status IN ('active','inactive','retired') \
+         ), \
+         eligible AS ( \
+             SELECT r.id, r.source_id, r.revision \
+             FROM ranked r \
+             JOIN source s ON s.id = r.source_id \
+             WHERE r.rn > s.retention_count \
+               AND r.status IN ('inactive','retired') \
+               AND r.ingested_at < now() - ($1::bigint * interval '1 second') \
+         ) \
+         DELETE FROM source_version \
+         WHERE id IN (SELECT id FROM eligible) \
+         RETURNING source_id, revision",
+    )
+    .bind(grace)
+    .fetch_all(pool)
+    .await?;
+    let mut pairs: Vec<(Uuid, i32)> = rows;
+    pairs.sort();
+    Ok(pairs)
+}
+
 /// Fetch a source_version by its monotonic revision.
 ///
 /// # Errors

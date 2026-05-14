@@ -109,7 +109,7 @@ async fn sweep_once_deletes_retired_past_grace() {
     let h = common::boot().await;
     let slug = seed_retired_source(&h.pool, "job-aged", 25 * 60 * 60).await;
 
-    let stats = source_retention::sweep_once(&h.pool, 24)
+    let stats = source_retention::sweep_once(&h.pool, 24, 24)
         .await
         .expect("sweep");
 
@@ -119,7 +119,7 @@ async fn sweep_once_deletes_retired_past_grace() {
         stats.deleted_slugs,
     );
     assert!(!source_exists(&h.pool, &slug).await, "row must be gone");
-    assert!(stats.deleted_count() >= 1);
+    assert!(stats.deleted_source_count() >= 1);
 }
 
 #[tokio::test]
@@ -127,7 +127,7 @@ async fn sweep_once_keeps_recently_retired_inside_grace() {
     let h = common::boot().await;
     let slug = seed_retired_source(&h.pool, "job-recent", 5 * 60).await;
 
-    let stats = source_retention::sweep_once(&h.pool, 24)
+    let stats = source_retention::sweep_once(&h.pool, 24, 24)
         .await
         .expect("sweep");
 
@@ -144,7 +144,7 @@ async fn sweep_once_handles_grace_hours_zero() {
     let h = common::boot().await;
     let slug = seed_retired_source(&h.pool, "job-zero", 2).await;
 
-    let stats = source_retention::sweep_once(&h.pool, 0)
+    let stats = source_retention::sweep_once(&h.pool, 0, 24)
         .await
         .expect("sweep");
 
@@ -156,16 +156,73 @@ async fn sweep_once_handles_grace_hours_zero() {
 async fn empty_pass_returns_zero_stats() {
     let h = common::boot().await;
     // Sentinel-only retired row that's INSIDE the grace window — so the
-    // sweep finds nothing eligible. We can't rely on the corpus being
-    // empty (CI Postgres is shared across binaries), but we CAN seed one
-    // recently-retired row and assert it isn't deleted; the resulting
-    // stats may still be non-zero if another test left aged-out fixtures
-    // for the sweep to pick up. That's fine — assert our slug isn't in
-    // the deleted set rather than asserting the total.
+    // source sweep finds nothing eligible for this slug. We can't rely on
+    // the corpus being empty (CI Postgres is shared across binaries), but
+    // we CAN seed one recently-retired row and assert it isn't deleted;
+    // the resulting stats may still include other fixtures' deletions.
     let slug = seed_retired_source(&h.pool, "job-empty", 30).await;
-    let stats = source_retention::sweep_once(&h.pool, 24)
+    let stats = source_retention::sweep_once(&h.pool, 24, 24)
         .await
         .expect("sweep");
     assert!(!stats.deleted_slugs.iter().any(|s| s == &slug));
+    assert!(source_exists(&h.pool, &slug).await);
+}
+
+#[tokio::test]
+async fn sweep_once_runs_version_pass_alongside_source_pass() {
+    use mn_core::types::SourceKind;
+    use mn_store::entities::{embedding_model, source as source_entity, source_version};
+
+    let h = common::boot().await;
+    // Seed a source with 4 finalized versions, retention=2, all aged out.
+    let model_id = embedding_model::upsert(&h.pool, "bge-base-en-v1.5", 1, 768, "baai")
+        .await
+        .unwrap();
+    let slug = format!("job-vpass-{}", Uuid::new_v4());
+    let source_id =
+        source_entity::insert(&h.pool, &slug, "VPass Fixture", SourceKind::DocsSite, None, 2)
+            .await
+            .unwrap();
+    let mut version_ids = Vec::new();
+    for i in 0..4_i32 {
+        let (id, _) = source_version::create_building(
+            &h.pool,
+            source_id,
+            model_id,
+            "0.1.0",
+            &format!("hv{i}"),
+        )
+        .await
+        .unwrap();
+        source_version::finalize(&h.pool, id).await.unwrap();
+        version_ids.push(id);
+    }
+    for id in &version_ids {
+        sqlx::query(
+            "UPDATE source_version \
+             SET ingested_at = now() - ($1::bigint * interval '1 second') \
+             WHERE id = $2",
+        )
+        .bind(25_i64 * 60 * 60)
+        .bind(*id)
+        .execute(&h.pool)
+        .await
+        .unwrap();
+    }
+
+    let stats = source_retention::sweep_once(&h.pool, 24, 24)
+        .await
+        .expect("sweep");
+
+    // We expect two version rows for OUR source_id to be deleted (revs 1 + 2).
+    let our_vers: Vec<i32> = stats
+        .deleted_versions
+        .iter()
+        .filter(|(sid, _)| *sid == source_id)
+        .map(|(_, rev)| *rev)
+        .collect();
+    assert_eq!(our_vers, vec![1, 2], "{:?}", stats.deleted_versions);
+
+    // Our source row itself should still exist (it isn't retired).
     assert!(source_exists(&h.pool, &slug).await);
 }
