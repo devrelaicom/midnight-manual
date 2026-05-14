@@ -68,6 +68,21 @@ pub struct ServerConfig {
     /// `MIDNIGHT_MANUAL_EMBEDDER_BATCH_SIZE` — chunks per worker tick.
     /// Defaults to 16; clamped to `[1, 128]`.
     pub embedder_batch_size: i64,
+    /// `MIDNIGHT_MANUAL_SOURCE_RETIREMENT_ENABLED` — when true, spawns the
+    /// background source-retention sweep that hard-deletes sources whose
+    /// `retired_at` is older than the grace window (Phase 13). Defaults to
+    /// `true` in production. Tests set this to `false` so the sweep never
+    /// races against fixture data, and instead drive `sweep_once` directly.
+    pub source_retirement_enabled: bool,
+    /// `MIDNIGHT_MANUAL_SOURCE_RETIREMENT_GRACE_HOURS` — how long a soft-
+    /// retired source lingers before the sweep is allowed to hard-delete it.
+    /// Defaults to 24 hours (the same default the spec uses for the
+    /// source-version sweep). Clamped to `[1, 24 * 365]`.
+    pub source_retirement_grace_hours: i64,
+    /// `MIDNIGHT_MANUAL_SOURCE_RETIREMENT_INTERVAL_MINUTES` — how often the
+    /// background daemon ticks. Defaults to 60 minutes; clamped to
+    /// `[1, 24 * 60]`.
+    pub source_retirement_interval_minutes: u64,
 }
 
 impl Default for ServerConfig {
@@ -94,6 +109,9 @@ impl Default for ServerConfig {
             embedder_enabled: false,
             embedder_interval_ms: 30_000,
             embedder_batch_size: 16,
+            source_retirement_enabled: false,
+            source_retirement_grace_hours: 24,
+            source_retirement_interval_minutes: 60,
         }
     }
 }
@@ -143,6 +161,19 @@ impl ServerConfig {
             .ok()
             .and_then(|s| s.parse::<i64>().ok())
             .map_or(16, |v| v.clamp(1, 128));
+        let source_retirement_enabled = env::var("MIDNIGHT_MANUAL_SOURCE_RETIREMENT_ENABLED")
+            .map(|v| !matches!(v.as_str(), "0" | "false" | "no"))
+            .unwrap_or(true);
+        let source_retirement_grace_hours =
+            env::var("MIDNIGHT_MANUAL_SOURCE_RETIREMENT_GRACE_HOURS")
+                .ok()
+                .and_then(|s| s.parse::<i64>().ok())
+                .map_or(24, |v| v.clamp(1, 24 * 365));
+        let source_retirement_interval_minutes =
+            env::var("MIDNIGHT_MANUAL_SOURCE_RETIREMENT_INTERVAL_MINUTES")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map_or(60, |v| v.clamp(1, 24 * 60));
         Ok(Self {
             database_url,
             port,
@@ -162,6 +193,9 @@ impl ServerConfig {
             embedder_enabled,
             embedder_interval_ms,
             embedder_batch_size,
+            source_retirement_enabled,
+            source_retirement_grace_hours,
+            source_retirement_interval_minutes,
         })
     }
 }
