@@ -100,6 +100,43 @@ pub async fn get_by_id(pool: &PgPool, id: Uuid) -> Result<Document> {
     row.try_into()
 }
 
+/// One row from [`list_for_source_version`] — the minimum needed to seed an
+/// [`IngestPlanBuilder`'s prior state](super) (FR-014 carry-forward).
+///
+/// [`IngestPlanBuilder`]: ../../../mn_content/ingest/struct.PlanBuilder.html
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocumentSummary {
+    /// Document id.
+    pub id: Uuid,
+    /// Repo-relative source path.
+    pub source_path: String,
+    /// Normalized content hash.
+    pub content_hash: String,
+}
+
+/// List every document under a given `source_version`, returning the minimal
+/// fields needed to drive carry-forward decisions.
+///
+/// # Errors
+///
+/// Returns [`crate::error::StoreError::Database`] on driver failure.
+pub async fn list_for_source_version(
+    pool: &PgPool,
+    source_version_id: Uuid,
+) -> Result<Vec<DocumentSummary>> {
+    let rows: Vec<(Uuid, String, String)> = sqlx::query_as(
+        "SELECT id, source_path, content_hash FROM document WHERE source_version_id = $1 \
+         ORDER BY source_path",
+    )
+    .bind(source_version_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, source_path, content_hash)| DocumentSummary { id, source_path, content_hash })
+        .collect())
+}
+
 /// Look up an existing document in a source_version by its `content_hash` —
 /// powers the FR-014 incremental re-ingest optimization (carry forward embedding
 /// bytes for unchanged content).

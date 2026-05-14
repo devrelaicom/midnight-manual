@@ -198,6 +198,8 @@ pub enum CliCommandName {
     Auth,
     /// `mnm telemetry` (any sub).
     Telemetry,
+    /// `mnm ingest` (admin).
+    Ingest,
 }
 
 /// The top-level event envelope written to `telemetry_event_raw.fields` (plus

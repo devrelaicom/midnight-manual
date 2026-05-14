@@ -3,6 +3,7 @@
 pub mod auth;
 pub mod config;
 pub mod doctor;
+pub mod ingest;
 pub mod keys;
 pub mod login;
 pub mod mcp;

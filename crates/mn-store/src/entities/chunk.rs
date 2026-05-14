@@ -127,6 +127,61 @@ pub async fn get_by_id_admin(pool: &PgPool, id: Uuid) -> Result<Chunk> {
     row.try_into()
 }
 
+/// Carry-forward snapshot of a chunk — all the fields the ingest handler
+/// needs to clone a chunk row into a new `source_version` without re-running
+/// the embedder.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CarryForwardChunk {
+    /// Verbatim chunk text.
+    pub content: String,
+    /// SHA-256 over `content`.
+    pub content_hash: String,
+    /// Existing embedding vector (may be `None` if the prior chunk was in
+    /// `embed_failed`).
+    pub embedding: Option<Vec<f32>>,
+    /// Embedding model id from the prior version — must match the new SV's
+    /// embedding model (trigger-enforced).
+    pub embedding_model_id: Uuid,
+    /// Markdown heading path.
+    pub heading_path: Vec<String>,
+    /// Code-symbol path.
+    pub symbol_path: Vec<String>,
+    /// 0-indexed chunk position.
+    pub chunk_index: i32,
+    /// Total chunks in the parent document.
+    pub total_chunks: i32,
+    /// Start byte in source.
+    pub start_byte: i32,
+    /// End byte in source.
+    pub end_byte: i32,
+    /// Best-effort token count.
+    pub token_count: i32,
+    /// Lifecycle state.
+    pub status: ChunkStatus,
+}
+
+/// List every chunk under a document for carry-forward cloning. Includes
+/// `embed_failed` rows so a doc with a failed chunk doesn't silently lose it
+/// across versions.
+///
+/// # Errors
+///
+/// Returns [`crate::error::StoreError::Database`] on driver failure.
+pub async fn list_for_carry_forward(
+    pool: &PgPool,
+    document_id: Uuid,
+) -> Result<Vec<CarryForwardChunk>> {
+    let rows = sqlx::query_as::<_, CarryForwardRow>(
+        "SELECT content, content_hash, embedding, embedding_model_id, heading_path, symbol_path, \
+                chunk_index, total_chunks, start_byte, end_byte, token_count, status \
+         FROM chunk WHERE document_id = $1 ORDER BY chunk_index",
+    )
+    .bind(document_id)
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter().map(TryInto::try_into).collect()
+}
+
 /// List all chunks of a document in `chunk_index` order. Used by
 /// `GET /v1/chunks/{id}/siblings` (US4 acceptance #4).
 ///
@@ -145,6 +200,45 @@ pub async fn list_siblings(pool: &PgPool, document_id: Uuid) -> Result<Vec<Chunk
     .fetch_all(pool)
     .await?;
     rows.into_iter().map(TryInto::try_into).collect()
+}
+
+#[derive(sqlx::FromRow)]
+struct CarryForwardRow {
+    content: String,
+    content_hash: String,
+    embedding: Option<Vector>,
+    embedding_model_id: Uuid,
+    heading_path: Vec<String>,
+    symbol_path: Vec<String>,
+    chunk_index: i32,
+    total_chunks: i32,
+    start_byte: i32,
+    end_byte: i32,
+    token_count: i32,
+    status: String,
+}
+
+impl TryFrom<CarryForwardRow> for CarryForwardChunk {
+    type Error = crate::error::StoreError;
+
+    fn try_from(r: CarryForwardRow) -> std::result::Result<Self, Self::Error> {
+        let status: ChunkStatus = serde_json::from_value(serde_json::Value::String(r.status))
+            .map_err(|e| crate::error::StoreError::Json(e.to_string()))?;
+        Ok(Self {
+            content: r.content,
+            content_hash: r.content_hash,
+            embedding: r.embedding.map(|v| v.to_vec()),
+            embedding_model_id: r.embedding_model_id,
+            heading_path: r.heading_path,
+            symbol_path: r.symbol_path,
+            chunk_index: r.chunk_index,
+            total_chunks: r.total_chunks,
+            start_byte: r.start_byte,
+            end_byte: r.end_byte,
+            token_count: r.token_count,
+            status,
+        })
+    }
 }
 
 #[derive(sqlx::FromRow)]
