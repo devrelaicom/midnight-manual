@@ -25,3 +25,8 @@ thiserror    = { workspace = true }
 tracing      = { workspace = true }
 tokio        = { workspace = true }
 time         = { workspace = true }
+async-trait  = "0.1"
+
+[dev-dependencies]
+tempfile           = { workspace = true }
+tracing-subscriber = { workspace = true }
