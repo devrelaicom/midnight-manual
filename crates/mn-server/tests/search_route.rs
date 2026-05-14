@@ -130,14 +130,10 @@ async fn seed(pool: &sqlx::PgPool) -> (Uuid, Uuid) {
 
 fn cfg() -> ServerConfig {
     ServerConfig {
-        database_url: String::new(),
-        port: 0,
-        auto_migrate: false,
         // Tests bypass the boot-time resolver so we pin the corpus model
         // explicitly. Matches the seeded `embedding_model` row in migration 0006.
         corpus_model: Some("bge-base-en-v1.5@1".to_owned()),
-        user_store_body: None,
-        jwt_secret: None,
+        ..Default::default()
     }
 }
 

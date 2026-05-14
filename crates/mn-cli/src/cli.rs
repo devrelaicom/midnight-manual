@@ -72,6 +72,8 @@ pub enum Command {
     Config(commands::config::Args),
     /// MCP server (stdio JSON-RPC) and related tooling.
     Mcp(commands::mcp::Args),
+    /// GitHub OAuth read-uplift flow + local auth-file inspection.
+    Auth(commands::auth::Args),
     /// Ed25519 keypair management (admin; hidden by default).
     Keys(commands::keys::Args),
     /// Admin login via challenge-response (admin; hidden by default).
@@ -112,6 +114,7 @@ pub async fn run() -> Result<()> {
         }
         Command::Config(args) => commands::config::run(args, cli.config.as_deref(), cli.json).await,
         Command::Mcp(args) => commands::mcp::run(args).await,
+        Command::Auth(args) => commands::auth::run(args, cli.server.as_deref(), cli.json).await,
         Command::Keys(args) => commands::keys::run(args, cli.json),
         Command::Login(args) => commands::login::run(args, cli.server.as_deref(), cli.json).await,
         Command::Users(args) => commands::users::run(args, cli.json),

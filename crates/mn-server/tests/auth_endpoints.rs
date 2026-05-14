@@ -21,12 +21,10 @@ use tower::ServiceExt;
 
 fn cfg_with_auth(user_store_body: String, jwt_secret_bytes: Vec<u8>) -> ServerConfig {
     ServerConfig {
-        database_url: String::new(),
-        port: 0,
-        auto_migrate: false,
         corpus_model: Some("bge-base-en-v1.5@1".to_owned()),
         user_store_body: Some(user_store_body),
         jwt_secret: Some(jwt_secret_bytes),
+        ..Default::default()
     }
 }
 
@@ -171,12 +169,8 @@ async fn verify_with_consumed_challenge_404s_on_replay() {
 async fn auth_endpoints_503_when_auth_unconfigured() {
     let h = common::boot().await;
     let cfg = ServerConfig {
-        database_url: String::new(),
-        port: 0,
-        auto_migrate: false,
         corpus_model: Some("bge-base-en-v1.5@1".to_owned()),
-        user_store_body: None,
-        jwt_secret: None,
+        ..Default::default()
     };
     let app = app::build(h.pool.clone(), cfg).expect("build app");
 
@@ -251,12 +245,8 @@ async fn bearer_middleware_skips_when_auth_unconfigured() {
     // and an Authorization header (even a bogus one) is ignored.
     let h = common::boot().await;
     let cfg = ServerConfig {
-        database_url: String::new(),
-        port: 0,
-        auto_migrate: false,
         corpus_model: Some("bge-base-en-v1.5@1".to_owned()),
-        user_store_body: None,
-        jwt_secret: None,
+        ..Default::default()
     };
     let app = app::build(h.pool.clone(), cfg).expect("build app");
 
