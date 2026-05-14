@@ -8,6 +8,7 @@ mod common;
 
 use mn_core::types::SourceKind;
 use mn_store::entities::{embedding_model, source, source_version};
+use uuid::Uuid;
 
 #[tokio::test]
 async fn cannot_have_two_active_versions_for_same_source() {
@@ -16,10 +17,10 @@ async fn cannot_have_two_active_versions_for_same_source() {
     let model_id = embedding_model::upsert(&h.pool, "bge-base-en-v1.5", 1, 768, "baai")
         .await
         .unwrap();
-    let source_id =
-        source::insert(&h.pool, "ec-04-test", "EC-04 Test", SourceKind::DocsSite, None, 5)
-            .await
-            .unwrap();
+    let slug = format!("ec-04-test-{}", Uuid::new_v4());
+    let source_id = source::insert(&h.pool, &slug, "EC-04 Test", SourceKind::DocsSite, None, 5)
+        .await
+        .unwrap();
 
     let (sv1, _) = source_version::create_building(&h.pool, source_id, model_id, "0.1.0", "h1")
         .await

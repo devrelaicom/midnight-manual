@@ -89,6 +89,29 @@ impl Embedder {
         let mut v = self.embed(&[text.to_owned()], None)?;
         Ok(v.pop().unwrap_or_default())
     }
+
+    /// Async-friendly variant of [`Embedder::embed`] that offloads the
+    /// CPU-bound ONNX inference to a blocking thread so it does not stall the
+    /// Tokio runtime.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Embedder::embed`]. Returns
+    /// [`EmbeddingError::Inference`] with `message = "blocking task panicked"`
+    /// if the spawned task panicked.
+    pub async fn embed_blocking(
+        &self,
+        texts: Vec<String>,
+        batch_size: Option<usize>,
+    ) -> Result<Vec<Vec<f32>>> {
+        let me = self.clone();
+        tokio::task::spawn_blocking(move || me.embed(&texts, batch_size))
+            .await
+            .map_err(|e| EmbeddingError::Inference {
+                model: MODEL_NAME.to_owned(),
+                message: format!("blocking task failed: {e}"),
+            })?
+    }
 }
 
 /// Process-wide lazy singleton for the embedder. First call loads the model;
@@ -107,7 +130,17 @@ static GLOBAL: OnceCell<Embedder> = OnceCell::const_new();
 /// subsequent calls always return the cached handle without retrying.
 pub async fn global(cache_dir: PathBuf) -> Result<Embedder> {
     GLOBAL
-        .get_or_try_init(|| async move { Embedder::try_new(cache_dir) })
+        .get_or_try_init(|| async move {
+            // try_new reads ~450 MB of ONNX off disk and bootstraps ort —
+            // strictly CPU/IO bound. Run on the blocking thread pool so we
+            // don't stall a Tokio worker for the duration of cold-load.
+            tokio::task::spawn_blocking(move || Embedder::try_new(cache_dir))
+                .await
+                .map_err(|e| EmbeddingError::Init {
+                    model: MODEL_NAME.to_owned(),
+                    message: format!("blocking init task failed: {e}"),
+                })?
+        })
         .await
         .cloned()
 }

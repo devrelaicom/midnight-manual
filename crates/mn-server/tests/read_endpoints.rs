@@ -15,6 +15,7 @@ use mn_core::types::SourceKind;
 use mn_server::{app, config::ServerConfig};
 use mn_store::entities::{embedding_model, source};
 use tower::ServiceExt;
+use uuid::Uuid;
 
 #[tokio::test]
 async fn healthz_returns_200() {
@@ -104,9 +105,10 @@ async fn active_model_returns_seeded_row() {
 #[tokio::test]
 async fn sources_list_includes_inserted_row_and_show_round_trips() {
     let h = common::boot().await;
+    let slug = format!("phase4b-test-{}", Uuid::new_v4());
     source::insert(
         &h.pool,
-        "phase4b-test",
+        &slug,
         "Phase 4b Test",
         SourceKind::DocsSite,
         Some("https://example.com"),
@@ -145,14 +147,14 @@ async fn sources_list_includes_inserted_row_and_show_round_trips() {
         .unwrap()
         .iter()
         .filter_map(|row| row["slug"].as_str())
-        .any(|s| s == "phase4b-test");
+        .any(|s| s == slug);
     assert!(has_slug, "list response must include the inserted slug");
 
     // Show
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/v1/sources/phase4b-test")
+                .uri(format!("/v1/sources/{slug}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -161,7 +163,7 @@ async fn sources_list_includes_inserted_row_and_show_round_trips() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = to_bytes(resp.into_body(), 4096).await.unwrap();
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(v["slug"], "phase4b-test");
+    assert_eq!(v["slug"], slug);
     assert_eq!(v["display_name"], "Phase 4b Test");
     assert_eq!(v["kind"], "docs_site");
 }

@@ -82,6 +82,27 @@ impl Reranker {
             .map(|r| RerankResult { index: r.index, score: r.score })
             .collect())
     }
+
+    /// Async-friendly variant of [`Reranker::rerank`] that offloads the
+    /// CPU-bound cross-encoder inference to a blocking thread.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Reranker::rerank`].
+    pub async fn rerank_blocking(
+        &self,
+        query: String,
+        documents: Vec<String>,
+        batch_size: Option<usize>,
+    ) -> Result<Vec<RerankResult>> {
+        let me = self.clone();
+        tokio::task::spawn_blocking(move || me.rerank(&query, &documents, batch_size))
+            .await
+            .map_err(|e| EmbeddingError::Inference {
+                model: MODEL_NAME.to_owned(),
+                message: format!("blocking task failed: {e}"),
+            })?
+    }
 }
 
 /// Process-wide lazy singleton, matching [`crate::embedder::global`].
@@ -94,7 +115,14 @@ static GLOBAL: OnceCell<Reranker> = OnceCell::const_new();
 /// See [`Reranker::try_new`].
 pub async fn global(cache_dir: PathBuf) -> Result<Reranker> {
     GLOBAL
-        .get_or_try_init(|| async move { Reranker::try_new(cache_dir) })
+        .get_or_try_init(|| async move {
+            tokio::task::spawn_blocking(move || Reranker::try_new(cache_dir))
+                .await
+                .map_err(|e| EmbeddingError::Init {
+                    model: MODEL_NAME.to_owned(),
+                    message: format!("blocking init task failed: {e}"),
+                })?
+        })
         .await
         .cloned()
 }
@@ -112,11 +140,7 @@ mod tests {
             RerankResult { index: 1, score: 0.9 },
             RerankResult { index: 2, score: 0.5 },
         ];
-        results.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        results.sort_by(|a, b| b.score.total_cmp(&a.score));
         assert_eq!(results[0].index, 1);
         assert_eq!(results[1].index, 2);
         assert_eq!(results[2].index, 0);

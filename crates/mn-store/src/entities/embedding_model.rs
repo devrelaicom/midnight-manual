@@ -27,6 +27,31 @@ pub async fn get_by_name_revision(
     Ok(row.into())
 }
 
+/// Resolve the "active" embedding model — the row used by the most recently
+/// activated source_version. In v1 there is at most one such model; this
+/// function returns that row.
+///
+/// Falls back to the most recently-created `embedding_model` if no source
+/// version is active yet (fresh DB after `0006_seed_embedding_model.sql`).
+///
+/// # Errors
+///
+/// Returns [`crate::error::StoreError::NotFound`] if no `embedding_model` row
+/// exists at all (migrations not run or seed row missing).
+pub async fn get_active(pool: &PgPool) -> Result<EmbeddingModel> {
+    let row = sqlx::query_as::<_, EmbeddingModelRow>(
+        "SELECT em.id, em.name, em.revision, em.dim, em.provider, em.created_at \
+         FROM embedding_model em \
+         LEFT JOIN source_version sv \
+           ON sv.embedding_model_id = em.id AND sv.is_active = true \
+         ORDER BY sv.ingested_at DESC NULLS LAST, em.created_at DESC \
+         LIMIT 1",
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(row.into())
+}
+
 /// Look up the embedding_model row by its primary key.
 ///
 /// # Errors

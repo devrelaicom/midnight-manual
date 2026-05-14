@@ -15,6 +15,12 @@ use std::io::{self, Write as _};
 
 use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
 
+/// Maximum body size accepted by [`FrameReader::next_message`]. The MCP server
+/// is a long-lived child of an arbitrary AI client, so we refuse oversize
+/// `Content-Length` declarations before allocating. 16 MiB is well above any
+/// reasonable real-world payload (a 50-vector query at 768 dims is ~600 KiB).
+pub const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
+
 /// Tokio-friendly reader that yields one JSON message at a time over a
 /// `Content-Length`-framed stream.
 pub struct FrameReader<R> {
@@ -87,6 +93,13 @@ where
                 "no Content-Length header before body",
             ));
         };
+
+        if len > MAX_BODY_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Content-Length {len} exceeds MAX_BODY_BYTES ({MAX_BODY_BYTES})"),
+            ));
+        }
 
         let mut body = vec![0u8; len];
         self.inner.read_exact(&mut body).await?;
@@ -180,6 +193,17 @@ mod tests {
         let mut reader = FrameReader::new(&b"X-Foo: bar\r\n\r\nbody"[..]);
         let err = reader.next_message().await.unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[tokio::test]
+    async fn oversize_content_length_is_rejected() {
+        // 17 MiB declared body, well over MAX_BODY_BYTES — must error before
+        // allocating, not after running OOM.
+        let framed = b"Content-Length: 17825793\r\n\r\n".to_vec();
+        let mut reader = FrameReader::new(&framed[..]);
+        let err = reader.next_message().await.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("MAX_BODY_BYTES"));
     }
 
     #[tokio::test]
