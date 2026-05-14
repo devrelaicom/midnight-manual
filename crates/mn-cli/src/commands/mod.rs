@@ -7,6 +7,7 @@ pub mod ingest;
 pub mod keys;
 pub mod login;
 pub mod mcp;
+pub mod search;
 pub mod sources;
 pub mod telemetry;
 pub mod users;
