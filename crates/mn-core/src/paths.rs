@@ -61,6 +61,17 @@ pub fn private_key_path(env: &impl ConfigEnv, user_id: &str) -> Option<PathBuf> 
     keys_dir(env).map(|p| p.join(format!("{user_id}.private")))
 }
 
+/// Resolve the persistent telemetry-opt-out marker path.
+///
+/// Returns `<config_home>/telemetry-disabled`. The presence of this file is
+/// the third opt-out mechanism (FR-107 mechanism #3); the CLI / MCP / server
+/// consult it at startup. The file contents are irrelevant — only existence
+/// matters.
+#[must_use]
+pub fn telemetry_marker_path(env: &impl ConfigEnv) -> Option<PathBuf> {
+    config_home(env).map(|p| p.join("telemetry-disabled"))
+}
+
 /// Resolve the user-store path on the CLI side.
 ///
 /// On the CLI side, `MIDNIGHT_MANUAL_USER_STORE` is read as a **file path**;
@@ -145,6 +156,21 @@ mod tests {
             .set("MIDNIGHT_MANUAL_USER_STORE", "/etc/users.toml")
             .set("XDG_CONFIG_HOME", "/x");
         assert_eq!(user_store_path(&env), Some(PathBuf::from("/etc/users.toml")));
+    }
+
+    #[test]
+    fn telemetry_marker_under_config_home() {
+        let env = FakeEnv::default().set("XDG_CONFIG_HOME", "/x");
+        assert_eq!(
+            telemetry_marker_path(&env),
+            Some(PathBuf::from("/x/midnight-manual/telemetry-disabled")),
+        );
+    }
+
+    #[test]
+    fn telemetry_marker_none_without_env() {
+        let env = FakeEnv::default();
+        assert!(telemetry_marker_path(&env).is_none());
     }
 
     #[test]

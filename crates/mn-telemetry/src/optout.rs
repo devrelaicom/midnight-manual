@@ -17,6 +17,7 @@
 //! module exposes [`DISABLE_ENV_VAR`] and [`HELP_TEXT`] so the CLI / MCP /
 //! server can render the same canonical strings.
 
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Canonical name of the disable-by-env-var environment variable.
@@ -65,6 +66,59 @@ pub fn set_runtime_disabled(disabled: bool) {
 /// Read the runtime-disabled flag.
 pub fn runtime_disabled() -> bool {
     RUNTIME_DISABLED.load(Ordering::Acquire)
+}
+
+/// Load the persistent runtime-disabled marker.
+///
+/// The presence of the file (regardless of its contents) sets the
+/// runtime-disabled flag; absence clears it. Pass `None` to treat as "no
+/// marker" — useful when the path can't be resolved (no `HOME` /
+/// `XDG_CONFIG_HOME`).
+///
+/// This is mechanism #3 of FR-107 — the `mnm telemetry disable` runtime
+/// toggle persists by writing this marker, and every component consults it
+/// at startup so the choice survives across invocations.
+pub fn load_persistent_marker(path: Option<&Path>) {
+    let disabled = path.is_some_and(Path::exists);
+    set_runtime_disabled(disabled);
+}
+
+/// Write the persistent marker (idempotent). The parent directory is
+/// created if missing.
+///
+/// # Errors
+///
+/// Returns the underlying `std::io::Error` if the directory or file cannot
+/// be created.
+pub fn write_persistent_marker(path: &Path) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    // Content is irrelevant — we just need the file to exist. A short
+    // self-documenting body helps future readers who stumble on it.
+    std::fs::write(
+        path,
+        "# Presence of this file disables midnight-manual telemetry.\n\
+         # Reverse with: mnm telemetry enable\n",
+    )?;
+    set_runtime_disabled(true);
+    Ok(())
+}
+
+/// Remove the persistent marker (idempotent — missing is fine).
+///
+/// # Errors
+///
+/// Returns the underlying `std::io::Error` for any error other than
+/// `NotFound`.
+pub fn remove_persistent_marker(path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    set_runtime_disabled(false);
+    Ok(())
 }
 
 /// Single source of truth: is telemetry enabled right now?
@@ -171,6 +225,54 @@ mod tests {
         assert!(!is_enabled(&FakeEnv::default(), true));
         set_runtime_disabled(false);
         assert!(is_enabled(&FakeEnv::default(), true));
+    }
+
+    #[test]
+    fn persistent_marker_round_trip_toggles_runtime_flag() {
+        struct ResetGuard;
+        impl Drop for ResetGuard {
+            fn drop(&mut self) {
+                set_runtime_disabled(false);
+            }
+        }
+        let _g = lock();
+        let _r = ResetGuard;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested/telemetry-disabled");
+
+        // Boot path: marker absent → flag clear.
+        set_runtime_disabled(true);
+        load_persistent_marker(Some(&path));
+        assert!(!runtime_disabled(), "absent marker must clear the flag");
+
+        // Write: flag set + file present.
+        write_persistent_marker(&path).unwrap();
+        assert!(runtime_disabled());
+        assert!(path.exists());
+
+        // Boot path after write: flag re-resolved from disk.
+        set_runtime_disabled(false);
+        load_persistent_marker(Some(&path));
+        assert!(runtime_disabled());
+
+        // Remove: flag clear + file gone.
+        remove_persistent_marker(&path).unwrap();
+        assert!(!runtime_disabled());
+        assert!(!path.exists());
+
+        // Remove again: idempotent.
+        remove_persistent_marker(&path).unwrap();
+    }
+
+    #[test]
+    fn load_persistent_marker_with_none_is_noop() {
+        let _g = lock();
+        set_runtime_disabled(true);
+        // None path → resolver picks the "no path → no marker" branch,
+        // which clears the flag.
+        load_persistent_marker(None);
+        assert!(!runtime_disabled());
     }
 
     #[test]

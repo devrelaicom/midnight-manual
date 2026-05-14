@@ -10,6 +10,7 @@ use axum::http::{Request, StatusCode};
 use mn_server::{app, config::ServerConfig};
 use serde_json::{json, Value};
 use tower::ServiceExt;
+use uuid::Uuid;
 
 async fn post(app: axum::Router, uri: &str, body: Value) -> (StatusCode, Value) {
     let resp = app
@@ -67,22 +68,34 @@ fn sample_mcp_startup_event() -> Value {
 async fn happy_path_persists_batch_and_returns_202() {
     let h = common::boot().await;
     let app = app::build(h.pool.clone(), cfg()).expect("build app");
-    let before: i64 = sqlx::query_scalar("SELECT COUNT(*)::bigint FROM telemetry_event_raw")
-        .fetch_one(&h.pool)
-        .await
-        .unwrap();
 
-    let batch = json!([sample_mcp_startup_event(), sample_mcp_startup_event()]);
+    // Scope by unique request_id so parallel telemetry tests don't bias
+    // the row count we're asserting on.
+    let rid = format!("telemetry-test-{}", Uuid::new_v4());
+    let event = json!({
+        "component": "mcp",
+        "version": "0.1.0",
+        "request_id": rid.clone(),
+        "payload": {
+            "event_type": "mcp_startup",
+            "startup_ms": 42,
+            "model_state": "missing"
+        }
+    });
+    let batch = json!([event.clone(), event]);
     let (status, body) = post(app, "/v1/telemetry/events", batch).await;
     assert_eq!(status, StatusCode::ACCEPTED, "body: {body}");
     assert_eq!(body["accepted"], 2);
     assert_eq!(body["rejected"], 0);
 
-    let after: i64 = sqlx::query_scalar("SELECT COUNT(*)::bigint FROM telemetry_event_raw")
-        .fetch_one(&h.pool)
-        .await
-        .unwrap();
-    assert_eq!(after - before, 2, "two new rows must be persisted");
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::bigint FROM telemetry_event_raw WHERE request_id = $1",
+    )
+    .bind(&rid)
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 2, "two rows must be persisted under our request_id");
 }
 
 #[tokio::test]
