@@ -11,8 +11,12 @@
 //! visibility gate never gates *invocation* — a hidden command still runs
 //! when called by name.
 
+use std::time::Instant;
+
 use anyhow::Result;
 use clap::{CommandFactory as _, FromArgMatches as _, Parser, Subcommand};
+use mn_telemetry::events::{CliCommandName, Component, EventPayload, Outcome};
+use mn_telemetry::{Event, TelemetryClient};
 
 use crate::commands;
 
@@ -103,7 +107,23 @@ pub async fn run() -> Result<()> {
     let cli = Cli::from_arg_matches(&matches).map_err(anyhow::Error::from)?;
     init_logging(cli.log_level.as_deref());
 
-    match cli.cmd {
+    let started = Instant::now();
+    let env = mn_core::config::StdEnv;
+    let (cfg, _) =
+        mn_core::config::Config::discover(cli.config.as_deref(), &env).unwrap_or_default();
+    // The --no-telemetry / MIDNIGHT_MANUAL_DISABLE_TELEMETRY flag flips the
+    // resolver via the env var the clap arg is bound to. The config-side
+    // flag (config.telemetry.enabled) is the second mechanism; the runtime
+    // toggle (third mechanism) lives in `mn_telemetry::optout`.
+    let cloud_url = cli.server.clone().unwrap_or_else(|| cfg.server.url.clone());
+    let telemetry_url = format!("{}/v1/telemetry/events", cloud_url.trim_end_matches('/'));
+    let config_enabled = cfg.telemetry.enabled && !cli.no_telemetry;
+    let telemetry =
+        TelemetryClient::boot(&telemetry_url, config_enabled).unwrap_or(TelemetryClient::Disabled);
+
+    let command_name = cli_command_name(&cli.cmd);
+
+    let result = match cli.cmd {
         Command::Version => commands::version::run(cli.json),
         Command::Doctor(args) => commands::doctor::run(args, cli.json).await,
         Command::Sources(args) => {
@@ -118,6 +138,44 @@ pub async fn run() -> Result<()> {
         Command::Keys(args) => commands::keys::run(args, cli.json),
         Command::Login(args) => commands::login::run(args, cli.server.as_deref(), cli.json).await,
         Command::Users(args) => commands::users::run(args, cli.json),
+    };
+
+    let duration_ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
+    let outcome = if result.is_ok() {
+        Outcome::Ok
+    } else {
+        Outcome::Error
+    };
+    telemetry
+        .emit(Event::new(
+            Component::Cli,
+            crate::VERSION,
+            EventPayload::CliCommand {
+                command: command_name,
+                duration_ms,
+                outcome,
+            },
+        ))
+        .await;
+    // Force the queue out before exit — the CLI is typically too short-lived
+    // to hit the 30s timer.
+    telemetry.flush().await;
+
+    result
+}
+
+const fn cli_command_name(cmd: &Command) -> CliCommandName {
+    match cmd {
+        Command::Version => CliCommandName::Version,
+        Command::Doctor(_) => CliCommandName::Doctor,
+        // No dedicated `Sources` variant in the closed enum yet — emit as
+        // `sources` via the dedicated CliCommandName::Sources discriminant.
+        Command::Sources(_) | Command::Versions(_) => CliCommandName::Sources,
+        Command::Config(_) => CliCommandName::Config,
+        Command::Mcp(_) => CliCommandName::Mcp,
+        Command::Auth(_) | Command::Login(_) | Command::Keys(_) | Command::Users(_) => {
+            CliCommandName::Auth
+        }
     }
 }
 

@@ -7,3 +7,4 @@ pub mod health;
 pub mod models;
 pub mod search;
 pub mod sources;
+pub mod telemetry;

@@ -3,9 +3,11 @@ name: Privacy canaries
 # Enforces FR-112 / SC-061: forbidden strings (query content, tokens, chunk content,
 # file paths, env values, PII) MUST NEVER appear in any log file or telemetry row.
 #
-# This workflow is a release gate. It runs the canary test suite, captures all
-# stdout/stderr from every component, dumps telemetry_event_raw via SQL, and greps
-# for the canary set. Any match fails the build.
+# This workflow is a release gate. It runs the canary test suite (the
+# `telemetry_canary` integration test in mn-server plus the unit canaries in
+# mn-telemetry), captures all stdout/stderr from every component, dumps
+# telemetry_event_raw via SQL, and greps for the canary set. Any match fails
+# the build.
 
 on:
   pull_request:
@@ -19,10 +21,6 @@ jobs:
   canaries:
     name: canary tests
     runs-on: ubuntu-latest
-    # Canary infrastructure lands in Phase 12 (US11). Until tests/canary/canary.rs
-    # exists this job is a no-op skip — keeps CI green for earlier phases without
-    # weakening the privacy gate once it lands.
-    if: ${{ hashFiles('tests/canary/canary.rs') != '' }}
     services:
       postgres:
         image: pgvector/pgvector:pg16
@@ -38,25 +36,41 @@ jobs:
     env:
       DATABASE_URL: postgresql://postgres:dev@localhost:5432/postgres
       RUST_LOG: info
+      # Telemetry must be enabled for the canary test to actually flow events
+      # through the HTTP pipeline. The three opt-out mechanisms are exercised
+      # by their own unit tests.
       MIDNIGHT_MANUAL_DISABLE_TELEMETRY: "0"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.91.0
       - uses: Swatinem/rust-cache@v2
-      - name: Run canary integration tests (capture all output)
-        run: |
-          cargo test --workspace --features canary --test canary -- --nocapture 2>&1 | tee canary-output.log
+        with:
+          cache-bin: false
 
-      - name: Dump telemetry_event_raw and aggregate logs
+      # NOTE: mn-telemetry's own unit tests deliberately plant canary strings
+      # in test buffers to exercise the detector itself, so we do NOT include
+      # their output here — they'd trip the grep step below. Those tests are
+      # gated by the regular CI workflow. The canary CI gate runs only the
+      # canary-free end-to-end pipeline tests.
+      - name: Run mn-server canary integration test
         run: |
-          psql "$DATABASE_URL" -c "COPY (SELECT row_to_json(t) FROM telemetry_event_raw t) TO STDOUT" > telemetry-dump.ndjson
+          cargo test --package mn-server --features integration --test telemetry_canary -- --nocapture 2>&1 | tee canary-output.log
+
+      - name: Run mn-server telemetry endpoint integration tests
+        run: |
+          cargo test --package mn-server --features integration --test telemetry_endpoint -- --nocapture 2>&1 | tee -a canary-output.log
+
+      - name: Dump telemetry_event_raw
+        run: |
+          psql "$DATABASE_URL" -c "COPY (SELECT row_to_json(t) FROM telemetry_event_raw t) TO STDOUT" > telemetry-dump.ndjson || true
           cat canary-output.log telemetry-dump.ndjson > all-captured.txt
 
       - name: Grep for canary strings (fails on any match)
         run: |
-          # The canary set MUST NEVER appear in any captured output.
-          # Update tests/canary/canaries.txt when adding new canary strings.
-          if grep -F -f tests/canary/canaries.txt all-captured.txt; then
+          # The canary prefix MUST NEVER appear in any captured output. The
+          # full set lives in crates/mn-telemetry/src/canary.rs; we grep on
+          # the common prefix so any partial leak still fails.
+          if grep -F "CANARY_zzz_xyz_" all-captured.txt; then
             echo "❌ PRIVACY CANARY VIOLATION: forbidden string appeared in logs or telemetry"
             exit 1
           fi

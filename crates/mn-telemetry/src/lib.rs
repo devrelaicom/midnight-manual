@@ -1,22 +1,21 @@
 //! `mn-telemetry` — typed event schemas, opt-out resolver, and client surface
 //! for the privacy-canary-gated telemetry pipeline (US11 / FR-107..114).
 //!
-//! Phase 8a (this revision) lands:
+//! Phase 8a + 8b (this revision) lands:
 //!
 //! - The closed set of event types matching migration `0005`'s CHECK constraint.
 //! - The three-mechanism opt-out resolver (env var, config flag, runtime toggle).
-//! - The [`Client`] trait + a [`NoopClient`] default so call sites can adopt
-//!   the API immediately, even though the HTTP-backed buffered client lands
-//!   in Phase 8b.
+//! - The [`Client`] trait + a [`NoopClient`] default so call sites that
+//!   haven't opted in yet remain ergonomic.
+//! - The [`HttpClient`] buffered batching client (FR-108 / FR-113) that
+//!   accumulates events in-memory and POSTs them as JSON arrays to the
+//!   configured cloud endpoint with jittered exponential backoff on 5xx
+//!   and network errors.
+//! - The [`TelemetryClient`] boot-time handle that resolves opt-out and
+//!   either spawns a real [`HttpClient`] flusher or selects a cheap
+//!   `Disabled` no-op branch.
 //! - Top-level canary-set constants exposed via [`canary`] so canary tests
 //!   (FR-112) can probe every code path with the same forbidden strings.
-//!
-//! What is intentionally NOT here yet (deferred to Phase 8b):
-//!
-//! - Buffered HTTP client with FIFO drop (FR-113).
-//! - `POST /v1/telemetry` server route + validator.
-//! - `mnm telemetry disable` CLI subcommand (the toggle is exposed
-//!   programmatically via [`optout::set_runtime_disabled`]).
 
 #![doc(html_root_url = "https://docs.rs/mn-telemetry/0.1.0")]
 #![allow(clippy::doc_markdown)]
@@ -43,7 +42,11 @@ pub mod client;
 pub mod events;
 pub mod optout;
 
-pub use client::{Client, NoopClient};
+pub use client::{
+    Client, HttpClient, HttpClientConfig, HttpClientError, NoopClient, TelemetryClient,
+    DEFAULT_FLUSH_INTERVAL, DEFAULT_FLUSH_THRESHOLD, DEFAULT_REQUEST_TIMEOUT, MAX_RETRY_ATTEMPTS,
+    RETRY_BUDGET,
+};
 pub use events::{
     CliCommandName, Component, Event, EventPayload, McpToolName, ModelState, Outcome,
 };
