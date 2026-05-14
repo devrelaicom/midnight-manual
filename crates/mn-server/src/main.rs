@@ -60,15 +60,16 @@ async fn main() -> anyhow::Result<()> {
     let _sweep_handle =
         jobs::telemetry_sweep::spawn(pool.clone(), cfg.telemetry_raw_retention_days);
 
-    // Background: source + source_version retention sweep (Phases 13/14).
-    // Hard-deletes sources whose `retired_at` is past `source_grace`, and
-    // source_versions outside `source.retention_count` that have aged past
-    // `version_grace`. Cascades handle the children in both cases.
+    // Background: full retention sweep (Phases 13/14/15). Three passes
+    // per tick — retired sources, aged-out source_versions outside the
+    // per-source `retention_count` window, and aborted ingest runs.
+    // Cascades handle the children in all cases.
     let _source_retention_handle = if cfg.source_retirement_enabled {
         Some(jobs::source_retention::spawn(
             pool.clone(),
             cfg.source_retirement_grace_hours,
             cfg.source_version_sweep_grace_hours,
+            cfg.abort_grace_hours,
             cfg.source_retirement_interval_minutes,
         ))
     } else {

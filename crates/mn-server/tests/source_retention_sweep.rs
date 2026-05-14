@@ -115,7 +115,7 @@ async fn sweep_once_deletes_retired_past_grace() {
     let h = common::boot().await;
     let slug = seed_retired_source(&h.pool, "job-aged", 25 * 60 * 60).await;
 
-    source_retention::sweep_once(&h.pool, 24, 24)
+    source_retention::sweep_once(&h.pool, 24, 24, 1)
         .await
         .expect("sweep");
 
@@ -127,7 +127,7 @@ async fn sweep_once_keeps_recently_retired_inside_grace() {
     let h = common::boot().await;
     let slug = seed_retired_source(&h.pool, "job-recent", 5 * 60).await;
 
-    let stats = source_retention::sweep_once(&h.pool, 24, 24)
+    let stats = source_retention::sweep_once(&h.pool, 24, 24, 1)
         .await
         .expect("sweep");
 
@@ -143,7 +143,7 @@ async fn sweep_once_handles_grace_hours_zero() {
     let h = common::boot().await;
     let slug = seed_retired_source(&h.pool, "job-zero", 2).await;
 
-    source_retention::sweep_once(&h.pool, 0, 24)
+    source_retention::sweep_once(&h.pool, 0, 24, 1)
         .await
         .expect("sweep");
 
@@ -157,7 +157,7 @@ async fn empty_pass_omits_our_slug_from_deleted() {
     // MUST NOT return it. (A concurrent grace=0 sweep from another binary
     // might still hard-delete it, so we don't assert continued existence.)
     let slug = seed_retired_source(&h.pool, "job-empty", 30).await;
-    let stats = source_retention::sweep_once(&h.pool, 24, 24)
+    let stats = source_retention::sweep_once(&h.pool, 24, 24, 1)
         .await
         .expect("sweep");
     assert!(!stats.deleted_slugs.iter().any(|s| s == &slug));
@@ -205,7 +205,7 @@ async fn sweep_once_runs_version_pass_alongside_source_pass() {
         .unwrap();
     }
 
-    source_retention::sweep_once(&h.pool, 24, 24)
+    source_retention::sweep_once(&h.pool, 24, 24, 1)
         .await
         .expect("sweep");
 
@@ -221,4 +221,56 @@ async fn sweep_once_runs_version_pass_alongside_source_pass() {
 
     // Our source row itself should still exist (it isn't retired).
     assert!(source_exists(&h.pool, &slug).await);
+}
+
+#[tokio::test]
+async fn sweep_once_runs_aborted_pass_alongside_other_passes() {
+    use mn_core::types::SourceKind;
+    use mn_store::entities::{embedding_model, source as source_entity, source_version};
+
+    let h = common::boot().await;
+    // Seed a source with an active version + an aborted run aged past 1h.
+    let model_id = embedding_model::upsert(&h.pool, "bge-base-en-v1.5", 1, 768, "baai")
+        .await
+        .unwrap();
+    let slug = format!("job-abort-{}", Uuid::new_v4());
+    let source_id =
+        source_entity::insert(&h.pool, &slug, "Abort Fixture", SourceKind::DocsSite, None, 5)
+            .await
+            .unwrap();
+    let (active_id, _) =
+        source_version::create_building(&h.pool, source_id, model_id, "0.1.0", "h-active")
+            .await
+            .unwrap();
+    source_version::finalize(&h.pool, active_id).await.unwrap();
+    let (aborted_id, _) =
+        source_version::create_building(&h.pool, source_id, model_id, "0.1.0", "h-aborted")
+            .await
+            .unwrap();
+    source_version::abort(&h.pool, aborted_id).await.unwrap();
+    // Age the aborted run to 2h ago.
+    sqlx::query(
+        "UPDATE source_version \
+         SET ingested_at = now() - ($1::bigint * interval '1 second') \
+         WHERE id = $2",
+    )
+    .bind(2_i64 * 60 * 60)
+    .bind(aborted_id)
+    .execute(&h.pool)
+    .await
+    .unwrap();
+
+    // grace_hours: source=24, version=24, abort=1 → the aborted row is
+    // outside the abort grace and gets swept; the active version stays.
+    source_retention::sweep_once(&h.pool, 24, 24, 1)
+        .await
+        .expect("sweep");
+
+    let active_row = source_version::get_by_id(&h.pool, active_id).await.unwrap();
+    assert!(active_row.is_active, "active version must survive sweep");
+    let aborted_row = source_version::get_by_id(&h.pool, aborted_id).await;
+    assert!(
+        matches!(aborted_row, Err(mn_store::StoreError::NotFound)),
+        "aborted run must be gone: {aborted_row:?}",
+    );
 }
