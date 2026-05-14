@@ -8,6 +8,7 @@
 
 pub mod content_hash;
 pub mod frontmatter;
+pub mod ingest;
 pub mod manifest;
 pub mod markdown;
 
