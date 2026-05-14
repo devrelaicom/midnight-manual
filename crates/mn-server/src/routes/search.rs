@@ -133,13 +133,17 @@ async fn search(State(state): State<AppState>, Json(req): Json<SearchRequest>) -
     }
     let limit = req.limit.min(max_limit()).max(1);
 
-    // Model-mismatch guard. Falls back to the seeded bge-base-en-v1.5@1 when
-    // the server hasn't explicitly set a corpus_model override.
-    let corpus_model_id: String = state
-        .cfg
-        .corpus_model
-        .clone()
-        .unwrap_or_else(|| "bge-base-en-v1.5@1".to_owned());
+    // Model-mismatch guard. The active corpus model is resolved at boot and
+    // stamped into ServerConfig; if it's somehow None here the server is
+    // mis-configured and we 503 rather than silently compare against a
+    // hardcoded literal (which used to cause spec drift if migration 0006
+    // ever seeded a different revision).
+    let Some(corpus_model_id) = state.cfg.corpus_model.clone() else {
+        return error::service_unavailable(
+            "server has no resolved corpus_model; check boot logs",
+            "",
+        );
+    };
     if req.client_embedding_model != corpus_model_id {
         return error::into_response(
             CoreError::builder(ErrorCode::EmbeddingModelMismatch)
@@ -240,7 +244,9 @@ async fn search(State(state): State<AppState>, Json(req): Json<SearchRequest>) -
     }
     let total_candidates = best.len();
     let mut ranked: Vec<(Uuid, f64)> = best.into_iter().collect();
-    ranked.sort_by(|(_, a), (_, b)| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    // total_cmp gives a strict total order even with NaN inputs, so a
+    // poisoned similarity value can't produce a non-deterministic sort.
+    ranked.sort_by(|(_, a), (_, b)| b.total_cmp(a));
     ranked.truncate(limit as usize);
 
     // Fetch full chunk rows in the ranked order.

@@ -34,6 +34,18 @@ async fn main() -> anyhow::Result<()> {
             .context("run migrations")?;
     }
 
+    // Resolve the active embedding model from the DB so handlers can compare
+    // against a single source-of-truth instead of a hardcoded literal.
+    // Fail-fast at boot if no row exists — that's a bad migration state and
+    // every search would 409 anyway.
+    let active = mn_store::entities::embedding_model::get_active(&pool)
+        .await
+        .context("resolve active embedding model (did migration 0006 run?)")?;
+    let resolved_corpus_model = format!("{}@{}", active.name, active.revision);
+    tracing::info!(corpus_model = %resolved_corpus_model, "resolved active embedding model");
+    let mut cfg = cfg;
+    cfg.corpus_model = Some(resolved_corpus_model);
+
     let app = app::build(pool, cfg.clone());
     let addr: SocketAddr = format!("0.0.0.0:{}", cfg.port)
         .parse()

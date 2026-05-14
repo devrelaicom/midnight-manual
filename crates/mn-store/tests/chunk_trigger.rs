@@ -10,6 +10,7 @@ mod common;
 use mn_core::provenance::Provenance;
 use mn_core::types::{ChunkStatus, DocumentKind, NodeKind, SourceKind};
 use mn_store::entities::{chunk, document, embedding_model, node, source, source_version};
+use uuid::Uuid;
 
 #[tokio::test]
 async fn chunk_with_mismatched_model_id_is_rejected() {
@@ -23,10 +24,10 @@ async fn chunk_with_mismatched_model_id_is_rejected() {
         .unwrap();
     assert_ne!(model_a, model_b);
 
-    let source_id =
-        source::insert(&h.pool, "trigger-test", "Trigger Test", SourceKind::Standalone, None, 5)
-            .await
-            .unwrap();
+    let slug = format!("trigger-test-{}", Uuid::new_v4());
+    let source_id = source::insert(&h.pool, &slug, "Trigger Test", SourceKind::Standalone, None, 5)
+        .await
+        .unwrap();
 
     // source_version uses model_a
     let (sv_id, _) = source_version::create_building(&h.pool, source_id, model_a, "0.1.0", "h")

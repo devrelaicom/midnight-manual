@@ -9,6 +9,7 @@ mod common;
 
 use mn_core::types::{NodeKind, SourceKind};
 use mn_store::entities::{embedding_model, node, source, source_version};
+use uuid::Uuid;
 
 #[tokio::test]
 async fn parent_chain_walks_to_root() {
@@ -17,16 +18,11 @@ async fn parent_chain_walks_to_root() {
     let model_id = embedding_model::upsert(&h.pool, "bge-base-en-v1.5", 1, 768, "baai")
         .await
         .unwrap();
-    let source_id = source::insert(
-        &h.pool,
-        "parent-chain-test",
-        "Parent Chain Test",
-        SourceKind::DocsSite,
-        None,
-        5,
-    )
-    .await
-    .unwrap();
+    let slug = format!("parent-chain-test-{}", Uuid::new_v4());
+    let source_id =
+        source::insert(&h.pool, &slug, "Parent Chain Test", SourceKind::DocsSite, None, 5)
+            .await
+            .unwrap();
     let (sv_id, _) = source_version::create_building(&h.pool, source_id, model_id, "0.1.0", "h")
         .await
         .unwrap();
@@ -68,16 +64,11 @@ async fn parent_chain_of_root_is_empty() {
     let model_id = embedding_model::upsert(&h.pool, "bge-base-en-v1.5", 1, 768, "baai")
         .await
         .unwrap();
-    let source_id = source::insert(
-        &h.pool,
-        "parent-chain-test-2",
-        "Parent Chain Test 2",
-        SourceKind::DocsSite,
-        None,
-        5,
-    )
-    .await
-    .unwrap();
+    let slug = format!("parent-chain-test-2-{}", Uuid::new_v4());
+    let source_id =
+        source::insert(&h.pool, &slug, "Parent Chain Test 2", SourceKind::DocsSite, None, 5)
+            .await
+            .unwrap();
     let (sv_id, _) = source_version::create_building(&h.pool, source_id, model_id, "0.1.0", "h")
         .await
         .unwrap();

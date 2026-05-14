@@ -337,7 +337,8 @@ pub async fn run_search(
         .map_err(|e| SearchError::Cloud(format!("embedder init failed: {e}")))?;
     LOADED_MARKERS.mark_embedder();
     let vectors = embedder
-        .embed(&parsed.queries, None)
+        .embed_blocking(parsed.queries.clone(), None)
+        .await
         .map_err(|e| SearchError::Cloud(format!("embed failed: {e}")))?;
     let pairs: Vec<QueryPair> = parsed
         .queries
@@ -449,14 +450,21 @@ fn parse_search_args(v: &serde_json::Value) -> Result<ParsedSearchArgs, String> 
         _ => return Err("supply either `query` (string) or `queries` (array)".to_owned()),
     };
 
-    let default_limit_i64 = i64::from(DEFAULT_LIMIT);
-    let limit = obj
-        .get("limit")
-        .map_or(default_limit_i64, |v| v.as_i64().unwrap_or(default_limit_i64));
-    if !(1..=i64::from(MAX_LIMIT)).contains(&limit) {
-        return Err(format!("`limit` must be 1..={MAX_LIMIT}"));
-    }
-    let limit = u32::try_from(limit).expect("validated above");
+    // Honour omitted `limit` as the default; reject any present-but-not-integer
+    // value rather than quietly defaulting (silent-default would let callers
+    // ship a typo like `limit: "five"` and never notice).
+    let limit = match obj.get("limit") {
+        None => DEFAULT_LIMIT,
+        Some(v) => {
+            let Some(n) = v.as_i64() else {
+                return Err("`limit` must be an integer".to_owned());
+            };
+            if !(1..=i64::from(MAX_LIMIT)).contains(&n) {
+                return Err(format!("`limit` must be 1..={MAX_LIMIT}"));
+            }
+            u32::try_from(n).expect("validated above")
+        }
+    };
 
     let rerank = obj
         .get("rerank")
@@ -485,7 +493,7 @@ async fn rerank_results(
 
     // Use the first query as the rerank pivot. Multi-query / HyDE typically
     // wants the most "user-facing" question to anchor the rerank.
-    let pivot = queries.first().map_or("", String::as_str);
+    let pivot = queries.first().map_or(String::new(), String::clone);
     let docs: Vec<String> = results
         .iter()
         .map(|r| {
@@ -496,15 +504,19 @@ async fn rerank_results(
         })
         .collect();
     let scores = reranker
-        .rerank(pivot, &docs, None)
+        .rerank_blocking(pivot, docs, None)
+        .await
         .map_err(|e| SearchError::Cloud(format!("rerank failed: {e}")))?;
 
-    // Attach scores and sort.
+    // Attach scores and sort. Dedupe by index in case the model ever returns
+    // the same source index twice (defensive — fastembed shouldn't, but a
+    // future swap could).
+    let mut seen = std::collections::HashSet::new();
     let mut indexed: Vec<(f32, serde_json::Value)> = scores
         .into_iter()
         .filter_map(|s| {
             let idx = s.index;
-            if idx >= results.len() {
+            if idx >= results.len() || !seen.insert(idx) {
                 return None;
             }
             let mut taken = std::mem::take(&mut results[idx]);
@@ -514,7 +526,10 @@ async fn rerank_results(
             Some((s.score, taken))
         })
         .collect();
-    indexed.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    // total_cmp gives a strict total order even with NaN inputs (a NaN from
+    // the reranker would otherwise collapse to Ordering::Equal and produce a
+    // non-deterministic sort).
+    indexed.sort_by(|a, b| b.0.total_cmp(&a.0));
     indexed.truncate(limit as usize);
     Ok(indexed.into_iter().map(|(_, v)| v).collect())
 }
