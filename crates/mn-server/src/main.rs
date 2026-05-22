@@ -48,7 +48,9 @@ async fn main() -> anyhow::Result<()> {
     let mut cfg = cfg;
     cfg.corpus_model = Some(resolved_corpus_model);
 
-    let app = app::build(pool.clone(), cfg.clone()).context("build app")?;
+    let rate_limiter = mn_server::ratelimit::RateLimiter::from_config(&cfg);
+    let app = app::build_with_limiter(pool.clone(), cfg.clone(), rate_limiter.clone())
+        .context("build app")?;
     let addr: SocketAddr = format!("0.0.0.0:{}", cfg.port)
         .parse()
         .context("parse listen address")?;
@@ -103,6 +105,34 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("embedder worker disabled (MIDNIGHT_MANUAL_EMBEDDER_ENABLED=false)");
         None
     };
+
+    // Background: rate-limit override refresh + bucket reaper (Phase 17).
+    // Only spawned when rate limiting is enabled.
+    if let Some(limiter) = rate_limiter.clone() {
+        if let Err(e) = limiter.refresh_overrides_now(&pool).await {
+            tracing::warn!(error = %e, "initial rate-limit override load failed");
+        }
+        let refresh_pool = pool.clone();
+        let refresh_secs = cfg.rate_limit_override_refresh_secs;
+        let refresh_limiter = limiter.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(refresh_secs.max(1)));
+            tick.tick().await; // consume the immediate first tick
+            loop {
+                tick.tick().await;
+                if let Err(e) = refresh_limiter.refresh_overrides_now(&refresh_pool).await {
+                    tracing::warn!(error = %e, "rate-limit override refresh failed");
+                }
+            }
+        });
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(60));
+            loop {
+                tick.tick().await;
+                limiter.reap(Duration::from_secs(300));
+            }
+        });
+    }
 
     let listener = tokio::net::TcpListener::bind(addr)
         .await
