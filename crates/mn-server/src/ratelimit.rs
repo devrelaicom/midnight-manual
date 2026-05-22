@@ -68,7 +68,7 @@ struct TokenBucket {
 }
 
 impl TokenBucket {
-    fn new(rps: f64, now: Instant) -> Self {
+    const fn new(rps: f64, now: Instant) -> Self {
         Self { tokens: rps, last: now }
     }
 
@@ -77,14 +77,25 @@ impl TokenBucket {
     fn charge(&mut self, rps: f64, cost: f64, now: Instant) -> Decision {
         let elapsed = now.saturating_duration_since(self.last).as_secs_f64();
         self.last = now;
-        self.tokens = (self.tokens + elapsed * rps).min(rps);
+        self.tokens = elapsed.mul_add(rps, self.tokens).min(rps);
         if self.tokens >= cost {
             self.tokens -= cost;
-            let reset_secs = if rps > 0.0 { ceil_u64((rps - self.tokens) / rps) } else { 0 };
-            Decision::Allowed { remaining: floor_u32(self.tokens), reset_secs }
+            let reset_secs = if rps > 0.0 {
+                ceil_u64((rps - self.tokens) / rps)
+            } else {
+                0
+            };
+            Decision::Allowed {
+                remaining: floor_u32(self.tokens),
+                reset_secs,
+            }
         } else {
             let needed = cost - self.tokens;
-            let retry = if rps > 0.0 { ceil_u64(needed / rps) } else { u64::MAX };
+            let retry = if rps > 0.0 {
+                ceil_u64(needed / rps)
+            } else {
+                u64::MAX
+            };
             Decision::Rejected { retry_after_secs: retry.max(1) }
         }
     }
@@ -195,9 +206,12 @@ impl RateLimiter {
     pub fn charge(&self, key: &Key, rps: u32, cost: u32) -> Decision {
         let now = Instant::now();
         let mut map = self.buckets.lock().expect("buckets lock poisoned");
-        let bucket =
-            map.entry(key.clone()).or_insert_with(|| TokenBucket::new(f64::from(rps), now));
-        bucket.charge(f64::from(rps), f64::from(cost), now)
+        let bucket = map
+            .entry(key.clone())
+            .or_insert_with(|| TokenBucket::new(f64::from(rps), now));
+        let decision = bucket.charge(f64::from(rps), f64::from(cost), now);
+        drop(map);
+        decision
     }
 
     /// Reload the active override set from Postgres. Exposed so the refresh
@@ -258,13 +272,21 @@ pub fn match_override(overrides: &[ParsedOverride], ip: IpAddr) -> Option<&Parse
     overrides
         .iter()
         .filter(|o| ip_in(o.net, o.prefix, ip))
-        .max_by(|a, b| a.prefix.cmp(&b.prefix).then_with(|| a.created_at.cmp(&b.created_at)))
+        .max_by(|a, b| {
+            a.prefix
+                .cmp(&b.prefix)
+                .then_with(|| a.created_at.cmp(&b.created_at))
+        })
 }
 
 /// Parse a stored `addr/prefix` (canonical, host bits masked) into a
 /// [`ParsedOverride`]. Returns `None` if the address or prefix is unparseable
 /// or `limit_rps` is non-positive.
-fn parse_override(cidr: &str, limit_rps: i32, created_at: OffsetDateTime) -> Option<ParsedOverride> {
+fn parse_override(
+    cidr: &str,
+    limit_rps: i32,
+    created_at: OffsetDateTime,
+) -> Option<ParsedOverride> {
     let (net_s, prefix_s) = cidr.split_once('/').unwrap_or((cidr, ""));
     let net: IpAddr = net_s.parse().ok()?;
     let prefix = if prefix_s.is_empty() {
@@ -280,7 +302,13 @@ fn parse_override(cidr: &str, limit_rps: i32, created_at: OffsetDateTime) -> Opt
     if rps == 0 {
         return None;
     }
-    Some(ParsedOverride { net, prefix, limit_rps: rps, created_at, raw: cidr.to_owned() })
+    Some(ParsedOverride {
+        net,
+        prefix,
+        limit_rps: rps,
+        created_at,
+        raw: cidr.to_owned(),
+    })
 }
 
 /// Log a one-line warning per refresh if any override's network contains
@@ -311,7 +339,7 @@ mod tests {
         assert!(matches!(third, Decision::Allowed { remaining: 0, .. }), "{third:?}");
         match b.charge(3.0, 1.0, t0) {
             Decision::Rejected { retry_after_secs } => assert!(retry_after_secs >= 1),
-            d => panic!("expected rejection, got {d:?}"),
+            Decision::Allowed { .. } => panic!("expected rejection, got allowed"),
         }
     }
 
@@ -373,7 +401,12 @@ mod tests {
     }
 
     fn ctx(tier: AuthTier) -> AuthContext {
-        AuthContext { sub: "u1".into(), role: Role::Admin, tier, jti: "j".into() }
+        AuthContext {
+            sub: "u1".into(),
+            role: Role::Admin,
+            tier,
+            jti: "j".into(),
+        }
     }
 
     #[test]

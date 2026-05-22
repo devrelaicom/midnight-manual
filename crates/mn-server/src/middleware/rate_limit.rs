@@ -1,5 +1,6 @@
 //! Rate-limit middleware (Phase 17). Resolves the caller's tier, charges one
-//! token against the in-process [`RateLimiter`], sets `X-RateLimit-*` headers,
+//! token against the in-process [`RateLimiter`](crate::ratelimit::RateLimiter),
+//! sets `X-RateLimit-*` headers,
 //! and returns `429` with `Retry-After` when the bucket is empty. A no-op when
 //! the limiter is absent (rate limiting disabled).
 
@@ -119,7 +120,8 @@ pub async fn layer(
                 tier = tier.as_str(),
                 "rate limit ok"
             );
-            req.extensions_mut().insert(RateLimitContext { key, tier, limit });
+            req.extensions_mut()
+                .insert(RateLimitContext { key, tier, limit });
             let mut resp = next.run(req).await;
             let h = resp.headers_mut();
             set_u32(h, &HDR_LIMIT, limit);

@@ -5,6 +5,9 @@ use std::env;
 use thiserror::Error;
 
 /// All the knobs the server reads at boot.
+// A config struct legitimately carries many independent on/off knobs; grouping
+// them into sub-structs would add ceremony without clarifying anything.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     /// libpq-style URL for the Postgres connection.
@@ -162,6 +165,9 @@ impl ServerConfig {
     /// # Errors
     ///
     /// Returns [`ConfigError::Missing`] if `DATABASE_URL` is unset.
+    // A flat sequence of `env::var(...)` reads — splitting it up would only
+    // scatter the env-var surface across helpers.
+    #[allow(clippy::too_many_lines)]
     pub fn from_env() -> Result<Self, ConfigError> {
         let database_url =
             env::var("DATABASE_URL").map_err(|_| ConfigError::Missing("DATABASE_URL"))?;
