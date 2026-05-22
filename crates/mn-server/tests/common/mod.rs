@@ -2,7 +2,10 @@
 //!
 //! Behavior mirrors the harness in `crates/mn-store/tests/common/mod.rs`: prefer
 //! the `DATABASE_URL` env var (CI's `services: postgres`) and fall back to
-//! testcontainers when not set.
+//! testcontainers when not set. In `DATABASE_URL` mode each `boot()` runs
+//! migrations against a fresh, uniquely-named schema (`search_path` falls back
+//! to `public` for the shared pgvector/pgcrypto extensions) so parallel tests
+//! don't collide on the shared `public` schema.
 
 #![allow(
     dead_code,
@@ -27,10 +30,10 @@ enum ContainerHandle {
 
 pub async fn boot() -> Harness {
     if let Ok(url) = std::env::var("DATABASE_URL") {
-        let pool = pool::connect(&url).await.expect("connect to DATABASE_URL");
+        let pool = external_schema_pool(&url).await;
         pool::run_migrations(&pool)
             .await
-            .expect("run migrations against DATABASE_URL");
+            .expect("run migrations against DATABASE_URL test schema");
         return Harness {
             pool,
             _container: ContainerHandle::External,
@@ -55,6 +58,50 @@ pub async fn boot() -> Harness {
         pool,
         _container: ContainerHandle::Owned(container),
     }
+}
+
+/// Build a pool against a shared `DATABASE_URL`, isolated to a fresh,
+/// uniquely-named schema.
+///
+/// Parallel integration tests share one Postgres in CI; without isolation they
+/// collide on the `public` schema. Each `boot()` gets its own schema and a
+/// `search_path` that falls back to `public` for the shared pgvector/pgcrypto
+/// extensions, so the per-schema migrations resolve the `vector` type without
+/// re-creating the extension.
+async fn external_schema_pool(url: &str) -> PgPool {
+    use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+    use sqlx::Executor as _;
+    use std::time::Duration;
+
+    let base: PgConnectOptions = url.parse().expect("parse DATABASE_URL");
+    let schema = format!("t_{}", uuid::Uuid::new_v4().simple());
+
+    // Setup connection: ensure the shared extensions exist in `public` and
+    // create this test's schema. Extension creation is best-effort because
+    // parallel setups race on `CREATE EXTENSION IF NOT EXISTS`.
+    let setup = PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(Duration::from_secs(5))
+        .connect_with(base.clone())
+        .await
+        .expect("connect setup to DATABASE_URL");
+    let _ = setup.execute("CREATE EXTENSION IF NOT EXISTS vector").await;
+    let _ = setup
+        .execute("CREATE EXTENSION IF NOT EXISTS pgcrypto")
+        .await;
+    setup
+        .execute(format!("CREATE SCHEMA \"{schema}\"").as_str())
+        .await
+        .expect("create per-test schema");
+    setup.close().await;
+
+    let opts = base.options([("search_path", format!("{schema},public"))]);
+    PgPoolOptions::new()
+        .max_connections(16)
+        .acquire_timeout(Duration::from_secs(5))
+        .connect_with(opts)
+        .await
+        .expect("connect to DATABASE_URL test schema")
 }
 
 async fn wait_for_pool(url: &str) -> PgPool {
