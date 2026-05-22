@@ -861,16 +861,22 @@ components:
             name: { type: string }
             version_constraint_satisfies: { type: string }
         sdk_dependency:
-          type: object
-          properties:
-            kind: { type: string }
-            name: { type: string }
-            version_constraint_satisfies: { type: string }
+          type: array
+          description: OR within the array; each entry matches by kind + name, optionally refined by a server-side semver check (FR-033).
+          items:
+            type: object
+            properties:
+              kind: { type: string }
+              name: { type: string }
+              version_constraint_satisfies: { type: string }
         package:
-          type: object
-          properties:
-            kind: { type: string }
-            name: { type: string }
+          type: array
+          description: OR within the array; each entry matches a chunk's document package by kind + name.
+          items:
+            type: object
+            properties:
+              kind: { type: string }
+              name: { type: string }
 
     SearchResponse:
       type: object
