@@ -97,6 +97,7 @@ time             = { version = "0.3", features = ["serde", "formatting", "parsin
 url              = "2"
 ipnet            = "2"
 regex            = "1"
+semver           = "1"
 once_cell        = "1"
 indicatif        = "0.17"
 

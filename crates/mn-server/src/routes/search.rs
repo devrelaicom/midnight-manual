@@ -10,6 +10,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
 use mn_core::error::{Error as CoreError, ErrorCode};
+use mn_core::provenance::Provenance;
+use mn_core::scoring::{self, ConfidenceFactors, RelevanceSource, ScoreResult, VersionQuery};
 use mn_retrieval::filters::SearchFilters;
 use pgvector::Vector;
 use serde::{Deserialize, Serialize};
@@ -58,6 +60,32 @@ pub struct SearchRequest {
     /// Search filters (AND across keys, OR within each array).
     #[serde(default)]
     pub filters: SearchFilters,
+    /// Result ordering key (US6 acceptance #9). Defaults to `confidence`.
+    #[serde(default)]
+    pub sort_by: SortBy,
+    /// Drop results whose `confidence` is below this floor before applying
+    /// `limit` (US6 acceptance #10). Defaults to 0.0 (no filtering).
+    #[serde(default)]
+    pub min_confidence: f64,
+    /// When `false`, omit the per-result `scores` object from the response.
+    /// Defaults to `true`.
+    #[serde(default = "default_true")]
+    pub include_scores: bool,
+}
+
+/// How to order the result set (US6 acceptance #9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SortBy {
+    /// Blended trust × relevance confidence, descending. The default.
+    #[default]
+    Confidence,
+    /// Content `trust_score`, descending.
+    Trust,
+    /// The relevance term used (normalized RRF here), descending.
+    Relevance,
+    /// The underlying RRF score, descending (the pre-US6 Story 4 default).
+    Score,
 }
 
 /// One {text, vector} pair.
@@ -71,6 +99,10 @@ pub struct QueryPair {
 
 const fn default_limit() -> u32 {
     20
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 const fn max_limit() -> u32 {
@@ -103,8 +135,9 @@ pub struct SearchResult {
     pub total_chunks: i32,
     /// Created-at timestamp.
     pub created_at: OffsetDateTime,
-    /// Per-result scores (RRF + reranker + confidence land in later phases).
-    pub scores: ScoreBreakdown,
+    /// Per-result scores. Omitted when the request sets `include_scores=false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scores: Option<ScoreBreakdown>,
 }
 
 /// Score breakdown — additive; new fields are appended in later phases.
@@ -119,6 +152,12 @@ pub struct ScoreBreakdown {
     /// 0-based indices of the distinct input queries that contributed at least
     /// one FTS or vector rank to this result.
     pub matched_queries: Vec<usize>,
+    /// Content trust in `[0, 1]`, from provenance (US6, D24).
+    pub trust_score: f64,
+    /// Blended trust × relevance confidence in `[0, 1]` (US6, D24).
+    pub confidence: f64,
+    /// Per-factor breakdown explaining the trust + confidence values.
+    pub confidence_factors: ConfidenceFactors,
 }
 
 /// Per-query timings and counters.
@@ -131,6 +170,12 @@ pub struct SearchMetadata {
     /// How many input queries were dropped as duplicates before retrieval
     /// (EC-90). Duplicates do not inflate the rate-limit cost.
     pub deduplicated_count: usize,
+    /// How many candidates were dropped for falling below `min_confidence`
+    /// before the limit was applied (US6 acceptance #10).
+    pub filtered_by_confidence: usize,
+    /// The ordering key actually applied (echoes the request, default
+    /// `confidence`), so callers can confirm the resolved sort.
+    pub sort_by: SortBy,
 }
 
 /// One per-query record.
@@ -368,56 +413,86 @@ async fn search(
         ranked_lists.push(fts_hits);
     }
 
-    // Single RRF pass across all (query, mode) lists.
+    // Single RRF pass across all (query, mode) lists. We score the FULL fused
+    // candidate set (not just the top `limit`) so confidence filtering and the
+    // sort_by reorder operate over every candidate before truncation (#9/#10).
     let list_refs: Vec<&[Uuid]> = ranked_lists.iter().map(Vec::as_slice).collect();
-    let mut fused = mn_retrieval::rrf::fuse(&list_refs);
+    let fused = mn_retrieval::rrf::fuse(&list_refs);
     let total_candidates = fused.len();
-    fused.truncate(limit as usize);
 
-    // Fetch full chunk rows in fused order.
-    let mut results = Vec::with_capacity(fused.len());
-    for (chunk_id, rrf_score) in fused {
-        let row = sqlx::query(
-            "SELECT id, document_id, source_version_id, chunk_index, total_chunks, \
-                    content, created_at \
-             FROM chunk WHERE id = $1",
-        )
-        .bind(chunk_id)
-        .fetch_optional(&state.pool)
-        .await;
-        match row {
-            Ok(Some(r)) => {
-                // BTreeSet iterates ascending, so matched_queries is sorted.
-                let matched_queries: Vec<usize> = matched
-                    .get(&chunk_id)
-                    .into_iter()
-                    .flatten()
-                    .copied()
-                    .collect();
-                let similarity = best_similarity.get(&chunk_id).copied().unwrap_or(0.0);
-                match decode_search_row(&r, rrf_score, similarity, matched_queries) {
-                    Ok(result) => results.push(result),
-                    Err(e) => {
-                        // Schema drift — log and skip, rather than insert a row
-                        // with Uuid::nil() + now() as silent placeholders.
-                        tracing::warn!(
-                            request_id = rid,
-                            chunk_id = %chunk_id,
-                            error = %e,
-                            "decode chunk row failed; skipping",
-                        );
-                    }
-                }
-            }
-            Ok(None) => {
-                // Chunk was deleted between candidate fetch and full-row fetch
-                // — skip silently and continue.
-            }
-            Err(e) => {
-                tracing::warn!(request_id = rid, error = %e, chunk_id = %chunk_id, "fetch chunk failed");
-            }
+    // Batch-fetch every fused candidate joined with its document (provenance +
+    // freshness) and source_version (ingest timestamp).
+    let fused_ids: Vec<Uuid> = fused.iter().map(|(id, _)| *id).collect();
+    let rows = match fetch_scoring_rows(&state.pool, &fused_ids).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(request_id = rid, error = %e, "scoring-row fetch failed");
+            return error::service_unavailable("result fetch failed", rid);
         }
+    };
+
+    // Query-side version constraint (borrows from req.filters), built once.
+    let version_query = req.filters.language_target.as_ref().map(|lt| VersionQuery {
+        name: &lt.name,
+        version_constraint_satisfies: lt.version_constraint_satisfies.as_deref(),
+    });
+    let now = OffsetDateTime::now_utc();
+
+    // Score each candidate in fused order. Rows missing (deleted since the
+    // candidate fetch) are skipped.
+    let mut scored: Vec<ScoredCandidate> = Vec::with_capacity(fused.len());
+    for (chunk_id, rrf_score) in fused {
+        let Some(row) = rows.get(&chunk_id) else {
+            continue;
+        };
+        // BTreeSet iterates ascending, so matched_queries is sorted.
+        let matched_queries: Vec<usize> = matched
+            .get(&chunk_id)
+            .into_iter()
+            .flatten()
+            .copied()
+            .collect();
+        let vector_similarity = best_similarity.get(&chunk_id).copied().unwrap_or(0.0);
+        let relevance = scoring::normalize_rrf(rrf_score);
+        let age_days = age_in_days(now, row.source_modified_at, row.ingested_at);
+        let score = state.scoring_policy.score(
+            &row.provenance,
+            version_query.as_ref(),
+            age_days,
+            relevance,
+            RelevanceSource::Rrf,
+        );
+        scored.push(ScoredCandidate {
+            chunk_id,
+            content: row.content.clone(),
+            document_id: row.document_id,
+            source_version_id: row.source_version_id,
+            chunk_index: row.chunk_index,
+            total_chunks: row.total_chunks,
+            created_at: row.created_at,
+            rrf_score,
+            vector_similarity,
+            matched_queries,
+            relevance,
+            score,
+        });
     }
+
+    // Drop candidates below the confidence floor before applying `limit` (#10).
+    let min_confidence = req.min_confidence.clamp(0.0, 1.0);
+    let before = scored.len();
+    scored.retain(|c| c.score.confidence >= min_confidence);
+    let filtered_by_confidence = before - scored.len();
+
+    // Sort by the requested key, then truncate (#9). The sort is stable, so
+    // the fused (RRF) order breaks ties.
+    sort_candidates(&mut scored, req.sort_by);
+    scored.truncate(limit as usize);
+
+    let results: Vec<SearchResult> = scored
+        .into_iter()
+        .map(|c| c.into_result(req.include_scores))
+        .collect();
 
     Json(SearchResponse {
         results,
@@ -425,9 +500,147 @@ async fn search(
             per_query,
             total_candidates,
             deduplicated_count,
+            filtered_by_confidence,
+            sort_by: req.sort_by,
         },
     })
     .into_response()
+}
+
+/// A fused candidate with its computed scores, awaiting filter/sort/truncate.
+struct ScoredCandidate {
+    chunk_id: Uuid,
+    content: String,
+    document_id: Uuid,
+    source_version_id: Uuid,
+    chunk_index: i32,
+    total_chunks: i32,
+    created_at: OffsetDateTime,
+    rrf_score: f64,
+    vector_similarity: f64,
+    matched_queries: Vec<usize>,
+    /// Normalized RRF relevance term (used when `sort_by = relevance`).
+    relevance: f64,
+    score: ScoreResult,
+}
+
+impl ScoredCandidate {
+    /// Convert into the wire `SearchResult`, attaching the `scores` object only
+    /// when `include_scores` is set.
+    fn into_result(self, include_scores: bool) -> SearchResult {
+        let scores = if include_scores {
+            Some(ScoreBreakdown {
+                rrf_score: self.rrf_score,
+                vector_similarity: self.vector_similarity,
+                matched_queries: self.matched_queries,
+                trust_score: self.score.trust_score,
+                confidence: self.score.confidence,
+                confidence_factors: self.score.factors,
+            })
+        } else {
+            None
+        };
+        SearchResult {
+            chunk_id: self.chunk_id,
+            content: self.content,
+            document_id: self.document_id,
+            source_version_id: self.source_version_id,
+            chunk_index: self.chunk_index,
+            total_chunks: self.total_chunks,
+            created_at: self.created_at,
+            scores,
+        }
+    }
+}
+
+/// Sort candidates in place by the requested key, descending. `total_cmp`
+/// gives a strict total order even with NaN; the sort is stable so equal keys
+/// keep their fused (RRF) order.
+fn sort_candidates(scored: &mut [ScoredCandidate], sort_by: SortBy) {
+    scored.sort_by(|a, b| {
+        let (ka, kb) = match sort_by {
+            SortBy::Confidence => (a.score.confidence, b.score.confidence),
+            SortBy::Trust => (a.score.trust_score, b.score.trust_score),
+            SortBy::Relevance => (a.relevance, b.relevance),
+            SortBy::Score => (a.rrf_score, b.rrf_score),
+        };
+        kb.total_cmp(&ka)
+    });
+}
+
+/// Age of a document in whole days: from `source_modified_at` when present,
+/// else the source-version `ingested_at` (the policy's freshness fallback).
+fn age_in_days(
+    now: OffsetDateTime,
+    source_modified_at: Option<OffsetDateTime>,
+    ingested_at: OffsetDateTime,
+) -> i64 {
+    let ts = source_modified_at.unwrap_or(ingested_at);
+    (now - ts).whole_days()
+}
+
+/// A chunk row joined with the provenance + freshness it needs for scoring.
+struct ScoringRow {
+    content: String,
+    document_id: Uuid,
+    source_version_id: Uuid,
+    chunk_index: i32,
+    total_chunks: i32,
+    created_at: OffsetDateTime,
+    provenance: Provenance,
+    source_modified_at: Option<OffsetDateTime>,
+    ingested_at: OffsetDateTime,
+}
+
+/// Batch-fetch the scoring rows for a set of chunk ids, keyed by chunk id.
+/// Invalid/forward-incompatible provenance JSON degrades to the default
+/// (lowest-trust) `Provenance` rather than dropping the row.
+///
+/// # Errors
+///
+/// Propagates any `sqlx` error from the query or column decode.
+async fn fetch_scoring_rows(
+    pool: &sqlx::PgPool,
+    ids: &[Uuid],
+) -> Result<std::collections::HashMap<Uuid, ScoringRow>, sqlx::Error> {
+    if ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let rows = sqlx::query(
+        "SELECT chunk.id, chunk.document_id, chunk.source_version_id, chunk.chunk_index, \
+                chunk.total_chunks, chunk.content, chunk.created_at, \
+                d.provenance AS provenance, d.source_modified_at AS source_modified_at, \
+                sv.ingested_at AS ingested_at \
+         FROM chunk \
+         JOIN document d ON d.id = chunk.document_id \
+         JOIN source_version sv ON sv.id = chunk.source_version_id \
+         WHERE chunk.id = ANY($1)",
+    )
+    .bind(ids)
+    .fetch_all(pool)
+    .await?;
+
+    let mut map = std::collections::HashMap::with_capacity(rows.len());
+    for r in &rows {
+        let id: Uuid = r.try_get("id")?;
+        let provenance_json: serde_json::Value = r.try_get("provenance")?;
+        let provenance: Provenance = serde_json::from_value(provenance_json).unwrap_or_default();
+        map.insert(
+            id,
+            ScoringRow {
+                content: r.try_get("content")?,
+                document_id: r.try_get("document_id")?,
+                source_version_id: r.try_get("source_version_id")?,
+                chunk_index: r.try_get("chunk_index")?,
+                total_chunks: r.try_get("total_chunks")?,
+                created_at: r.try_get("created_at")?,
+                provenance,
+                source_modified_at: r.try_get("source_modified_at")?,
+                ingested_at: r.try_get("ingested_at")?,
+            },
+        );
+    }
+    Ok(map)
 }
 
 /// Resolve the effective query list from either the canonical `queries` array
@@ -541,34 +754,9 @@ async fn fts_search(pool: &sqlx::PgPool, text: &str) -> Result<Vec<Uuid>, sqlx::
         .collect())
 }
 
-/// Decode a chunk row into a `SearchResult`. Every column is `try_get`'d so a
-/// schema mismatch surfaces as an `Err` for the caller to skip, rather than
-/// silently substituting `Uuid::nil()` / `OffsetDateTime::now_utc()`.
-fn decode_search_row(
-    r: &sqlx::postgres::PgRow,
-    rrf_score: f64,
-    vector_similarity: f64,
-    matched_queries: Vec<usize>,
-) -> Result<SearchResult, sqlx::Error> {
-    Ok(SearchResult {
-        chunk_id: r.try_get("id")?,
-        content: r.try_get("content")?,
-        document_id: r.try_get("document_id")?,
-        source_version_id: r.try_get("source_version_id")?,
-        chunk_index: r.try_get("chunk_index")?,
-        total_chunks: r.try_get("total_chunks")?,
-        created_at: r.try_get("created_at")?,
-        scores: ScoreBreakdown {
-            rrf_score,
-            vector_similarity,
-            matched_queries,
-        },
-    })
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{normalize_queries, QueryPair, SearchRequest};
+    use super::{normalize_queries, QueryPair, SearchRequest, SortBy};
     use mn_retrieval::filters::SearchFilters;
 
     fn req(
@@ -583,6 +771,9 @@ mod tests {
             client_embedding_model: "bge-base-en-v1.5@1".to_owned(),
             limit: 20,
             filters: SearchFilters::default(),
+            sort_by: SortBy::default(),
+            min_confidence: 0.0,
+            include_scores: true,
         }
     }
 

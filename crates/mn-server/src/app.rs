@@ -34,6 +34,9 @@ pub struct AppState {
     /// In-process rate limiter, or `None` when rate limiting is disabled
     /// (Phase 17). When `None` the rate-limit middleware is a pass-through.
     pub rate_limiter: Option<Arc<crate::ratelimit::RateLimiter>>,
+    /// Confidence-scoring policy resolved at boot (US6, D24). Shared read-only
+    /// across requests.
+    pub scoring_policy: Arc<mn_core::scoring_policy::ScoringPolicy>,
 }
 
 /// Resolved auth subsystem state — set once at boot when both the user
@@ -162,11 +165,13 @@ pub fn build_with_limiter(
     rate_limiter: Option<Arc<crate::ratelimit::RateLimiter>>,
 ) -> Result<Router, AuthStateError> {
     let auth = AuthState::from_config(&cfg)?.map(Arc::new);
+    let scoring_policy = Arc::new(cfg.scoring_policy.clone());
     let state = AppState {
         pool,
         cfg: Arc::new(cfg),
         auth,
         rate_limiter,
+        scoring_policy,
     };
 
     Ok(Router::new()

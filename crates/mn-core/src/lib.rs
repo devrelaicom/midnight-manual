@@ -15,6 +15,7 @@ pub mod error;
 pub mod model_id;
 pub mod paths;
 pub mod provenance;
+pub mod scoring;
 pub mod scoring_policy;
 pub mod types;
 

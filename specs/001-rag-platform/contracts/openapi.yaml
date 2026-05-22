@@ -918,16 +918,19 @@ components:
             next_chunk_id: { type: string, format: uuid, nullable: true }
         scores:
           type: object
+          description: >-
+            Per-result scores. Omitted entirely when the request sets
+            include_scores=false. trust_score, confidence, and
+            confidence_factors are the US6 (D24) additive fields.
           properties:
-            rrf: { type: number }
-            fts_rank: { type: integer, nullable: true }
-            vector_distance: { type: number, nullable: true }
+            rrf_score: { type: number }
+            vector_similarity: { type: number }
             matched_queries:
               type: array
               items: { type: integer }
-        trust_score: { type: number, minimum: 0, maximum: 1 }
-        confidence: { type: number, minimum: 0, maximum: 1 }
-        confidence_factors: { $ref: '#/components/schemas/ConfidenceFactors' }
+            trust_score: { type: number, minimum: 0, maximum: 1 }
+            confidence: { type: number, minimum: 0, maximum: 1 }
+            confidence_factors: { $ref: '#/components/schemas/ConfidenceFactors' }
 
     ConfidenceFactors:
       type: object
@@ -938,7 +941,6 @@ components:
         verified_by: { type: string, nullable: true }
         verification_multiplier: { type: number }
         age_days: { type: integer }
-        age_source: { type: string, enum: [source_modified_at, ingested_at] }
         freshness_multiplier: { type: number }
         deprecation: { type: boolean }
         deprecation_multiplier: { type: number }

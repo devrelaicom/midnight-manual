@@ -2,6 +2,7 @@
 
 use std::env;
 
+use mn_core::scoring_policy::ScoringPolicy;
 use thiserror::Error;
 
 /// All the knobs the server reads at boot.
@@ -121,6 +122,11 @@ pub struct ServerConfig {
     /// `queries.length` for `POST /v1/search` (D25, EC-88). Default 10;
     /// clamped to the hard ceiling `[1, 50]`.
     pub max_queries_per_request: u32,
+    /// Resolved confidence-scoring policy (D24 / US6). Loaded once at boot
+    /// from the TOML file at `MIDNIGHT_MANUAL_SCORING_POLICY`; the compiled-in
+    /// [`ScoringPolicy::default`] is used when the env var is unset. An invalid
+    /// file fails startup (Constitution VI / VIII).
+    pub scoring_policy: ScoringPolicy,
 }
 
 impl Default for ServerConfig {
@@ -159,6 +165,7 @@ impl Default for ServerConfig {
             rate_limit_client_ip_header: "fly-client-ip".into(),
             rate_limit_override_refresh_secs: 30,
             max_queries_per_request: 10,
+            scoring_policy: ScoringPolicy::default(),
         }
     }
 }
@@ -261,6 +268,7 @@ impl ServerConfig {
             .ok()
             .and_then(|s| s.parse::<u32>().ok())
             .map_or(10, |v| v.clamp(1, 50));
+        let scoring_policy = load_scoring_policy()?;
         Ok(Self {
             database_url,
             port,
@@ -292,8 +300,33 @@ impl ServerConfig {
             rate_limit_client_ip_header,
             rate_limit_override_refresh_secs,
             max_queries_per_request,
+            scoring_policy,
         })
     }
+}
+
+/// Resolve the confidence-scoring policy from `MIDNIGHT_MANUAL_SCORING_POLICY`.
+///
+/// The env var, when set, names a TOML file path. Absent → compiled-in
+/// [`ScoringPolicy::default`]. A path that can't be read or whose TOML is
+/// invalid fails startup (fail-fast, Constitution VIII).
+fn load_scoring_policy() -> Result<ScoringPolicy, ConfigError> {
+    let path = env::var("MIDNIGHT_MANUAL_SCORING_POLICY")
+        .ok()
+        .filter(|s| !s.is_empty());
+    resolve_scoring_policy(path)
+}
+
+/// Resolve a scoring policy from an optional file path. Factored out of
+/// [`load_scoring_policy`] so it can be unit-tested without mutating process env.
+fn resolve_scoring_policy(path: Option<String>) -> Result<ScoringPolicy, ConfigError> {
+    let Some(path) = path else {
+        return Ok(ScoringPolicy::default());
+    };
+    let body = std::fs::read_to_string(&path)
+        .map_err(|e| ConfigError::ScoringPolicyRead { path: path.clone(), source: e })?;
+    ScoringPolicy::parse(&body)
+        .map_err(|e| ConfigError::ScoringPolicyParse { path, message: e.to_string() })
 }
 
 /// All the ways config loading can fail.
@@ -302,6 +335,23 @@ pub enum ConfigError {
     /// A required env var was unset.
     #[error("required env var `{0}` is not set")]
     Missing(&'static str),
+    /// The scoring-policy file named by `MIDNIGHT_MANUAL_SCORING_POLICY` could
+    /// not be read.
+    #[error("could not read scoring policy at `{path}`: {source}")]
+    ScoringPolicyRead {
+        /// The path that failed to read.
+        path: String,
+        /// The underlying IO error.
+        source: std::io::Error,
+    },
+    /// The scoring-policy file was read but failed validation.
+    #[error("invalid scoring policy at `{path}`: {message}")]
+    ScoringPolicyParse {
+        /// The path that failed to parse.
+        path: String,
+        /// The parse/validation error.
+        message: String,
+    },
 }
 
 #[cfg(test)]
@@ -318,5 +368,37 @@ mod tests {
         assert_eq!(c.rate_limit_client_ip_header, "fly-client-ip");
         assert_eq!(c.rate_limit_override_refresh_secs, 30);
         assert_eq!(c.max_queries_per_request, 10);
+    }
+
+    #[test]
+    fn scoring_policy_defaults_when_unset() {
+        assert_eq!(resolve_scoring_policy(None).unwrap(), ScoringPolicy::default());
+        assert_eq!(ServerConfig::default().scoring_policy, ScoringPolicy::default());
+    }
+
+    #[test]
+    fn scoring_policy_loads_from_file() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("mnm-scoring-{}.toml", uuid::Uuid::new_v4()));
+        let mut policy = ScoringPolicy::default();
+        policy.blend.trust_weight = 0.7;
+        policy.blend.relevance_weight = 0.3;
+        std::fs::write(&path, toml::to_string(&policy).unwrap()).unwrap();
+        let loaded = resolve_scoring_policy(Some(path.display().to_string())).unwrap();
+        assert!((loaded.blend.trust_weight - 0.7).abs() < 1e-12);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn scoring_policy_invalid_fails_startup() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("mnm-scoring-bad-{}.toml", uuid::Uuid::new_v4()));
+        std::fs::write(&path, "schema_version = 1\nbogus_key = 9\n").unwrap();
+        let err = resolve_scoring_policy(Some(path.display().to_string())).unwrap_err();
+        assert!(matches!(err, ConfigError::ScoringPolicyParse { .. }));
+        std::fs::remove_file(&path).ok();
+
+        let missing = resolve_scoring_policy(Some("/nonexistent/mnm/policy.toml".to_owned()));
+        assert!(matches!(missing.unwrap_err(), ConfigError::ScoringPolicyRead { .. }));
     }
 }
