@@ -116,8 +116,7 @@ async fn main() -> anyhow::Result<()> {
         let refresh_secs = cfg.rate_limit_override_refresh_secs;
         let refresh_limiter = limiter.clone();
         tokio::spawn(async move {
-            let mut tick =
-                tokio::time::interval(Duration::from_secs(refresh_secs.max(1)));
+            let mut tick = tokio::time::interval(Duration::from_secs(refresh_secs.max(1)));
             tick.tick().await; // consume the immediate first tick
             loop {
                 tick.tick().await;

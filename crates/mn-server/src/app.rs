@@ -162,7 +162,12 @@ pub fn build_with_limiter(
     rate_limiter: Option<Arc<crate::ratelimit::RateLimiter>>,
 ) -> Result<Router, AuthStateError> {
     let auth = AuthState::from_config(&cfg)?.map(Arc::new);
-    let state = AppState { pool, cfg: Arc::new(cfg), auth, rate_limiter };
+    let state = AppState {
+        pool,
+        cfg: Arc::new(cfg),
+        auth,
+        rate_limiter,
+    };
 
     Ok(Router::new()
         .merge(crate::routes::health::router())

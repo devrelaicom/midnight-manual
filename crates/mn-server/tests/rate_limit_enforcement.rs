@@ -66,11 +66,17 @@ async fn send(
     ip: &str,
     bearer: Option<&str>,
 ) -> (StatusCode, HeaderMap, Value) {
-    let mut builder = Request::builder().method(method).uri(uri).header("fly-client-ip", ip);
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("fly-client-ip", ip);
     if let Some(t) = bearer {
         builder = builder.header("Authorization", format!("Bearer {t}"));
     }
-    let resp = app.oneshot(builder.body(Body::empty()).unwrap()).await.unwrap();
+    let resp = app
+        .oneshot(builder.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
     let status = resp.status();
     let headers = resp.headers().clone();
     let bytes = to_bytes(resp.into_body(), 256 * 1024).await.unwrap();
@@ -98,7 +104,9 @@ async fn mint_token(app: axum::Router, user_id: &str, kp: &Keypair, mint_ip: &st
     let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
     let body: Value = serde_json::from_slice(&bytes).unwrap();
     let challenge_id = body["challenge_id"].as_str().unwrap().to_owned();
-    let nonce = STANDARD_NO_PAD.decode(body["nonce_b64"].as_str().unwrap()).unwrap();
+    let nonce = STANDARD_NO_PAD
+        .decode(body["nonce_b64"].as_str().unwrap())
+        .unwrap();
     let signature_b64 = STANDARD_NO_PAD.encode(kp.sign(&nonce));
     let resp = app
         .oneshot(
@@ -192,9 +200,13 @@ async fn cidr_override_raises_the_limit() {
     )
     .await
     .expect("seed override");
-    limiter.refresh_overrides_now(&h.pool).await.expect("refresh");
+    limiter
+        .refresh_overrides_now(&h.pool)
+        .await
+        .expect("refresh");
 
-    let app = app::build_with_limiter(h.pool.clone(), cfg, Some(Arc::clone(&limiter))).expect("build");
+    let app =
+        app::build_with_limiter(h.pool.clone(), cfg, Some(Arc::clone(&limiter))).expect("build");
     // Anon floor of 1 would 429 the third request; the /24 override (50 rps)
     // keeps all three at 200 with the override's limit in the header.
     for _ in 0..3 {
