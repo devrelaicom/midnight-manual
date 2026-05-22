@@ -10,11 +10,14 @@
 //!    Anonymous still works; the server's `/v1/search` is public and the
 //!    bearer only affects rate-limit tier.
 //!
-//! 3. Load the local embedder (`bge-base-en-v1.5`) and encode the query.
-//!    First-run cost is the ~100 MB model download; subsequent runs hit
-//!    the on-disk cache and are fast.
+//! 3. Load the local embedder (`bge-base-en-v1.5`) and encode every query
+//!    (one primary plus any `--query` / `--queries-stdin` extras) in one
+//!    batch. First-run cost is the ~100 MB model download; subsequent runs
+//!    hit the on-disk cache and are fast.
 //!
-//! 4. `POST /v1/search` with the resulting `{text, vector}` pair.
+//! 4. `POST /v1/search` with the resulting `{text, vector}` pairs. With more
+//!    than one query the server RRFs across them; the response's per-query and
+//!    per-result diagnostics are surfaced in the rendered output.
 //!
 //! 5. Render the response — human table by default, single-line NDJSON when
 //!    `--json` is set.
@@ -40,11 +43,26 @@ use time::OffsetDateTime;
 /// `embedding_model_mismatch` if its active corpus model doesn't agree.
 pub const DEFAULT_EMBEDDING_MODEL: &str = "bge-base-en-v1.5@1";
 
+/// Maximum number of queries the CLI will send in one request (matches the
+/// server's hard ceiling).
+const MAX_QUERIES: usize = 10;
+
 /// Args for `mnm search`.
 #[derive(Debug, ClapArgs)]
 pub struct Args {
-    /// The query string.
-    pub query: String,
+    /// The primary query string. Required unless `--queries-stdin` is set.
+    pub query: Option<String>,
+
+    /// Additional query texts for multi-query retrieval (HyDE / expansion /
+    /// step-back). Repeatable: `--query "alt 1" --query "alt 2"`.
+    #[arg(long = "query")]
+    pub extra_queries: Vec<String>,
+
+    /// Read a JSON document `{ "queries": ["...", ...] }` from stdin instead of
+    /// passing query text as arguments. Mutually exclusive with the positional
+    /// query and `--query`.
+    #[arg(long)]
+    pub queries_stdin: bool,
 
     /// Maximum number of results. Capped server-side at 100.
     #[arg(long, default_value_t = 10)]
@@ -105,29 +123,32 @@ pub async fn run_with_paths(
     cli_version: &str,
     json: bool,
 ) -> Result<()> {
-    if args.query.trim().is_empty() {
-        return Err(anyhow!("query must not be empty"));
-    }
+    let texts = collect_query_texts(&args)?;
     let started = Instant::now();
 
     let embedder = mn_embedding::embedder::global(cache_dir.to_path_buf())
         .await
         .context("load embedder (first run downloads ~100 MB)")?;
     let vectors = embedder
-        .embed_blocking(vec![args.query.clone()], None)
+        .embed_blocking(texts.clone(), None)
         .await
-        .context("encode query")?;
-    let vector = vectors
-        .into_iter()
-        .next()
-        .ok_or_else(|| anyhow!("embedder returned no vector"))?;
+        .context("encode queries")?;
+    if vectors.len() != texts.len() {
+        return Err(anyhow!(
+            "embedder returned {} vectors for {} queries",
+            vectors.len(),
+            texts.len()
+        ));
+    }
 
     let bearer = auth_path.and_then(resolve_best_bearer);
+    let queries: Vec<QueryPair> = texts
+        .into_iter()
+        .zip(vectors)
+        .map(|(text, vector)| QueryPair { text, vector })
+        .collect();
     let request = SearchRequest {
-        queries: vec![QueryPair {
-            text: args.query.clone(),
-            vector,
-        }],
+        queries,
         client_embedding_model: args.embedding_model.clone(),
         limit: args.limit,
         filters: SearchFilters::default(),
@@ -190,8 +211,69 @@ pub async fn search_via_http(
         .json()
         .await
         .context("parse /v1/search response body")?;
-    println!("{}", render(&request.queries[0].text, &parsed, json));
+    let texts: Vec<String> = request.queries.iter().map(|q| q.text.clone()).collect();
+    println!("{}", render(&texts, &parsed, json));
     Ok(())
+}
+
+/// Assemble the final list of query texts from the CLI args.
+///
+/// Either the positional query (plus any repeated `--query`) OR a stdin JSON
+/// document `{ "queries": [...] }` — the two are mutually exclusive. Texts are
+/// trimmed; empties are dropped; the result must be 1..=[`MAX_QUERIES`].
+///
+/// # Errors
+///
+/// Returns `anyhow::Error` when the forms are combined, stdin can't be read or
+/// parsed, no non-empty query remains, or more than [`MAX_QUERIES`] are given.
+fn collect_query_texts(args: &Args) -> Result<Vec<String>> {
+    let raw = if args.queries_stdin {
+        if args.query.is_some() || !args.extra_queries.is_empty() {
+            return Err(anyhow!(
+                "--queries-stdin cannot be combined with a positional query or --query"
+            ));
+        }
+        read_queries_from_stdin(&mut std::io::stdin().lock())?
+    } else {
+        let primary = args.query.clone().ok_or_else(|| {
+            anyhow!("a query is required (positional argument or --queries-stdin)")
+        })?;
+        let mut v = Vec::with_capacity(1 + args.extra_queries.len());
+        v.push(primary);
+        v.extend(args.extra_queries.iter().cloned());
+        v
+    };
+
+    let texts: Vec<String> = raw
+        .into_iter()
+        .map(|t| t.trim().to_owned())
+        .filter(|t| !t.is_empty())
+        .collect();
+    if texts.is_empty() {
+        return Err(anyhow!("no non-empty query text provided"));
+    }
+    if texts.len() > MAX_QUERIES {
+        return Err(anyhow!("at most {MAX_QUERIES} queries are allowed (got {})", texts.len()));
+    }
+    Ok(texts)
+}
+
+/// Parse a `{ "queries": ["...", ...] }` JSON document from `reader`.
+///
+/// # Errors
+///
+/// Returns `anyhow::Error` if the stream can't be read or isn't the expected
+/// JSON shape.
+fn read_queries_from_stdin(reader: &mut impl std::io::Read) -> Result<Vec<String>> {
+    #[derive(Deserialize)]
+    struct StdinQueries {
+        queries: Vec<String>,
+    }
+    let mut buf = String::new();
+    reader.read_to_string(&mut buf).context("read stdin")?;
+    let parsed: StdinQueries =
+        serde_json::from_str(&buf).context("parse stdin as JSON {\"queries\": [\"...\", ...]}")?;
+    Ok(parsed.queries)
 }
 
 fn resolve_best_bearer(auth_path: &Path) -> Option<String> {
@@ -292,38 +374,140 @@ pub struct SearchResult {
 #[derive(Debug, Serialize)]
 struct SearchOutput<'a> {
     action: &'a str,
-    query: &'a str,
+    queries: &'a [String],
     result_count: usize,
     results: &'a [SearchResult],
+    search_metadata: &'a Option<serde_json::Value>,
 }
 
-fn render(query: &str, resp: &SearchResponse, json: bool) -> String {
+fn render(queries: &[String], resp: &SearchResponse, json: bool) -> String {
     if json {
         let body = SearchOutput {
             action: "search",
-            query,
+            queries,
             result_count: resp.results.len(),
             results: &resp.results,
+            search_metadata: &resp.search_metadata,
         };
         return serde_json::to_string(&body).unwrap_or_default();
     }
+    let label = query_label(queries);
     if resp.results.is_empty() {
-        return format!("no results for `{query}`");
+        return format!("no results for {label}");
     }
     let mut out = String::new();
     let plural = if resp.results.len() == 1 { "" } else { "s" };
     let count = resp.results.len();
-    writeln!(out, "{count} result{plural} for `{query}`:").ok();
+    writeln!(out, "{count} result{plural} for {label}:").ok();
     for (i, r) in resp.results.iter().enumerate() {
         let preview = preview_line(&r.content);
         let idx = i + 1;
         let chunk_idx = r.chunk_index + 1;
         let total = r.total_chunks.max(1);
         let chunk_id = r.chunk_id;
-        writeln!(out, "  {idx}. chunk {chunk_idx}/{total} [{chunk_id}]").ok();
+        let score = result_score_suffix(r);
+        writeln!(out, "  {idx}. chunk {chunk_idx}/{total} [{chunk_id}]{score}").ok();
         writeln!(out, "     {preview}").ok();
     }
+    if let Some(diag) = diagnostics_block(queries, resp) {
+        out.push('\n');
+        out.push_str(&diag);
+        out.push('\n');
+    }
     out.trim_end().to_owned()
+}
+
+/// Human-readable label for the query set: a single backticked query, or a
+/// count for multi-query requests.
+fn query_label(queries: &[String]) -> String {
+    match queries {
+        [one] => format!("`{one}`"),
+        _ => format!("{} queries", queries.len()),
+    }
+}
+
+/// Trailing ` (rrf …, queries […])` annotation for a result, parsed
+/// defensively from the server's `scores` bag (absent fields are skipped).
+fn result_score_suffix(r: &SearchResult) -> String {
+    let Some(scores) = r.scores.as_ref() else {
+        return String::new();
+    };
+    let mut parts = Vec::new();
+    if let Some(rrf) = scores.get("rrf_score").and_then(serde_json::Value::as_f64) {
+        parts.push(format!("rrf {rrf:.4}"));
+    }
+    if let Some(mq) = scores
+        .get("matched_queries")
+        .and_then(serde_json::Value::as_array)
+    {
+        let idxs: Vec<String> = mq
+            .iter()
+            .filter_map(serde_json::Value::as_u64)
+            .map(|n| n.to_string())
+            .collect();
+        if !idxs.is_empty() {
+            parts.push(format!("queries [{}]", idxs.join(", ")));
+        }
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("  ({})", parts.join(", "))
+    }
+}
+
+/// Per-query diagnostics block from `search_metadata.per_query` (FTS/vector
+/// candidate counts + latencies, plus any de-duplication note). Returns `None`
+/// when the server sent no per-query metadata.
+fn diagnostics_block(queries: &[String], resp: &SearchResponse) -> Option<String> {
+    let meta = resp.search_metadata.as_ref()?;
+    let per_query = meta
+        .get("per_query")
+        .and_then(serde_json::Value::as_array)?;
+    if per_query.is_empty() {
+        return None;
+    }
+    let mut out = String::from("diagnostics:");
+    if let Some(dups) = meta
+        .get("deduplicated_count")
+        .and_then(serde_json::Value::as_u64)
+    {
+        if dups > 0 {
+            write!(out, "\n  {dups} duplicate quer{} dropped", if dups == 1 { "y" } else { "ies" })
+                .ok();
+        }
+    }
+    for rec in per_query {
+        let qi = rec
+            .get("query_index")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|n| usize::try_from(n).ok())
+            .unwrap_or(0);
+        let fts_c = rec
+            .get("fts_candidates")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let vec_c = rec
+            .get("vector_candidates")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let fts_ms = rec
+            .get("fts_latency_ms")
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(0.0);
+        let vec_ms = rec
+            .get("vector_latency_ms")
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(0.0);
+        let text = queries.get(qi).map_or("", String::as_str);
+        let label = preview_line(text);
+        write!(
+            out,
+            "\n  query {qi} (`{label}`): {fts_c} fts ({fts_ms:.1} ms) + {vec_c} vec ({vec_ms:.1} ms)"
+        )
+        .ok();
+    }
+    Some(out)
 }
 
 /// One-line summary of a chunk's text — first 120 chars on a single line.
@@ -360,10 +544,14 @@ mod tests {
         SearchResponse { results, search_metadata: None }
     }
 
+    fn texts(qs: &[&str]) -> Vec<String> {
+        qs.iter().map(|s| (*s).to_owned()).collect()
+    }
+
     #[test]
     fn human_output_lists_each_result() {
         let r = sample_response(2);
-        let s = render("hello", &r, false);
+        let s = render(&texts(&["hello"]), &r, false);
         assert!(s.contains("2 results for `hello`"));
         assert!(s.contains("1. chunk 1/2"));
         assert!(s.contains("2. chunk 2/2"));
@@ -376,28 +564,119 @@ mod tests {
             results: Vec::new(),
             search_metadata: None,
         };
-        let s = render("nope", &r, false);
+        let s = render(&texts(&["nope"]), &r, false);
         assert_eq!(s, "no results for `nope`");
     }
 
     #[test]
     fn human_output_singular_for_one_result() {
         let r = sample_response(1);
-        let s = render("q", &r, false);
+        let s = render(&texts(&["q"]), &r, false);
         assert!(s.starts_with("1 result for"));
         assert!(!s.starts_with("1 results"));
     }
 
     #[test]
+    fn multi_query_label_uses_count() {
+        let r = sample_response(2);
+        let s = render(&texts(&["a", "b", "c"]), &r, false);
+        assert!(s.contains("for 3 queries"), "got: {s}");
+    }
+
+    #[test]
     fn json_output_stable_shape() {
         let r = sample_response(2);
-        let s = render("hello", &r, true);
+        let s = render(&texts(&["hello", "world"]), &r, true);
         let v: serde_json::Value = serde_json::from_str(&s).unwrap();
         assert_eq!(v["action"], "search");
-        assert_eq!(v["query"], "hello");
+        assert_eq!(v["queries"][0], "hello");
+        assert_eq!(v["queries"][1], "world");
         assert_eq!(v["result_count"], 2);
         assert!(v["results"].is_array());
         assert_eq!(v["results"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn human_output_renders_per_query_and_per_result_diagnostics() {
+        let r = SearchResponse {
+            results: vec![SearchResult {
+                chunk_id: uuid::Uuid::from_u128(1),
+                content: "body".to_owned(),
+                document_id: None,
+                chunk_index: 0,
+                total_chunks: 1,
+                scores: Some(serde_json::json!({
+                    "rrf_score": 0.0312,
+                    "matched_queries": [0, 1],
+                })),
+            }],
+            search_metadata: Some(serde_json::json!({
+                "per_query": [
+                    { "query_index": 0, "fts_candidates": 5, "fts_latency_ms": 1.2,
+                      "vector_candidates": 30, "vector_latency_ms": 3.4 },
+                    { "query_index": 1, "fts_candidates": 0, "fts_latency_ms": 0.4,
+                      "vector_candidates": 30, "vector_latency_ms": 2.9 },
+                ],
+                "deduplicated_count": 1,
+            })),
+        };
+        let s = render(&texts(&["alpha", "beta"]), &r, false);
+        // Per-result annotation.
+        assert!(s.contains("rrf 0.0312"), "got: {s}");
+        assert!(s.contains("queries [0, 1]"), "got: {s}");
+        // Per-query diagnostics block.
+        assert!(s.contains("diagnostics:"), "got: {s}");
+        assert!(s.contains("query 0 (`alpha`): 5 fts"), "got: {s}");
+        assert!(s.contains("query 1 (`beta`):"), "got: {s}");
+        assert!(s.contains("1 duplicate query dropped"), "got: {s}");
+    }
+
+    #[test]
+    fn reads_queries_from_stdin_json() {
+        let mut c = std::io::Cursor::new(br#"{"queries": ["one", "two", "three"]}"#.to_vec());
+        let got = read_queries_from_stdin(&mut c).unwrap();
+        assert_eq!(got, texts(&["one", "two", "three"]));
+    }
+
+    #[test]
+    fn stdin_rejects_non_object_json() {
+        let mut c = std::io::Cursor::new(br#"["one", "two"]"#.to_vec());
+        assert!(read_queries_from_stdin(&mut c).is_err());
+    }
+
+    fn args(query: Option<&str>, extra: &[&str], stdin: bool) -> Args {
+        Args {
+            query: query.map(str::to_owned),
+            extra_queries: texts(extra),
+            queries_stdin: stdin,
+            limit: 10,
+            embedding_model: DEFAULT_EMBEDDING_MODEL.to_owned(),
+        }
+    }
+
+    #[test]
+    fn collect_texts_combines_positional_and_extra() {
+        let got = collect_query_texts(&args(Some("primary"), &["alt1", "alt2"], false)).unwrap();
+        assert_eq!(got, texts(&["primary", "alt1", "alt2"]));
+    }
+
+    #[test]
+    fn collect_texts_drops_empty_and_requires_one() {
+        // whitespace-only is trimmed away; nothing left → error.
+        assert!(collect_query_texts(&args(Some("   "), &[], false)).is_err());
+        // missing positional without stdin → error.
+        assert!(collect_query_texts(&args(None, &[], false)).is_err());
+    }
+
+    #[test]
+    fn collect_texts_rejects_stdin_combined_with_args() {
+        assert!(collect_query_texts(&args(Some("x"), &[], true)).is_err());
+    }
+
+    #[test]
+    fn collect_texts_rejects_over_cap() {
+        let many: Vec<&str> = vec!["x"; MAX_QUERIES]; // primary + MAX extras = MAX+1
+        assert!(collect_query_texts(&args(Some("primary"), &many, false)).is_err());
     }
 
     #[test]

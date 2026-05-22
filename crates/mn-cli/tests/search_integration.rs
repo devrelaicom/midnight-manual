@@ -74,6 +74,46 @@ async fn happy_path_posts_search_and_returns_ok() {
 }
 
 #[tokio::test]
+async fn multi_query_request_sends_all_pairs() {
+    let server = MockServer::start().await;
+    let captured_body = Arc::new(Mutex::new(serde_json::Value::Null));
+    let body_capture = Arc::clone(&captured_body);
+    Mock::given(method("POST"))
+        .and(path("/v1/search"))
+        .respond_with(move |req: &Request| {
+            *body_capture.lock().unwrap() = req.body_json().unwrap();
+            ResponseTemplate::new(200).set_body_json(sample_results_body(2))
+        })
+        .mount(&server)
+        .await;
+
+    let request = SearchRequest {
+        queries: vec![
+            QueryPair {
+                text: "primary".to_owned(),
+                vector: vec![0.1, 0.2, 0.3],
+            },
+            QueryPair {
+                text: "alt one".to_owned(),
+                vector: vec![0.4, 0.5, 0.6],
+            },
+        ],
+        client_embedding_model: "bge-base-en-v1.5@1".to_owned(),
+        limit: 10,
+        filters: SearchFilters::default(),
+    };
+    search_via_http(&server.uri(), None, &request, true)
+        .await
+        .expect("multi-query search ok");
+
+    let captured = captured_body.lock().unwrap().clone();
+    let queries = captured["queries"].as_array().unwrap();
+    assert_eq!(queries.len(), 2);
+    assert_eq!(queries[0]["text"], "primary");
+    assert_eq!(queries[1]["text"], "alt one");
+}
+
+#[tokio::test]
 async fn bearer_is_sent_when_provided() {
     let server = MockServer::start().await;
     let captured_auth = Arc::new(Mutex::new(Option::<String>::None));
