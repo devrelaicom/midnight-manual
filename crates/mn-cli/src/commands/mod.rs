@@ -8,6 +8,7 @@ pub mod keys;
 pub mod login;
 pub mod mcp;
 pub mod models;
+pub mod ratelimits;
 pub mod search;
 pub mod sources;
 pub mod telemetry;

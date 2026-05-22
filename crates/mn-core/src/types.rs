@@ -93,6 +93,30 @@ pub struct SourceVersion {
     pub retired_at: Option<OffsetDateTime>,
 }
 
+/// A per-CIDR temporary rate-limit ceiling (`rate_limit_override`, D11/FR-031).
+///
+/// `cidr` is carried as a `String` because the workspace's sqlx build excludes
+/// the `ipnetwork` feature, so the column is cast to/from text at the query
+/// boundary. The value is the network address Postgres stored (host bits
+/// masked off), e.g. `169.155.237.0/25`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RateLimitOverride {
+    /// Database UUID.
+    pub id: Uuid,
+    /// Network block the override applies to, in `addr/prefix` form.
+    pub cidr: String,
+    /// Requests-per-second ceiling for the block (always positive).
+    pub limit_rps: i32,
+    /// When the override stops being effective.
+    pub expires_at: OffsetDateTime,
+    /// Free-form operator note (e.g. an event name).
+    pub note: Option<String>,
+    /// `user_id` of the admin who created the override (JWT `sub` claim).
+    pub created_by: String,
+    /// When the override row was inserted.
+    pub created_at: OffsetDateTime,
+}
+
 /// `embedding_model` registry row — the typed view of the table.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EmbeddingModel {

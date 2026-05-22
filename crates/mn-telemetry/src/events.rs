@@ -200,6 +200,8 @@ pub enum CliCommandName {
     Telemetry,
     /// `mnm ingest` (admin).
     Ingest,
+    /// `mnm ratelimits` (admin).
+    Ratelimits,
 }
 
 /// The top-level event envelope written to `telemetry_event_raw.fields` (plus
@@ -298,6 +300,18 @@ mod tests {
         for (p, expected) in cases {
             assert_eq!(p.event_type(), *expected, "wrong wire string for {p:?}");
         }
+    }
+
+    #[test]
+    fn cli_command_name_serializes_snake_case() {
+        assert_eq!(
+            serde_json::to_value(CliCommandName::Ratelimits).unwrap(),
+            serde_json::Value::String("ratelimits".into())
+        );
+        assert_eq!(
+            serde_json::to_value(CliCommandName::Sources).unwrap(),
+            serde_json::Value::String("sources".into())
+        );
     }
 
     #[test]
