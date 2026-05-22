@@ -113,7 +113,7 @@ pub async fn layer(
             set_u64(h, &HDR_RETRY_AFTER, retry_after_secs);
             resp
         }
-        Decision::Allowed { remaining, reset_secs } => {
+        Decision::Allowed { .. } => {
             tracing::info!(
                 request_id = req_id.as_str(),
                 rate_limit_decision = "allowed",
@@ -121,8 +121,15 @@ pub async fn layer(
                 "rate limit ok"
             );
             req.extensions_mut()
-                .insert(RateLimitContext { key, tier, limit });
+                .insert(RateLimitContext { key: key.clone(), tier, limit });
             let mut resp = next.run(req).await;
+            // Re-peek (charge 0) AFTER the handler so the headers reflect any
+            // extra tokens the handler charged for a multi-query request
+            // (D25) — acceptance #5 wants the post-charge balance.
+            let (remaining, reset_secs) = match limiter.charge(&key, limit, 0) {
+                Decision::Allowed { remaining, reset_secs } => (remaining, reset_secs),
+                Decision::Rejected { retry_after_secs } => (0, retry_after_secs),
+            };
             let h = resp.headers_mut();
             set_u32(h, &HDR_LIMIT, limit);
             set_u32(h, &HDR_REMAINING, remaining);
