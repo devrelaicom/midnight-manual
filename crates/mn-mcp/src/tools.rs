@@ -14,6 +14,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
+use mn_core::scoring::normalize_rerank;
+use mn_core::scoring_policy::ScoringPolicy;
 use mn_embedding::{embedder, reranker};
 use serde::Serialize;
 use serde_json::json;
@@ -359,6 +361,12 @@ pub async fn run_search(
         client_embedding_model: cfg.client_embedding_model.clone(),
         limit: cloud_limit,
         filters: parsed.filters.clone(),
+        // When reranking, fetch the candidate pool in RRF/relevance order so the
+        // cross-encoder sees the most relevant chunks (not the cloud's
+        // confidence-first default, which could drop relevant-but-low-trust
+        // candidates before we rerank). Pass-through (rerank=false) keeps the
+        // cloud's confidence ordering.
+        sort_by: if parsed.rerank { Some("score") } else { None },
     };
     let cloud_resp = match cloud.search(&req).await {
         Ok(v) => v,
@@ -482,7 +490,7 @@ fn parse_search_args(v: &serde_json::Value) -> Result<ParsedSearchArgs, String> 
 
 async fn rerank_results(
     queries: &[String],
-    mut results: Vec<serde_json::Value>,
+    results: Vec<serde_json::Value>,
     cache_dir: &Path,
     limit: u32,
 ) -> Result<Vec<serde_json::Value>, SearchError> {
@@ -508,30 +516,90 @@ async fn rerank_results(
         .await
         .map_err(|e| SearchError::Cloud(format!("rerank failed: {e}")))?;
 
-    // Attach scores and sort. Dedupe by index in case the model ever returns
-    // the same source index twice (defensive — fastembed shouldn't, but a
-    // future swap could).
+    Ok(rerank_postprocess(results, &scores, limit))
+}
+
+/// Attach `rerank_score`, recompute trust-aware `confidence` from the
+/// sigmoid-normalized reranker logit, re-sort, and truncate (US6 #8/#12).
+///
+/// For each reranked result we substitute the normalized cross-encoder score
+/// for the relevance term, blend it with the cloud's `trust_score` using the
+/// compiled-in default policy weights, and record the substitution in
+/// `confidence_factors.relevance_source = "rerank"`. Results are then ordered
+/// by the recomputed confidence (descending). Results that carry no cloud
+/// `trust_score` (e.g. an older cloud, or `include_scores=false`) keep their
+/// confidence and fall back to ordering by the reranker score, so the function
+/// degrades gracefully. Pure (no model/IO) so it is unit-testable.
+fn rerank_postprocess(
+    mut results: Vec<serde_json::Value>,
+    scores: &[reranker::RerankResult],
+    limit: u32,
+) -> Vec<serde_json::Value> {
+    let policy = ScoringPolicy::default();
+    // Dedupe by index in case the model ever returns the same source index
+    // twice (defensive — fastembed shouldn't, but a future swap could).
     let mut seen = std::collections::HashSet::new();
-    let mut indexed: Vec<(f32, serde_json::Value)> = scores
-        .into_iter()
+    let mut indexed: Vec<(f64, serde_json::Value)> = scores
+        .iter()
         .filter_map(|s| {
             let idx = s.index;
             if idx >= results.len() || !seen.insert(idx) {
                 return None;
             }
+            let relevance = normalize_rerank(f64::from(s.score));
             let mut taken = std::mem::take(&mut results[idx]);
-            if let Some(obj) = taken.as_object_mut() {
-                obj.insert("rerank_score".to_owned(), serde_json::Value::from(f64::from(s.score)));
-            }
-            Some((s.score, taken))
+            let sort_key = recompute_confidence(&mut taken, &policy, f64::from(s.score), relevance);
+            Some((sort_key, taken))
         })
         .collect();
-    // total_cmp gives a strict total order even with NaN inputs (a NaN from
-    // the reranker would otherwise collapse to Ordering::Equal and produce a
-    // non-deterministic sort).
+    // total_cmp gives a strict total order even with NaN inputs (a NaN would
+    // otherwise collapse to Ordering::Equal and produce a non-deterministic
+    // sort).
     indexed.sort_by(|a, b| b.0.total_cmp(&a.0));
     indexed.truncate(limit as usize);
-    Ok(indexed.into_iter().map(|(_, v)| v).collect())
+    indexed.into_iter().map(|(_, v)| v).collect()
+}
+
+/// Patch one result in place: attach the raw `rerank_score` logit, and when the
+/// cloud supplied a `scores.trust_score`, recompute `scores.confidence` from
+/// `relevance` and stamp `relevance_source`/`relevance_multiplier` into
+/// `confidence_factors`. Returns the value to sort by (the recomputed
+/// confidence, else the normalized relevance when no trust is available).
+fn recompute_confidence(
+    result: &mut serde_json::Value,
+    policy: &ScoringPolicy,
+    raw_logit: f64,
+    relevance: f64,
+) -> f64 {
+    let Some(obj) = result.as_object_mut() else {
+        return relevance;
+    };
+    obj.insert("rerank_score".to_owned(), serde_json::Value::from(raw_logit));
+
+    let trust = obj
+        .get("scores")
+        .and_then(|s| s.get("trust_score"))
+        .and_then(serde_json::Value::as_f64);
+    let Some(trust) = trust else {
+        // No cloud trust to blend with — leave confidence untouched and order
+        // by relevance (monotonic in the reranker logit).
+        return relevance;
+    };
+    let confidence = policy.confidence(trust, relevance);
+    if let Some(scores) = obj
+        .get_mut("scores")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        scores.insert("confidence".to_owned(), serde_json::Value::from(confidence));
+        if let Some(factors) = scores
+            .get_mut("confidence_factors")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            factors.insert("relevance_source".to_owned(), serde_json::Value::from("rerank"));
+            factors.insert("relevance_multiplier".to_owned(), serde_json::Value::from(relevance));
+        }
+    }
+    confidence
 }
 
 // ---------------------------------------------------------------------------
@@ -652,6 +720,86 @@ mod tests {
         let s = search_input_schema();
         assert_eq!(s["type"], "object");
         assert!(s.get("oneOf").is_some());
+    }
+
+    fn result_with_trust(chunk: &str, trust: f64) -> serde_json::Value {
+        json!({
+            "chunk_id": chunk,
+            "content": format!("content for {chunk}"),
+            "scores": {
+                "rrf_score": 0.5,
+                "trust_score": trust,
+                "confidence": 0.4,
+                "confidence_factors": { "relevance_source": "rrf", "relevance_multiplier": 0.4 },
+            },
+        })
+    }
+
+    #[test]
+    fn rerank_recomputes_confidence_and_marks_source() {
+        // #8/#12: confidence is recomputed from the sigmoid-normalized logit and
+        // the substitution is recorded.
+        let results = vec![result_with_trust("a", 0.9)];
+        let scores = vec![reranker::RerankResult { index: 0, score: 2.0 }];
+        let out = rerank_postprocess(results, &scores, 10);
+        assert_eq!(out.len(), 1);
+        let s = &out[0]["scores"];
+        assert_eq!(s["confidence_factors"]["relevance_source"], "rerank");
+        // relevance_multiplier == sigmoid(2.0) ≈ 0.8808.
+        let rel = s["confidence_factors"]["relevance_multiplier"]
+            .as_f64()
+            .unwrap();
+        assert!((rel - 0.880_797).abs() < 1e-4, "relevance was {rel}");
+        // confidence recomputed away from the cloud's 0.4 placeholder.
+        let conf = s["confidence"].as_f64().unwrap();
+        assert!((conf - 0.4).abs() > 1e-6 && (0.0..=1.0).contains(&conf));
+        assert!(out[0]["rerank_score"].as_f64().unwrap() > 1.99);
+    }
+
+    #[test]
+    fn rerank_orders_by_recomputed_confidence_not_logit() {
+        // High-trust chunk with a slightly lower logit should still outrank a
+        // low-trust chunk with a slightly higher logit, because confidence
+        // blends trust in.
+        let results = vec![
+            result_with_trust("low_trust", 0.05),
+            result_with_trust("high_trust", 0.99),
+        ];
+        let scores = vec![
+            reranker::RerankResult { index: 0, score: 1.2 }, // low trust, higher logit
+            reranker::RerankResult { index: 1, score: 1.0 }, // high trust, lower logit
+        ];
+        let out = rerank_postprocess(results, &scores, 10);
+        assert_eq!(out[0]["chunk_id"], "high_trust", "trust must lift the top result");
+        assert_eq!(out[1]["chunk_id"], "low_trust");
+    }
+
+    #[test]
+    fn rerank_passes_through_without_trust() {
+        // A result missing scores.trust_score keeps its confidence and just
+        // gains a rerank_score (graceful degradation).
+        let results = vec![json!({ "chunk_id": "x", "content": "c" })];
+        let scores = vec![reranker::RerankResult { index: 0, score: 0.5 }];
+        let out = rerank_postprocess(results, &scores, 10);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].get("scores").is_none());
+        assert!(out[0]["rerank_score"].is_number());
+    }
+
+    #[test]
+    fn rerank_truncates_to_limit() {
+        let results = vec![
+            result_with_trust("a", 0.8),
+            result_with_trust("b", 0.7),
+            result_with_trust("c", 0.6),
+        ];
+        let scores = vec![
+            reranker::RerankResult { index: 0, score: 0.1 },
+            reranker::RerankResult { index: 1, score: 0.9 },
+            reranker::RerankResult { index: 2, score: 0.5 },
+        ];
+        let out = rerank_postprocess(results, &scores, 2);
+        assert_eq!(out.len(), 2);
     }
 
     #[test]
