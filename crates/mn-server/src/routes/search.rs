@@ -1,9 +1,9 @@
-//! `POST /v1/search` — first cut.
+//! `POST /v1/search` — hybrid FTS + pgvector retrieval.
 //!
-//! This phase lands the route, the request/response shapes, the model-mismatch
-//! 409 guard, and a pgvector-only retrieval path. The FTS half + RRF merging
-//! across modes/queries lands in the follow-up PR; the structure here is
-//! deliberately set up to plug it in.
+//! For each distinct query pair the handler runs both a pgvector cosine search
+//! and a Postgres full-text search, then fuses every ranked list — across both
+//! modes and across all query pairs — in a single Reciprocal Rank Fusion pass
+//! (k=60). Reranking and confidence scoring land in later phases.
 
 use axum::extract::{Extension, State};
 use axum::response::{IntoResponse, Response};
@@ -50,7 +50,7 @@ pub struct SearchRequest {
 /// One {text, vector} pair.
 #[derive(Debug, Clone, Deserialize)]
 pub struct QueryPair {
-    /// The query text (kept around for FTS; ignored in this phase).
+    /// The query text, used for the full-text-search half of retrieval.
     pub text: String,
     /// The pre-computed embedding (768 dimensions for bge-base-en-v1.5).
     pub vector: Vec<f32>,
@@ -97,9 +97,15 @@ pub struct SearchResult {
 /// Score breakdown — additive; new fields are appended in later phases.
 #[derive(Debug, Serialize)]
 pub struct ScoreBreakdown {
-    /// Raw similarity from pgvector cosine distance, normalized to
-    /// 0..=1 (1 - distance for cosine).
+    /// Reciprocal Rank Fusion score (k=60) used to order results.
+    pub rrf_score: f64,
+    /// Best pgvector cosine similarity across the queries that vector-matched
+    /// this chunk, normalized to 0..=1 (`1 - distance`); 0.0 if the chunk was
+    /// found only via FTS.
     pub vector_similarity: f64,
+    /// 0-based indices of the distinct input queries that contributed at least
+    /// one FTS or vector rank to this result.
+    pub matched_queries: Vec<usize>,
 }
 
 /// Per-query timings and counters.
@@ -117,8 +123,12 @@ pub struct SearchMetadata {
 /// One per-query record.
 #[derive(Debug, Serialize)]
 pub struct PerQueryRecord {
-    /// 0-indexed input query position.
+    /// 0-indexed distinct-query position.
     pub query_index: usize,
+    /// FTS-mode candidate count for this query.
+    pub fts_candidates: usize,
+    /// FTS-mode latency in milliseconds.
+    pub fts_latency_ms: f64,
     /// Vector-mode candidate count for this query.
     pub vector_candidates: usize,
     /// Vector-mode latency in milliseconds.
@@ -252,48 +262,22 @@ async fn search(
         }
     }
 
-    // Run vector search per query. (FTS + RRF cross-merge lands in a follow-up.)
+    // Hybrid retrieval: for each distinct query run BOTH pgvector and FTS,
+    // collecting one ranked candidate list per (query, mode). RRF (k=60) then
+    // fuses every list — across modes and across queries — in a single pass.
     let mut per_query = Vec::with_capacity(distinct.len());
-    let mut all_candidates: Vec<Vec<(Uuid, f64)>> = Vec::with_capacity(distinct.len());
+    let mut ranked_lists: Vec<Vec<Uuid>> = Vec::with_capacity(distinct.len() * 2);
+    // Per chunk: which distinct queries contributed at least one rank, and the
+    // best vector similarity seen (for reporting; FTS-only chunks stay at 0.0).
+    let mut matched: std::collections::HashMap<Uuid, std::collections::BTreeSet<usize>> =
+        std::collections::HashMap::new();
+    let mut best_similarity: std::collections::HashMap<Uuid, f64> =
+        std::collections::HashMap::new();
 
     for (i, q) in distinct.iter().enumerate() {
         let t0 = std::time::Instant::now();
-        let vec = Vector::from(q.vector.clone());
-        // pgvector cosine distance: 0 = identical, 2 = opposite.
-        // Limit to top 100 per query before fusion.
-        let rows = sqlx::query(
-            "SELECT chunk.id, 1 - (chunk.embedding <=> $1) AS similarity \
-             FROM chunk \
-             JOIN source_version sv ON sv.id = chunk.source_version_id \
-             WHERE chunk.embedding IS NOT NULL \
-               AND chunk.status = 'ready' \
-               AND sv.is_active = true \
-             ORDER BY chunk.embedding <=> $1 \
-             LIMIT 100",
-        )
-        .bind(&vec)
-        .fetch_all(&state.pool)
-        .await;
-
-        let latency_ms = t0.elapsed().as_secs_f64() * 1000.0;
-
-        match rows {
-            Ok(rows) => {
-                let candidates: Vec<(Uuid, f64)> = rows
-                    .iter()
-                    .filter_map(|r| {
-                        let id: Uuid = r.try_get("id").ok()?;
-                        let sim: f64 = r.try_get("similarity").ok()?;
-                        Some((id, sim))
-                    })
-                    .collect();
-                per_query.push(PerQueryRecord {
-                    query_index: i,
-                    vector_candidates: candidates.len(),
-                    vector_latency_ms: latency_ms,
-                });
-                all_candidates.push(candidates);
-            }
+        let vector_hits = match vector_search(&state.pool, &q.vector).await {
+            Ok(hits) => hits,
             Err(e) => {
                 tracing::warn!(request_id = rid, error = %e, query_index = i, "vector search failed");
                 return error::service_unavailable(
@@ -301,34 +285,57 @@ async fn search(
                     rid,
                 );
             }
-        }
-    }
+        };
+        let vector_latency_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
-    // For now: take the union (deduplicated by chunk_id, keep the max
-    // similarity per chunk across queries) and return the top `limit`.
-    // Phase 4d adds proper RRF + cross-merge with FTS.
-    let mut best: std::collections::HashMap<Uuid, f64> = std::collections::HashMap::new();
-    for query_results in &all_candidates {
-        for (id, sim) in query_results {
-            best.entry(*id)
+        let t1 = std::time::Instant::now();
+        let fts_hits = match fts_search(&state.pool, &q.text).await {
+            Ok(hits) => hits,
+            Err(e) => {
+                tracing::warn!(request_id = rid, error = %e, query_index = i, "fts search failed");
+                return error::service_unavailable(format!("fts search failed for query {i}"), rid);
+            }
+        };
+        let fts_latency_ms = t1.elapsed().as_secs_f64() * 1000.0;
+
+        per_query.push(PerQueryRecord {
+            query_index: i,
+            fts_candidates: fts_hits.len(),
+            fts_latency_ms,
+            vector_candidates: vector_hits.len(),
+            vector_latency_ms,
+        });
+
+        let mut vector_ids = Vec::with_capacity(vector_hits.len());
+        for (id, sim) in vector_hits {
+            matched.entry(id).or_default().insert(i);
+            best_similarity
+                .entry(id)
                 .and_modify(|s| {
-                    if *sim > *s {
-                        *s = *sim;
+                    if sim > *s {
+                        *s = sim;
                     }
                 })
-                .or_insert(*sim);
+                .or_insert(sim);
+            vector_ids.push(id);
         }
-    }
-    let total_candidates = best.len();
-    let mut ranked: Vec<(Uuid, f64)> = best.into_iter().collect();
-    // total_cmp gives a strict total order even with NaN inputs, so a
-    // poisoned similarity value can't produce a non-deterministic sort.
-    ranked.sort_by(|(_, a), (_, b)| b.total_cmp(a));
-    ranked.truncate(limit as usize);
+        for id in &fts_hits {
+            matched.entry(*id).or_default().insert(i);
+        }
 
-    // Fetch full chunk rows in the ranked order.
-    let mut results = Vec::with_capacity(ranked.len());
-    for (chunk_id, similarity) in ranked {
+        ranked_lists.push(vector_ids);
+        ranked_lists.push(fts_hits);
+    }
+
+    // Single RRF pass across all (query, mode) lists.
+    let list_refs: Vec<&[Uuid]> = ranked_lists.iter().map(Vec::as_slice).collect();
+    let mut fused = mn_retrieval::rrf::fuse(&list_refs);
+    let total_candidates = fused.len();
+    fused.truncate(limit as usize);
+
+    // Fetch full chunk rows in fused order.
+    let mut results = Vec::with_capacity(fused.len());
+    for (chunk_id, rrf_score) in fused {
         let row = sqlx::query(
             "SELECT id, document_id, source_version_id, chunk_index, total_chunks, \
                     content, created_at \
@@ -338,19 +345,29 @@ async fn search(
         .fetch_optional(&state.pool)
         .await;
         match row {
-            Ok(Some(r)) => match decode_search_row(&r, similarity) {
-                Ok(result) => results.push(result),
-                Err(e) => {
-                    // Schema drift — log and skip, rather than insert a row
-                    // with Uuid::nil() + now() as silent placeholders.
-                    tracing::warn!(
-                        request_id = rid,
-                        chunk_id = %chunk_id,
-                        error = %e,
-                        "decode chunk row failed; skipping",
-                    );
+            Ok(Some(r)) => {
+                // BTreeSet iterates ascending, so matched_queries is sorted.
+                let matched_queries: Vec<usize> = matched
+                    .get(&chunk_id)
+                    .into_iter()
+                    .flatten()
+                    .copied()
+                    .collect();
+                let similarity = best_similarity.get(&chunk_id).copied().unwrap_or(0.0);
+                match decode_search_row(&r, rrf_score, similarity, matched_queries) {
+                    Ok(result) => results.push(result),
+                    Err(e) => {
+                        // Schema drift — log and skip, rather than insert a row
+                        // with Uuid::nil() + now() as silent placeholders.
+                        tracing::warn!(
+                            request_id = rid,
+                            chunk_id = %chunk_id,
+                            error = %e,
+                            "decode chunk row failed; skipping",
+                        );
+                    }
                 }
-            },
+            }
             Ok(None) => {
                 // Chunk was deleted between candidate fetch and full-row fetch
                 // — skip silently and continue.
@@ -360,9 +377,6 @@ async fn search(
             }
         }
     }
-
-    // _suppress unused warning until RRF integration lands.
-    let _ = mn_retrieval::rrf::RRF_K;
 
     Json(SearchResponse {
         results,
@@ -387,12 +401,80 @@ fn query_hash(q: &QueryPair) -> u64 {
     h.finish()
 }
 
+/// Run the pgvector half of retrieval for one query.
+///
+/// Returns up to 100 `(chunk_id, similarity)` pairs ordered by descending
+/// cosine similarity over active, ready chunks with a non-null embedding.
+///
+/// # Errors
+///
+/// Propagates any `sqlx` error from the query.
+async fn vector_search(
+    pool: &sqlx::PgPool,
+    vector: &[f32],
+) -> Result<Vec<(Uuid, f64)>, sqlx::Error> {
+    let vec = Vector::from(vector.to_vec());
+    // pgvector cosine distance: 0 = identical, 2 = opposite. Top 100 per query.
+    let rows = sqlx::query(
+        "SELECT chunk.id, 1 - (chunk.embedding <=> $1) AS similarity \
+         FROM chunk \
+         JOIN source_version sv ON sv.id = chunk.source_version_id \
+         WHERE chunk.embedding IS NOT NULL \
+           AND chunk.status = 'ready' \
+           AND sv.is_active = true \
+         ORDER BY chunk.embedding <=> $1 \
+         LIMIT 100",
+    )
+    .bind(&vec)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .iter()
+        .filter_map(|r| {
+            let id: Uuid = r.try_get("id").ok()?;
+            let sim: f64 = r.try_get("similarity").ok()?;
+            Some((id, sim))
+        })
+        .collect())
+}
+
+/// Run the full-text-search half of retrieval for one query.
+///
+/// Returns up to 100 chunk ids ordered by descending `ts_rank` over active,
+/// ready chunks. Empty or stopword-only text yields no rows, since
+/// `websearch_to_tsquery` produces a query that matches nothing.
+///
+/// # Errors
+///
+/// Propagates any `sqlx` error from the query.
+async fn fts_search(pool: &sqlx::PgPool, text: &str) -> Result<Vec<Uuid>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT chunk.id \
+         FROM chunk \
+         JOIN source_version sv ON sv.id = chunk.source_version_id \
+         WHERE chunk.tsvector @@ websearch_to_tsquery('english', $1) \
+           AND chunk.status = 'ready' \
+           AND sv.is_active = true \
+         ORDER BY ts_rank(chunk.tsvector, websearch_to_tsquery('english', $1)) DESC \
+         LIMIT 100",
+    )
+    .bind(text)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .iter()
+        .filter_map(|r| r.try_get::<Uuid, _>("id").ok())
+        .collect())
+}
+
 /// Decode a chunk row into a `SearchResult`. Every column is `try_get`'d so a
 /// schema mismatch surfaces as an `Err` for the caller to skip, rather than
 /// silently substituting `Uuid::nil()` / `OffsetDateTime::now_utc()`.
 fn decode_search_row(
     r: &sqlx::postgres::PgRow,
-    similarity: f64,
+    rrf_score: f64,
+    vector_similarity: f64,
+    matched_queries: Vec<usize>,
 ) -> Result<SearchResult, sqlx::Error> {
     Ok(SearchResult {
         chunk_id: r.try_get("id")?,
@@ -402,6 +484,10 @@ fn decode_search_row(
         chunk_index: r.try_get("chunk_index")?,
         total_chunks: r.try_get("total_chunks")?,
         created_at: r.try_get("created_at")?,
-        scores: ScoreBreakdown { vector_similarity: similarity },
+        scores: ScoreBreakdown {
+            rrf_score,
+            vector_similarity,
+            matched_queries,
+        },
     })
 }
