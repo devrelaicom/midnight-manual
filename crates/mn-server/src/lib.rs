@@ -20,6 +20,7 @@ pub mod config;
 pub mod error;
 pub mod jobs;
 pub mod middleware;
+pub mod ratelimit;
 pub mod routes;
 
 /// Crate version stamped at build time.

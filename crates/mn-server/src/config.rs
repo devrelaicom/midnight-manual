@@ -95,6 +95,25 @@ pub struct ServerConfig {
     /// Phase 15). Defaults to 1 hour (the spec's
     /// `MIDNIGHT_MANUAL_ABORT_GRACE` default). Clamped to `[1, 24 * 365]`.
     pub abort_grace_hours: i64,
+    /// `MIDNIGHT_MANUAL_RATE_LIMIT_ENABLED` — master switch (Phase 17).
+    /// Default `false` so `Default::default()` (used by tests) never
+    /// throttles; production opts in.
+    pub rate_limit_enabled: bool,
+    /// `MIDNIGHT_MANUAL_RATE_LIMIT_ANONYMOUS_RPS` — per-IP requests/sec for
+    /// the anonymous tier. Default 10.
+    pub rate_limit_anonymous_rps: u32,
+    /// `MIDNIGHT_MANUAL_RATE_LIMIT_UPLIFT_RPS` — per-user requests/sec for
+    /// GitHub-SSO read-uplift tokens. Default 60.
+    pub rate_limit_uplift_rps: u32,
+    /// `MIDNIGHT_MANUAL_RATE_LIMIT_ADMIN_RPS` — per-user requests/sec for
+    /// admin-tier tokens. Default 1000.
+    pub rate_limit_admin_rps: u32,
+    /// `MIDNIGHT_MANUAL_RATE_LIMIT_CLIENT_IP_HEADER` — header carrying the
+    /// real client IP behind the proxy. Default `fly-client-ip`.
+    pub rate_limit_client_ip_header: String,
+    /// `MIDNIGHT_MANUAL_RATE_LIMIT_OVERRIDE_REFRESH_SECS` — override-cache
+    /// refresh interval. Default 30.
+    pub rate_limit_override_refresh_secs: u64,
 }
 
 impl Default for ServerConfig {
@@ -126,6 +145,12 @@ impl Default for ServerConfig {
             source_retirement_interval_minutes: 60,
             source_version_sweep_grace_hours: 24,
             abort_grace_hours: 1,
+            rate_limit_enabled: false,
+            rate_limit_anonymous_rps: 10,
+            rate_limit_uplift_rps: 60,
+            rate_limit_admin_rps: 1000,
+            rate_limit_client_ip_header: "fly-client-ip".into(),
+            rate_limit_override_refresh_secs: 30,
         }
     }
 }
@@ -197,6 +222,30 @@ impl ServerConfig {
             .ok()
             .and_then(|s| s.parse::<i64>().ok())
             .map_or(1, |v| v.clamp(1, 24 * 365));
+        let rate_limit_enabled = env::var("MIDNIGHT_MANUAL_RATE_LIMIT_ENABLED")
+            .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+            .unwrap_or(false);
+        let rate_limit_anonymous_rps = env::var("MIDNIGHT_MANUAL_RATE_LIMIT_ANONYMOUS_RPS")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+            .map_or(10, |v| v.max(1));
+        let rate_limit_uplift_rps = env::var("MIDNIGHT_MANUAL_RATE_LIMIT_UPLIFT_RPS")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+            .map_or(60, |v| v.max(1));
+        let rate_limit_admin_rps = env::var("MIDNIGHT_MANUAL_RATE_LIMIT_ADMIN_RPS")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+            .map_or(1000, |v| v.max(1));
+        let rate_limit_client_ip_header = env::var("MIDNIGHT_MANUAL_RATE_LIMIT_CLIENT_IP_HEADER")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "fly-client-ip".to_owned());
+        let rate_limit_override_refresh_secs =
+            env::var("MIDNIGHT_MANUAL_RATE_LIMIT_OVERRIDE_REFRESH_SECS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map_or(30, |v| v.max(1));
         Ok(Self {
             database_url,
             port,
@@ -221,6 +270,12 @@ impl ServerConfig {
             source_retirement_interval_minutes,
             source_version_sweep_grace_hours,
             abort_grace_hours,
+            rate_limit_enabled,
+            rate_limit_anonymous_rps,
+            rate_limit_uplift_rps,
+            rate_limit_admin_rps,
+            rate_limit_client_ip_header,
+            rate_limit_override_refresh_secs,
         })
     }
 }
@@ -231,4 +286,20 @@ pub enum ConfigError {
     /// A required env var was unset.
     #[error("required env var `{0}` is not set")]
     Missing(&'static str),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rate_limit_defaults_are_disabled() {
+        let c = ServerConfig::default();
+        assert!(!c.rate_limit_enabled);
+        assert_eq!(c.rate_limit_anonymous_rps, 10);
+        assert_eq!(c.rate_limit_uplift_rps, 60);
+        assert_eq!(c.rate_limit_admin_rps, 1000);
+        assert_eq!(c.rate_limit_client_ip_header, "fly-client-ip");
+        assert_eq!(c.rate_limit_override_refresh_secs, 30);
+    }
 }
