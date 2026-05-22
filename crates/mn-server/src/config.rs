@@ -117,6 +117,10 @@ pub struct ServerConfig {
     /// `MIDNIGHT_MANUAL_RATE_LIMIT_OVERRIDE_REFRESH_SECS` — override-cache
     /// refresh interval. Default 30.
     pub rate_limit_override_refresh_secs: u64,
+    /// `MIDNIGHT_MANUAL_MAX_QUERIES_PER_REQUEST` — the per-request cap on
+    /// `queries.length` for `POST /v1/search` (D25, EC-88). Default 10;
+    /// clamped to the hard ceiling `[1, 50]`.
+    pub max_queries_per_request: u32,
 }
 
 impl Default for ServerConfig {
@@ -154,6 +158,7 @@ impl Default for ServerConfig {
             rate_limit_admin_rps: 1000,
             rate_limit_client_ip_header: "fly-client-ip".into(),
             rate_limit_override_refresh_secs: 30,
+            max_queries_per_request: 10,
         }
     }
 }
@@ -252,6 +257,10 @@ impl ServerConfig {
                 .ok()
                 .and_then(|s| s.parse::<u64>().ok())
                 .map_or(30, |v| v.max(1));
+        let max_queries_per_request = env::var("MIDNIGHT_MANUAL_MAX_QUERIES_PER_REQUEST")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+            .map_or(10, |v| v.clamp(1, 50));
         Ok(Self {
             database_url,
             port,
@@ -282,6 +291,7 @@ impl ServerConfig {
             rate_limit_admin_rps,
             rate_limit_client_ip_header,
             rate_limit_override_refresh_secs,
+            max_queries_per_request,
         })
     }
 }
@@ -307,5 +317,6 @@ mod tests {
         assert_eq!(c.rate_limit_admin_rps, 1000);
         assert_eq!(c.rate_limit_client_ip_header, "fly-client-ip");
         assert_eq!(c.rate_limit_override_refresh_secs, 30);
+        assert_eq!(c.max_queries_per_request, 10);
     }
 }

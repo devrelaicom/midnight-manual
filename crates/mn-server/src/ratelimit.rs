@@ -99,6 +99,12 @@ impl TokenBucket {
             Decision::Rejected { retry_after_secs: retry.max(1) }
         }
     }
+
+    /// Add `n` tokens back, capped at capacity `rps`. No time-based refill —
+    /// this is a correction, not elapsed accrual.
+    fn refund(&mut self, rps: f64, n: f64) {
+        self.tokens = (self.tokens + n).min(rps);
+    }
 }
 
 /// Which tier a request was charged against. The label appears in the
@@ -212,6 +218,18 @@ impl RateLimiter {
         let decision = bucket.charge(f64::from(rps), f64::from(cost), now);
         drop(map);
         decision
+    }
+
+    /// Return `n` tokens to `key`'s bucket (capped at the tier capacity
+    /// `rps`). Used so a request rejected by a cheap pre-charge validation
+    /// (the multi-query cap, EC-88) costs nothing. No-op if the bucket has
+    /// already been reaped.
+    pub fn refund(&self, key: &Key, rps: u32, n: u32) {
+        let mut map = self.buckets.lock().expect("buckets lock poisoned");
+        if let Some(bucket) = map.get_mut(key) {
+            bucket.refund(f64::from(rps), f64::from(n));
+        }
+        drop(map);
     }
 
     /// Reload the active override set from Postgres. Exposed so the refresh
@@ -435,6 +453,27 @@ mod tests {
     fn charge_decrements_and_rejects() {
         let l = limiter();
         let key = Key::Ip("1.1.1.1".into());
+        for _ in 0..5 {
+            assert!(matches!(l.charge(&key, 5, 1), Decision::Allowed { .. }));
+        }
+        assert!(matches!(l.charge(&key, 5, 1), Decision::Rejected { .. }));
+    }
+
+    #[test]
+    fn refund_restores_tokens_capped_at_capacity() {
+        let l = limiter();
+        let key = Key::Ip("2.2.2.2".into());
+        // Drain the bucket (capacity 5).
+        for _ in 0..5 {
+            assert!(matches!(l.charge(&key, 5, 1), Decision::Allowed { .. }));
+        }
+        assert!(matches!(l.charge(&key, 5, 1), Decision::Rejected { .. }));
+        // Refund one → exactly one more charge succeeds, then empty again.
+        l.refund(&key, 5, 1);
+        assert!(matches!(l.charge(&key, 5, 1), Decision::Allowed { .. }));
+        assert!(matches!(l.charge(&key, 5, 1), Decision::Rejected { .. }));
+        // Over-refund is capped at capacity, not unbounded.
+        l.refund(&key, 5, 100);
         for _ in 0..5 {
             assert!(matches!(l.charge(&key, 5, 1), Decision::Allowed { .. }));
         }

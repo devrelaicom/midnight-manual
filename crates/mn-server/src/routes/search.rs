@@ -19,7 +19,9 @@ use uuid::Uuid;
 
 use crate::app::AppState;
 use crate::error;
+use crate::middleware::rate_limit::RateLimitContext;
 use crate::middleware::request_id::RequestId;
+use crate::ratelimit::Decision;
 
 /// Mount the search route.
 #[must_use]
@@ -103,10 +105,13 @@ pub struct ScoreBreakdown {
 /// Per-query timings and counters.
 #[derive(Debug, Serialize)]
 pub struct SearchMetadata {
-    /// Per-query records, one per input query.
+    /// Per-query records, one per distinct input query.
     pub per_query: Vec<PerQueryRecord>,
     /// Total candidates considered before the limit cap.
     pub total_candidates: usize,
+    /// How many input queries were dropped as duplicates before retrieval
+    /// (EC-90). Duplicates do not inflate the rate-limit cost.
+    pub deduplicated_count: usize,
 }
 
 /// One per-query record.
@@ -124,9 +129,35 @@ pub struct PerQueryRecord {
 async fn search(
     State(state): State<AppState>,
     Extension(req_id): Extension<RequestId>,
+    rl: Option<Extension<RateLimitContext>>,
     Json(req): Json<SearchRequest>,
 ) -> Response {
     let rid = req_id.as_str();
+    let rl_ctx = rl.as_ref().map(|Extension(c)| c);
+
+    // Cap check (EC-88) — before any work or rate-limit consumption. The
+    // effective cap is the configured value clamped to the hard ceiling of 50.
+    let cap = state.cfg.max_queries_per_request.min(50);
+    if req.queries.len() > cap as usize {
+        // Refund the single token the middleware already charged so an
+        // over-cap request truly costs nothing.
+        if let (Some(limiter), Some(ctx)) = (state.rate_limiter.as_ref(), rl_ctx) {
+            limiter.refund(&ctx.key, ctx.limit, 1);
+        }
+        return error::into_response(
+            CoreError::builder(ErrorCode::MultiQueryLimitExceeded)
+                .message(format!(
+                    "queries.length {} exceeds the per-request cap of {cap}",
+                    req.queries.len()
+                ))
+                .remediation(format!(
+                    "reduce queries.length; the configured cap is {cap} and the hard ceiling is 50"
+                ))
+                .build(),
+            rid,
+        );
+    }
+
     // Validate request shape.
     if req.queries.is_empty() {
         return error::into_response(
@@ -181,11 +212,51 @@ async fn search(
         }
     }
 
-    // Run vector search per query. (FTS + RRF cross-merge lands in a follow-up.)
-    let mut per_query = Vec::with_capacity(req.queries.len());
-    let mut all_candidates: Vec<Vec<(Uuid, f64)>> = Vec::with_capacity(req.queries.len());
+    // Deduplicate identical {text, vector} pairs (EC-90) so duplicates don't
+    // inflate the rate-limit cost. First-occurrence order is preserved.
+    let mut seen = std::collections::HashSet::new();
+    let mut distinct: Vec<&QueryPair> = Vec::new();
+    for q in &req.queries {
+        if seen.insert(query_hash(q)) {
+            distinct.push(q);
+        }
+    }
+    let deduplicated_count = req.queries.len() - distinct.len();
 
-    for (i, q) in req.queries.iter().enumerate() {
+    // Charge the multi-query premium (D25): total cost is `max(1, distinct)`.
+    // The middleware already charged 1, so charge the remainder against the
+    // same bucket. EC-92: insufficient budget returns 429 naming the cost;
+    // the `X-RateLimit-*` headers (set by the middleware on the way out)
+    // reflect the post-charge balance.
+    if let (Some(limiter), Some(ctx)) = (state.rate_limiter.as_ref(), rl_ctx) {
+        let extra = u32::try_from(distinct.len().saturating_sub(1)).unwrap_or(u32::MAX);
+        if extra > 0 {
+            if let Decision::Rejected { .. } = limiter.charge(&ctx.key, ctx.limit, extra) {
+                let remaining = match limiter.charge(&ctx.key, ctx.limit, 0) {
+                    Decision::Allowed { remaining, .. } => remaining,
+                    Decision::Rejected { .. } => 0,
+                };
+                return error::into_response(
+                    CoreError::builder(ErrorCode::RateLimited)
+                        .message(format!(
+                            "rate-limit budget insufficient for {} distinct queries \
+                             (cost {} tokens); {remaining} remaining",
+                            distinct.len(),
+                            distinct.len()
+                        ))
+                        .remediation("reduce queries.length or request a higher rate-limit tier")
+                        .build(),
+                    rid,
+                );
+            }
+        }
+    }
+
+    // Run vector search per query. (FTS + RRF cross-merge lands in a follow-up.)
+    let mut per_query = Vec::with_capacity(distinct.len());
+    let mut all_candidates: Vec<Vec<(Uuid, f64)>> = Vec::with_capacity(distinct.len());
+
+    for (i, q) in distinct.iter().enumerate() {
         let t0 = std::time::Instant::now();
         let vec = Vector::from(q.vector.clone());
         // pgvector cosine distance: 0 = identical, 2 = opposite.
@@ -295,9 +366,25 @@ async fn search(
 
     Json(SearchResponse {
         results,
-        search_metadata: SearchMetadata { per_query, total_candidates },
+        search_metadata: SearchMetadata {
+            per_query,
+            total_candidates,
+            deduplicated_count,
+        },
     })
     .into_response()
+}
+
+/// Stable content hash of a query pair (`text` + the raw bits of each vector
+/// component) used to detect duplicate queries for EC-90 dedup.
+fn query_hash(q: &QueryPair) -> u64 {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    q.text.hash(&mut h);
+    for f in &q.vector {
+        f.to_bits().hash(&mut h);
+    }
+    h.finish()
 }
 
 /// Decode a chunk row into a `SearchResult`. Every column is `try_get`'d so a
