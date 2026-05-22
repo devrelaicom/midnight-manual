@@ -9,7 +9,8 @@
 #![allow(
     clippy::too_many_lines,
     clippy::doc_markdown,
-    clippy::cast_precision_loss
+    clippy::cast_precision_loss,
+    clippy::suboptimal_flops
 )]
 
 mod common;
