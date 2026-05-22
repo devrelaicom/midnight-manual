@@ -92,11 +92,13 @@ pub enum Command {
     Users(commands::users::Args),
     /// Run an admin ingest from a manifest (admin; hidden by default).
     Ingest(commands::ingest::Args),
+    /// Per-CIDR rate-limit override CRUD (admin; hidden by default).
+    Ratelimits(commands::ratelimits::Args),
 }
 
 /// Subcommand names that are admin-only and therefore hidden from `--help`
 /// unless `MIDNIGHT_MANUAL_SHOW_ADMIN_CMDS=1` is set (FR-066).
-const ADMIN_SUBCOMMANDS: &[&str] = &["keys", "login", "users", "ingest"];
+const ADMIN_SUBCOMMANDS: &[&str] = &["keys", "login", "users", "ingest", "ratelimits"];
 
 /// Parse argv and dispatch.
 ///
@@ -161,6 +163,9 @@ pub async fn run() -> Result<()> {
             commands::ingest::run(args, cli.server.as_deref(), &telemetry, crate::VERSION, cli.json)
                 .await
         }
+        Command::Ratelimits(args) => {
+            commands::ratelimits::run(args, cli.server.as_deref(), cli.json).await
+        }
     };
 
     let duration_ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
@@ -203,6 +208,7 @@ const fn cli_command_name(cmd: &Command) -> CliCommandName {
         }
         Command::Telemetry(_) => CliCommandName::Telemetry,
         Command::Ingest(_) => CliCommandName::Ingest,
+        Command::Ratelimits(_) => CliCommandName::Ratelimits,
     }
 }
 

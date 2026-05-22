@@ -11,5 +11,6 @@ pub mod document;
 pub mod embedding_model;
 pub mod node;
 pub mod package;
+pub mod rate_limit_override;
 pub mod source;
 pub mod source_version;
