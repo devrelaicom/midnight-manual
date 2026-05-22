@@ -43,6 +43,12 @@ pub struct SearchRequest {
     /// the cloud's, so callers can pass arbitrary filter JSON.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub filters: Option<serde_json::Value>,
+    /// Cloud-side ordering key. When reranking locally, the MCP server asks for
+    /// `"score"` (RRF/relevance order) so the candidate pool the cross-encoder
+    /// reranks isn't pre-filtered by the cloud's confidence-first default
+    /// (US6). `None` lets the cloud apply its default (`confidence`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sort_by: Option<&'static str>,
 }
 
 /// Errors the cloud client can produce.

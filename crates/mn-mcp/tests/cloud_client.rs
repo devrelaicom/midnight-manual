@@ -21,6 +21,7 @@ fn make_search_req() -> SearchRequest {
         client_embedding_model: "bge-base-en-v1.5@1".into(),
         limit: 10,
         filters: None,
+        sort_by: None,
     }
 }
 
