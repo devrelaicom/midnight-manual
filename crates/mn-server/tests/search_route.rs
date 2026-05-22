@@ -143,14 +143,19 @@ async fn search_returns_nearest_chunk_first() {
     let (a, _b) = seed(&h.pool).await;
     let app = app::build(h.pool.clone(), cfg()).expect("build app");
 
-    // Query vector very close to chunk_a's seed (0.10) — chunk_a should rank first.
+    // Query vector very close to chunk_a's seed (0.10) — chunk_a should rank
+    // first. `limit` is generous because parallel CI shares one schema: every
+    // other `seed()` call leaves a chunk with the SAME 0.10 vector AND the same
+    // content, so the FTS + vector candidate pool fills with indistinguishable
+    // ties. A small limit could truncate this test's own chunk_a out of the
+    // fused top-N purely by tie-break order; 100 keeps every true neighbour.
     let body = serde_json::json!({
         "queries": [{
             "text": "alpha-ish content",
             "vector": unit_vector(0.11),
         }],
         "client_embedding_model": "bge-base-en-v1.5@1",
-        "limit": 5,
+        "limit": 100,
     });
     let resp = app
         .oneshot(
