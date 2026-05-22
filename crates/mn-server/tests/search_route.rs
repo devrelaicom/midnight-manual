@@ -17,10 +17,11 @@ mod common;
 
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
-use mn_core::provenance::Provenance;
+use mn_core::provenance::{Attribution, LanguageTarget, Provenance};
 use mn_core::types::{ChunkStatus, DocumentKind, NodeKind, SourceKind};
 use mn_server::{app, config::ServerConfig};
 use mn_store::entities::{chunk, document, embedding_model, node, source, source_version};
+use time::{Duration, OffsetDateTime};
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -405,6 +406,143 @@ async fn seed_hybrid(pool: &sqlx::PgPool) -> (Uuid, Uuid) {
     (embedded, fts_only)
 }
 
+/// Seed one active source_version with two chunks that share an identical
+/// vector and a globally-rare FTS token (so retrieval relevance is the same for
+/// both), but live under documents with very different provenance:
+/// `high` (Foundation, verified, fresh) and `low` (Unknown, unverified, stale).
+/// Returns `(high_chunk_id, low_chunk_id, rare_token)`.
+async fn seed_scored(pool: &sqlx::PgPool) -> (Uuid, Uuid, String) {
+    let model_id = embedding_model::upsert(pool, "bge-base-en-v1.5", 1, 768, "baai")
+        .await
+        .unwrap();
+    let slug = format!("search-scored-test-{}", Uuid::new_v4());
+    let source_id = source::insert(pool, &slug, "Scored", SourceKind::DocsSite, None, 5)
+        .await
+        .unwrap();
+    let (sv_id, _) = source_version::create_building(pool, source_id, model_id, "0.1.0", "h")
+        .await
+        .unwrap();
+    let root = node::insert(pool, sv_id, None, NodeKind::Root, "root", 0)
+        .await
+        .unwrap();
+
+    // A token unique to this seed call so only these two chunks FTS-match it,
+    // immune to parallel-CI pollution from other seeds.
+    let token = format!("scoretok{}", Uuid::new_v4().simple());
+    let content = format!("{token} shared scoring content");
+    let vector = unit_vector(0.314);
+
+    let high_prov = Provenance {
+        attribution: Attribution::Foundation,
+        verified: true,
+        verified_by: Some("midnight-foundation".into()),
+        language_targets: vec![LanguageTarget {
+            name: "compact".into(),
+            version_constraint: Some(">=0.23".into()),
+        }],
+        ..Provenance::default()
+    };
+    let low_prov = Provenance {
+        attribution: Attribution::Unknown,
+        verified: false,
+        ..Provenance::default()
+    };
+
+    let high = seed_scored_chunk(
+        pool,
+        sv_id,
+        root,
+        model_id,
+        "high.md",
+        &high_prov,
+        Some(OffsetDateTime::now_utc() - Duration::days(14)),
+        &content,
+        &vector,
+        0,
+    )
+    .await;
+    let low = seed_scored_chunk(
+        pool,
+        sv_id,
+        root,
+        model_id,
+        "low.md",
+        &low_prov,
+        Some(OffsetDateTime::now_utc() - Duration::days(800)),
+        &content,
+        &vector,
+        1,
+    )
+    .await;
+
+    source_version::finalize(pool, sv_id).await.unwrap();
+    (high, low, token)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn seed_scored_chunk(
+    pool: &sqlx::PgPool,
+    sv_id: Uuid,
+    root: Uuid,
+    model_id: Uuid,
+    name: &str,
+    provenance: &Provenance,
+    source_modified_at: Option<OffsetDateTime>,
+    content: &str,
+    vector: &[f32],
+    order: i32,
+) -> Uuid {
+    let doc_node = node::insert(pool, sv_id, Some(root), NodeKind::Document, name, order)
+        .await
+        .unwrap();
+    let doc_id = document::insert(
+        pool,
+        document::NewDocument {
+            source_version_id: sv_id,
+            node_id: doc_node,
+            kind: DocumentKind::Markdown,
+            source_url: None,
+            published_url: None,
+            source_path: name,
+            language: Some("en"),
+            content_hash: name,
+            source_modified_at,
+            frontmatter: None,
+            provenance,
+            package_id: None,
+            char_count: 0,
+            token_count: 0,
+        },
+    )
+    .await
+    .unwrap();
+    let chunk_node = node::insert(pool, sv_id, Some(doc_node), NodeKind::Chunk, "c", 0)
+        .await
+        .unwrap();
+    chunk::insert(
+        pool,
+        chunk::NewChunk {
+            source_version_id: sv_id,
+            document_id: doc_id,
+            node_id: chunk_node,
+            chunk_index: 0,
+            total_chunks: 1,
+            content,
+            content_hash: name,
+            embedding: Some(vector.to_vec()),
+            embedding_model_id: model_id,
+            heading_path: &[],
+            symbol_path: &[],
+            start_byte: 0,
+            end_byte: 40,
+            token_count: 8,
+            status: ChunkStatus::Ready,
+        },
+    )
+    .await
+    .unwrap()
+}
+
 async fn post_search(app: axum::Router, body: serde_json::Value) -> serde_json::Value {
     let resp = app
         .oneshot(
@@ -572,6 +710,167 @@ async fn convenience_form_is_accepted_end_to_end() {
         "convenience form must drive the same hybrid retrieval as the canonical form"
     );
     assert_eq!(v["search_metadata"]["per_query"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn results_carry_confidence_fields() {
+    // Acceptance #1 / #7: every result carries trust_score, confidence, and a
+    // confidence_factors breakdown whose relevance_source is "rrf" on the cloud.
+    let h = common::boot().await;
+    let (_high, _low, token) = seed_scored(&h.pool).await;
+    let app = app::build(h.pool.clone(), cfg()).expect("build app");
+
+    let v = post_search(
+        app,
+        serde_json::json!({
+            "query": token,
+            "vector": unit_vector(0.314),
+            "client_embedding_model": "bge-base-en-v1.5@1",
+            "limit": 50,
+        }),
+    )
+    .await;
+
+    let results = v["results"].as_array().unwrap();
+    assert!(!results.is_empty());
+    for r in results {
+        let s = &r["scores"];
+        let trust = s["trust_score"].as_f64().unwrap();
+        let conf = s["confidence"].as_f64().unwrap();
+        assert!((0.0..=1.0).contains(&trust), "trust out of range: {trust}");
+        assert!((0.0..=1.0).contains(&conf), "confidence out of range: {conf}");
+        assert_eq!(s["confidence_factors"]["relevance_source"], "rrf");
+        assert!(s["confidence_factors"]["attribution"].is_string());
+        assert!(s["confidence_factors"]["age_days"].is_number());
+    }
+    assert!(v["search_metadata"]["filtered_by_confidence"].is_number());
+}
+
+#[tokio::test]
+async fn higher_trust_outranks_under_default_confidence_sort() {
+    // Acceptance #2/#9: with identical relevance, the Foundation+verified+fresh
+    // chunk outranks the Unknown+unverified+stale one under the default
+    // confidence sort.
+    let h = common::boot().await;
+    let (high, low, token) = seed_scored(&h.pool).await;
+    let app = app::build(h.pool.clone(), cfg()).expect("build app");
+
+    let v = post_search(
+        app,
+        serde_json::json!({
+            "query": token,
+            "vector": unit_vector(0.314),
+            "client_embedding_model": "bge-base-en-v1.5@1",
+            "limit": 50,
+        }),
+    )
+    .await;
+
+    let results = v["results"].as_array().unwrap();
+    let pos = |id: Uuid| {
+        results
+            .iter()
+            .position(|r| r["chunk_id"].as_str() == Some(id.to_string().as_str()))
+    };
+    let hi = pos(high).expect("high-trust chunk present");
+    let lo = pos(low).expect("low-trust chunk present");
+    assert!(hi < lo, "high-trust chunk (idx {hi}) must rank above low-trust (idx {lo})");
+
+    let hi_conf = results[hi]["scores"]["confidence"].as_f64().unwrap();
+    let lo_conf = results[lo]["scores"]["confidence"].as_f64().unwrap();
+    assert!(hi_conf > lo_conf, "high confidence {hi_conf} must exceed low {lo_conf}");
+    let hi_factors = &results[hi]["scores"]["confidence_factors"];
+    assert!(hi_factors["verified"].as_bool().unwrap());
+}
+
+#[tokio::test]
+async fn version_match_boost_applies_with_filter() {
+    // Acceptance #6: a language_target filter with a satisfied version lifts the
+    // matching chunk's version_match_multiplier above neutral.
+    let h = common::boot().await;
+    let (high, _low, token) = seed_scored(&h.pool).await;
+    let app = app::build(h.pool.clone(), cfg()).expect("build app");
+
+    let v = post_search(
+        app,
+        serde_json::json!({
+            "query": token,
+            "vector": unit_vector(0.314),
+            "client_embedding_model": "bge-base-en-v1.5@1",
+            "limit": 50,
+            "filters": { "language_target": { "name": "compact", "version_constraint_satisfies": "0.31" } },
+        }),
+    )
+    .await;
+
+    let results = v["results"].as_array().unwrap();
+    let hi = results
+        .iter()
+        .find(|r| r["chunk_id"].as_str() == Some(high.to_string().as_str()))
+        .expect("high-trust chunk present");
+    let factors = &hi["scores"]["confidence_factors"];
+    let vmm = factors["version_match_multiplier"].as_f64().unwrap();
+    assert!(vmm > 1.0, "satisfied version should boost (>1.0), got {vmm}");
+    assert_eq!(factors["language_target_query"]["version_constraint_satisfies"], "0.31");
+}
+
+#[tokio::test]
+async fn min_confidence_filters_before_limit() {
+    // Acceptance #10: an unreachable confidence floor drops every candidate and
+    // reports the count in filtered_by_confidence.
+    let h = common::boot().await;
+    let (_high, _low, token) = seed_scored(&h.pool).await;
+    let app = app::build(h.pool.clone(), cfg()).expect("build app");
+
+    let v = post_search(
+        app,
+        serde_json::json!({
+            "query": token,
+            "vector": unit_vector(0.314),
+            "client_embedding_model": "bge-base-en-v1.5@1",
+            "limit": 50,
+            // Confidence is strictly < 1.0 (the relevance term never reaches 1),
+            // so a floor of 1.0 filters everything.
+            "min_confidence": 1.0,
+        }),
+    )
+    .await;
+
+    assert!(v["results"].as_array().unwrap().is_empty());
+    let filtered = v["search_metadata"]["filtered_by_confidence"]
+        .as_u64()
+        .unwrap();
+    let total = v["search_metadata"]["total_candidates"].as_u64().unwrap();
+    assert!(filtered > 0, "expected some filtered, got {filtered}");
+    assert_eq!(filtered, total, "all candidates should be filtered by the 1.0 floor");
+}
+
+#[tokio::test]
+async fn include_scores_false_omits_scores() {
+    // The scores object is omitted when include_scores=false, but ranking still
+    // happens server-side.
+    let h = common::boot().await;
+    let (_high, _low, token) = seed_scored(&h.pool).await;
+    let app = app::build(h.pool.clone(), cfg()).expect("build app");
+
+    let v = post_search(
+        app,
+        serde_json::json!({
+            "query": token,
+            "vector": unit_vector(0.314),
+            "client_embedding_model": "bge-base-en-v1.5@1",
+            "limit": 50,
+            "include_scores": false,
+        }),
+    )
+    .await;
+
+    let results = v["results"].as_array().unwrap();
+    assert!(!results.is_empty());
+    for r in results {
+        assert!(r.get("scores").is_none(), "scores must be omitted");
+        assert!(r["chunk_id"].is_string());
+    }
 }
 
 #[tokio::test]

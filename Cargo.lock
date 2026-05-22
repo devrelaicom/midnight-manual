@@ -2710,12 +2710,14 @@ version = "0.1.0"
 dependencies = [
  "insta",
  "proptest",
+ "semver",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "time",
  "toml",
+ "tracing",
  "uuid",
 ]
 
@@ -2793,6 +2795,7 @@ dependencies = [
  "thiserror 2.0.18",
  "time",
  "tokio",
+ "toml",
  "tower",
  "tower-http",
  "tracing",

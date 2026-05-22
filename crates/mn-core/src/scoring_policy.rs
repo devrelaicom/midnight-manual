@@ -15,6 +15,7 @@ pub const SCHEMA_VERSION: u32 = 1;
 
 /// Full scoring-policy shape — every section is independently overridable.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ScoringPolicy {
     /// Schema sentinel. Always `1` in v1.
     pub schema_version: u32,
@@ -34,6 +35,7 @@ pub struct ScoringPolicy {
 
 /// `[attribution]` multipliers (highest trust to lowest).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AttributionMultipliers {
     /// Foundation-attributed content.
     pub foundation: f64,
@@ -49,6 +51,7 @@ pub struct AttributionMultipliers {
 
 /// `[verification]` — multipliers based on who verified the content.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct VerificationMultipliers {
     /// Verified by the Midnight Foundation.
     pub verified_by_foundation: f64,
@@ -62,6 +65,7 @@ pub struct VerificationMultipliers {
 
 /// `[freshness]` — exponential-decay model parameters.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FreshnessParams {
     /// Half-life in days (default 180).
     pub half_life_days: f64,
@@ -72,6 +76,7 @@ pub struct FreshnessParams {
 
 /// `[deprecation]` — penalty when `provenance.deprecation.is_deprecated = true`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeprecationParams {
     /// Multiplier (default 0.30 → -70%).
     pub penalty_multiplier: f64,
@@ -80,6 +85,7 @@ pub struct DeprecationParams {
 /// `[version_match]` — multipliers when query-side `language_target` constraint
 /// is checked against the chunk's `provenance.language_targets`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct VersionMatchMultipliers {
     /// Chunk's target satisfies the query constraint.
     pub satisfies: f64,
@@ -91,6 +97,7 @@ pub struct VersionMatchMultipliers {
 
 /// `[blend]` — exponents in the geometric-mean blend `trust^w_t * relevance^w_r`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BlendWeights {
     /// Trust-side exponent (default 0.55).
     pub trust_weight: f64,
@@ -156,7 +163,7 @@ impl ScoringPolicy {
     }
 
     fn validate_finite(&self) -> Result<(), ScoringPolicyError> {
-        let weights: [(&str, f64); 14] = [
+        let weights: [(&str, f64); 16] = [
             ("attribution.foundation", self.attribution.foundation),
             ("attribution.partner", self.attribution.partner),
             ("attribution.third_party", self.attribution.third_party),
@@ -169,6 +176,8 @@ impl ScoringPolicy {
             ("freshness.half_life_days", self.freshness.half_life_days),
             ("deprecation.penalty_multiplier", self.deprecation.penalty_multiplier),
             ("version_match.satisfies", self.version_match.satisfies),
+            ("version_match.neutral", self.version_match.neutral),
+            ("version_match.unsatisfied", self.version_match.unsatisfied),
             ("blend.trust_weight", self.blend.trust_weight),
             ("blend.relevance_weight", self.blend.relevance_weight),
         ];
@@ -259,6 +268,27 @@ mod tests {
         let body = toml::to_string(&p).unwrap();
         let err = ScoringPolicy::parse(&body).unwrap_err();
         assert!(matches!(err, ScoringPolicyError::NonFiniteWeight { .. }));
+    }
+
+    #[test]
+    fn rejects_unknown_key() {
+        // Acceptance #11: unknown keys fail the load (fail-fast, Constitution VIII).
+        let mut body = toml::to_string(&ScoringPolicy::default()).unwrap();
+        body.push_str("\nbogus_top_level_key = 42\n");
+        let err = ScoringPolicy::parse(&body).unwrap_err();
+        assert!(matches!(err, ScoringPolicyError::Parse(_)));
+    }
+
+    #[test]
+    fn rejects_negative_neutral_or_unsatisfied() {
+        for mutate in [
+            |p: &mut ScoringPolicy| p.version_match.neutral = -0.1,
+            |p: &mut ScoringPolicy| p.version_match.unsatisfied = -0.1,
+        ] {
+            let mut p = ScoringPolicy::default();
+            mutate(&mut p);
+            assert!(p.validate_finite().is_err());
+        }
     }
 
     #[test]

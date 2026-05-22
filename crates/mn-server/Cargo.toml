@@ -25,6 +25,7 @@ testcontainers = { workspace = true }
 tower          = { workspace = true }
 wiremock       = { workspace = true }
 serde_json     = { workspace = true }
+toml           = { workspace = true }
 
 [dependencies]
 mn-core        = { path = "../mn-core" }
