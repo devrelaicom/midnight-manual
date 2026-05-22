@@ -35,7 +35,7 @@ pub fn list() -> ToolsListResult {
             ToolDescription {
                 name: "search",
                 description:
-                    "Hybrid (FTS + vector) retrieval over the Midnight corpus with optional cross-encoder reranking and trust-aware confidence scoring. Patterns: hyde (question + hypothetical answer), multi_query (2-3 paraphrases), step_back (question + abstract form). See docs/cookbook/query-enhancement.md.",
+                    "Hybrid (FTS + vector) retrieval over the Midnight corpus, with optional cross-encoder reranking and trust-aware confidence scoring. Provide the single-query `{query, vector}` form, or a `queries` array of 1-10 `{text, vector}` pairs that RRF fuses across. The caller embeds each text. Rate-limit cost is max(1, distinct queries) tokens (D25).\n\nPatterns (full worked examples in docs/cookbook/query-enhancement.md):\n- hyde: send the question plus a hypothetical answer as a second query, e.g. queries=[\"<the user's question>\", \"<a 1-2 sentence hypothetical answer the agent drafts>\"]. Lifts recall when the question is short or jargon-light.\n- multi_query: send 2-3 paraphrases varying vocabulary and breadth, e.g. queries=[\"compile a contract\", \"build source into a deployable artifact\", \"smart-contract build step\"]. Helps when synonyms matter.\n- step_back: send the question plus a more abstract framing, e.g. queries=[\"why did this specific call fail?\", \"how does the platform validate calls?\"]. Helps when the question is over-specific.",
                 input_schema: search_input_schema(),
             },
             ToolDescription {

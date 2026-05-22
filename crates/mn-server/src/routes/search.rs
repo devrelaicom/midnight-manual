@@ -30,11 +30,24 @@ pub fn router() -> Router<AppState> {
 }
 
 /// Request body shape for `POST /v1/search`.
+///
+/// Two mutually-exclusive input forms are accepted: the canonical `queries`
+/// array (multi-query, RRF across pairs) or the single-query convenience form
+/// `{query, vector}` (D3 / acceptance #6). They are normalized to the same
+/// internal query list by `normalize_queries`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct SearchRequest {
-    /// One or more query pairs. v1: must be non-empty; multi-query (>1) RRFs
-    /// across pairs.
+    /// Zero or more query pairs. Multi-query (>1) RRFs across pairs. Mutually
+    /// exclusive with the convenience `query`/`vector` fields.
+    #[serde(default)]
     pub queries: Vec<QueryPair>,
+    /// Single-query convenience form: the query text. Pairs with `vector` and
+    /// is mutually exclusive with `queries`.
+    #[serde(default)]
+    pub query: Option<String>,
+    /// Single-query convenience form: the pre-computed embedding for `query`.
+    #[serde(default)]
+    pub vector: Option<Vec<f32>>,
     /// The embedding model identifier the client used to produce each
     /// `vector`. MUST match the corpus's active model identifier (D12 /
     /// FR-038); mismatch returns 409.
@@ -48,7 +61,7 @@ pub struct SearchRequest {
 }
 
 /// One {text, vector} pair.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct QueryPair {
     /// The query text, used for the full-text-search half of retrieval.
     pub text: String,
@@ -145,10 +158,25 @@ async fn search(
     let rid = req_id.as_str();
     let rl_ctx = rl.as_ref().map(|Extension(c)| c);
 
+    // Normalize the single-query convenience form `{query, vector}` (#6) into
+    // the canonical query list. Ambiguous/incomplete requests are rejected.
+    let queries = match normalize_queries(&req) {
+        Ok(queries) => queries,
+        Err((message, remediation)) => {
+            return error::into_response(
+                CoreError::builder(ErrorCode::InvalidRequest)
+                    .message(message)
+                    .remediation(remediation)
+                    .build(),
+                rid,
+            );
+        }
+    };
+
     // Cap check (EC-88) — before any work or rate-limit consumption. The
     // effective cap is the configured value clamped to the hard ceiling of 50.
     let cap = state.cfg.max_queries_per_request.min(50);
-    if req.queries.len() > cap as usize {
+    if queries.len() > cap as usize {
         // Refund the single token the middleware already charged so an
         // over-cap request truly costs nothing.
         if let (Some(limiter), Some(ctx)) = (state.rate_limiter.as_ref(), rl_ctx) {
@@ -158,7 +186,7 @@ async fn search(
             CoreError::builder(ErrorCode::MultiQueryLimitExceeded)
                 .message(format!(
                     "queries.length {} exceeds the per-request cap of {cap}",
-                    req.queries.len()
+                    queries.len()
                 ))
                 .remediation(format!(
                     "reduce queries.length; the configured cap is {cap} and the hard ceiling is 50"
@@ -169,11 +197,24 @@ async fn search(
     }
 
     // Validate request shape.
-    if req.queries.is_empty() {
+    if queries.is_empty() {
         return error::into_response(
             CoreError::builder(ErrorCode::InvalidRequest)
                 .message("queries must contain at least one entry")
                 .remediation("supply one or more `{text, vector}` pairs in the `queries` array")
+                .build(),
+            rid,
+        );
+    }
+
+    // Reject when every query has empty/whitespace-only text (#7): such a
+    // request can never drive the FTS half of hybrid retrieval and signals a
+    // malformed caller.
+    if queries.iter().all(|q| q.text.trim().is_empty()) {
+        return error::into_response(
+            CoreError::builder(ErrorCode::InvalidRequest)
+                .message("every query has empty `text`")
+                .remediation("supply non-empty query text so full-text search can run")
                 .build(),
             rid,
         );
@@ -207,7 +248,7 @@ async fn search(
     }
 
     // Vector-dim guard: every query's vector must be 768 dims (the seed model).
-    for (i, q) in req.queries.iter().enumerate() {
+    for (i, q) in queries.iter().enumerate() {
         if q.vector.len() != 768 {
             return error::into_response(
                 CoreError::builder(ErrorCode::InvalidRequest)
@@ -226,12 +267,12 @@ async fn search(
     // inflate the rate-limit cost. First-occurrence order is preserved.
     let mut seen = std::collections::HashSet::new();
     let mut distinct: Vec<&QueryPair> = Vec::new();
-    for q in &req.queries {
+    for q in &queries {
         if seen.insert(query_hash(q)) {
             distinct.push(q);
         }
     }
-    let deduplicated_count = req.queries.len() - distinct.len();
+    let deduplicated_count = queries.len() - distinct.len();
 
     // Charge the multi-query premium (D25): total cost is `max(1, distinct)`.
     // The middleware already charged 1, so charge the remainder against the
@@ -389,6 +430,39 @@ async fn search(
     .into_response()
 }
 
+/// Resolve the effective query list from either the canonical `queries` array
+/// or the single-query convenience form `{query, vector}` (acceptance #6).
+///
+/// The two forms are mutually exclusive. Returns `Err((message, remediation))`
+/// for an ambiguous (both forms) or incomplete (only one of `query`/`vector`)
+/// request. An entirely empty request yields `Ok(vec![])` so the caller's
+/// empty-queries guard produces the canonical error.
+fn normalize_queries(req: &SearchRequest) -> Result<Vec<QueryPair>, (String, String)> {
+    let has_convenience = req.query.is_some() || req.vector.is_some();
+    if !req.queries.is_empty() {
+        if has_convenience {
+            return Err((
+                "provide either `queries` or the single-query `{query, vector}` form, not both"
+                    .to_owned(),
+                "drop `query`/`vector` when using `queries`, or send a single `{query, vector}`"
+                    .to_owned(),
+            ));
+        }
+        return Ok(req.queries.clone());
+    }
+    match (req.query.as_ref(), req.vector.as_ref()) {
+        (Some(text), Some(vector)) => Ok(vec![QueryPair {
+            text: text.clone(),
+            vector: vector.clone(),
+        }]),
+        (Some(_), None) | (None, Some(_)) => Err((
+            "the single-query form requires both `query` and `vector`".to_owned(),
+            "include the 768-dim `vector` alongside `query`, or use the `queries` array".to_owned(),
+        )),
+        (None, None) => Ok(Vec::new()),
+    }
+}
+
 /// Stable content hash of a query pair (`text` + the raw bits of each vector
 /// component) used to detect duplicate queries for EC-90 dedup.
 fn query_hash(q: &QueryPair) -> u64 {
@@ -490,4 +564,74 @@ fn decode_search_row(
             matched_queries,
         },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_queries, QueryPair, SearchRequest};
+    use mn_retrieval::filters::SearchFilters;
+
+    fn req(
+        queries: Vec<QueryPair>,
+        query: Option<String>,
+        vector: Option<Vec<f32>>,
+    ) -> SearchRequest {
+        SearchRequest {
+            queries,
+            query,
+            vector,
+            client_embedding_model: "bge-base-en-v1.5@1".to_owned(),
+            limit: 20,
+            filters: SearchFilters::default(),
+        }
+    }
+
+    #[test]
+    fn convenience_form_normalizes_identically_to_canonical() {
+        let v = vec![0.5_f32; 768];
+        let convenience = req(Vec::new(), Some("hello world".to_owned()), Some(v.clone()));
+        let canonical = req(
+            vec![QueryPair {
+                text: "hello world".to_owned(),
+                vector: v,
+            }],
+            None,
+            None,
+        );
+        // The convenience form is pure sugar: both shapes resolve to the exact
+        // same internal query list, so downstream processing is byte-identical.
+        assert_eq!(
+            normalize_queries(&convenience).unwrap(),
+            normalize_queries(&canonical).unwrap()
+        );
+    }
+
+    #[test]
+    fn rejects_both_forms_at_once() {
+        let v = vec![0.5_f32; 768];
+        let both = req(
+            vec![QueryPair {
+                text: "a".to_owned(),
+                vector: v.clone(),
+            }],
+            Some("b".to_owned()),
+            Some(v),
+        );
+        assert!(normalize_queries(&both).is_err());
+    }
+
+    #[test]
+    fn rejects_incomplete_convenience_form() {
+        let only_query = req(Vec::new(), Some("a".to_owned()), None);
+        let only_vector = req(Vec::new(), None, Some(vec![0.5_f32; 768]));
+        assert!(normalize_queries(&only_query).is_err());
+        assert!(normalize_queries(&only_vector).is_err());
+    }
+
+    #[test]
+    fn empty_request_yields_empty_list() {
+        assert!(normalize_queries(&req(Vec::new(), None, None))
+            .unwrap()
+            .is_empty());
+    }
 }

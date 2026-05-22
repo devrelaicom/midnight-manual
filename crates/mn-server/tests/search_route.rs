@@ -541,3 +541,65 @@ async fn results_carry_rrf_score_in_descending_order() {
         prev = s;
     }
 }
+
+#[tokio::test]
+async fn convenience_form_is_accepted_end_to_end() {
+    // Acceptance #6: the single-query `{query, vector}` form is processed the
+    // same as `queries: [{text, vector}]`. (The strict byte-identical guarantee
+    // is covered by the `normalize_queries` unit test; here we confirm the route
+    // accepts the shape end-to-end and returns the expected chunk.)
+    let h = common::boot().await;
+    let (_embedded, fts_only) = seed_hybrid(&h.pool).await;
+    let app = app::build(h.pool.clone(), cfg()).expect("build app");
+
+    let v = post_search(
+        app,
+        serde_json::json!({
+            "query": "zzqxftsonly",
+            "vector": unit_vector(0.4243),
+            "client_embedding_model": "bge-base-en-v1.5@1",
+            "limit": 50,
+        }),
+    )
+    .await;
+
+    let results = v["results"].as_array().unwrap();
+    let fts_str = fts_only.to_string();
+    assert!(
+        results
+            .iter()
+            .any(|r| r["chunk_id"].as_str() == Some(fts_str.as_str())),
+        "convenience form must drive the same hybrid retrieval as the canonical form"
+    );
+    assert_eq!(v["search_metadata"]["per_query"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn search_returns_400_when_all_text_empty() {
+    // Acceptance #7: every query with empty/whitespace text is rejected.
+    let h = common::boot().await;
+    let app = app::build(h.pool.clone(), cfg()).expect("build app");
+
+    let body = serde_json::json!({
+        "queries": [
+            { "text": "", "vector": unit_vector(0.1) },
+            { "text": "   ", "vector": unit_vector(0.2) },
+        ],
+        "client_embedding_model": "bge-base-en-v1.5@1",
+    });
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/search")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["error"]["code"], "invalid_request");
+}

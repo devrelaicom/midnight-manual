@@ -804,7 +804,11 @@ components:
     # ===== Search =====
     SearchRequest:
       type: object
-      required: [queries, client_embedding_model]
+      required: [client_embedding_model]
+      description: >-
+        Provide EITHER `queries` (canonical multi-query form) OR the single-query
+        convenience pair `query` + `vector`. The two are mutually exclusive; the
+        convenience form behaves identically to a one-element `queries` array.
       properties:
         queries:
           type: array
@@ -820,6 +824,16 @@ components:
                 items: { type: number }
                 minItems: 768
                 maxItems: 768
+        query:
+          type: string
+          minLength: 1
+          description: Single-query convenience form text (pairs with `vector`; mutually exclusive with `queries`).
+        vector:
+          type: array
+          items: { type: number }
+          minItems: 768
+          maxItems: 768
+          description: Single-query convenience form embedding (pairs with `query`).
         client_embedding_model: { type: string, description: "{name}@{revision} per FR-039" }
         limit: { type: integer, default: 20, minimum: 1, maximum: 100 }
         sort_by: { type: string, enum: [confidence, trust, relevance, score], default: confidence }
