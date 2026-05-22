@@ -31,6 +31,9 @@ pub struct AppState {
     /// routes return 503 in that case rather than letting boot fail (so
     /// read-only deployments without an admin user-store still serve search).
     pub auth: Option<Arc<AuthState>>,
+    /// In-process rate limiter, or `None` when rate limiting is disabled
+    /// (Phase 17). When `None` the rate-limit middleware is a pass-through.
+    pub rate_limiter: Option<Arc<crate::ratelimit::RateLimiter>>,
 }
 
 /// Resolved auth subsystem state — set once at boot when both the user
@@ -141,8 +144,25 @@ fn build_github_oauth(cfg: &ServerConfig) -> Option<GithubOAuthState> {
 /// `MIDNIGHT_MANUAL_JWT_SECRET` is shorter than 32 bytes). When BOTH are
 /// absent the server boots with `auth = None`.
 pub fn build(pool: PgPool, cfg: ServerConfig) -> Result<Router, AuthStateError> {
+    let limiter = crate::ratelimit::RateLimiter::from_config(&cfg);
+    build_with_limiter(pool, cfg, limiter)
+}
+
+/// Build the app with an explicit rate limiter, so `main` can share the
+/// instance with its background tasks and integration tests can pre-seed
+/// overrides. [`build`] delegates here after constructing the limiter from
+/// config.
+///
+/// # Errors
+///
+/// Returns [`AuthStateError`] if the auth env values are present but malformed.
+pub fn build_with_limiter(
+    pool: PgPool,
+    cfg: ServerConfig,
+    rate_limiter: Option<Arc<crate::ratelimit::RateLimiter>>,
+) -> Result<Router, AuthStateError> {
     let auth = AuthState::from_config(&cfg)?.map(Arc::new);
-    let state = AppState { pool, cfg: Arc::new(cfg), auth };
+    let state = AppState { pool, cfg: Arc::new(cfg), auth, rate_limiter };
 
     Ok(Router::new()
         .merge(crate::routes::health::router())
@@ -164,6 +184,10 @@ pub fn build(pool: PgPool, cfg: ServerConfig) -> Result<Router, AuthStateError> 
         // before any handler-side validation runs.
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::middleware::rate_limit::layer,
+        ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             crate::middleware::bearer::layer,
