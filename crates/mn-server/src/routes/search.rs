@@ -15,7 +15,7 @@ use mn_core::scoring::{self, ConfidenceFactors, RelevanceSource, ScoreResult, Ve
 use mn_retrieval::filters::SearchFilters;
 use pgvector::Vector;
 use serde::{Deserialize, Serialize};
-use sqlx::Row;
+use sqlx::{Postgres, QueryBuilder, Row};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
@@ -362,7 +362,7 @@ async fn search(
 
     for (i, q) in distinct.iter().enumerate() {
         let t0 = std::time::Instant::now();
-        let vector_hits = match vector_search(&state.pool, &q.vector).await {
+        let vector_hits = match vector_search(&state.pool, &q.vector, &req.filters).await {
             Ok(hits) => hits,
             Err(e) => {
                 tracing::warn!(request_id = rid, error = %e, query_index = i, "vector search failed");
@@ -375,7 +375,7 @@ async fn search(
         let vector_latency_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
         let t1 = std::time::Instant::now();
-        let fts_hits = match fts_search(&state.pool, &q.text).await {
+        let fts_hits = match fts_search(&state.pool, &q.text, &req.filters).await {
             Ok(hits) => hits,
             Err(e) => {
                 tracing::warn!(request_id = rid, error = %e, query_index = i, "fts search failed");
@@ -445,6 +445,12 @@ async fn search(
         let Some(row) = rows.get(&chunk_id) else {
             continue;
         };
+        // Apply the semver-bearing filter dimensions (language_target /
+        // sdk_dependency, #11/FR-033) that SQL can't express. The scalar
+        // dimensions were already enforced during candidate retrieval.
+        if !req.filters.semver_post_match(&row.provenance) {
+            continue;
+        }
         // BTreeSet iterates ascending, so matched_queries is sorted.
         let matched_queries: Vec<usize> = matched
             .get(&chunk_id)
@@ -691,7 +697,8 @@ fn query_hash(q: &QueryPair) -> u64 {
 /// Run the pgvector half of retrieval for one query.
 ///
 /// Returns up to 100 `(chunk_id, similarity)` pairs ordered by descending
-/// cosine similarity over active, ready chunks with a non-null embedding.
+/// cosine similarity over active, ready chunks with a non-null embedding, after
+/// applying the SQL-expressible filter dimensions (#11).
 ///
 /// # Errors
 ///
@@ -699,22 +706,23 @@ fn query_hash(q: &QueryPair) -> u64 {
 async fn vector_search(
     pool: &sqlx::PgPool,
     vector: &[f32],
+    filters: &SearchFilters,
 ) -> Result<Vec<(Uuid, f64)>, sqlx::Error> {
-    let vec = Vector::from(vector.to_vec());
     // pgvector cosine distance: 0 = identical, 2 = opposite. Top 100 per query.
-    let rows = sqlx::query(
-        "SELECT chunk.id, 1 - (chunk.embedding <=> $1) AS similarity \
-         FROM chunk \
-         JOIN source_version sv ON sv.id = chunk.source_version_id \
-         WHERE chunk.embedding IS NOT NULL \
-           AND chunk.status = 'ready' \
-           AND sv.is_active = true \
-         ORDER BY chunk.embedding <=> $1 \
-         LIMIT 100",
-    )
-    .bind(&vec)
-    .fetch_all(pool)
-    .await?;
+    let mut qb: QueryBuilder<Postgres> =
+        QueryBuilder::new("SELECT chunk.id, 1 - (chunk.embedding <=> ");
+    qb.push_bind(Vector::from(vector.to_vec()));
+    qb.push(") AS similarity FROM chunk JOIN source_version sv ON sv.id = chunk.source_version_id");
+    push_filter_joins(&mut qb, filters);
+    qb.push(
+        " WHERE chunk.embedding IS NOT NULL AND chunk.status = 'ready' AND sv.is_active = true",
+    );
+    push_filter_predicates(&mut qb, filters);
+    qb.push(" ORDER BY chunk.embedding <=> ");
+    qb.push_bind(Vector::from(vector.to_vec()));
+    qb.push(" LIMIT 100");
+
+    let rows = qb.build().fetch_all(pool).await?;
     Ok(rows
         .iter()
         .filter_map(|r| {
@@ -728,30 +736,100 @@ async fn vector_search(
 /// Run the full-text-search half of retrieval for one query.
 ///
 /// Returns up to 100 chunk ids ordered by descending `ts_rank` over active,
-/// ready chunks. Empty or stopword-only text yields no rows, since
-/// `websearch_to_tsquery` produces a query that matches nothing.
+/// ready chunks, after applying the SQL-expressible filter dimensions (#11).
+/// Empty or stopword-only text yields no rows, since `websearch_to_tsquery`
+/// produces a query that matches nothing.
 ///
 /// # Errors
 ///
 /// Propagates any `sqlx` error from the query.
-async fn fts_search(pool: &sqlx::PgPool, text: &str) -> Result<Vec<Uuid>, sqlx::Error> {
-    let rows = sqlx::query(
-        "SELECT chunk.id \
-         FROM chunk \
-         JOIN source_version sv ON sv.id = chunk.source_version_id \
-         WHERE chunk.tsvector @@ websearch_to_tsquery('english', $1) \
-           AND chunk.status = 'ready' \
-           AND sv.is_active = true \
-         ORDER BY ts_rank(chunk.tsvector, websearch_to_tsquery('english', $1)) DESC \
-         LIMIT 100",
-    )
-    .bind(text)
-    .fetch_all(pool)
-    .await?;
+async fn fts_search(
+    pool: &sqlx::PgPool,
+    text: &str,
+    filters: &SearchFilters,
+) -> Result<Vec<Uuid>, sqlx::Error> {
+    let mut qb: QueryBuilder<Postgres> = QueryBuilder::new(
+        "SELECT chunk.id FROM chunk JOIN source_version sv ON sv.id = chunk.source_version_id",
+    );
+    push_filter_joins(&mut qb, filters);
+    qb.push(" WHERE chunk.tsvector @@ websearch_to_tsquery('english', ");
+    qb.push_bind(text.to_owned());
+    qb.push(") AND chunk.status = 'ready' AND sv.is_active = true");
+    push_filter_predicates(&mut qb, filters);
+    qb.push(" ORDER BY ts_rank(chunk.tsvector, websearch_to_tsquery('english', ");
+    qb.push_bind(text.to_owned());
+    qb.push(")) DESC LIMIT 100");
+
+    let rows = qb.build().fetch_all(pool).await?;
     Ok(rows
         .iter()
         .filter_map(|r| r.try_get::<Uuid, _>("id").ok())
         .collect())
+}
+
+/// Whether any filter needs the `document` table joined (it carries provenance
+/// and `package_id`).
+const fn needs_document_join(filters: &SearchFilters) -> bool {
+    !filters.attribution.is_empty()
+        || filters.verified.is_some()
+        || !filters.content_type.is_empty()
+        || !filters.package.is_empty()
+}
+
+/// Append the JOINs required by the active SQL filter dimensions. Both
+/// candidate queries call this immediately after the `source_version` join so
+/// the alias set (`chunk`, `sv`, `d`, `s`, `p`) is consistent.
+fn push_filter_joins(qb: &mut QueryBuilder<'_, Postgres>, filters: &SearchFilters) {
+    if needs_document_join(filters) {
+        qb.push(" JOIN document d ON d.id = chunk.document_id");
+    }
+    if !filters.source_slug.is_empty() {
+        qb.push(" JOIN source s ON s.id = sv.source_id");
+    }
+    if !filters.package.is_empty() {
+        qb.push(" LEFT JOIN package p ON p.id = d.package_id");
+    }
+}
+
+/// Append the SQL-expressible filter predicates (`attribution`, `verified`,
+/// `content_type`, `source_slug`, `package`) as ` AND (...)` clauses. AND
+/// across keys; OR within each key's value array. The semver-bearing
+/// `language_target`/`sdk_dependency` dimensions are handled in Rust by
+/// [`SearchFilters::semver_post_match`].
+fn push_filter_predicates(qb: &mut QueryBuilder<'_, Postgres>, filters: &SearchFilters) {
+    if !filters.attribution.is_empty() {
+        qb.push(" AND COALESCE(d.provenance->>'attribution', 'unknown') = ANY(");
+        qb.push_bind(filters.attribution.clone());
+        qb.push(")");
+    }
+    if let Some(verified) = filters.verified {
+        qb.push(" AND COALESCE((d.provenance->>'verified')::boolean, false) = ");
+        qb.push_bind(verified);
+    }
+    if !filters.content_type.is_empty() {
+        qb.push(" AND COALESCE(d.provenance->>'content_type', 'other') = ANY(");
+        qb.push_bind(filters.content_type.clone());
+        qb.push(")");
+    }
+    if !filters.source_slug.is_empty() {
+        qb.push(" AND s.slug = ANY(");
+        qb.push_bind(filters.source_slug.clone());
+        qb.push(")");
+    }
+    if !filters.package.is_empty() {
+        qb.push(" AND (");
+        for (i, pkg) in filters.package.iter().enumerate() {
+            if i > 0 {
+                qb.push(" OR ");
+            }
+            qb.push("(p.kind = ");
+            qb.push_bind(pkg.kind.clone());
+            qb.push(" AND p.name = ");
+            qb.push_bind(pkg.name.clone());
+            qb.push(")");
+        }
+        qb.push(")");
+    }
 }
 
 #[cfg(test)]

@@ -17,10 +17,10 @@ mod common;
 
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
-use mn_core::provenance::{Attribution, LanguageTarget, Provenance};
-use mn_core::types::{ChunkStatus, DocumentKind, NodeKind, SourceKind};
+use mn_core::provenance::{Attribution, ContentType, LanguageTarget, Provenance, SdkDependency};
+use mn_core::types::{ChunkStatus, DocumentKind, NodeKind, PackageKind, SourceKind};
 use mn_server::{app, config::ServerConfig};
-use mn_store::entities::{chunk, document, embedding_model, node, source, source_version};
+use mn_store::entities::{chunk, document, embedding_model, node, package, source, source_version};
 use time::{Duration, OffsetDateTime};
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -543,6 +543,100 @@ async fn seed_scored_chunk(
     .unwrap()
 }
 
+/// Seed one fully-tagged chunk for exercising every filter dimension. The chunk
+/// is Foundation-attributed, verified, content_type=tutorial, targets compact
+/// `>=0.23`, depends on npm `@midnight-ntwrk/midnight-js >=1.0.0`, and belongs
+/// to a rust package. Returns `(chunk_id, source_slug, package_name, rare_token)`.
+async fn seed_filter_fixture(pool: &sqlx::PgPool) -> (Uuid, String, String, String) {
+    let model_id = embedding_model::upsert(pool, "bge-base-en-v1.5", 1, 768, "baai")
+        .await
+        .unwrap();
+    let slug = format!("filter-fixture-{}", Uuid::new_v4());
+    let source_id = source::insert(pool, &slug, "Filter", SourceKind::DocsSite, None, 5)
+        .await
+        .unwrap();
+    let (sv_id, _) = source_version::create_building(pool, source_id, model_id, "0.1.0", "h")
+        .await
+        .unwrap();
+    let root = node::insert(pool, sv_id, None, NodeKind::Root, "root", 0)
+        .await
+        .unwrap();
+    let pkg_name = format!("pkg-{}", Uuid::new_v4().simple());
+    let package_id =
+        package::upsert(pool, sv_id, PackageKind::Rust, &pkg_name, Some("1.0.0"), None)
+            .await
+            .unwrap();
+    let doc_node = node::insert(pool, sv_id, Some(root), NodeKind::Document, "doc.md", 0)
+        .await
+        .unwrap();
+    let provenance = Provenance {
+        attribution: Attribution::Foundation,
+        verified: true,
+        verified_by: Some("midnight-foundation".into()),
+        content_type: ContentType::Tutorial,
+        language_targets: vec![LanguageTarget {
+            name: "compact".into(),
+            version_constraint: Some(">=0.23".into()),
+        }],
+        sdk_dependencies: vec![SdkDependency {
+            kind: "npm".into(),
+            name: "@midnight-ntwrk/midnight-js".into(),
+            version_constraint: Some(">=1.0.0".into()),
+        }],
+        ..Provenance::default()
+    };
+    let token = format!("filtertok{}", Uuid::new_v4().simple());
+    let content = format!("{token} filter fixture content");
+    let doc_id = document::insert(
+        pool,
+        document::NewDocument {
+            source_version_id: sv_id,
+            node_id: doc_node,
+            kind: DocumentKind::Markdown,
+            source_url: None,
+            published_url: None,
+            source_path: "doc.md",
+            language: Some("en"),
+            content_hash: "h",
+            source_modified_at: Some(OffsetDateTime::now_utc() - Duration::days(10)),
+            frontmatter: None,
+            provenance: &provenance,
+            package_id: Some(package_id),
+            char_count: 0,
+            token_count: 0,
+        },
+    )
+    .await
+    .unwrap();
+    let chunk_node = node::insert(pool, sv_id, Some(doc_node), NodeKind::Chunk, "c", 0)
+        .await
+        .unwrap();
+    let chunk_id = chunk::insert(
+        pool,
+        chunk::NewChunk {
+            source_version_id: sv_id,
+            document_id: doc_id,
+            node_id: chunk_node,
+            chunk_index: 0,
+            total_chunks: 1,
+            content: &content,
+            content_hash: "hc",
+            embedding: Some(unit_vector(0.271)),
+            embedding_model_id: model_id,
+            heading_path: &[],
+            symbol_path: &[],
+            start_byte: 0,
+            end_byte: 40,
+            token_count: 8,
+            status: ChunkStatus::Ready,
+        },
+    )
+    .await
+    .unwrap();
+    source_version::finalize(pool, sv_id).await.unwrap();
+    (chunk_id, slug, pkg_name, token)
+}
+
 async fn post_search(app: axum::Router, body: serde_json::Value) -> serde_json::Value {
     let resp = app
         .oneshot(
@@ -871,6 +965,144 @@ async fn include_scores_false_omits_scores() {
         assert!(r.get("scores").is_none(), "scores must be omitted");
         assert!(r["chunk_id"].is_string());
     }
+}
+
+/// Whether `results` contains a chunk with the given id.
+fn contains_chunk(v: &serde_json::Value, id: Uuid) -> bool {
+    v["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|r| r["chunk_id"].as_str() == Some(id.to_string().as_str()))
+}
+
+/// Build a fresh app and POST a search body (each `oneshot` consumes the app).
+async fn run_filtered(
+    pool: &sqlx::PgPool,
+    token: &str,
+    filters: serde_json::Value,
+) -> serde_json::Value {
+    let app = app::build(pool.clone(), cfg()).expect("build app");
+    post_search(
+        app,
+        serde_json::json!({
+            "query": token,
+            "vector": unit_vector(0.271),
+            "client_embedding_model": "bge-base-en-v1.5@1",
+            "limit": 100,
+            "filters": filters,
+        }),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn scalar_filters_include_and_exclude() {
+    // Acceptance #11: attribution / verified / content_type / source_slug /
+    // package each restrict results, AND across keys.
+    let h = common::boot().await;
+    let (chunk, slug, pkg, token) = seed_filter_fixture(&h.pool).await;
+
+    // Matching values include the chunk.
+    assert!(contains_chunk(
+        &run_filtered(&h.pool, &token, serde_json::json!({ "attribution": ["foundation"] })).await,
+        chunk
+    ));
+    assert!(contains_chunk(
+        &run_filtered(&h.pool, &token, serde_json::json!({ "verified": true })).await,
+        chunk
+    ));
+    assert!(contains_chunk(
+        &run_filtered(&h.pool, &token, serde_json::json!({ "content_type": ["tutorial"] })).await,
+        chunk
+    ));
+    assert!(contains_chunk(
+        &run_filtered(&h.pool, &token, serde_json::json!({ "source_slug": [slug] })).await,
+        chunk
+    ));
+    assert!(contains_chunk(
+        &run_filtered(
+            &h.pool,
+            &token,
+            serde_json::json!({ "package": [{ "kind": "rust", "name": pkg }] })
+        )
+        .await,
+        chunk
+    ));
+
+    // Non-matching values exclude it.
+    assert!(!contains_chunk(
+        &run_filtered(
+            &h.pool,
+            &token,
+            serde_json::json!({ "attribution": ["partner", "community"] })
+        )
+        .await,
+        chunk
+    ));
+    assert!(!contains_chunk(
+        &run_filtered(&h.pool, &token, serde_json::json!({ "verified": false })).await,
+        chunk
+    ));
+    assert!(!contains_chunk(
+        &run_filtered(&h.pool, &token, serde_json::json!({ "content_type": ["doc"] })).await,
+        chunk
+    ));
+    assert!(!contains_chunk(
+        &run_filtered(&h.pool, &token, serde_json::json!({ "source_slug": ["some-other-slug"] }))
+            .await,
+        chunk
+    ));
+    assert!(!contains_chunk(
+        &run_filtered(
+            &h.pool,
+            &token,
+            serde_json::json!({ "package": [{ "kind": "rust", "name": "nonexistent-pkg" }] })
+        )
+        .await,
+        chunk
+    ));
+}
+
+#[tokio::test]
+async fn and_across_keys_excludes_on_any_miss() {
+    // AND semantics: a matching attribution but a mismatched content_type still
+    // excludes the chunk.
+    let h = common::boot().await;
+    let (chunk, _slug, _pkg, token) = seed_filter_fixture(&h.pool).await;
+    let v = run_filtered(
+        &h.pool,
+        &token,
+        serde_json::json!({ "attribution": ["foundation"], "content_type": ["doc"] }),
+    )
+    .await;
+    assert!(!contains_chunk(&v, chunk), "AND: a single failing key must exclude");
+}
+
+#[tokio::test]
+async fn semver_filters_language_target_and_sdk_dependency() {
+    // Acceptance #11 / FR-033: version_constraint_satisfies is evaluated
+    // server-side for language_target and sdk_dependency.
+    let h = common::boot().await;
+    let (chunk, _slug, _pkg, token) = seed_filter_fixture(&h.pool).await;
+
+    // language_target: chunk targets compact >=0.23.
+    assert!(contains_chunk(&run_filtered(&h.pool, &token, serde_json::json!({ "language_target": { "name": "compact", "version_constraint_satisfies": "0.31" } })).await, chunk));
+    assert!(!contains_chunk(&run_filtered(&h.pool, &token, serde_json::json!({ "language_target": { "name": "compact", "version_constraint_satisfies": "0.10" } })).await, chunk));
+    // name mismatch excludes.
+    assert!(!contains_chunk(
+        &run_filtered(
+            &h.pool,
+            &token,
+            serde_json::json!({ "language_target": { "name": "rust" } })
+        )
+        .await,
+        chunk
+    ));
+
+    // sdk_dependency: chunk declares npm @midnight-ntwrk/midnight-js >=1.0.0.
+    assert!(contains_chunk(&run_filtered(&h.pool, &token, serde_json::json!({ "sdk_dependency": [{ "kind": "npm", "name": "@midnight-ntwrk/midnight-js", "version_constraint_satisfies": "1.4.0" }] })).await, chunk));
+    assert!(!contains_chunk(&run_filtered(&h.pool, &token, serde_json::json!({ "sdk_dependency": [{ "kind": "npm", "name": "@midnight-ntwrk/midnight-js", "version_constraint_satisfies": "0.9.0" }] })).await, chunk));
 }
 
 #[tokio::test]

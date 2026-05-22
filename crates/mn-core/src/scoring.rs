@@ -275,10 +275,14 @@ impl ScoringPolicy {
     }
 }
 
-/// Parse a possibly-partial version string (`"0.31"`, `"v1.4"`, `"1"`) into a
-/// full [`semver::Version`] by padding missing minor/patch components with `0`.
-/// Returns `None` when the numeric core can't be parsed.
-fn parse_version(raw: &str) -> Option<semver::Version> {
+/// Parse a possibly-partial version string into a full [`semver::Version`].
+///
+/// Pads missing minor/patch components with `0` (`"0.31"` → `0.31.0`, `"v1.4"`
+/// → `1.4.0`, `"1"` → `1.0.0`) and returns `None` when the numeric core can't
+/// be parsed. Shared with the search-filter layer so version-match scoring and
+/// version-constraint filtering normalize versions identically.
+#[must_use]
+pub fn parse_version(raw: &str) -> Option<semver::Version> {
     let trimmed = raw.trim().trim_start_matches(['v', 'V']);
     // Split off any pre-release/build suffix; we only normalize the numeric core.
     let core = trimmed.split(['-', '+']).next().unwrap_or(trimmed).trim();
