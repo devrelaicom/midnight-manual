@@ -110,6 +110,12 @@ pub enum EventPayload {
         duration_ms: u32,
         /// Final state.
         outcome: Outcome,
+        /// Number of batches in the upload phase (optional for backward compat).
+        #[serde(default)]
+        batch_count: Option<u32>,
+        /// Index of the batch that failed during upload, if any (optional for backward compat).
+        #[serde(default)]
+        failed_batch_index: Option<u32>,
     },
     /// `mnm models pull` / `pull_models` MCP tool ran to completion.
     PullModels {
@@ -278,6 +284,8 @@ mod tests {
                     documents_skipped: 0,
                     duration_ms: 0,
                     outcome: Outcome::Ok,
+                    batch_count: None,
+                    failed_batch_index: None,
                 },
                 "ingest_complete",
             ),

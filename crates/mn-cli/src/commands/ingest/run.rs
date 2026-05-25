@@ -131,9 +131,9 @@ pub async fn run_with_paths(
     let outcome = run_inner(&args, server_url, auth_path, json).await;
 
     let duration_ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
-    let (added, carried, deleted, telemetry_outcome) = match &outcome {
-        Ok(stats) => (stats.added, stats.carried, stats.deleted, Outcome::Ok),
-        Err(_) => (0, 0, 0, Outcome::Error),
+    let (added, carried, deleted, batch_count, failed_batch_index, telemetry_outcome) = match &outcome {
+        Ok(stats) => (stats.added, stats.carried, stats.deleted, stats.batch_count, stats.failed_batch_index, Outcome::Ok),
+        Err(_) => (0, 0, 0, 0, None, Outcome::Error),
     };
     telemetry
         .emit(Event::new(
@@ -145,6 +145,8 @@ pub async fn run_with_paths(
                 documents_skipped: u32::try_from(deleted).unwrap_or(u32::MAX),
                 duration_ms,
                 outcome: telemetry_outcome,
+                batch_count: Some(batch_count),
+                failed_batch_index,
             },
         ))
         .await;
@@ -156,6 +158,8 @@ struct RunStats {
     added: usize,
     carried: usize,
     deleted: usize,
+    batch_count: u32,
+    failed_batch_index: Option<u32>,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -267,6 +271,8 @@ async fn run_inner(
             added: plan.stats.documents_added,
             carried: 0,
             deleted: 0,
+            batch_count: 0,
+            failed_batch_index: None,
         });
     }
 
@@ -424,6 +430,7 @@ async fn run_inner(
 
     let mut accepted = 0usize;
     let mut carried = 0usize;
+    let mut failed_batch_index: Option<u32> = None;
 
     for (i, chunk) in docs.chunks(batch_size).enumerate() {
         reporter.batch(i + 1, batch_count, "uploading documents");
@@ -440,6 +447,7 @@ async fn run_inner(
                 carried += r.carried;
             }
             Err(e) => {
+                failed_batch_index = Some(u32::try_from(i).unwrap_or(u32::MAX));
                 abort_run(&client, server_url, &args.source_slug, start.ingest_run_id, &token)
                     .await;
                 return Err(
@@ -480,6 +488,8 @@ async fn run_inner(
         added: accepted.saturating_sub(carried),
         carried,
         deleted: 0,
+        batch_count: u32::try_from(batch_count).unwrap_or(u32::MAX),
+        failed_batch_index,
     };
     println!(
         "{}",
