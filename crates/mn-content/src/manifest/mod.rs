@@ -6,6 +6,7 @@
 //! ingest-UX design spec for rationale.
 
 pub mod resolve;
+pub mod sitemap;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};

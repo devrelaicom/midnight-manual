@@ -20,6 +20,7 @@ integration = []
 mn-core               = { path = "../mn-core" }
 globset               = { workspace = true }
 pulldown-cmark        = { workspace = true }
+quick-xml             = { workspace = true }
 tree-sitter           = { workspace = true }
 tree-sitter-rust      = { workspace = true }
 tree-sitter-typescript = { workspace = true }
@@ -32,6 +33,7 @@ sha2                  = { workspace = true }
 time                  = { workspace = true }
 tracing               = { workspace = true }
 regex                 = { workspace = true }
+url                   = { workspace = true }
 uuid                  = { workspace = true }
 walkdir               = { workspace = true }
 
