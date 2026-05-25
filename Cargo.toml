@@ -28,6 +28,34 @@ unsafe_code     = "forbid"
 missing_docs    = "warn"
 unused_imports  = "warn"
 
+# cargo-dist (a.k.a. `dist`) — release-artifact build matrix wired into
+# `.github/workflows/release.yml`. The runtime cargo-dist version is whatever
+# the installer script pulls; this `cargo-dist-version` field is a reminder of
+# which tool version generated this config. Re-run `cargo dist init` to refresh
+# the schema if a newer cargo-dist warns about it.
+[workspace.metadata.dist]
+cargo-dist-version = "0.27.1"
+ci                 = ["github"]
+installers         = ["shell", "powershell"]
+# Seven targets per FR-099 (CLI binary distribution). The server is Docker-only
+# (see crates/mn-server/Cargo.toml `[package.metadata.dist] dist = false`), so
+# this matrix only builds the `midnight-manual` + `mnm` CLI binaries.
+targets            = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+    "x86_64-pc-windows-msvc",
+]
+# The release.yml workflow opens a PR-style draft on tag pushes, so cargo-dist
+# should plan rather than build on PRs.
+pr-run-mode        = "plan"
+# Release tag fires under release-please; allow uncommitted changes the action
+# creates in CI checkouts.
+allow-dirty        = ["ci"]
+
 [workspace.lints.clippy]
 all              = { level = "warn", priority = -1 }
 pedantic         = { level = "warn", priority = -1 }

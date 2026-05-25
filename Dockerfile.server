@@ -1,7 +1,11 @@
 # Multi-stage build for midnight-manual-server (FR-102, SC-058: <50MB compressed)
 
 # ----- builder stage -----
-FROM rust:1.83-bookworm AS builder
+# Pinned to workspace MSRV (Cargo.toml [workspace.package].rust-version). Bump
+# both together — a stale image tag will fail on any transitive dep that
+# raised its own MSRV past the image's compiler (cargo-platform / time /
+# image / etc. have done this multiple times in the 1.83 → 1.91 window).
+FROM rust:1.91-bookworm AS builder
 
 WORKDIR /app
 
