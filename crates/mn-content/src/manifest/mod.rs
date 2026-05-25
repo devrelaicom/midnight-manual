@@ -5,6 +5,8 @@
 //! `published_url` / `provenance` / `name` overrides; files NOT referenced
 //! fall back to directory-tree inference unless `--strict-manifest` is set.
 
+pub mod resolve;
+
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
