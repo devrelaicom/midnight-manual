@@ -60,6 +60,8 @@ pub struct PlannedChunk {
     pub end_byte: usize,
     /// SHA-256 over the chunk's verbatim content.
     pub content_hash: String,
+    /// Token count of this chunk (computed in Task 12; defaults to 0 until then).
+    pub token_count: u32,
 }
 
 /// A document that the orchestrator decided is brand-new or content-changed.
@@ -82,6 +84,18 @@ pub struct PlannedDocument {
     pub char_count: usize,
     /// Chunks emitted by the chunker.
     pub chunks: Vec<PlannedChunk>,
+    /// Final published URL after manifest inheritance (None when neither
+    /// the manifest nor a sitemap matched).
+    pub published_url: Option<String>,
+    /// URL to the source of the document (e.g. a github blob URL).
+    pub source_url: Option<String>,
+    /// Filesystem-derived modification timestamp at walk time.
+    pub source_modified_at: Option<time::OffsetDateTime>,
+    /// IANA-like language identifier from `mn_content::language`.
+    pub language: Option<String>,
+    /// Token count of the document body (computed once at chunk time and
+    /// summed across chunks; landed in Task 12).
+    pub token_count: u32,
 }
 
 /// A document whose `content_hash` matched the prior active version. The
@@ -211,6 +225,7 @@ impl PlanBuilder {
         kind: DocumentKind,
         content: &str,
         split: &FrontmatterSplit,
+        resolved: &crate::manifest::resolve::ResolvedLeaf,
     ) -> Result<(), IngestError> {
         if !self.seen_paths.insert(path.clone()) {
             return Err(IngestError::DuplicatePath(path));
@@ -252,6 +267,7 @@ impl PlanBuilder {
                     start_byte: c.start_byte,
                     end_byte: c.end_byte,
                     content_hash,
+                    token_count: 0,
                 }
             })
             .collect();
@@ -261,12 +277,57 @@ impl PlanBuilder {
             kind,
             content_hash: hash,
             frontmatter: split.frontmatter.clone(),
-            provenance: split.provenance.clone(),
+            provenance: merge_provenance(&split.provenance, &resolved.provenance_override),
             char_count: content.chars().count(),
             chunks: planned_chunks,
+            published_url: resolved.published_url.clone(),
+            source_url: resolved.source_url.clone(),
+            source_modified_at: None,
+            language: crate::language::from_path(&resolved.rel_path).map(str::to_owned),
+            token_count: 0,
         });
         Ok(())
     }
+}
+
+/// Frontmatter wins per-field; ancestor `resolved` fills only the gaps.
+fn merge_provenance(frontmatter: &Provenance, ancestor: &Provenance) -> Provenance {
+    let default = Provenance::default();
+    let mut out = ancestor.clone();
+    if frontmatter.attribution != default.attribution {
+        out.attribution = frontmatter.attribution;
+    }
+    if frontmatter.verified != default.verified {
+        out.verified = frontmatter.verified;
+    }
+    if frontmatter.verified_by != default.verified_by {
+        out.verified_by = frontmatter.verified_by.clone();
+    }
+    if frontmatter.verified_at != default.verified_at {
+        out.verified_at = frontmatter.verified_at;
+    }
+    if frontmatter.verification_notes != default.verification_notes {
+        out.verification_notes = frontmatter.verification_notes.clone();
+    }
+    if !frontmatter.language_targets.is_empty() {
+        out.language_targets = frontmatter.language_targets.clone();
+    }
+    if !frontmatter.sdk_dependencies.is_empty() {
+        out.sdk_dependencies = frontmatter.sdk_dependencies.clone();
+    }
+    if frontmatter.deprecation != default.deprecation {
+        out.deprecation = frontmatter.deprecation.clone();
+    }
+    if !frontmatter.tags.is_empty() {
+        out.tags = frontmatter.tags.clone();
+    }
+    if frontmatter.content_type != default.content_type {
+        out.content_type = frontmatter.content_type;
+    }
+    out
+}
+
+impl PlanBuilder {
 
     /// Consume the builder and produce the final [`IngestPlan`].
     ///
@@ -333,8 +394,16 @@ mod tests {
 
     fn feed(builder: &mut PlanBuilder, path: &str, content: &str) {
         let split = split_frontmatter(content);
+        let leaf = crate::manifest::resolve::ResolvedLeaf {
+            rel_path: PathBuf::from(path),
+            kind: DocumentKind::Markdown,
+            name: None,
+            published_url: None,
+            source_url: None,
+            provenance_override: Default::default(),
+        };
         builder
-            .add_walked_document(PathBuf::from(path), DocumentKind::Markdown, content, &split)
+            .add_walked_document(PathBuf::from(path), DocumentKind::Markdown, content, &split, &leaf)
             .expect("add_walked_document");
     }
 
@@ -498,8 +567,16 @@ mod tests {
         let mut b = empty_builder();
         feed(&mut b, "x.md", "# A");
         let split = split_frontmatter("# B");
+        let leaf = crate::manifest::resolve::ResolvedLeaf {
+            rel_path: PathBuf::from("x.md"),
+            kind: DocumentKind::Markdown,
+            name: None,
+            published_url: None,
+            source_url: None,
+            provenance_override: Default::default(),
+        };
         let err = b
-            .add_walked_document(PathBuf::from("x.md"), DocumentKind::Markdown, "# B", &split)
+            .add_walked_document(PathBuf::from("x.md"), DocumentKind::Markdown, "# B", &split, &leaf)
             .unwrap_err();
         assert!(matches!(err, IngestError::DuplicatePath(_)));
     }
@@ -563,6 +640,39 @@ mod tests {
         assert_eq!(plan.source_slug, "midnight-docs");
         assert_eq!(plan.source_kind, SourceKind::DocsSite);
         assert_eq!(plan.target_revision, "abcdef1234");
+    }
+
+    #[test]
+    fn planned_document_carries_resolved_metadata() {
+        use crate::manifest::resolve::ResolvedLeaf;
+        use mn_core::types::DocumentKind;
+
+        let leaf = ResolvedLeaf {
+            rel_path: PathBuf::from("a.md"),
+            kind: DocumentKind::Markdown,
+            name: None,
+            published_url: Some("https://docs.example.com/a/".to_owned()),
+            source_url: Some("https://github.com/x/y/blob/main/a.md".to_owned()),
+            provenance_override: Default::default(),
+        };
+        let mut b = empty_builder();
+        let split = split_frontmatter("# A\n\nbody");
+        b.add_walked_document(
+            leaf.rel_path.clone(),
+            DocumentKind::Markdown,
+            "# A\n\nbody",
+            &split,
+            &leaf,
+        )
+        .unwrap();
+        let plan = b.finalize();
+        let doc = &plan.new_documents[0];
+        assert_eq!(doc.published_url.as_deref(), Some("https://docs.example.com/a/"));
+        assert_eq!(
+            doc.source_url.as_deref(),
+            Some("https://github.com/x/y/blob/main/a.md")
+        );
+        assert_eq!(doc.language.as_deref(), Some("markdown"));
     }
 }
 
@@ -629,8 +739,16 @@ mod proptests {
                     continue;
                 }
                 let split = split_frontmatter(&body);
+                let leaf = crate::manifest::resolve::ResolvedLeaf {
+                    rel_path: PathBuf::from(&p),
+                    kind: DocumentKind::Markdown,
+                    name: None,
+                    published_url: None,
+                    source_url: None,
+                    provenance_override: Default::default(),
+                };
                 builder
-                    .add_walked_document(PathBuf::from(&p), DocumentKind::Markdown, &body, &split)
+                    .add_walked_document(PathBuf::from(&p), DocumentKind::Markdown, &body, &split, &leaf)
                     .expect("dedup'd above");
             }
             let plan = builder.finalize();
