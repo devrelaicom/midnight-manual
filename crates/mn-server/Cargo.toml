@@ -16,6 +16,12 @@ workspace = true
 [features]
 integration = []
 
+# Excluded from cargo-dist (FR-102): the server is published as a multi-arch
+# Docker image (Dockerfile.server), not as a per-OS binary archive. The CLI
+# crate (mn-cli) is the only artifact cargo-dist ships.
+[package.metadata.dist]
+dist = false
+
 [[bin]]
 name = "midnight-manual-server"
 path = "src/main.rs"

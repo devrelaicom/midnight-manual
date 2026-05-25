@@ -21,7 +21,12 @@ jobs:
       - uses: googleapis/release-please-action@v4
         id: release
         with:
-          release-type: rust
+          # Workspace-shared version lives in [workspace.package].version of the
+          # root Cargo.toml; the config + manifest below tell release-please to
+          # bump that single source of truth (every crate inherits via
+          # version.workspace = true).
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
 
   release:
     name: Build and publish release artifacts
