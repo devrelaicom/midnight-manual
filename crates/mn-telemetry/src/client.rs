@@ -136,7 +136,7 @@ impl Client for NoopClient {
 /// Tunable knobs for [`HttpClient`].
 #[derive(Debug, Clone)]
 pub struct HttpClientConfig {
-    /// Resolved sink URL. Typically `https://manual.midnight.network/v1/telemetry/events`.
+    /// Resolved sink URL. Typically `https://midnight-manual.midnightntwrk.expert/v1/telemetry/events`.
     pub endpoint: Url,
     /// `config_enabled` plumbed to the opt-out resolver. `false` short-circuits
     /// before any network I/O.

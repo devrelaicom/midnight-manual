@@ -27,7 +27,7 @@ use crate::transport::{FrameReader, FrameWriter};
 pub struct ServerConfig {
     /// Where the embedder / reranker store their ONNX files.
     pub cache_dir: PathBuf,
-    /// Base URL of the cloud server (`https://manual.midnight.network` in
+    /// Base URL of the cloud server (`https://midnight-manual.midnightntwrk.expert` in
     /// production). Tools call this for everything except `status` /
     /// `pull_models`.
     pub cloud_url: String,
@@ -53,7 +53,7 @@ impl ServerConfig {
     /// enabled (subject to the opt-out resolver).
     #[must_use]
     pub fn with_defaults(cache_dir: PathBuf) -> Self {
-        let cloud_url = "https://manual.midnight.network".to_owned();
+        let cloud_url = "https://midnight-manual.midnightntwrk.expert".to_owned();
         let telemetry_url = format!("{cloud_url}/v1/telemetry/events");
         Self {
             cache_dir,
