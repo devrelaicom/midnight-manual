@@ -1,7 +1,8 @@
 //! Generate a `Manifest` from a glob set + optional sitemaps. Pure-logic
 //! core of `mnm manifest generate` (§1.2 of the spec).
 
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -143,20 +144,148 @@ fn slug_from_frontmatter(fm: &Option<serde_json::Value>) -> Option<String> {
     fm.as_ref()?.get("slug")?.as_str().map(str::to_owned)
 }
 
-// build_manifest is implemented in Task 17.
-fn build_manifest(_opts: &GenerateOptions, _entries: &[GenerateEntry]) -> Manifest {
+fn build_manifest(opts: &GenerateOptions, entries: &[GenerateEntry]) -> Manifest {
+    let root_name = opts
+        .root_name
+        .clone()
+        .or_else(|| {
+            opts.base
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(title_case)
+        })
+        .unwrap_or_else(|| "Source".to_owned());
+
+    // Group entries by their directory prefix path.
+    let mut tree: TreeNode = TreeNode::group(root_name);
+    for e in entries {
+        tree.insert(&e.rel_path, e);
+    }
+
+    if opts.hoist {
+        hoist_common_url(&mut tree);
+    }
+    // pin_dirs lands in Task 18.
+
     Manifest {
         manifest_version: 1,
-        root: ManifestNode {
-            name: Some("PLACEHOLDER".to_owned()),
-            path: None,
+        root: tree.into_node(),
+    }
+}
+
+fn title_case(s: &str) -> String {
+    s.split('-')
+        .map(|w| {
+            let mut c = w.chars();
+            match c.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + c.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Intermediate tree representation. Wrapped because we want to
+/// hoist URL prefixes before lowering to ManifestNode.
+struct TreeNode {
+    name: Option<String>,
+    file: Option<PathBuf>,
+    published_url: Option<String>,
+    children: HashMap<String, TreeNode>,
+}
+
+impl TreeNode {
+    fn group(name: impl Into<String>) -> Self {
+        Self {
+            name: Some(name.into()),
             file: None,
             published_url: None,
+            children: HashMap::new(),
+        }
+    }
+
+    fn leaf(file: PathBuf, url: Option<String>) -> Self {
+        Self {
+            name: None,
+            file: Some(file),
+            published_url: url,
+            children: HashMap::new(),
+        }
+    }
+
+    fn insert(&mut self, rel: &Path, e: &GenerateEntry) {
+        let segs: Vec<_> = rel
+            .components()
+            .filter_map(|c| match c {
+                std::path::Component::Normal(s) => s.to_str().map(str::to_owned),
+                _ => None,
+            })
+            .collect();
+        self.insert_segs(&segs, e);
+    }
+
+    fn insert_segs(&mut self, segs: &[String], e: &GenerateEntry) {
+        if segs.len() == 1 {
+            let leaf = TreeNode::leaf(e.rel_path.clone(), e.matched_url.clone());
+            self.children.insert(segs[0].clone(), leaf);
+            return;
+        }
+        let head = segs[0].clone();
+        let child = self
+            .children
+            .entry(head.clone())
+            .or_insert_with(|| TreeNode::group(title_case(&head)));
+        child.insert_segs(&segs[1..], e);
+    }
+
+    fn into_node(self) -> ManifestNode {
+        let mut children: Vec<_> = self.children.into_iter().collect();
+        children.sort_by(|a, b| a.0.cmp(&b.0));
+        ManifestNode {
+            name: self.name,
+            path: None,
+            file: self.file,
+            published_url: self.published_url,
             provenance: None,
             include: Vec::new(),
             exclude: Vec::new(),
-            children: Vec::new(),
-        },
+            children: children.into_iter().map(|(_, v)| v.into_node()).collect(),
+        }
+    }
+}
+
+/// If every leaf in a one-level subtree has a `published_url` sharing
+/// the same prefix-up-to-final-segment, lift the prefix to the parent
+/// node and clear the leaves.
+fn hoist_common_url(node: &mut TreeNode) {
+    for child in node.children.values_mut() {
+        hoist_common_url(child);
+    }
+    if node.children.len() < 2 {
+        return;
+    }
+    // Gather child URLs that look like `<prefix>/<segment>/`.
+    let prefixes: Vec<String> = node
+        .children
+        .values()
+        .filter_map(|c| {
+            let url = c.published_url.as_ref()?;
+            let trimmed = url.trim_end_matches('/');
+            let cut = trimmed.rfind('/')?;
+            Some(trimmed[..=cut].to_owned())
+        })
+        .collect();
+    if prefixes.len() != node.children.len() {
+        return; // some leaf has no URL — skip hoist
+    }
+    let first = &prefixes[0];
+    if !prefixes.iter().all(|p| p == first) {
+        return;
+    }
+    node.published_url = Some(first.clone());
+    for child in node.children.values_mut() {
+        child.published_url = None;
     }
 }
 
@@ -183,5 +312,39 @@ mod tests {
             files,
             vec![PathBuf::from("docs/a.md"), PathBuf::from("docs/b.md")]
         );
+    }
+
+    #[test]
+    fn build_manifest_produces_a_tree_and_hoists_common_url_prefix() {
+        let entries = vec![
+            GenerateEntry {
+                rel_path: PathBuf::from("docs/auth.md"),
+                matched_url: Some("https://docs.example.com/auth/".to_owned()),
+                match_reason: "Leaf".to_owned(),
+            },
+            GenerateEntry {
+                rel_path: PathBuf::from("docs/tls.md"),
+                matched_url: Some("https://docs.example.com/tls/".to_owned()),
+                match_reason: "Leaf".to_owned(),
+            },
+        ];
+        let opts = GenerateOptions {
+            root_name: Some("docs".to_owned()),
+            hoist: true,
+            pin_dirs: false,
+            ..Default::default()
+        };
+        let m = build_manifest(&opts, &entries);
+        // Root group exists.
+        assert_eq!(m.root.name.as_deref(), Some("docs"));
+        assert_eq!(m.root.children.len(), 1); // "docs" subgroup
+        let docs_group = &m.root.children[0];
+        // Hoisted prefix sits on the docs group.
+        assert_eq!(
+            docs_group.published_url.as_deref(),
+            Some("https://docs.example.com/")
+        );
+        // Leaves no longer declare published_url (it's inherited).
+        assert!(docs_group.children.iter().all(|c| c.published_url.is_none()));
     }
 }
