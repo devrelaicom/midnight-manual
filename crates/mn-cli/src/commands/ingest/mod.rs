@@ -4,6 +4,7 @@ use anyhow::Result;
 use clap::{Args as ClapArgs, Subcommand};
 use mn_telemetry::TelemetryClient;
 
+pub mod plan;
 pub mod run;
 
 #[derive(Debug, ClapArgs)]
@@ -14,6 +15,9 @@ pub struct Args {
 
 #[derive(Debug, Subcommand)]
 pub enum IngestCmd {
+    /// Compute the ingest plan locally without starting a server-side run.
+    #[command(hide = true)]
+    Plan(plan::Args),
     /// Execute an ingest against the cloud server.
     Run(run::Args),
 }
@@ -26,6 +30,7 @@ pub async fn run(
     json: bool,
 ) -> Result<()> {
     match args.cmd {
+        IngestCmd::Plan(a) => plan::run(a, server, json).await,
         IngestCmd::Run(a) => run::run(a, server, telemetry, cli_version, json).await,
     }
 }
