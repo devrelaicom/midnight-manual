@@ -1,9 +1,14 @@
 //! `hierarchy.yaml` manifest loader (FR-017, FR-050).
 //!
-//! Manifests let the maintainer override the on-disk directory tree with an
-//! explicit hierarchy. Files referenced by the manifest inherit its
-//! `published_url` / `provenance` / `name` overrides; files NOT referenced
-//! fall back to directory-tree inference unless `--strict-manifest` is set.
+//! Manifests are the source of truth at ingest time. Only files reachable
+//! from the manifest (via `file:` leaves or `path:` discovery) are
+//! ingested. There is no directory-tree fallback — see §3.3 of the
+//! ingest-UX design spec for rationale.
+
+pub mod generate;
+pub mod matcher;
+pub mod resolve;
+pub mod sitemap;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -38,8 +43,15 @@ pub struct ManifestNode {
     /// Optional provenance override merged with frontmatter at ingest time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provenance: Option<serde_json::Value>,
+    /// Per-node glob include filter (applies when `path:` is set; ignored otherwise).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub include: Vec<String>,
+    /// Per-node glob exclude filter (applies when `path:` is set; ignored otherwise).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclude: Vec<String>,
     /// Child nodes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[allow(clippy::use_self)] // `Self` is not valid in struct field type position
     pub children: Vec<ManifestNode>,
 }
 
@@ -270,5 +282,28 @@ root:
         let m = Manifest::parse(body).unwrap();
         let err = m.validate().unwrap_err();
         assert!(matches!(err, ManifestError::UnsafePath(_)));
+    }
+
+    #[test]
+    fn parses_include_and_exclude_on_node() {
+        let body = r#"
+manifest_version: 1
+root:
+  name: docs
+  path: docs/
+  include: ["**/*.md", "**/*.mdx"]
+  exclude: ["**/draft/**"]
+"#;
+        let m = Manifest::parse(body).unwrap();
+        assert_eq!(m.root.include, vec!["**/*.md", "**/*.mdx"]);
+        assert_eq!(m.root.exclude, vec!["**/draft/**"]);
+    }
+
+    #[test]
+    fn include_and_exclude_default_to_empty() {
+        let body = "manifest_version: 1\nroot:\n  name: docs\n";
+        let m = Manifest::parse(body).unwrap();
+        assert!(m.root.include.is_empty());
+        assert!(m.root.exclude.is_empty());
     }
 }

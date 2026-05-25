@@ -41,7 +41,7 @@ pub struct ServerConfig {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
-            url: "https://manual.midnight.network".into(),
+            url: "https://midnight-manual.midnightntwrk.expert".into(),
         }
     }
 }
@@ -261,5 +261,11 @@ mod tests {
 
     fn tempdir() -> tempfile::TempDir {
         tempfile::tempdir().expect("create tempdir")
+    }
+
+    #[test]
+    fn server_url_default_is_production_host() {
+        let cfg = Config::default();
+        assert_eq!(cfg.server.url, "https://midnight-manual.midnightntwrk.expert");
     }
 }

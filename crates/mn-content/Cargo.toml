@@ -18,7 +18,10 @@ integration = []
 
 [dependencies]
 mn-core               = { path = "../mn-core" }
+anyhow                = { workspace = true }
+globset               = { workspace = true }
 pulldown-cmark        = { workspace = true }
+quick-xml             = { workspace = true }
 tree-sitter           = { workspace = true }
 tree-sitter-rust      = { workspace = true }
 tree-sitter-typescript = { workspace = true }
@@ -28,9 +31,13 @@ serde_json            = { workspace = true }
 serde_yaml            = { workspace = true }
 thiserror             = { workspace = true }
 sha2                  = { workspace = true }
+time                  = { workspace = true }
 tracing               = { workspace = true }
 regex                 = { workspace = true }
+url                   = { workspace = true }
 uuid                  = { workspace = true }
+walkdir               = { workspace = true }
+reqwest               = { workspace = true }
 
 [dev-dependencies]
 proptest              = { workspace = true }

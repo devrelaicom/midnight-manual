@@ -28,19 +28,13 @@ fn sample_manifest_parses_against_current_schema() {
         Manifest::parse(&body).unwrap_or_else(|e| panic!("parse {}: {e}", path.display()));
     assert_eq!(manifest.manifest_version, 1);
     assert_eq!(manifest.root.name.as_deref(), Some("Sample"));
-    let groups = &manifest.root.children;
-    assert_eq!(groups.len(), 2, "sample manifest should have two groups");
-    let files: Vec<_> = groups
-        .iter()
-        .flat_map(|g| g.children.iter().filter_map(|n| n.file.as_deref()))
-        .collect();
+    // The new path:-based manifest uses directory pinning instead of explicit children.
+    // Verify that the path and include filters are present.
+    assert_eq!(manifest.root.path, Some(PathBuf::from(".")));
     assert_eq!(
-        files,
-        vec![
-            std::path::Path::new("welcome.md"),
-            std::path::Path::new("how-it-works.md")
-        ],
-        "sample manifest file order changed"
+        manifest.root.include,
+        vec!["*.md".to_string()],
+        "sample manifest should have include filter for markdown files"
     );
 }
 

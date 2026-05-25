@@ -14,7 +14,7 @@
 /// 2. The resolved config's `[server].url`.
 ///
 /// 3. The compiled-in default
-///    (`<https://manual.midnight.network>`).
+///    (`<https://midnight-manual.midnightntwrk.expert>`).
 ///
 /// Trailing `/` is stripped so callers can safely format `format!("{url}/v1/...")`.
 #[must_use]

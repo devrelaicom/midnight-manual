@@ -1,4 +1,4 @@
-//! Integration tests covering the source_version lifecycle (US1 + EC-04).
+//! Integration tests covering the `source_version` lifecycle (US1 + EC-04).
 //!
 //! All tests are gated on `--features integration` and require either a running
 //! Postgres reachable via `DATABASE_URL` (CI's service) or a working local Docker

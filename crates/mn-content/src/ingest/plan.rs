@@ -60,6 +60,8 @@ pub struct PlannedChunk {
     pub end_byte: usize,
     /// SHA-256 over the chunk's verbatim content.
     pub content_hash: String,
+    /// Token count of this chunk (computed in Task 12; defaults to 0 until then).
+    pub token_count: u32,
 }
 
 /// A document that the orchestrator decided is brand-new or content-changed.
@@ -82,6 +84,18 @@ pub struct PlannedDocument {
     pub char_count: usize,
     /// Chunks emitted by the chunker.
     pub chunks: Vec<PlannedChunk>,
+    /// Final published URL after manifest inheritance (None when neither
+    /// the manifest nor a sitemap matched).
+    pub published_url: Option<String>,
+    /// URL to the source of the document (e.g. a github blob URL).
+    pub source_url: Option<String>,
+    /// Filesystem-derived modification timestamp at walk time.
+    pub source_modified_at: Option<time::OffsetDateTime>,
+    /// IANA-like language identifier from `mn_content::language`.
+    pub language: Option<String>,
+    /// Token count of the document body (computed once at chunk time and
+    /// summed across chunks; landed in Task 12).
+    pub token_count: u32,
 }
 
 /// A document whose `content_hash` matched the prior active version. The
@@ -150,6 +164,27 @@ pub enum IngestError {
     DuplicatePath(PathBuf),
 }
 
+/// A bundle of all data for a single walked document, passed to
+/// [`PlanBuilder::add_walked_document`].
+///
+/// Using a struct keeps the method signature stable as more fields land
+/// (e.g. token counts, language overrides) without breaking every call site.
+pub struct WalkContext<'a> {
+    /// Repo-relative path (the join key used by the plan).
+    pub path: PathBuf,
+    /// Document kind discriminator.
+    pub kind: DocumentKind,
+    /// Raw file contents.
+    pub content: &'a str,
+    /// Parsed frontmatter + body split.
+    pub split: &'a FrontmatterSplit,
+    /// Resolver-derived inheritance from the manifest.
+    pub resolved: &'a crate::manifest::resolve::ResolvedLeaf,
+    /// Filesystem modification timestamp at walk time (`None` if the OS
+    /// could not supply `mtime`).
+    pub source_modified_at: Option<time::OffsetDateTime>,
+}
+
 /// Stateful builder for [`IngestPlan`]. One instance per ingest run.
 #[derive(Debug)]
 pub struct PlanBuilder {
@@ -204,24 +239,19 @@ impl PlanBuilder {
     ///
     /// # Errors
     ///
-    /// Returns [`IngestError::DuplicatePath`] if `path` was already fed in.
-    pub fn add_walked_document(
-        &mut self,
-        path: PathBuf,
-        kind: DocumentKind,
-        content: &str,
-        split: &FrontmatterSplit,
-    ) -> Result<(), IngestError> {
-        if !self.seen_paths.insert(path.clone()) {
-            return Err(IngestError::DuplicatePath(path));
+    /// Returns [`IngestError::DuplicatePath`] if the path inside `walked` was
+    /// already fed in.
+    pub fn add_walked_document(&mut self, walked: &WalkContext<'_>) -> Result<(), IngestError> {
+        if !self.seen_paths.insert(walked.path.clone()) {
+            return Err(IngestError::DuplicatePath(walked.path.clone()));
         }
 
-        let hash = document_hash(content);
+        let hash = document_hash(walked.content);
 
-        if let Some(prior) = self.prior_by_path.get(&path) {
+        if let Some(prior) = self.prior_by_path.get(&walked.path) {
             if prior.content_hash == hash {
                 self.carried_documents.push(CarriedDocument {
-                    path,
+                    path: walked.path.clone(),
                     content_hash: hash,
                     prior_document_id: prior.document_id,
                 });
@@ -229,14 +259,14 @@ impl PlanBuilder {
             }
         }
 
-        let chunks = match kind {
-            DocumentKind::Markdown => chunk_markdown(&split.body, self.chunker_config),
+        let chunks = match walked.kind {
+            DocumentKind::Markdown => chunk_markdown(&walked.split.body, self.chunker_config),
             DocumentKind::Code | DocumentKind::Plaintext => {
                 // Phase 9a only ships the Markdown chunker through the
                 // orchestrator. Code chunking lands in a follow-up — for now
                 // route through the Markdown chunker's fallback windowing
                 // path, which is content-agnostic.
-                chunk_markdown(&split.body, self.chunker_config)
+                chunk_markdown(&walked.split.body, self.chunker_config)
             }
         };
         let total = u32::try_from(chunks.len()).unwrap_or(u32::MAX);
@@ -244,6 +274,7 @@ impl PlanBuilder {
             .into_iter()
             .map(|c| {
                 let content_hash = chunk_hash(&c.content);
+                let token_count = crate::tokens::count(&c.content);
                 PlannedChunk {
                     content: c.content,
                     heading_path: c.heading_path,
@@ -252,22 +283,75 @@ impl PlanBuilder {
                     start_byte: c.start_byte,
                     end_byte: c.end_byte,
                     content_hash,
+                    token_count,
                 }
             })
             .collect();
 
+        let doc_tokens: u32 = planned_chunks.iter().map(|c| c.token_count).sum();
+
         self.new_documents.push(PlannedDocument {
-            path,
-            kind,
+            path: walked.path.clone(),
+            kind: walked.kind,
             content_hash: hash,
-            frontmatter: split.frontmatter.clone(),
-            provenance: split.provenance.clone(),
-            char_count: content.chars().count(),
+            frontmatter: walked.split.frontmatter.clone(),
+            provenance: merge_provenance(
+                &walked.split.provenance,
+                &walked.resolved.provenance_override,
+            ),
+            char_count: walked.content.chars().count(),
             chunks: planned_chunks,
+            published_url: walked.resolved.published_url.clone(),
+            source_url: walked.resolved.source_url.clone(),
+            source_modified_at: walked.source_modified_at,
+            language: crate::language::from_path(&walked.resolved.rel_path).map(str::to_owned),
+            token_count: doc_tokens,
         });
         Ok(())
     }
+}
 
+/// Frontmatter wins per-field; ancestor `resolved` fills only the gaps.
+fn merge_provenance(frontmatter: &Provenance, ancestor: &Provenance) -> Provenance {
+    let default = Provenance::default();
+    let mut out = ancestor.clone();
+    if frontmatter.attribution != default.attribution {
+        out.attribution = frontmatter.attribution;
+    }
+    if frontmatter.verified != default.verified {
+        out.verified = frontmatter.verified;
+    }
+    if frontmatter.verified_by != default.verified_by {
+        out.verified_by.clone_from(&frontmatter.verified_by);
+    }
+    if frontmatter.verified_at != default.verified_at {
+        out.verified_at = frontmatter.verified_at;
+    }
+    if frontmatter.verification_notes != default.verification_notes {
+        out.verification_notes
+            .clone_from(&frontmatter.verification_notes);
+    }
+    if !frontmatter.language_targets.is_empty() {
+        out.language_targets
+            .clone_from(&frontmatter.language_targets);
+    }
+    if !frontmatter.sdk_dependencies.is_empty() {
+        out.sdk_dependencies
+            .clone_from(&frontmatter.sdk_dependencies);
+    }
+    if frontmatter.deprecation != default.deprecation {
+        out.deprecation.clone_from(&frontmatter.deprecation);
+    }
+    if !frontmatter.tags.is_empty() {
+        out.tags.clone_from(&frontmatter.tags);
+    }
+    if frontmatter.content_type != default.content_type {
+        out.content_type = frontmatter.content_type;
+    }
+    out
+}
+
+impl PlanBuilder {
     /// Consume the builder and produce the final [`IngestPlan`].
     ///
     /// The three document vectors are sorted lexicographically by `path` so
@@ -333,8 +417,24 @@ mod tests {
 
     fn feed(builder: &mut PlanBuilder, path: &str, content: &str) {
         let split = split_frontmatter(content);
+        let leaf = crate::manifest::resolve::ResolvedLeaf {
+            rel_path: PathBuf::from(path),
+            kind: DocumentKind::Markdown,
+            name: None,
+            published_url: None,
+            source_url: None,
+            provenance_override: Provenance::default(),
+        };
+        let ctx = WalkContext {
+            path: PathBuf::from(path),
+            kind: DocumentKind::Markdown,
+            content,
+            split: &split,
+            resolved: &leaf,
+            source_modified_at: None,
+        };
         builder
-            .add_walked_document(PathBuf::from(path), DocumentKind::Markdown, content, &split)
+            .add_walked_document(&ctx)
             .expect("add_walked_document");
     }
 
@@ -498,9 +598,23 @@ mod tests {
         let mut b = empty_builder();
         feed(&mut b, "x.md", "# A");
         let split = split_frontmatter("# B");
-        let err = b
-            .add_walked_document(PathBuf::from("x.md"), DocumentKind::Markdown, "# B", &split)
-            .unwrap_err();
+        let leaf = crate::manifest::resolve::ResolvedLeaf {
+            rel_path: PathBuf::from("x.md"),
+            kind: DocumentKind::Markdown,
+            name: None,
+            published_url: None,
+            source_url: None,
+            provenance_override: Provenance::default(),
+        };
+        let ctx = WalkContext {
+            path: PathBuf::from("x.md"),
+            kind: DocumentKind::Markdown,
+            content: "# B",
+            split: &split,
+            resolved: &leaf,
+            source_modified_at: None,
+        };
+        let err = b.add_walked_document(&ctx).unwrap_err();
         assert!(matches!(err, IngestError::DuplicatePath(_)));
     }
 
@@ -563,6 +677,48 @@ mod tests {
         assert_eq!(plan.source_slug, "midnight-docs");
         assert_eq!(plan.source_kind, SourceKind::DocsSite);
         assert_eq!(plan.target_revision, "abcdef1234");
+    }
+
+    #[test]
+    fn planned_document_carries_resolved_metadata() {
+        use crate::manifest::resolve::ResolvedLeaf;
+        use mn_core::types::DocumentKind;
+
+        let leaf = ResolvedLeaf {
+            rel_path: PathBuf::from("a.md"),
+            kind: DocumentKind::Markdown,
+            name: None,
+            published_url: Some("https://docs.example.com/a/".to_owned()),
+            source_url: Some("https://github.com/x/y/blob/main/a.md".to_owned()),
+            provenance_override: Provenance::default(),
+        };
+        let mut b = empty_builder();
+        let split = split_frontmatter("# A\n\nbody");
+        let ctx = WalkContext {
+            path: leaf.rel_path.clone(),
+            kind: DocumentKind::Markdown,
+            content: "# A\n\nbody",
+            split: &split,
+            resolved: &leaf,
+            source_modified_at: None,
+        };
+        b.add_walked_document(&ctx).unwrap();
+        let plan = b.finalize();
+        let doc = &plan.new_documents[0];
+        assert_eq!(doc.published_url.as_deref(), Some("https://docs.example.com/a/"));
+        assert_eq!(doc.source_url.as_deref(), Some("https://github.com/x/y/blob/main/a.md"));
+        assert_eq!(doc.language.as_deref(), Some("markdown"));
+    }
+
+    #[test]
+    fn token_counts_are_populated_and_sum_to_document_total() {
+        let mut b = empty_builder();
+        feed(&mut b, "x.md", "# A\n\nbody one\n\n# B\n\nbody two with more tokens here.\n");
+        let plan = b.finalize();
+        let doc = &plan.new_documents[0];
+        let chunk_sum: u32 = doc.chunks.iter().map(|c| c.token_count).sum();
+        assert!(doc.token_count > 0);
+        assert_eq!(doc.token_count, chunk_sum);
     }
 }
 
@@ -629,8 +785,24 @@ mod proptests {
                     continue;
                 }
                 let split = split_frontmatter(&body);
+                let leaf = crate::manifest::resolve::ResolvedLeaf {
+                    rel_path: PathBuf::from(&p),
+                    kind: DocumentKind::Markdown,
+                    name: None,
+                    published_url: None,
+                    source_url: None,
+                    provenance_override: Provenance::default(),
+                };
+                let ctx = WalkContext {
+                    path: PathBuf::from(&p),
+                    kind: DocumentKind::Markdown,
+                    content: &body,
+                    split: &split,
+                    resolved: &leaf,
+                    source_modified_at: None,
+                };
                 builder
-                    .add_walked_document(PathBuf::from(&p), DocumentKind::Markdown, &body, &split)
+                    .add_walked_document(&ctx)
                     .expect("dedup'd above");
             }
             let plan = builder.finalize();

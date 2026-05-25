@@ -11,9 +11,10 @@
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
+use time::OffsetDateTime;
 
 use crate::frontmatter::{split as split_frontmatter, FrontmatterSplit};
-use crate::manifest::{Manifest, ManifestNode};
+use crate::manifest::Manifest;
 
 /// One file pulled off disk and pre-processed for the orchestrator.
 #[derive(Debug, Clone, PartialEq)]
@@ -24,6 +25,12 @@ pub struct WalkedDocument {
     pub content: String,
     /// Parsed frontmatter + body split.
     pub split: FrontmatterSplit,
+    /// Resolver-derived inheritance — fed to `PlanBuilder` so it can be
+    /// threaded to the upload layer.
+    pub resolved: crate::manifest::resolve::ResolvedLeaf,
+    /// Filesystem modification timestamp captured at walk time.
+    /// `None` if the OS could not supply `mtime` for the file.
+    pub source_modified_at: Option<OffsetDateTime>,
 }
 
 /// Errors the walker can surface.
@@ -64,23 +71,31 @@ pub enum WalkError {
 /// [`WalkError::Io`] on read failure, or [`WalkError::NotUtf8`] on decode
 /// failure. The walk stops at the first error.
 pub fn walk(manifest: &Manifest, base: &Path) -> Result<Vec<WalkedDocument>, WalkError> {
-    let mut paths: Vec<PathBuf> = Vec::new();
-    collect_files(&manifest.root, &mut paths);
-    paths.sort();
-    paths.dedup();
-
-    let mut out: Vec<WalkedDocument> = Vec::with_capacity(paths.len());
-    for rel in paths {
-        let abs = base.join(&rel);
+    let leaves = crate::manifest::resolve::resolve(manifest, base);
+    let mut out: Vec<WalkedDocument> = Vec::with_capacity(leaves.len());
+    for leaf in leaves {
+        let abs = base.join(&leaf.rel_path);
         if !abs.exists() {
-            return Err(WalkError::MissingFile(rel));
+            return Err(WalkError::MissingFile(leaf.rel_path));
         }
-        let bytes =
-            std::fs::read(&abs).map_err(|e| WalkError::Io { path: rel.clone(), source: e })?;
-        let content =
-            String::from_utf8(bytes).map_err(|_| WalkError::NotUtf8 { path: rel.clone() })?;
+        let bytes = std::fs::read(&abs).map_err(|e| WalkError::Io {
+            path: leaf.rel_path.clone(),
+            source: e,
+        })?;
+        let content = String::from_utf8(bytes)
+            .map_err(|_| WalkError::NotUtf8 { path: leaf.rel_path.clone() })?;
         let split = split_frontmatter(&content);
-        out.push(WalkedDocument { rel_path: rel, content, split });
+        let modified = std::fs::metadata(&abs)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .map(OffsetDateTime::from);
+        out.push(WalkedDocument {
+            rel_path: leaf.rel_path.clone(),
+            content,
+            split,
+            resolved: leaf,
+            source_modified_at: modified,
+        });
     }
     Ok(out)
 }
@@ -108,15 +123,6 @@ impl Walker {
     /// See [`walk`].
     pub fn walk(&self) -> Result<Vec<WalkedDocument>, WalkError> {
         walk(&self.manifest, &self.base)
-    }
-}
-
-fn collect_files(node: &ManifestNode, out: &mut Vec<PathBuf>) {
-    if let Some(file) = &node.file {
-        out.push(file.clone());
-    }
-    for child in &node.children {
-        collect_files(child, out);
     }
 }
 
@@ -216,5 +222,35 @@ mod tests {
         let walker = Walker::new(manifest, dir.path().to_path_buf());
         let err = walker.walk().unwrap_err();
         assert!(matches!(err, WalkError::NotUtf8 { .. }));
+    }
+
+    #[test]
+    fn walker_captures_source_modified_at() {
+        let dir = tempdir();
+        write_file(dir.path(), "a.md", "# A");
+        let body = "manifest_version: 1\nroot:\n  children:\n    - file: a.md\n";
+        let manifest = Manifest::parse(body).unwrap();
+        let walker = Walker::new(manifest, dir.path().to_path_buf());
+        let docs = walker.walk().unwrap();
+        assert!(docs[0].source_modified_at.is_some());
+    }
+
+    #[test]
+    fn walker_emits_resolved_leaves_including_path_discovery() {
+        let dir = tempdir();
+        write_file(dir.path(), "docs/a.md", "# A");
+        write_file(dir.path(), "docs/sub/b.md", "# B");
+        write_file(dir.path(), "outside.md", "# not in manifest");
+        let body = r"
+manifest_version: 1
+root:
+  name: docs
+  path: docs/
+";
+        let manifest = Manifest::parse(body).unwrap();
+        let walker = Walker::new(manifest, dir.path().to_path_buf());
+        let docs = walker.walk().unwrap();
+        let paths: Vec<_> = docs.iter().map(|d| d.rel_path.clone()).collect();
+        assert_eq!(paths, vec![PathBuf::from("docs/a.md"), PathBuf::from("docs/sub/b.md")]);
     }
 }
