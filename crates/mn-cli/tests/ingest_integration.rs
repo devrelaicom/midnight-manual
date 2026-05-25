@@ -308,6 +308,140 @@ async fn aborts_run_when_upload_fails() {
     assert!(*abort_hit.lock().unwrap(), "CLI must invoke .../abort after upload failure");
 }
 
+/// Regression test for the F-bug: a manifest declaring `published_url` at the
+/// root level must propagate that value through the resolver's inheritance into
+/// every `DocumentUpload.published_url` that arrives at the server.
+///
+/// Before the fix `DocumentUpload.published_url` was hardcoded to `None`
+/// regardless of what the manifest declared. This test will fail if that
+/// regression ever returns.
+#[tokio::test]
+async fn published_url_inheritance_survives_to_upload_body() {
+    let server = MockServer::start().await;
+
+    // Mock: GET /v1/sources/:slug — source exists.
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/v1/sources/[^/]+$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "slug": "docs",
+            "kind": "docs_site",
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path_regex(r"^/v1/admin/sources/[^/]+/ingest-runs$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ingest_run_id": "00000000-0000-0000-0000-000000000042",
+            "source_version_id": "00000000-0000-0000-0000-000000000042",
+            "source_version_revision": 1,
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("PUT"))
+        .and(path_regex(r"^/v1/admin/sources/[^/]+/ingest-runs/[^/]+/documents$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "accepted": 2,
+            "carried": 0,
+            "conflicts": [],
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path_regex(r"^/v1/admin/sources/[^/]+/ingest-runs/[^/]+/finalize$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "source_version_id": "00000000-0000-0000-0000-000000000042",
+            "revision": 1,
+            "is_active": true,
+            "demoted_revision": null,
+        })))
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    write_file(dir.path(), "a.md", "# A\n\nBody of A.");
+    write_file(dir.path(), "b.md", "# B\n\nBody of B.");
+
+    // Manifest declares published_url at root. The resolver must compose
+    //   https://docs.example.com/a/  for a.md
+    //   https://docs.example.com/b/  for b.md
+    let manifest_path = dir.path().join("hierarchy.yaml");
+    std::fs::write(
+        &manifest_path,
+        "manifest_version: 1\nroot:\n  published_url: https://docs.example.com/\n  children:\n    - file: a.md\n    - file: b.md\n",
+    )
+    .unwrap();
+
+    let auth_path = write_admin_auth(dir.path());
+
+    let args = IngestArgs {
+        manifest: manifest_path,
+        source_slug: "docs".to_owned(),
+        revision: Some("rev-fbug".to_owned()),
+        embedding_model: "bge-base-en-v1.5@1".to_owned(),
+        note: None,
+        source_root: Some(dir.path().to_path_buf()),
+        dry_run: false,
+        yes: false,
+        source_base_url: None,
+        batch_size: 50,
+    };
+    let telemetry = mn_telemetry::TelemetryClient::Disabled;
+
+    mn_cli::commands::ingest::run::run_with_paths(
+        args,
+        &server.uri(),
+        &auth_path,
+        &telemetry,
+        "0.1.0-test",
+        true,
+    )
+    .await
+    .expect("ingest should succeed");
+
+    // Retrieve the captured PUT /documents request body via wiremock's
+    // `received_requests()`. The mock server records every request.
+    let requests = server.received_requests().await.unwrap();
+    let put_req = requests
+        .iter()
+        .find(|r| r.method == wiremock::http::Method::PUT)
+        .expect("PUT /documents request must have been made");
+
+    let body: serde_json::Value =
+        serde_json::from_slice(&put_req.body).expect("PUT body is valid JSON");
+
+    let documents = body["documents"]
+        .as_array()
+        .expect("documents array in body");
+    assert_eq!(documents.len(), 2, "both files must be uploaded");
+
+    // Collect published_url values keyed by path so order doesn't matter.
+    let by_path: std::collections::HashMap<String, Option<String>> = documents
+        .iter()
+        .map(|d| {
+            let path = d["path"].as_str().unwrap_or("").to_owned();
+            let url = d["published_url"].as_str().map(str::to_owned);
+            (path, url)
+        })
+        .collect();
+
+    // The F-bug: if published_url were hardcoded to None these assertions fail.
+    let a_url = by_path.get("a.md").and_then(|u| u.as_deref());
+    assert_eq!(
+        a_url,
+        Some("https://docs.example.com/a/"),
+        "a.md must carry the resolved published_url; was None (F-bug)"
+    );
+    let b_url = by_path.get("b.md").and_then(|u| u.as_deref());
+    assert_eq!(
+        b_url,
+        Some("https://docs.example.com/b/"),
+        "b.md must carry the resolved published_url; was None (F-bug)"
+    );
+}
+
 #[tokio::test]
 async fn manifest_missing_file_errors_before_any_http() {
     let server = MockServer::start().await;
