@@ -32,22 +32,22 @@ pub struct ResolvedLeaf {
     pub provenance_override: Provenance,
 }
 
-/// Resolve a manifest into its leaves. The `base` is informational at this
-/// stage — file existence is checked by the walker, not the resolver.
+/// Resolve a manifest into its leaves.
 ///
-/// At this checkpoint the resolver only handles explicit `file:` leaves
-/// without any inheritance. Inheritance and `path:` discovery are added
-/// in subsequent tasks.
+/// `base` is the on-disk root from which relative paths in the manifest are
+/// resolved. For `path:` nodes the resolver enumerates files under
+/// `base/<path>` using walkdir + globset.
 #[must_use]
-pub fn resolve(manifest: &Manifest, _base: &Path) -> Vec<ResolvedLeaf> {
+pub fn resolve(manifest: &Manifest, base: &Path) -> Vec<ResolvedLeaf> {
     let mut out = Vec::new();
     let empty = serde_json::Map::new();
-    walk(&manifest.root, None, &empty, &mut out);
+    walk(base, &manifest.root, None, &empty, &mut out);
     out.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
     out
 }
 
 fn walk(
+    base: &Path,
     node: &super::ManifestNode,
     parent_url: Option<&str>,
     parent_prov: &serde_json::Map<String, serde_json::Value>,
@@ -87,9 +87,132 @@ fn walk(
             provenance_override: prov_override,
         });
     }
-    for child in &node.children {
-        walk(child, inherited_url, &merged_prov, out);
+
+    // Collect the set of files explicitly declared as `file:` children so that
+    // `path:` discovery does not emit duplicates for them.
+    let explicit_files: std::collections::HashSet<PathBuf> = node
+        .children
+        .iter()
+        .filter_map(|c| c.file.clone())
+        .collect();
+
+    // If this node declares a `path:`, discover all matching files under that
+    // directory and emit a leaf for each one that is not already covered by an
+    // explicit `file:` child.
+    if let Some(path) = &node.path {
+        for rel in discover_under_path(base, path, &node.include, &node.exclude, &explicit_files) {
+            let url = compose_url(inherited_url, &rel);
+            let prov_override = serde_json::from_value::<Provenance>(
+                serde_json::Value::Object(merged_prov.clone()),
+            )
+            .unwrap_or_default();
+            out.push(ResolvedLeaf {
+                rel_path: rel.clone(),
+                kind: kind_for(&rel),
+                name: None,
+                published_url: url,
+                source_url: None,
+                provenance_override: prov_override,
+            });
+        }
     }
+
+    for child in &node.children {
+        walk(base, child, inherited_url, &merged_prov, out);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// path: discovery helpers
+// ---------------------------------------------------------------------------
+
+/// Directories that are always skipped during `path:` discovery.
+const DEFAULT_IGNORE_DIRS: &[&str] = &["node_modules", ".git", "target", "dist"];
+
+/// Walk `base/rel_dir` recursively and return all files that:
+/// - are not hidden (no leading `.`),
+/// - are not inside a `DEFAULT_IGNORE_DIRS` directory,
+/// - have a known `DocumentKind` (or match an explicit include glob),
+/// - match any `include` globs (if provided),
+/// - do NOT match any `exclude` globs,
+/// - are not in `explicit_files` (already declared as `file:` children).
+///
+/// Returned paths are relative to `base` and sorted lexicographically.
+fn discover_under_path(
+    base: &Path,
+    rel_dir: &Path,
+    include: &[String],
+    exclude: &[String],
+    explicit_files: &std::collections::HashSet<PathBuf>,
+) -> Vec<PathBuf> {
+    let abs = base.join(rel_dir);
+    if !abs.is_dir() {
+        return Vec::new();
+    }
+    let include_set = build_globs(include);
+    let exclude_set = build_globs(exclude);
+
+    let mut out = Vec::new();
+    for entry in walkdir::WalkDir::new(&abs)
+        .into_iter()
+        .filter_entry(|e| {
+            let name = e.file_name().to_string_lossy();
+            // Skip hidden entries.
+            if name.starts_with('.') {
+                return false;
+            }
+            // Skip known ignore directories.
+            if e.file_type().is_dir() && DEFAULT_IGNORE_DIRS.contains(&name.as_ref()) {
+                return false;
+            }
+            true
+        })
+        .flatten()
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let rel = match entry.path().strip_prefix(base) {
+            Ok(p) => p.to_path_buf(),
+            Err(_) => continue,
+        };
+        // Skip files already covered by explicit `file:` children.
+        if explicit_files.contains(&rel) {
+            continue;
+        }
+        // Default include = files whose extension maps to a known DocumentKind.
+        if include_set.is_none() && crate::language::from_path(&rel).is_none() {
+            continue;
+        }
+        if let Some(set) = &include_set {
+            if !set.is_match(&rel) {
+                continue;
+            }
+        }
+        if let Some(set) = &exclude_set {
+            if set.is_match(&rel) {
+                continue;
+            }
+        }
+        out.push(rel);
+    }
+    out.sort();
+    out
+}
+
+/// Build a `GlobSet` from a list of patterns. Returns `None` when the list is
+/// empty (callers interpret `None` as "no filter").
+fn build_globs(patterns: &[String]) -> Option<globset::GlobSet> {
+    if patterns.is_empty() {
+        return None;
+    }
+    let mut builder = globset::GlobSetBuilder::new();
+    for p in patterns {
+        if let Ok(g) = globset::Glob::new(p) {
+            builder.add(g);
+        }
+    }
+    builder.build().ok()
 }
 
 /// Compose the file's final `published_url` from an inherited prefix.
@@ -261,5 +384,61 @@ root:
         assert_eq!(p.attribution, mn_core::provenance::Attribution::Foundation);
         // Leaf-level verified wins.
         assert!(!p.verified);
+    }
+
+    #[test]
+    fn path_node_discovers_files_under_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        std::fs::create_dir_all(base.join("docs/sub")).unwrap();
+        std::fs::write(base.join("docs/a.md"), "# A").unwrap();
+        std::fs::write(base.join("docs/sub/b.md"), "# B").unwrap();
+        std::fs::write(base.join("docs/sub/skip.draft.md"), "# draft").unwrap();
+        let body = r#"
+manifest_version: 1
+root:
+  name: docs
+  path: docs/
+  published_url: https://docs.example.com/
+  exclude: ["**/*.draft.md"]
+"#;
+        let m = Manifest::parse(body).unwrap();
+        let leaves = resolve(&m, base);
+        let paths: Vec<_> = leaves.iter().map(|l| l.rel_path.clone()).collect();
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from("docs/a.md"),
+                PathBuf::from("docs/sub/b.md"),
+            ]
+        );
+        // Inherited URL prefix is joined with each discovered file's stem.
+        assert!(leaves[0].published_url.as_deref().unwrap().ends_with("/a/"));
+        assert!(leaves[1].published_url.as_deref().unwrap().ends_with("/b/"));
+    }
+
+    #[test]
+    fn explicit_file_in_children_wins_over_path_discovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        std::fs::create_dir_all(base.join("docs")).unwrap();
+        std::fs::write(base.join("docs/a.md"), "# A").unwrap();
+        let body = r#"
+manifest_version: 1
+root:
+  name: docs
+  path: docs/
+  published_url: https://docs.example.com/
+  children:
+    - file: docs/a.md
+      published_url: https://override.example.com/special/
+"#;
+        let m = Manifest::parse(body).unwrap();
+        let leaves = resolve(&m, base);
+        assert_eq!(leaves.len(), 1);
+        assert_eq!(
+            leaves[0].published_url.as_deref(),
+            Some("https://override.example.com/special/")
+        );
     }
 }

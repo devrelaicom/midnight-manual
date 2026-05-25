@@ -92,6 +92,7 @@ utoipa           = { version = "5", features = ["axum_extras", "uuid", "time"] }
 # CLI & config
 clap             = { version = "4", features = ["derive", "env"] }
 directories      = "5"
+globset          = "0.4"
 
 # Auth & crypto
 ed25519-dalek    = { version = "2", features = ["rand_core", "pkcs8"] }
@@ -134,6 +135,7 @@ proptest         = "1"
 testcontainers   = "0.23"
 insta            = "1"
 tempfile         = "3"
+walkdir          = "2"
 wiremock         = "0.6"
 
 # CLI command convenience for the workspace itself
