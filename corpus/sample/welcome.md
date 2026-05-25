@@ -24,4 +24,4 @@ or both chunks from this file.
 
 Anything you read here is fictional placeholder text. For the real Midnight
 documentation corpus, point the ingest at the upstream `midnight-docs` repo
-or your own content tree — see `docs/README-deploy.md` §9b.
+or your own content tree — see `docs/README-deploy.md` §10b.

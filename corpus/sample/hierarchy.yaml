@@ -1,4 +1,4 @@
-# Sample ingest fixture — see corpus/README.md and docs/README-deploy.md §9a.
+# Sample ingest fixture — see corpus/README.md and docs/README-deploy.md §10a.
 #
 # This manifest is intentionally minimal: two placeholder docs under one group
 # so the operator can verify the full ingest pipeline (walk → chunk → embed →

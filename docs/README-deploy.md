@@ -47,7 +47,41 @@ flyctl apps create midnight-manual \
 The app name `midnight-manual` matches `fly.toml:4`. Use a different name only
 if you also edit `fly.toml`.
 
-## 2. Provision Fly Postgres + pgvector
+## 2. Provision the custom domain + TLS cert
+
+The production URL is `https://midnight-manual.midnightntwrk.expert`. Fly's
+default `midnight-manual.fly.dev` hostname keeps working alongside it, so this
+step is safe to start in parallel with the rest of provisioning — DNS
+propagation and cert issuance can happen while you work on Postgres + secrets.
+
+```bash
+flyctl certs create midnight-manual.midnightntwrk.expert --app midnight-manual
+```
+
+Flyctl prints the DNS records you need to set at whoever hosts
+`midnightntwrk.expert`. Typically two:
+
+| Record | Value |
+| --- | --- |
+| `CNAME midnight-manual.midnightntwrk.expert` | `midnight-manual.fly.dev` |
+| `TXT  _acme-challenge.midnight-manual.midnightntwrk.expert` | `<token from flyctl>` |
+
+Set those at the DNS provider, then poll until the cert is `Issued`:
+
+```bash
+flyctl certs show midnight-manual.midnightntwrk.expert --app midnight-manual
+```
+
+A few minutes is typical once DNS resolves; up to ~30 minutes if the registrar
+has slow TTLs. `force_https = true` in `fly.toml` handles the redirect on both
+the custom domain and the Fly default once the cert is in place.
+
+You can defer this step if you like — the server is reachable via
+`midnight-manual.fly.dev` until the cert issues. But the GitHub OAuth App
+callback URL (step 6 below) has to match the *final* host, so it's cleaner to
+have the cert in flight before you register the OAuth App.
+
+## 3. Provision Fly Postgres + pgvector
 
 ```bash
 # Create a managed Postgres cluster.
@@ -73,7 +107,7 @@ The server runs migrations at boot (`MIDNIGHT_MANUAL_AUTO_MIGRATE=true` in
 `fly.toml`), so once the extension exists the 6 numbered migrations under
 `crates/mn-store/migrations/` will apply on first deploy.
 
-## 3. Generate the JWT signing secret
+## 4. Generate the JWT signing secret
 
 The HS256 secret needs to be ≥ 32 bytes.
 
@@ -85,7 +119,7 @@ openssl rand -hex 32 | tr -d '\n' | \
 `--stage` queues the secret without restarting machines yet; we'll deploy
 everything in one batch at the end.
 
-## 4. Author the admin user-store TOML
+## 5. Author the admin user-store TOML
 
 The user-store gates admin endpoints (source CRUD, rate-limit overrides, etc.).
 Schema: `schema_version = 1` with `[admin]` and `[read_uplift]` sections. The
@@ -123,7 +157,7 @@ flyctl secrets set MIDNIGHT_MANUAL_USER_STORE="$(cat user-store.toml)" \
 
 Keep `user-store.toml` and `ops-primary.toml` **out of git**.
 
-## 5. Register the GitHub OAuth App
+## 6. Register the GitHub OAuth App
 
 Used by FR-062: members of the configured GitHub org can exchange an OAuth
 flow for a read-uplift JWT that bumps their rate-limit tier.
@@ -132,17 +166,20 @@ flow for a read-uplift JWT that bumps their rate-limit tier.
    `https://github.com/organizations/<org>/settings/applications/new` for an
    org-owned OAuth App).
 2. **Application name**: `midnight-manual` (anything works).
-3. **Homepage URL**: `https://midnight-manual.fly.dev` (or your custom domain
-   once configured — see step 8).
+3. **Homepage URL**: `https://midnight-manual.midnightntwrk.expert`.
 4. **Authorization callback URL**:
-   `https://midnight-manual.fly.dev/v1/auth/github/callback`.
+   `https://midnight-manual.midnightntwrk.expert/v1/auth/github/callback`.
 5. Generate a client secret on the next screen; copy both values.
+
+The callback URL must exactly match the cert hostname from step 2; using the
+Fly default (`midnight-manual.fly.dev`) here would block OAuth on the
+production domain later.
 
 ```bash
 flyctl secrets set \
     MIDNIGHT_MANUAL_GITHUB_OAUTH_CLIENT_ID=<client-id> \
     MIDNIGHT_MANUAL_GITHUB_OAUTH_CLIENT_SECRET=<client-secret> \
-    MIDNIGHT_MANUAL_GITHUB_OAUTH_REDIRECT_URL=https://midnight-manual.fly.dev/v1/auth/github/callback \
+    MIDNIGHT_MANUAL_GITHUB_OAUTH_REDIRECT_URL=https://midnight-manual.midnightntwrk.expert/v1/auth/github/callback \
     MIDNIGHT_MANUAL_GITHUB_ORG=midnight-network \
     --stage --app midnight-manual
 ```
@@ -150,7 +187,7 @@ flyctl secrets set \
 If any one of these four is missing the `/v1/auth/github/*` endpoints return
 503 cleanly (`app.rs` build-time gate), so a half-configured deploy is safe.
 
-## 6. (Optional) Custom scoring policy
+## 7. (Optional) Custom scoring policy
 
 The compiled-in confidence policy (US6/D24) is the recommended default. If you
 want to tune weights, ship a TOML file via secret:
@@ -163,7 +200,7 @@ flyctl secrets set MIDNIGHT_MANUAL_SCORING_POLICY="$(cat scoring-policy.toml)" \
 The server fails startup on a malformed policy (Constitution VIII fail-fast),
 so test it locally first with `cargo test -p mn-core scoring_policy`.
 
-## 7. First deploy
+## 8. First deploy
 
 Two paths:
 
@@ -198,12 +235,14 @@ flyctl tokens create deploy --app midnight-manual | \
     gh secret set FLY_API_TOKEN --repo <owner>/midnight-manual
 ```
 
-## 8. Smoke test
+## 9. Smoke test
 
-Once the machine is up, verify the basics:
+Once the machine is up, verify the basics. If the cert from step 2 hasn't
+issued yet, swap in `https://midnight-manual.fly.dev` for the smoke run — both
+hostnames serve the same machine.
 
 ```bash
-HOST=https://midnight-manual.fly.dev
+HOST=https://midnight-manual.midnightntwrk.expert
 
 # Liveness + readiness.
 curl -fs "$HOST/healthz"      # → 200 "ok"
@@ -221,7 +260,7 @@ curl -fs -X POST "$HOST/v1/search" \
 # → 0
 ```
 
-## 9. Ingest a corpus
+## 10. Ingest a corpus
 
 The corpus is initially empty. Two options:
 
@@ -268,16 +307,6 @@ mnm ingest /path/to/midnight-docs/hierarchy.yaml \
 ```
 
 `--dry-run` first if you want the plan before any writes.
-
-## 10. (Optional) Custom domain + TLS
-
-```bash
-flyctl certs create midnight-manual.example.com --app midnight-manual
-# Follow the DNS instructions; Fly handles the ACME flow.
-```
-
-Then update the GitHub OAuth App callback URL and the
-`MIDNIGHT_MANUAL_GITHUB_OAUTH_REDIRECT_URL` secret to match.
 
 ## 11. (Optional) Alerting
 

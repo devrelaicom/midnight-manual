@@ -5,7 +5,7 @@ Markdown (and eventually code) plus a `hierarchy.yaml` manifest at the root
 that declares the published hierarchy.
 
 The `sample/` directory ships in this repo as a smoke-test fixture — see
-[`docs/README-deploy.md`](../docs/README-deploy.md) §9a. It is intentionally
+[`docs/README-deploy.md`](../docs/README-deploy.md) §10a. It is intentionally
 minimal and **not** authoritative Midnight content; it exists to prove the
 ingest pipeline works end to end on a freshly-deployed server.
 
