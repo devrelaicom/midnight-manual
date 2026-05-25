@@ -1,0 +1,29 @@
+# Sample ingest fixture — see corpus/README.md and docs/README-deploy.md §9a.
+#
+# This manifest is intentionally minimal: two placeholder docs under one group
+# so the operator can verify the full ingest pipeline (walk → chunk → embed →
+# upload → finalize) end-to-end on a freshly-deployed server. Replace these
+# files with real content for an actual corpus.
+
+manifest_version: 1
+root:
+  name: Sample
+  children:
+    - name: Welcome
+      children:
+        - file: welcome.md
+          published_url: https://example.invalid/sample/welcome
+          provenance:
+            attribution: foundation
+            verified: true
+            verified_by: midnight-manual-sample
+            content_type: doc
+    - name: How this sample works
+      children:
+        - file: how-it-works.md
+          published_url: https://example.invalid/sample/how-it-works
+          provenance:
+            attribution: foundation
+            verified: true
+            verified_by: midnight-manual-sample
+            content_type: doc
