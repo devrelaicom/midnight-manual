@@ -1,0 +1,72 @@
+# Build-context filter for `docker build -f Dockerfile.server`.
+#
+# Without this file, `docker build` uploads the entire repo to the (remote)
+# builder. A dev machine's `target/` dir alone can be 50+ GB of cargo debug
+# artifacts; the resulting upload tail on `flyctl deploy` is measured in tens
+# of minutes. With this filter the build context drops to a few MB — the
+# Rust source under crates/, the workspace Cargo.toml/Cargo.lock, the
+# rust-toolchain.toml, and not much else.
+#
+# Anything `cargo build --release --bin midnight-manual-server` does not
+# consume can be excluded. The Dockerfile bakes `crates/mn-store/migrations`
+# into the runtime stage explicitly, so don't exclude that subtree.
+
+# Cargo build artifacts — by far the biggest contributor on a dev machine.
+target/
+
+# VCS internals and CI definitions.
+.git/
+.gitignore
+.gitattributes
+.gitmodules
+.github/
+
+# Editor / IDE / OS noise.
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*~
+
+# Local agent / workflow state — never consumed by the build.
+.claude/
+.midnight-expert/
+.sdd/
+
+# Top-level operator-only docs.
+CONSTITUTION.md
+CLAUDE.md
+
+# Documentation, spec, and discovery artifacts — not consumed by `cargo build`.
+docs/
+specs/
+discovery/
+README.md
+CHANGELOG.md
+CONTRIBUTING.md
+CODE_OF_CONDUCT.md
+SECURITY.md
+LICENSE
+NOTICE
+
+# Test fixtures and benches — not compiled into the release binary.
+corpus/
+benches/
+tests/
+
+# Dev / deploy config not consumed by the Rust build inside the image.
+fly.toml
+release-please-config.json
+.release-please-manifest.json
+justfile
+Justfile
+.envrc
+.nvmrc
+
+# Don't include Dockerfiles or the dockerignore itself in the context.
+.dockerignore
+Dockerfile*
+
+# Scratch / backup files.
+*.bak
+*.backup
