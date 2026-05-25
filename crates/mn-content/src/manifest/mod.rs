@@ -1,9 +1,9 @@
 //! `hierarchy.yaml` manifest loader (FR-017, FR-050).
 //!
-//! Manifests let the maintainer override the on-disk directory tree with an
-//! explicit hierarchy. Files referenced by the manifest inherit its
-//! `published_url` / `provenance` / `name` overrides; files NOT referenced
-//! fall back to directory-tree inference unless `--strict-manifest` is set.
+//! Manifests are the source of truth at ingest time. Only files reachable
+//! from the manifest (via `file:` leaves or `path:` discovery) are
+//! ingested. There is no directory-tree fallback — see §3.3 of the
+//! ingest-UX design spec for rationale.
 
 pub mod resolve;
 
