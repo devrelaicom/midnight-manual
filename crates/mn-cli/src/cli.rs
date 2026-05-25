@@ -94,6 +94,8 @@ pub enum Command {
     Ingest(commands::ingest::Args),
     /// Per-CIDR rate-limit override CRUD (admin; hidden by default).
     Ratelimits(commands::ratelimits::Args),
+    /// Manifest authoring + validation (local only).
+    Manifest(commands::manifest::Args),
 }
 
 /// Subcommand names that are admin-only and therefore hidden from `--help`
@@ -166,6 +168,7 @@ pub async fn run() -> Result<()> {
         Command::Ratelimits(args) => {
             commands::ratelimits::run(args, cli.server.as_deref(), cli.json).await
         }
+        Command::Manifest(args) => commands::manifest::run(args).await,
     };
 
     let duration_ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
@@ -209,6 +212,7 @@ const fn cli_command_name(cmd: &Command) -> CliCommandName {
         Command::Telemetry(_) => CliCommandName::Telemetry,
         Command::Ingest(_) => CliCommandName::Ingest,
         Command::Ratelimits(_) => CliCommandName::Ratelimits,
+        Command::Manifest(_) => CliCommandName::Manifest,
     }
 }
 

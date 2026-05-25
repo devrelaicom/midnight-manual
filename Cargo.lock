@@ -2709,12 +2709,14 @@ dependencies = [
 name = "mn-content"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "globset",
  "mn-core",
  "proptest",
  "pulldown-cmark",
  "quick-xml",
  "regex",
+ "reqwest",
  "serde",
  "serde_json",
  "serde_yaml",

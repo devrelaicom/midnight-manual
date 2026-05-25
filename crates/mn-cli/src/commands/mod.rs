@@ -6,6 +6,7 @@ pub mod doctor;
 pub mod ingest;
 pub mod keys;
 pub mod login;
+pub mod manifest;
 pub mod mcp;
 pub mod models;
 pub mod ratelimits;

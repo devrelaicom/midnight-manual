@@ -202,6 +202,8 @@ pub enum CliCommandName {
     Ingest,
     /// `mnm ratelimits` (admin).
     Ratelimits,
+    /// `mnm manifest` (any sub).
+    Manifest,
 }
 
 /// The top-level event envelope written to `telemetry_event_raw.fields` (plus
