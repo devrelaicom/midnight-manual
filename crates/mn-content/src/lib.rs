@@ -12,6 +12,7 @@ pub mod ingest;
 pub mod language;
 pub mod manifest;
 pub mod markdown;
+pub mod tokens;
 
 /// Crate version stamped at build time.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

@@ -277,6 +277,7 @@ impl PlanBuilder {
             .into_iter()
             .map(|c| {
                 let content_hash = chunk_hash(&c.content);
+                let token_count = crate::tokens::count(&c.content);
                 PlannedChunk {
                     content: c.content,
                     heading_path: c.heading_path,
@@ -285,10 +286,12 @@ impl PlanBuilder {
                     start_byte: c.start_byte,
                     end_byte: c.end_byte,
                     content_hash,
-                    token_count: 0,
+                    token_count,
                 }
             })
             .collect();
+
+        let doc_tokens: u32 = planned_chunks.iter().map(|c| c.token_count).sum();
 
         self.new_documents.push(PlannedDocument {
             path: walked.path.clone(),
@@ -302,7 +305,7 @@ impl PlanBuilder {
             source_url: walked.resolved.source_url.clone(),
             source_modified_at: walked.source_modified_at,
             language: crate::language::from_path(&walked.resolved.rel_path).map(str::to_owned),
-            token_count: 0,
+            token_count: doc_tokens,
         });
         Ok(())
     }
@@ -706,6 +709,17 @@ mod tests {
             Some("https://github.com/x/y/blob/main/a.md")
         );
         assert_eq!(doc.language.as_deref(), Some("markdown"));
+    }
+
+    #[test]
+    fn token_counts_are_populated_and_sum_to_document_total() {
+        let mut b = empty_builder();
+        feed(&mut b, "x.md", "# A\n\nbody one\n\n# B\n\nbody two with more tokens here.\n");
+        let plan = b.finalize();
+        let doc = &plan.new_documents[0];
+        let chunk_sum: u32 = doc.chunks.iter().map(|c| c.token_count).sum();
+        assert!(doc.token_count > 0);
+        assert_eq!(doc.token_count, chunk_sum);
     }
 }
 
