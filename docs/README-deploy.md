@@ -81,31 +81,60 @@ You can defer this step if you like — the server is reachable via
 callback URL (step 6 below) has to match the *final* host, so it's cleaner to
 have the cert in flight before you register the OAuth App.
 
-## 3. Provision Fly Postgres + pgvector
+## 3. Provision Managed Postgres + pgvector
+
+Use Fly **Managed Postgres** (`fly mpg`), not the legacy unmanaged
+`flyctl postgres create`. Fly explicitly will not support the unmanaged path
+anymore; the `--pgvector` flag on `mpg create` enables the extension for you
+so there's no separate `CREATE EXTENSION` step.
 
 ```bash
-# Create a managed Postgres cluster.
-flyctl postgres create \
+flyctl mpg create \
     --name midnight-manual-pg \
     --org <your-org-slug> \
     --region lhr \
-    --initial-cluster-size 1 \
-    --vm-size shared-cpu-1x \
-    --volume-size 10
+    --plan basic \
+    --volume-size 10 \
+    --pgvector
+```
 
-# Attach it to the app — this sets DATABASE_URL as a secret automatically.
-flyctl postgres attach midnight-manual-pg --app midnight-manual
+Plan trade-offs (current Fly MPG pricing):
 
-# Enable the pgvector extension on the cluster.
-# (Connect with `flyctl postgres connect -a midnight-manual-pg` then run:)
-#     CREATE EXTENSION IF NOT EXISTS vector;
-flyctl postgres connect --app midnight-manual-pg \
-    --command "CREATE EXTENSION IF NOT EXISTS vector;"
+| Plan | Spec | Monthly | When to pick it |
+| --- | --- | --- | --- |
+| **basic** | shared-2x · 1 GB RAM | ~$38 | first deploy, small corpus (≲ 50k chunks) |
+| starter | shared-2x · 2 GB RAM | ~$72 | safer for a full midnight-docs corpus |
+| launch | performance-2x · 8 GB RAM | ~$282 | production scale |
+
+Storage is metered separately at ~$0.28/GB-month, so 10 GB ≈ $2.80/mo on top.
+Start at `basic` and bump if you hit memory pressure once the HNSW index is
+warm.
+
+Then attach the cluster to the app — this sets `DATABASE_URL` on the app's
+secrets automatically.
+
+```bash
+# Cluster IDs come from `fly mpg list`; the attach command takes the ID, not
+# the name.
+flyctl mpg list
+flyctl mpg attach <cluster-id> --app midnight-manual
+
+# Sanity: DATABASE_URL now exists on the app.
+flyctl secrets list --app midnight-manual | grep DATABASE_URL
+```
+
+Confirm pgvector is enabled (optional but cheap):
+
+```bash
+flyctl mpg connect <cluster-id>
+# psql prompt:
+#   SELECT extname, extversion FROM pg_extension WHERE extname = 'vector';
+# → one row, version 0.7.x or higher.
 ```
 
 The server runs migrations at boot (`MIDNIGHT_MANUAL_AUTO_MIGRATE=true` in
-`fly.toml`), so once the extension exists the 6 numbered migrations under
-`crates/mn-store/migrations/` will apply on first deploy.
+`fly.toml`), so the 6 numbered migrations under
+`crates/mn-store/migrations/` apply on first deploy.
 
 ## 4. Generate the JWT signing secret
 
@@ -121,41 +150,66 @@ everything in one batch at the end.
 
 ## 5. Author the admin user-store TOML
 
-The user-store gates admin endpoints (source CRUD, rate-limit overrides, etc.).
-Schema: `schema_version = 1` with `[admin]` and `[read_uplift]` sections. The
-admin's ed25519 public key authenticates challenge requests (`POST
-/v1/auth/admin/challenge` → signed nonce → `/verify` → JWT).
+The user-store is the roster of human/CI principals who authenticate via
+Ed25519 challenge-response (FR-057). Each row binds a stable `user_id` to a
+public key and a role. The server loads it once at boot from
+`MIDNIGHT_MANUAL_USER_STORE` and never mutates it at runtime; updating the
+roster is a "edit local file → `flyctl secrets set` → redeploy" flow.
 
-Generate an admin keypair locally:
+GitHub-OAuth *read-uplift* bearers are a separate concept handled by the
+`MIDNIGHT_MANUAL_GITHUB_*` secrets in step 6 — they do **not** appear in
+`users.toml`.
+
+Two roles ship in v1:
+
+| Role | What it can do |
+| --- | --- |
+| `admin` | full surface incl. `/v1/admin/*` (source CRUD, rate-limit overrides) |
+| `writer` | ingest writes + reads; cannot reach `/v1/admin/*` |
+
+### Mint a keypair
 
 ```bash
-mnm keys generate --label "ops-primary" --out ./ops-primary.toml
-# This writes both the private key (kept locally, chmod 0600) and prints the
-# public-key block for the user-store.
+mnm keys generate --user-id ops-primary
 ```
 
-Author `user-store.toml`:
+This writes the 32-byte signing seed to
+`$XDG_CONFIG_HOME/midnight-manual/keys/ops-primary.private` (mode `0600` on
+Unix) — the operator does **not** choose the path. The public half is echoed
+to stdout in `users.toml` wire form, ready to paste. Add more principals (a
+CI bot, a co-maintainer, …) by rerunning with a different `--user-id` per
+principal.
+
+Useful flags: `--dry-run` (print + intended write path, touch nothing),
+`--force` (overwrite an existing `<user_id>.private` — refuses by default).
+
+### Build `user-store.toml` around the printed row
 
 ```toml
 schema_version = 1
 
-[admin]
-[admin.principals.ops-primary]
-ed25519_pubkey_base64 = "<paste from `mnm keys generate` output>"
+[[users]]
+user_id    = "ops-primary"
+role       = "admin"
+public_key = "ed25519:<base64 from `mnm keys generate` output>"
+created_at = "2026-05-25"
+# note     = "optional human note"
 
-[read_uplift]
-github_org = "midnight-network"     # any member of this org can request a
-                                    # read-uplift bearer via GitHub OAuth
+# Add more rows by appending another [[users]] block.
 ```
 
-Stage it as a secret (Fly stores the verbatim TOML body):
+Unknown fields and duplicate `user_id` values are rejected at load time
+(FR-057 fail-fast); the server boots with `auth = None` (and the
+`/v1/auth/admin/*` endpoints 503) if the secret is unset or malformed.
+
+### Stage as the Fly secret
 
 ```bash
 flyctl secrets set MIDNIGHT_MANUAL_USER_STORE="$(cat user-store.toml)" \
     --stage --app midnight-manual
 ```
 
-Keep `user-store.toml` and `ops-primary.toml` **out of git**.
+Keep `user-store.toml` and every `<user_id>.private` **out of git**.
 
 ## 6. Register the GitHub OAuth App
 
