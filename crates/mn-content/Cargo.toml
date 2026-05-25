@@ -36,6 +36,7 @@ regex                 = { workspace = true }
 url                   = { workspace = true }
 uuid                  = { workspace = true }
 walkdir               = { workspace = true }
+reqwest               = { workspace = true }
 
 [dev-dependencies]
 proptest              = { workspace = true }

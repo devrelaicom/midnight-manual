@@ -2,6 +2,7 @@
 //!
 //! Spec: §1.2 of docs/superpowers/specs/2026-05-25-ingest-ux-design.md
 
+use std::path::Path;
 use thiserror::Error;
 use url::Url;
 
@@ -83,6 +84,65 @@ pub fn parse(body: &str) -> Result<Parsed, SitemapError> {
     })
 }
 
+/// Check if a spec string is an HTTP(S) URL.
+#[must_use]
+pub fn is_http(spec: &str) -> bool {
+    spec.starts_with("http://") || spec.starts_with("https://")
+}
+
+/// Load a sitemap from a file path.
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be read or the XML is invalid.
+pub fn load_from_path(path: &Path) -> Result<Vec<Url>, SitemapError> {
+    let body = std::fs::read_to_string(path)
+        .map_err(|e| SitemapError::Parse(format!("read {}: {e}", path.display())))?;
+    match parse(&body)? {
+        Parsed::Urls(v) => Ok(v),
+        Parsed::Index(_) => Ok(Vec::new()), // file-form indexes are uncommon; ignore
+    }
+}
+
+/// Load a sitemap from an HTTP(S) URL, recursing one level into `<sitemapindex>`.
+///
+/// # Errors
+///
+/// Returns an error if the HTTP request fails or the XML is invalid.
+pub async fn load_from_url(
+    client: &reqwest::Client,
+    url: &Url,
+) -> Result<Vec<Url>, SitemapError> {
+    let body = client
+        .get(url.clone())
+        .send()
+        .await
+        .map_err(|e| SitemapError::Parse(e.to_string()))?
+        .text()
+        .await
+        .map_err(|e| SitemapError::Parse(e.to_string()))?;
+    match parse(&body)? {
+        Parsed::Urls(v) => Ok(v),
+        Parsed::Index(children) => {
+            let mut all = Vec::new();
+            for child in children {
+                let body = client
+                    .get(child)
+                    .send()
+                    .await
+                    .map_err(|e| SitemapError::Parse(e.to_string()))?
+                    .text()
+                    .await
+                    .map_err(|e| SitemapError::Parse(e.to_string()))?;
+                if let Ok(Parsed::Urls(v)) = parse(&body) {
+                    all.extend(v);
+                }
+            }
+            Ok(all)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -107,5 +167,18 @@ mod tests {
   <sitemap><loc>https://docs.example.com/sitemap-1.xml</loc></sitemap>
 </sitemapindex>"#;
         assert!(matches!(parse(body).unwrap(), Parsed::Index(v) if v.len() == 1));
+    }
+
+    #[test]
+    fn load_from_file_returns_urls() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sitemap.xml");
+        std::fs::write(
+            &path,
+            r"<urlset><url><loc>https://example.com/x/</loc></url></urlset>",
+        )
+        .unwrap();
+        let urls = load_from_path(&path).unwrap();
+        assert_eq!(urls.len(), 1);
     }
 }
