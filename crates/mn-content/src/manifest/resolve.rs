@@ -40,25 +40,59 @@ pub struct ResolvedLeaf {
 #[must_use]
 pub fn resolve(manifest: &Manifest, _base: &Path) -> Vec<ResolvedLeaf> {
     let mut out = Vec::new();
-    walk(&manifest.root, &mut out);
+    walk(&manifest.root, None, &mut out);
     out.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
     out
 }
 
-fn walk(node: &super::ManifestNode, out: &mut Vec<ResolvedLeaf>) {
+fn walk(node: &super::ManifestNode, parent_url: Option<&str>, out: &mut Vec<ResolvedLeaf>) {
+    let inherited = match (&node.published_url, parent_url) {
+        // Leaf-level explicit empty string = clear inheritance.
+        (Some(s), _) if s.is_empty() => None,
+        (Some(s), _) => Some(s.as_str()),
+        (None, p) => p,
+    };
+
     if let Some(file) = &node.file {
+        // If this node has its own published_url, use it directly (no composition).
+        // Otherwise, compose from the inherited URL.
+        let final_url = if let Some(own_url) = &node.published_url {
+            if own_url.is_empty() {
+                None
+            } else {
+                Some(own_url.clone())
+            }
+        } else {
+            compose_url(inherited, file)
+        };
         out.push(ResolvedLeaf {
             rel_path: file.clone(),
             kind: kind_for(file),
             name: node.name.clone(),
-            published_url: node.published_url.clone(),
+            published_url: final_url,
             source_url: None,
             provenance_override: Provenance::default(),
         });
     }
     for child in &node.children {
-        walk(child, out);
+        walk(child, inherited, out);
     }
+}
+
+/// Compose the file's final `published_url` from an inherited prefix.
+///
+/// - When the inherited URL ends in `/`, append the file basename (no
+///   extension) plus a trailing slash.
+/// - When it doesn't end in `/`, treat it as a verbatim leaf override
+///   (already final).
+/// - When there is no inherited URL, return None.
+fn compose_url(inherited: Option<&str>, file: &Path) -> Option<String> {
+    let prefix = inherited?;
+    if !prefix.ends_with('/') {
+        return Some(prefix.to_owned());
+    }
+    let stem = file.file_stem()?.to_str()?;
+    Some(format!("{prefix}{stem}/"))
 }
 
 fn kind_for(path: &Path) -> DocumentKind {
@@ -89,5 +123,74 @@ root:
         let paths: Vec<_> = leaves.iter().map(|l| l.rel_path.clone()).collect();
         assert_eq!(paths, vec![PathBuf::from("a.md"), PathBuf::from("dir/b.md")]);
         assert_eq!(leaves[0].kind, DocumentKind::Markdown);
+    }
+
+    #[test]
+    fn published_url_inherits_with_prefix_join() {
+        let body = r"
+manifest_version: 1
+root:
+  name: docs
+  published_url: https://docs.example.com/
+  children:
+    - name: Cookbook
+      published_url: https://docs.example.com/cookbook/
+      children:
+        - file: auth.md
+        - file: tls.md
+";
+        let m = Manifest::parse(body).unwrap();
+        let leaves = resolve(&m, Path::new("."));
+        let by_path: std::collections::HashMap<PathBuf, String> = leaves
+            .iter()
+            .map(|l| (l.rel_path.clone(), l.published_url.clone().unwrap()))
+            .collect();
+        assert_eq!(
+            by_path[&PathBuf::from("auth.md")],
+            "https://docs.example.com/cookbook/auth/"
+        );
+        assert_eq!(
+            by_path[&PathBuf::from("tls.md")],
+            "https://docs.example.com/cookbook/tls/"
+        );
+    }
+
+    #[test]
+    fn leaf_published_url_override_wins() {
+        let body = r"
+manifest_version: 1
+root:
+  published_url: https://docs.example.com/cookbook/
+  children:
+    - file: auth.md
+      published_url: https://docs.example.com/elsewhere/sign-in/
+";
+        let m = Manifest::parse(body).unwrap();
+        let leaves = resolve(&m, Path::new("."));
+        assert_eq!(
+            leaves[0].published_url.as_deref(),
+            Some("https://docs.example.com/elsewhere/sign-in/")
+        );
+    }
+
+    #[test]
+    fn published_url_null_at_leaf_clears_inherited() {
+        // serde_yaml maps `null` to None for Option<String>; the node-level
+        // None should be distinguishable from "not declared" so that leaves
+        // can opt out of inheritance. We use a sentinel string for "explicit
+        // null" rather than YAML null — see §3.2 of the spec.
+        //
+        // Implemented as: a leaf published_url of exactly "" means "clear".
+        let body = r#"
+manifest_version: 1
+root:
+  published_url: https://docs.example.com/cookbook/
+  children:
+    - file: internal.md
+      published_url: ""
+"#;
+        let m = Manifest::parse(body).unwrap();
+        let leaves = resolve(&m, Path::new("."));
+        assert_eq!(leaves[0].published_url, None);
     }
 }
