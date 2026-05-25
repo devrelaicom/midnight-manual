@@ -316,51 +316,55 @@ curl -fs -X POST "$HOST/v1/search" \
 
 ## 10. Ingest a corpus
 
-The corpus is initially empty. Two options:
+The corpus is initially empty. The new ingest tools live in two
+top-level command groups:
 
-### 9a. Ingest the sample scaffold (smoke test)
+- `mnm manifest {init,generate,check}` — purely local. Builds and
+  validates a `hierarchy.yaml`. No server contact required, so these
+  can be used against any docs source — including repos you don't
+  have write access to.
+- `mnm ingest {plan,run}` — talks to the server. `plan` is a
+  dry-run; `run` does the real ingest.
+
+### 10a. Smoke-test with the sample corpus
 
 ```bash
-# Create the source row first.
-mnm sources create \
-    --slug sample \
-    --kind docs-site \
-    --display-name "Sample" \
-    --retention-count 3 \
-    --server "$HOST"
-
-# Ingest the sample fixture under corpus/sample/.
-mnm ingest corpus/sample/hierarchy.yaml \
+mnm manifest check corpus/sample/hierarchy.yaml
+mnm ingest run corpus/sample/hierarchy.yaml \
     --source-slug sample \
-    --revision "$(git rev-parse --short HEAD)" \
-    --server "$HOST"
+    --yes   # auto-create the 'sample' source on first run
 ```
 
-This pushes a few placeholder docs through the pipeline end to end — embed,
-chunk, upload, finalize. The sample is intentionally trivial; it proves the
-pipeline works, not the corpus content.
+Watch the progress lines stream by; on success you'll see
+`finalized revision 1 (first version); +N new`.
 
-### 9b. Ingest a real Midnight-docs repo
+### 10b. Ingest a real Midnight-docs repo
 
-Author or clone the upstream `midnight-docs` repo, add a `hierarchy.yaml`
-manifest at the root (schema: `crates/mn-content/src/manifest.rs`), then:
+If the docs repo is one you own, commit the manifest alongside the
+content; otherwise generate it locally and keep it next to your
+`auth.toml`.
 
 ```bash
-mnm sources create \
-    --slug midnight-docs \
-    --kind docs-site \
-    --display-name "Midnight Docs" \
-    --retention-count 5 \
-    --server "$HOST"
+# Generate a manifest from globs + a sitemap.
+mnm manifest generate 'docs/**/*.md' 'docs/**/*.mdx' \
+    --base /path/to/midnight-docs \
+    --sitemap https://docs.midnight.network/sitemap.xml \
+    -o midnight-docs.yaml
 
-mnm ingest /path/to/midnight-docs/hierarchy.yaml \
+# Plan the ingest (no writes).
+mnm ingest plan midnight-docs.yaml \
+    --source-slug midnight-docs
+
+# Run it.
+mnm ingest run midnight-docs.yaml \
     --source-slug midnight-docs \
-    --revision "$(cd /path/to/midnight-docs && git rev-parse --short HEAD)" \
-    --note "first production ingest" \
-    --server "$HOST"
+    --yes
 ```
 
-`--dry-run` first if you want the plan before any writes.
+The `--server` flag is no longer needed in the common case — it
+defaults to `https://midnight-manual.midnightntwrk.expert`. Set
+`MIDNIGHT_MANUAL_SERVER` (or the `[server].url` config field) to
+point at a different deployment.
 
 ## 11. (Optional) Alerting
 
