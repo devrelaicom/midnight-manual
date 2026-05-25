@@ -8,6 +8,7 @@
 
 use serde_json::json;
 
+/// Progress reporting interface for long-running CLI phases.
 pub trait Reporter: Send {
     /// A phase started; payload is structured data for the JSON impl.
     fn phase(&mut self, name: &str, payload: serde_json::Value);
@@ -17,6 +18,7 @@ pub trait Reporter: Send {
     fn batch(&mut self, current: usize, total: usize, label: &str);
 }
 
+/// JSON-line reporter — emits one JSONL event per phase to stdout.
 pub struct Json;
 
 impl Reporter for Json {
@@ -36,12 +38,14 @@ impl Reporter for Json {
     }
 }
 
+/// TTY reporter — renders multi-progress bars + spinner via indicatif.
 pub struct Tty {
     mp: indicatif::MultiProgress,
     bar: Option<indicatif::ProgressBar>,
 }
 
 impl Tty {
+    /// Create a new [`Tty`] reporter.
     #[must_use]
     pub fn new() -> Self {
         Self {

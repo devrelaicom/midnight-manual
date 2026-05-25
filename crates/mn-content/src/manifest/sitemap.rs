@@ -109,10 +109,7 @@ pub fn load_from_path(path: &Path) -> Result<Vec<Url>, SitemapError> {
 /// # Errors
 ///
 /// Returns an error if the HTTP request fails or the XML is invalid.
-pub async fn load_from_url(
-    client: &reqwest::Client,
-    url: &Url,
-) -> Result<Vec<Url>, SitemapError> {
+pub async fn load_from_url(client: &reqwest::Client, url: &Url) -> Result<Vec<Url>, SitemapError> {
     let body = client
         .get(url.clone())
         .send()
@@ -173,11 +170,8 @@ mod tests {
     fn load_from_file_returns_urls() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("sitemap.xml");
-        std::fs::write(
-            &path,
-            r"<urlset><url><loc>https://example.com/x/</loc></url></urlset>",
-        )
-        .unwrap();
+        std::fs::write(&path, r"<urlset><url><loc>https://example.com/x/</loc></url></urlset>")
+            .unwrap();
         let urls = load_from_path(&path).unwrap();
         assert_eq!(urls.len(), 1);
     }

@@ -241,10 +241,7 @@ impl PlanBuilder {
     ///
     /// Returns [`IngestError::DuplicatePath`] if the path inside `walked` was
     /// already fed in.
-    pub fn add_walked_document(
-        &mut self,
-        walked: &WalkContext<'_>,
-    ) -> Result<(), IngestError> {
+    pub fn add_walked_document(&mut self, walked: &WalkContext<'_>) -> Result<(), IngestError> {
         if !self.seen_paths.insert(walked.path.clone()) {
             return Err(IngestError::DuplicatePath(walked.path.clone()));
         }
@@ -298,7 +295,10 @@ impl PlanBuilder {
             kind: walked.kind,
             content_hash: hash,
             frontmatter: walked.split.frontmatter.clone(),
-            provenance: merge_provenance(&walked.split.provenance, &walked.resolved.provenance_override),
+            provenance: merge_provenance(
+                &walked.split.provenance,
+                &walked.resolved.provenance_override,
+            ),
             char_count: walked.content.chars().count(),
             chunks: planned_chunks,
             published_url: walked.resolved.published_url.clone(),
@@ -322,25 +322,28 @@ fn merge_provenance(frontmatter: &Provenance, ancestor: &Provenance) -> Provenan
         out.verified = frontmatter.verified;
     }
     if frontmatter.verified_by != default.verified_by {
-        out.verified_by = frontmatter.verified_by.clone();
+        out.verified_by.clone_from(&frontmatter.verified_by);
     }
     if frontmatter.verified_at != default.verified_at {
         out.verified_at = frontmatter.verified_at;
     }
     if frontmatter.verification_notes != default.verification_notes {
-        out.verification_notes = frontmatter.verification_notes.clone();
+        out.verification_notes
+            .clone_from(&frontmatter.verification_notes);
     }
     if !frontmatter.language_targets.is_empty() {
-        out.language_targets = frontmatter.language_targets.clone();
+        out.language_targets
+            .clone_from(&frontmatter.language_targets);
     }
     if !frontmatter.sdk_dependencies.is_empty() {
-        out.sdk_dependencies = frontmatter.sdk_dependencies.clone();
+        out.sdk_dependencies
+            .clone_from(&frontmatter.sdk_dependencies);
     }
     if frontmatter.deprecation != default.deprecation {
-        out.deprecation = frontmatter.deprecation.clone();
+        out.deprecation.clone_from(&frontmatter.deprecation);
     }
     if !frontmatter.tags.is_empty() {
-        out.tags = frontmatter.tags.clone();
+        out.tags.clone_from(&frontmatter.tags);
     }
     if frontmatter.content_type != default.content_type {
         out.content_type = frontmatter.content_type;
@@ -349,7 +352,6 @@ fn merge_provenance(frontmatter: &Provenance, ancestor: &Provenance) -> Provenan
 }
 
 impl PlanBuilder {
-
     /// Consume the builder and produce the final [`IngestPlan`].
     ///
     /// The three document vectors are sorted lexicographically by `path` so
@@ -421,7 +423,7 @@ mod tests {
             name: None,
             published_url: None,
             source_url: None,
-            provenance_override: Default::default(),
+            provenance_override: Provenance::default(),
         };
         let ctx = WalkContext {
             path: PathBuf::from(path),
@@ -602,7 +604,7 @@ mod tests {
             name: None,
             published_url: None,
             source_url: None,
-            provenance_override: Default::default(),
+            provenance_override: Provenance::default(),
         };
         let ctx = WalkContext {
             path: PathBuf::from("x.md"),
@@ -688,7 +690,7 @@ mod tests {
             name: None,
             published_url: Some("https://docs.example.com/a/".to_owned()),
             source_url: Some("https://github.com/x/y/blob/main/a.md".to_owned()),
-            provenance_override: Default::default(),
+            provenance_override: Provenance::default(),
         };
         let mut b = empty_builder();
         let split = split_frontmatter("# A\n\nbody");
@@ -704,10 +706,7 @@ mod tests {
         let plan = b.finalize();
         let doc = &plan.new_documents[0];
         assert_eq!(doc.published_url.as_deref(), Some("https://docs.example.com/a/"));
-        assert_eq!(
-            doc.source_url.as_deref(),
-            Some("https://github.com/x/y/blob/main/a.md")
-        );
+        assert_eq!(doc.source_url.as_deref(), Some("https://github.com/x/y/blob/main/a.md"));
         assert_eq!(doc.language.as_deref(), Some("markdown"));
     }
 
@@ -792,7 +791,7 @@ mod proptests {
                     name: None,
                     published_url: None,
                     source_url: None,
-                    provenance_override: Default::default(),
+                    provenance_override: Provenance::default(),
                 };
                 let ctx = WalkContext {
                     path: PathBuf::from(&p),

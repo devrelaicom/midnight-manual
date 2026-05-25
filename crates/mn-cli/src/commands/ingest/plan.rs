@@ -52,11 +52,11 @@ pub async fn run(args: Args, server: Option<&str>, _json: bool) -> Result<()> {
     let base = args.base.clone().unwrap_or_else(|| {
         args.manifest
             .parent()
-            .map_or(PathBuf::from("."), Path::to_path_buf)
+            .map_or_else(|| PathBuf::from("."), Path::to_path_buf)
     });
 
-    let walker = Walker::new(manifest.clone(), base.clone());
-    let walked = walker.walk().context("walk source tree")?;
+    let w = Walker::new(manifest.clone(), base.clone());
+    let walked = w.walk().context("walk source tree")?;
 
     // TODO(Task 26): replace the stub with GET /v1/sources/:slug/active-version/documents
     // once that endpoint exists. For now we always start from an empty prior state.
@@ -106,22 +106,13 @@ fn print_plan(plan: &mn_content::ingest::IngestPlan, json: bool) {
         println!("{v}");
         return;
     }
-    println!(
-        "plan for source `{}` (rev {}):",
-        plan.source_slug, plan.target_revision
-    );
+    println!("plan for source `{}` (rev {}):", plan.source_slug, plan.target_revision);
     println!(
         "  walked       {} files",
         plan.new_documents.len() + plan.carried_documents.len()
     );
     println!("  chunked      {} chunks", plan.stats.chunks_emitted);
     println!("    new          {} documents", plan.stats.documents_added);
-    println!(
-        "    carried      {} documents",
-        plan.stats.documents_carried
-    );
-    println!(
-        "    deleted      {} documents",
-        plan.stats.documents_deleted
-    );
+    println!("    carried      {} documents", plan.stats.documents_carried);
+    println!("    deleted      {} documents", plan.stats.documents_deleted);
 }

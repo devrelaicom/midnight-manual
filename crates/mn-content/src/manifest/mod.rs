@@ -5,10 +5,10 @@
 //! ingested. There is no directory-tree fallback — see §3.3 of the
 //! ingest-UX design spec for rationale.
 
+pub mod generate;
+pub mod matcher;
 pub mod resolve;
 pub mod sitemap;
-pub mod matcher;
-pub mod generate;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -51,6 +51,7 @@ pub struct ManifestNode {
     pub exclude: Vec<String>,
     /// Child nodes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[allow(clippy::use_self)] // `Self` is not valid in struct field type position
     pub children: Vec<ManifestNode>,
 }
 

@@ -25,12 +25,15 @@ pub(super) fn infer_revision(base: &Path) -> String {
         .unwrap_or_else(|| "unknown".to_owned())
 }
 
+/// Top-level arguments for `mnm ingest`.
 #[derive(Debug, ClapArgs)]
 pub struct Args {
+    /// The ingest subcommand to execute.
     #[command(subcommand)]
     pub cmd: IngestCmd,
 }
 
+/// `mnm ingest` subcommands.
 #[derive(Debug, Subcommand)]
 pub enum IngestCmd {
     /// Compute the ingest plan locally without starting a server-side run.
@@ -40,6 +43,7 @@ pub enum IngestCmd {
     Run(run::Args),
 }
 
+/// Dispatch `mnm ingest <subcommand>`.
 pub async fn run(
     args: Args,
     server: Option<&str>,

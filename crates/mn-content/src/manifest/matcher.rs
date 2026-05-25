@@ -6,17 +6,25 @@
 use std::path::Path;
 use url::Url;
 
+/// Why a file was matched to a sitemap URL.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MatchReason {
+    /// Matched via the file's frontmatter `slug` field.
     Slug,
+    /// Matched by the file's leaf basename.
     Leaf,
+    /// Matched by leaf name, then disambiguated by the parent directory.
     LeafWithParentDir,
+    /// No match found.
     None,
 }
 
+/// Result of matching a file against the sitemap.
 #[derive(Debug, Clone)]
 pub struct Match {
+    /// The matched URL, if any.
     pub url: Option<Url>,
+    /// Reason for the match outcome.
     pub reason: MatchReason,
 }
 
@@ -39,15 +47,21 @@ pub fn match_file(file_rel: &Path, slug: Option<&str>, urls: &[Url]) -> Match {
         .and_then(|s| s.to_str())
         .unwrap_or_default();
     if leaf.is_empty() {
-        return Match { url: None, reason: MatchReason::None };
+        return Match {
+            url: None,
+            reason: MatchReason::None,
+        };
     }
 
     let leaf_hits: Vec<&Url> = urls
         .iter()
-        .filter(|u| last_segment(u).map(|s| s == leaf).unwrap_or(false))
+        .filter(|u| last_segment(u).is_some_and(|s| s == leaf))
         .collect();
     match leaf_hits.len() {
-        0 => Match { url: None, reason: MatchReason::None },
+        0 => Match {
+            url: None,
+            reason: MatchReason::None,
+        },
         1 => Match {
             url: Some(leaf_hits[0].clone()),
             reason: MatchReason::Leaf,
@@ -77,7 +91,10 @@ fn disambiguate_by_tail(file_rel: &Path, candidates: &[&Url]) -> Match {
         }
     }
     if tied {
-        return Match { url: None, reason: MatchReason::None };
+        return Match {
+            url: None,
+            reason: MatchReason::None,
+        };
     }
     Match {
         url: best.map(|(u, _)| u.clone()),
@@ -86,7 +103,7 @@ fn disambiguate_by_tail(file_rel: &Path, candidates: &[&Url]) -> Match {
 }
 
 fn last_segment(u: &Url) -> Option<&str> {
-    u.path_segments()?.filter(|s| !s.is_empty()).last()
+    u.path_segments()?.rfind(|s| !s.is_empty())
 }
 
 fn url_path_segments(u: &Url) -> Vec<String> {
@@ -135,8 +152,6 @@ fn common_suffix_len(a: &[String], b: &[String]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-
     fn url(s: &str) -> Url {
         Url::parse(s).unwrap()
     }

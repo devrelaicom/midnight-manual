@@ -8,7 +8,9 @@ use clap::Args as ClapArgs;
 use mn_content::manifest::generate::{generate, GenerateOptions};
 use mn_content::manifest::sitemap;
 
+/// Arguments for `mnm manifest generate`.
 #[derive(Debug, ClapArgs)]
+#[allow(clippy::struct_excessive_bools)] // CLI arg struct — each bool is a distinct flag
 pub struct Args {
     /// Glob patterns to include (positional). Combined with --include.
     pub globs: Vec<String>,
@@ -56,17 +58,20 @@ pub struct Args {
     pub dry_run: bool,
 }
 
+/// Run `mnm manifest generate`.
 pub async fn run(args: Args) -> Result<()> {
     if !args.dry_run && args.output.exists() && !args.force {
-        return Err(anyhow!(
-            "refusing to overwrite {}; pass --force",
-            args.output.display()
-        ));
+        return Err(anyhow!("refusing to overwrite {}; pass --force", args.output.display()));
     }
     let sitemap_urls = load_sitemaps(&args.sitemap).await?;
     let opts = GenerateOptions {
         base: args.base.clone(),
-        include: args.globs.iter().chain(args.include.iter()).cloned().collect(),
+        include: args
+            .globs
+            .iter()
+            .chain(args.include.iter())
+            .cloned()
+            .collect(),
         exclude: args.exclude.clone(),
         sitemap_urls,
         root_name: args.name.clone(),
@@ -78,8 +83,8 @@ pub async fn run(args: Args) -> Result<()> {
     let result = generate(&opts).context("generate manifest")?;
 
     let date = time::OffsetDateTime::now_utc().date().to_string();
-    let body = mn_content::manifest::generate::emit_yaml(&result.manifest, &date)
-        .context("emit yaml")?;
+    let body =
+        mn_content::manifest::generate::emit_yaml(&result.manifest, &date).context("emit yaml")?;
 
     if args.dry_run {
         println!("{body}");
@@ -112,23 +117,21 @@ pub async fn run(args: Args) -> Result<()> {
     );
 
     if let Some(report) = &args.report {
-        let lines: String = unmatched
-            .iter()
-            .map(|e| format!("{} {}\n", e.rel_path.display(), e.match_reason))
-            .collect();
-        std::fs::write(report, lines)
-            .with_context(|| format!("write {}", report.display()))?;
+        use std::fmt::Write as _;
+        let lines = unmatched.iter().fold(String::new(), |mut s, e| {
+            let _ = writeln!(s, "{} {}", e.rel_path.display(), e.match_reason);
+            s
+        });
+        std::fs::write(report, lines).with_context(|| format!("write {}", report.display()))?;
     }
 
     if args.strict && !unmatched.is_empty() {
-        return Err(anyhow!(
-            "{} files unmatched (--strict)",
-            unmatched.len()
-        ));
+        return Err(anyhow!("{} files unmatched (--strict)", unmatched.len()));
     }
     Ok(())
 }
 
+/// Fetch and parse sitemaps from HTTP URLs or local file paths.
 pub async fn load_sitemaps(specs: &[String]) -> Result<Vec<url::Url>> {
     if specs.is_empty() {
         return Ok(Vec::new());

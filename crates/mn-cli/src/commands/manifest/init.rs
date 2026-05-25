@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use anyhow::{anyhow, Context as _, Result};
 use clap::Args as ClapArgs;
 
+/// Arguments for `mnm manifest init`.
 #[derive(Debug, ClapArgs)]
 pub struct Args {
     /// Output path (default `./hierarchy.yaml`).
@@ -15,7 +16,8 @@ pub struct Args {
     pub force: bool,
 }
 
-pub fn run(args: Args) -> Result<()> {
+/// Run `mnm manifest init`.
+pub fn run(args: &Args) -> Result<()> {
     if args.output.exists() && !args.force {
         return Err(anyhow!(
             "refusing to overwrite {}; pass --force to replace",

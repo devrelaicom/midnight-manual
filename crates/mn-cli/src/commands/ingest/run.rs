@@ -131,10 +131,18 @@ pub async fn run_with_paths(
     let outcome = run_inner(&args, server_url, auth_path, json).await;
 
     let duration_ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
-    let (added, carried, deleted, batch_count, failed_batch_index, telemetry_outcome) = match &outcome {
-        Ok(stats) => (stats.added, stats.carried, stats.deleted, stats.batch_count, stats.failed_batch_index, Outcome::Ok),
-        Err(_) => (0, 0, 0, 0, None, Outcome::Error),
-    };
+    let (added, carried, deleted, batch_count, failed_batch_index, telemetry_outcome) =
+        match &outcome {
+            Ok(stats) => (
+                stats.added,
+                stats.carried,
+                stats.deleted,
+                stats.batch_count,
+                stats.failed_batch_index,
+                Outcome::Ok,
+            ),
+            Err(_) => (0, 0, 0, 0, None, Outcome::Error),
+        };
     telemetry
         .emit(Event::new(
             Component::Cli,
@@ -172,14 +180,8 @@ async fn run_inner(
     let mut reporter = crate::progress::pick(json);
 
     // ── Phase: resolve server ────────────────────────────────────────────────
-    reporter.phase(
-        "resolved_server",
-        serde_json::json!({"url": server_url}),
-    );
-    reporter.phase_done(
-        "resolved_server",
-        serde_json::json!({"url": server_url}),
-    );
+    reporter.phase("resolved_server", serde_json::json!({"url": server_url}));
+    reporter.phase_done("resolved_server", serde_json::json!({"url": server_url}));
 
     // ── Phase: validate manifest ─────────────────────────────────────────────
     reporter.phase("manifest_validated", serde_json::json!({}));
@@ -206,19 +208,13 @@ async fn run_inner(
             .map(|p| format!("  - {}", p.display()))
             .collect::<Vec<_>>()
             .join("\n");
-        return Err(anyhow!(
-            "manifest references {} missing file(s):\n{list}",
-            missing.len()
-        ));
+        return Err(anyhow!("manifest references {} missing file(s):\n{list}", missing.len()));
     }
 
     let walker = Walker::new(manifest, source_root.clone());
     let walked_docs = walker.walk().context("walk source tree")?;
 
-    reporter.phase_done(
-        "walk",
-        serde_json::json!({"files": walked_docs.len()}),
-    );
+    reporter.phase_done("walk", serde_json::json!({"files": walked_docs.len()}));
 
     // ── Phase: chunk ─────────────────────────────────────────────────────────
     reporter.phase("chunk", serde_json::json!({}));
@@ -228,12 +224,8 @@ async fn run_inner(
         .clone()
         .unwrap_or_else(|| super::infer_revision(&source_root));
 
-    let mut builder = PlanBuilder::new(
-        &args.source_slug,
-        SourceKind::DocsSite,
-        &revision,
-        PriorState::default(),
-    );
+    let mut builder =
+        PlanBuilder::new(&args.source_slug, SourceKind::DocsSite, &revision, PriorState::default());
     for doc in &walked_docs {
         let ctx = WalkContext {
             path: doc.rel_path.clone(),
@@ -297,26 +289,17 @@ async fn run_inner(
         .context("build HTTP client")?;
 
     // ── Phase: auto-create source if missing ─────────────────────────────────
-    reporter.phase(
-        "check_source",
-        serde_json::json!({"slug": args.source_slug}),
-    );
+    reporter.phase("check_source", serde_json::json!({"slug": args.source_slug}));
 
     let source_check = client
-        .get(format!(
-            "{server_url}/v1/sources/{}",
-            url_encode(&args.source_slug)
-        ))
+        .get(format!("{server_url}/v1/sources/{}", url_encode(&args.source_slug)))
         .send()
         .await
         .with_context(|| format!("GET /v1/sources/{}", &args.source_slug))?;
 
     if source_check.status() == reqwest::StatusCode::NOT_FOUND {
         if should_create_source(args)? {
-            reporter.phase(
-                "source_creating",
-                serde_json::json!({"slug": args.source_slug}),
-            );
+            reporter.phase("source_creating", serde_json::json!({"slug": args.source_slug}));
             client
                 .post(format!("{server_url}/v1/admin/sources"))
                 .bearer_auth(&token)
@@ -367,16 +350,11 @@ async fn run_inner(
     .map_err(|e| translate_start_error(e, &args.embedding_model))
     .context("start ingest run")?;
 
-    reporter.phase_done(
-        "start_run",
-        serde_json::json!({"run_id": start.ingest_run_id.to_string()}),
-    );
+    reporter
+        .phase_done("start_run", serde_json::json!({"run_id": start.ingest_run_id.to_string()}));
 
     // ── Phase: upload documents (chunked) ────────────────────────────────────
-    reporter.phase(
-        "upload_documents",
-        serde_json::json!({"documents": plan.new_documents.len()}),
-    );
+    reporter.phase("upload_documents", serde_json::json!({"documents": plan.new_documents.len()}));
 
     let docs: Vec<DocumentUpload> = plan
         .new_documents
@@ -420,7 +398,7 @@ async fn run_inner(
     let batch_count = if docs.is_empty() {
         1
     } else {
-        (docs.len() + batch_size - 1) / batch_size
+        docs.len().div_ceil(batch_size)
     };
     let upload_url = format!(
         "{server_url}/v1/admin/sources/{slug}/ingest-runs/{id}/documents",
@@ -430,7 +408,6 @@ async fn run_inner(
 
     let mut accepted = 0usize;
     let mut carried = 0usize;
-    let mut failed_batch_index: Option<u32> = None;
 
     for (i, chunk) in docs.chunks(batch_size).enumerate() {
         reporter.batch(i + 1, batch_count, "uploading documents");
@@ -447,13 +424,10 @@ async fn run_inner(
                 carried += r.carried;
             }
             Err(e) => {
-                failed_batch_index = Some(u32::try_from(i).unwrap_or(u32::MAX));
                 abort_run(&client, server_url, &args.source_slug, start.ingest_run_id, &token)
                     .await;
-                return Err(
-                    translate_upload_error(e, i + 1, batch_count, start.ingest_run_id)
-                        .context("upload documents"),
-                );
+                return Err(translate_upload_error(&e, i + 1, batch_count, start.ingest_run_id)
+                    .context("upload documents"));
             }
         }
     }
@@ -479,17 +453,14 @@ async fn run_inner(
         }
     };
 
-    reporter.phase_done(
-        "finalize",
-        serde_json::json!({"revision": finalize.revision}),
-    );
+    reporter.phase_done("finalize", serde_json::json!({"revision": finalize.revision}));
 
     let stats = RunStats {
         added: accepted.saturating_sub(carried),
         carried,
         deleted: 0,
         batch_count: u32::try_from(batch_count).unwrap_or(u32::MAX),
-        failed_batch_index,
+        failed_batch_index: None,
     };
     println!(
         "{}",
@@ -543,7 +514,7 @@ fn translate_start_error(e: anyhow::Error, requested: &str) -> anyhow::Error {
 
 /// Translate a batch-upload HTTP error into a helpful message.
 fn translate_upload_error(
-    e: anyhow::Error,
+    e: &anyhow::Error,
     batch: usize,
     of: usize,
     run_id: Uuid,

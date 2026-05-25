@@ -25,7 +25,7 @@ pub struct WalkedDocument {
     pub content: String,
     /// Parsed frontmatter + body split.
     pub split: FrontmatterSplit,
-    /// Resolver-derived inheritance — fed to PlanBuilder so it can be
+    /// Resolver-derived inheritance — fed to `PlanBuilder` so it can be
     /// threaded to the upload layer.
     pub resolved: crate::manifest::resolve::ResolvedLeaf,
     /// Filesystem modification timestamp captured at walk time.
@@ -76,15 +76,14 @@ pub fn walk(manifest: &Manifest, base: &Path) -> Result<Vec<WalkedDocument>, Wal
     for leaf in leaves {
         let abs = base.join(&leaf.rel_path);
         if !abs.exists() {
-            return Err(WalkError::MissingFile(leaf.rel_path.clone()));
+            return Err(WalkError::MissingFile(leaf.rel_path));
         }
         let bytes = std::fs::read(&abs).map_err(|e| WalkError::Io {
             path: leaf.rel_path.clone(),
             source: e,
         })?;
-        let content = String::from_utf8(bytes).map_err(|_| WalkError::NotUtf8 {
-            path: leaf.rel_path.clone(),
-        })?;
+        let content = String::from_utf8(bytes)
+            .map_err(|_| WalkError::NotUtf8 { path: leaf.rel_path.clone() })?;
         let split = split_frontmatter(&content);
         let modified = std::fs::metadata(&abs)
             .ok()
@@ -252,9 +251,6 @@ root:
         let walker = Walker::new(manifest, dir.path().to_path_buf());
         let docs = walker.walk().unwrap();
         let paths: Vec<_> = docs.iter().map(|d| d.rel_path.clone()).collect();
-        assert_eq!(
-            paths,
-            vec![PathBuf::from("docs/a.md"), PathBuf::from("docs/sub/b.md")]
-        );
+        assert_eq!(paths, vec![PathBuf::from("docs/a.md"), PathBuf::from("docs/sub/b.md")]);
     }
 }

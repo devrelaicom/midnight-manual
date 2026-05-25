@@ -1,3 +1,5 @@
+//! CLI smoke tests for `mnm manifest generate`.
+
 use std::process::Command;
 
 #[test]
@@ -11,12 +13,7 @@ fn manifest_generate_walks_a_tempdir_and_writes_yaml() {
     let out = base.join("hierarchy.yaml");
     let exe = env!("CARGO_BIN_EXE_mnm");
     let status = Command::new(exe)
-        .args([
-            "manifest",
-            "generate",
-            "docs/**/*.md",
-            "--base",
-        ])
+        .args(["manifest", "generate", "docs/**/*.md", "--base"])
         .arg(base)
         .args(["-o"])
         .arg(&out)

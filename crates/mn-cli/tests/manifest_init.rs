@@ -1,3 +1,5 @@
+//! CLI smoke tests for `mnm manifest init`.
+
 use std::process::Command;
 
 #[test]

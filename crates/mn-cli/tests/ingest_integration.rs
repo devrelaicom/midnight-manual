@@ -316,6 +316,7 @@ async fn aborts_run_when_upload_fails() {
 /// regardless of what the manifest declared. This test will fail if that
 /// regression ever returns.
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // complex regression test — keeping in one function for readability
 async fn published_url_inheritance_survives_to_upload_body() {
     let server = MockServer::start().await;
 

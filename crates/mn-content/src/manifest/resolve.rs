@@ -1,9 +1,9 @@
-//! Flatten a parsed `Manifest` into `Vec<ResolvedLeaf>` by walking the
-//! tree top-down, applying `published_url` and `provenance` inheritance,
-//! and (optionally — added in a later task) discovering files under
-//! `path:` nodes.
+//! Flatten a parsed `Manifest` into `Vec<ResolvedLeaf>`.
 //!
-//! Spec: §3.1, §3.2 of docs/superpowers/specs/2026-05-25-ingest-ux-design.md
+//! Walks the tree top-down, applying `published_url` and `provenance`
+//! inheritance, and discovers files under `path:` nodes.
+//!
+//! Spec: §3.1, §3.2 of the ingest-UX design spec.
 
 use std::path::{Path, PathBuf};
 
@@ -65,19 +65,19 @@ fn walk(
     if let Some(file) = &node.file {
         // If this node has its own published_url, use it directly (no composition).
         // Otherwise, compose from the inherited URL.
-        let final_url = if let Some(own_url) = &node.published_url {
-            if own_url.is_empty() {
-                None
-            } else {
-                Some(own_url.clone())
-            }
-        } else {
-            compose_url(inherited_url, file)
-        };
-        let prov_override = serde_json::from_value::<Provenance>(
-            serde_json::Value::Object(merged_prov.clone()),
-        )
-        .unwrap_or_default();
+        let final_url = node.published_url.as_ref().map_or_else(
+            || compose_url(inherited_url, file),
+            |own_url| {
+                if own_url.is_empty() {
+                    None
+                } else {
+                    Some(own_url.clone())
+                }
+            },
+        );
+        let prov_override =
+            serde_json::from_value::<Provenance>(serde_json::Value::Object(merged_prov.clone()))
+                .unwrap_or_default();
         out.push(ResolvedLeaf {
             rel_path: file.clone(),
             kind: kind_for(file),
@@ -102,9 +102,9 @@ fn walk(
     if let Some(path) = &node.path {
         for rel in discover_under_path(base, path, &node.include, &node.exclude, &explicit_files) {
             let url = compose_url(inherited_url, &rel);
-            let prov_override = serde_json::from_value::<Provenance>(
-                serde_json::Value::Object(merged_prov.clone()),
-            )
+            let prov_override = serde_json::from_value::<Provenance>(serde_json::Value::Object(
+                merged_prov.clone(),
+            ))
             .unwrap_or_default();
             out.push(ResolvedLeaf {
                 rel_path: rel.clone(),
@@ -295,14 +295,8 @@ root:
             .iter()
             .map(|l| (l.rel_path.clone(), l.published_url.clone().unwrap()))
             .collect();
-        assert_eq!(
-            by_path[&PathBuf::from("auth.md")],
-            "https://docs.example.com/cookbook/auth/"
-        );
-        assert_eq!(
-            by_path[&PathBuf::from("tls.md")],
-            "https://docs.example.com/cookbook/tls/"
-        );
+        assert_eq!(by_path[&PathBuf::from("auth.md")], "https://docs.example.com/cookbook/auth/");
+        assert_eq!(by_path[&PathBuf::from("tls.md")], "https://docs.example.com/cookbook/tls/");
     }
 
     #[test]
@@ -346,7 +340,7 @@ root:
 
     #[test]
     fn provenance_merges_field_by_field_top_down() {
-        let body = r#"
+        let body = r"
 manifest_version: 1
 root:
   provenance:
@@ -355,7 +349,7 @@ root:
     verified_by: midnight-foundation
   children:
     - file: a.md
-"#;
+";
         let m = Manifest::parse(body).unwrap();
         let leaves = resolve(&m, Path::new("."));
         let p = &leaves[0].provenance_override;
@@ -366,7 +360,7 @@ root:
 
     #[test]
     fn leaf_provenance_overrides_ancestor_fieldwise() {
-        let body = r#"
+        let body = r"
 manifest_version: 1
 root:
   provenance:
@@ -376,7 +370,7 @@ root:
     - file: a.md
       provenance:
         verified: false
-"#;
+";
         let m = Manifest::parse(body).unwrap();
         let leaves = resolve(&m, Path::new("."));
         let p = &leaves[0].provenance_override;
@@ -405,13 +399,7 @@ root:
         let m = Manifest::parse(body).unwrap();
         let leaves = resolve(&m, base);
         let paths: Vec<_> = leaves.iter().map(|l| l.rel_path.clone()).collect();
-        assert_eq!(
-            paths,
-            vec![
-                PathBuf::from("docs/a.md"),
-                PathBuf::from("docs/sub/b.md"),
-            ]
-        );
+        assert_eq!(paths, vec![PathBuf::from("docs/a.md"), PathBuf::from("docs/sub/b.md"),]);
         // Inherited URL prefix is joined with each discovered file's stem.
         assert!(leaves[0].published_url.as_deref().unwrap().ends_with("/a/"));
         assert!(leaves[1].published_url.as_deref().unwrap().ends_with("/b/"));
@@ -423,7 +411,7 @@ root:
         let base = dir.path();
         std::fs::create_dir_all(base.join("docs")).unwrap();
         std::fs::write(base.join("docs/a.md"), "# A").unwrap();
-        let body = r#"
+        let body = r"
 manifest_version: 1
 root:
   name: docs
@@ -432,7 +420,7 @@ root:
   children:
     - file: docs/a.md
       published_url: https://override.example.com/special/
-"#;
+";
         let m = Manifest::parse(body).unwrap();
         let leaves = resolve(&m, base);
         assert_eq!(leaves.len(), 1);

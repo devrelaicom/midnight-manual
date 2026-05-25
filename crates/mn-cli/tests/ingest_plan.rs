@@ -9,11 +9,7 @@ fn ingest_plan_runs_offline_with_empty_prior_state() {
     let base = dir.path();
     std::fs::write(base.join("a.md"), "# A").unwrap();
     let m_path = base.join("hierarchy.yaml");
-    std::fs::write(
-        &m_path,
-        "manifest_version: 1\nroot:\n  children:\n    - file: a.md\n",
-    )
-    .unwrap();
+    std::fs::write(&m_path, "manifest_version: 1\nroot:\n  children:\n    - file: a.md\n").unwrap();
     let status = std::process::Command::new(env!("CARGO_BIN_EXE_mnm"))
         .args(["ingest", "plan"])
         .arg(&m_path)

@@ -24,11 +24,11 @@ pub struct GenerateOptions {
     pub root_name: Option<String>,
     /// Fallback URL prefix when no sitemap match.
     pub url_base: Option<String>,
-    /// Hoist shared published_url to common parent (--hoist).
+    /// Hoist shared `published_url` to common parent (--hoist).
     pub hoist: bool,
-    /// Pin directories with ≥ pin_threshold matched files (--pin-dirs).
+    /// Pin directories with ≥ `pin_threshold` matched files (--pin-dirs).
     pub pin_dirs: bool,
-    /// Threshold for pin_dirs.
+    /// Threshold for `pin_dirs`.
     pub pin_threshold: usize,
 }
 
@@ -51,18 +51,24 @@ impl Default for GenerateOptions {
 /// Per-file generator outcome — useful for the coverage report.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GenerateEntry {
+    /// Relative path of the file within the source root.
     pub rel_path: PathBuf,
+    /// Matched sitemap URL, if any.
     pub matched_url: Option<String>,
+    /// Human-readable reason for the match (or "None").
     pub match_reason: String,
 }
 
 /// Final generator output.
 #[derive(Debug, Clone)]
 pub struct GenerateResult {
+    /// The generated manifest.
     pub manifest: Manifest,
+    /// Per-file coverage entries used to produce the coverage report.
     pub entries: Vec<GenerateEntry>,
 }
 
+/// Run the generator with the given options and return the manifest + coverage entries.
 pub fn generate(opts: &GenerateOptions) -> anyhow::Result<GenerateResult> {
     let files = collect_files(opts)?;
     let entries = build_entries(opts, &files)?;
@@ -113,15 +119,12 @@ fn collect_files(opts: &GenerateOptions) -> anyhow::Result<Vec<PathBuf>> {
     Ok(out)
 }
 
-fn build_entries(
-    opts: &GenerateOptions,
-    files: &[PathBuf],
-) -> anyhow::Result<Vec<GenerateEntry>> {
+fn build_entries(opts: &GenerateOptions, files: &[PathBuf]) -> anyhow::Result<Vec<GenerateEntry>> {
     let mut out = Vec::with_capacity(files.len());
     for rel in files {
         let body = std::fs::read_to_string(opts.base.join(rel))?;
         let split = frontmatter::split(&body);
-        let slug = slug_from_frontmatter(&split.frontmatter);
+        let slug = slug_from_frontmatter(split.frontmatter.as_ref());
         let m = super::matcher::match_file(rel, slug.as_deref(), &opts.sitemap_urls);
         let matched_url = m.url.map(|u| u.to_string()).or_else(|| {
             opts.url_base.as_ref().map(|base| {
@@ -140,8 +143,8 @@ fn build_entries(
     Ok(out)
 }
 
-fn slug_from_frontmatter(fm: &Option<serde_json::Value>) -> Option<String> {
-    fm.as_ref()?.get("slug")?.as_str().map(str::to_owned)
+fn slug_from_frontmatter(fm: Option<&serde_json::Value>) -> Option<String> {
+    fm?.get("slug")?.as_str().map(str::to_owned)
 }
 
 fn build_manifest(opts: &GenerateOptions, entries: &[GenerateEntry]) -> Manifest {
@@ -179,22 +182,22 @@ fn title_case(s: &str) -> String {
     s.split('-')
         .map(|w| {
             let mut c = w.chars();
-            match c.next() {
-                Some(first) => first.to_uppercase().collect::<String>() + c.as_str(),
-                None => String::new(),
-            }
+            c.next().map_or_else(String::new, |first| {
+                first.to_uppercase().collect::<String>() + c.as_str()
+            })
         })
         .collect::<Vec<_>>()
         .join(" ")
 }
 
 /// Intermediate tree representation. Wrapped because we want to
-/// hoist URL prefixes before lowering to ManifestNode.
+/// hoist URL prefixes before lowering to `ManifestNode`.
 struct TreeNode {
     name: Option<String>,
     file: Option<PathBuf>,
     path: Option<PathBuf>,
     published_url: Option<String>,
+    #[allow(clippy::use_self)] // `Self` is not valid in struct field type position
     children: HashMap<String, TreeNode>,
 }
 
@@ -232,7 +235,7 @@ impl TreeNode {
 
     fn insert_segs(&mut self, segs: &[String], e: &GenerateEntry) {
         if segs.len() == 1 {
-            let leaf = TreeNode::leaf(e.rel_path.clone(), e.matched_url.clone());
+            let leaf = Self::leaf(e.rel_path.clone(), e.matched_url.clone());
             self.children.insert(segs[0].clone(), leaf);
             return;
         }
@@ -240,7 +243,7 @@ impl TreeNode {
         let child = self
             .children
             .entry(head.clone())
-            .or_insert_with(|| TreeNode::group(title_case(&head)));
+            .or_insert_with(|| Self::group(title_case(&head)));
         child.insert_segs(&segs[1..], e);
     }
 
@@ -297,6 +300,7 @@ fn hoist_common_url(node: &mut TreeNode) {
 /// When a directory group has ≥ threshold leaf-only children whose
 /// per-leaf URLs have been cleared (hoisted to the parent), replace the
 /// explicit children with a single `path:` directive on the group node.
+#[allow(clippy::only_used_in_recursion)] // `base` is a pass-through for future use
 fn pin_dirs(node: &mut TreeNode, base: &Path, threshold: usize) {
     for child in node.children.values_mut() {
         pin_dirs(child, base, threshold);
@@ -334,6 +338,7 @@ fn common_parent(paths: &[PathBuf]) -> Option<PathBuf> {
     Some(first.join(""))
 }
 
+/// Serialize a manifest to YAML with a generated-by header comment.
 pub fn emit_yaml(manifest: &Manifest, date: &str) -> anyhow::Result<String> {
     let header = format!(
         "# Generated by `mnm manifest generate` on {date}.
@@ -389,10 +394,7 @@ mod tests {
             ..Default::default()
         };
         let files = collect_files(&opts).unwrap();
-        assert_eq!(
-            files,
-            vec![PathBuf::from("docs/a.md"), PathBuf::from("docs/b.md")]
-        );
+        assert_eq!(files, vec![PathBuf::from("docs/a.md"), PathBuf::from("docs/b.md")]);
     }
 
     #[test]
@@ -421,12 +423,12 @@ mod tests {
         assert_eq!(m.root.children.len(), 1); // "docs" subgroup
         let docs_group = &m.root.children[0];
         // Hoisted prefix sits on the docs group.
-        assert_eq!(
-            docs_group.published_url.as_deref(),
-            Some("https://docs.example.com/")
-        );
+        assert_eq!(docs_group.published_url.as_deref(), Some("https://docs.example.com/"));
         // Leaves no longer declare published_url (it's inherited).
-        assert!(docs_group.children.iter().all(|c| c.published_url.is_none()));
+        assert!(docs_group
+            .children
+            .iter()
+            .all(|c| c.published_url.is_none()));
     }
 
     #[test]

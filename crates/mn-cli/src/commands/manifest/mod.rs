@@ -8,12 +8,15 @@ pub mod check;
 pub mod generate;
 pub mod init;
 
+/// Top-level arguments for `mnm manifest`.
 #[derive(Debug, ClapArgs)]
 pub struct Args {
+    /// The manifest subcommand to execute.
     #[command(subcommand)]
     pub cmd: ManifestCmd,
 }
 
+/// `mnm manifest` subcommands.
 #[derive(Debug, Subcommand)]
 pub enum ManifestCmd {
     /// Write an empty starter manifest with comments.
@@ -24,9 +27,10 @@ pub enum ManifestCmd {
     Check(check::Args),
 }
 
+/// Dispatch `mnm manifest <subcommand>`.
 pub async fn run(args: Args) -> Result<()> {
     match args.cmd {
-        ManifestCmd::Init(a) => init::run(a),
+        ManifestCmd::Init(a) => init::run(&a),
         ManifestCmd::Generate(a) => generate::run(a).await,
         ManifestCmd::Check(a) => check::run(a).await,
     }

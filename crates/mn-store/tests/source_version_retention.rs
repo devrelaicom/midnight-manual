@@ -1,4 +1,4 @@
-//! Integration tests for the new Phase-14 source_version helpers:
+//! Integration tests for the new Phase-14 `source_version` helpers:
 //! `list_for_source`, `promote_by_revision`, and `sweep_aged_inactive`.
 
 #![cfg(feature = "integration")]

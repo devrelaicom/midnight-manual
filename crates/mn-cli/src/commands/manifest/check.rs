@@ -6,17 +6,23 @@ use anyhow::{anyhow, Context as _, Result};
 use clap::Args as ClapArgs;
 use mn_content::manifest::Manifest;
 
+/// Arguments for `mnm manifest check`.
 #[derive(Debug, ClapArgs)]
 pub struct Args {
+    /// Path to the `hierarchy.yaml` manifest to validate.
     pub manifest: PathBuf,
+    /// Override the base directory for file-existence checks.
     #[arg(long)]
     pub base: Option<PathBuf>,
+    /// Sitemap URL or file path to check coverage against (repeatable).
     #[arg(long = "sitemap")]
     pub sitemap: Vec<String>,
+    /// Fail on any missing-file or unmatched-URL issue.
     #[arg(long)]
     pub strict: bool,
 }
 
+/// Run `mnm manifest check`.
 pub async fn run(args: Args) -> Result<()> {
     let body = std::fs::read_to_string(&args.manifest)
         .with_context(|| format!("read {}", args.manifest.display()))?;
@@ -45,14 +51,18 @@ pub async fn run(args: Args) -> Result<()> {
             .filter(|l| {
                 l.published_url
                     .as_ref()
-                    .map_or(false, |u| sitemap_urls.iter().any(|s| s.as_str() == u))
+                    .is_some_and(|u| sitemap_urls.iter().any(|s| s.as_str() == u))
             })
             .count();
         eprintln!(
             "sitemap coverage: {}/{} ({}%)",
             matched,
             leaves.len(),
-            if leaves.is_empty() { 100 } else { matched * 100 / leaves.len() }
+            if leaves.is_empty() {
+                100
+            } else {
+                matched * 100 / leaves.len()
+            }
         );
     }
 
