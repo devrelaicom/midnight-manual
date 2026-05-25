@@ -29,6 +29,6 @@ pub mod walker;
 
 pub use plan::{
     CarriedDocument, DeletedDocument, IngestError, IngestPlan, IngestStats, PlanBuilder,
-    PlannedChunk, PlannedDocument, PriorDocument, PriorState,
+    PlannedChunk, PlannedDocument, PriorDocument, PriorState, WalkContext,
 };
 pub use walker::{WalkError, WalkedDocument, Walker};

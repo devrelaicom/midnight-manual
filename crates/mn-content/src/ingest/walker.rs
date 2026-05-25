@@ -11,6 +11,7 @@
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
+use time::OffsetDateTime;
 
 use crate::frontmatter::{split as split_frontmatter, FrontmatterSplit};
 use crate::manifest::Manifest;
@@ -27,6 +28,9 @@ pub struct WalkedDocument {
     /// Resolver-derived inheritance — fed to PlanBuilder so it can be
     /// threaded to the upload layer.
     pub resolved: crate::manifest::resolve::ResolvedLeaf,
+    /// Filesystem modification timestamp captured at walk time.
+    /// `None` if the OS could not supply `mtime` for the file.
+    pub source_modified_at: Option<OffsetDateTime>,
 }
 
 /// Errors the walker can surface.
@@ -82,11 +86,16 @@ pub fn walk(manifest: &Manifest, base: &Path) -> Result<Vec<WalkedDocument>, Wal
             path: leaf.rel_path.clone(),
         })?;
         let split = split_frontmatter(&content);
+        let modified = std::fs::metadata(&abs)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .map(OffsetDateTime::from);
         out.push(WalkedDocument {
             rel_path: leaf.rel_path.clone(),
             content,
             split,
             resolved: leaf,
+            source_modified_at: modified,
         });
     }
     Ok(out)
@@ -214,6 +223,17 @@ mod tests {
         let walker = Walker::new(manifest, dir.path().to_path_buf());
         let err = walker.walk().unwrap_err();
         assert!(matches!(err, WalkError::NotUtf8 { .. }));
+    }
+
+    #[test]
+    fn walker_captures_source_modified_at() {
+        let dir = tempdir();
+        write_file(dir.path(), "a.md", "# A");
+        let body = "manifest_version: 1\nroot:\n  children:\n    - file: a.md\n";
+        let manifest = Manifest::parse(body).unwrap();
+        let walker = Walker::new(manifest, dir.path().to_path_buf());
+        let docs = walker.walk().unwrap();
+        assert!(docs[0].source_modified_at.is_some());
     }
 
     #[test]

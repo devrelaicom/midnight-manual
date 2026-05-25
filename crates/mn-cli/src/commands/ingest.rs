@@ -29,7 +29,7 @@ use std::time::Instant;
 
 use anyhow::{anyhow, Context as _, Result};
 use clap::Args as ClapArgs;
-use mn_content::ingest::{PlanBuilder, PriorState, Walker};
+use mn_content::ingest::{PlanBuilder, PriorState, WalkContext, Walker};
 use mn_content::manifest::Manifest;
 use mn_core::auth_file::AuthFile;
 use mn_core::provenance::Provenance;
@@ -177,13 +177,16 @@ async fn run_inner(
         PriorState::default(),
     );
     for doc in walked_docs {
+        let ctx = WalkContext {
+            path: doc.rel_path.clone(),
+            kind: DocumentKind::Markdown,
+            content: &doc.content,
+            split: &doc.split,
+            resolved: &doc.resolved,
+            source_modified_at: doc.source_modified_at,
+        };
         builder
-            .add_walked_document(
-                doc.rel_path.clone(),
-                DocumentKind::Markdown,
-                &doc.content,
-                &doc.split,
-            )
+            .add_walked_document(&ctx)
             .with_context(|| format!("plan add {}", doc.rel_path.display()))?;
     }
     let plan = builder.finalize();
