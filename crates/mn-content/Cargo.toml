@@ -18,6 +18,7 @@ integration = []
 
 [dependencies]
 mn-core               = { path = "../mn-core" }
+anyhow                = { workspace = true }
 globset               = { workspace = true }
 pulldown-cmark        = { workspace = true }
 quick-xml             = { workspace = true }

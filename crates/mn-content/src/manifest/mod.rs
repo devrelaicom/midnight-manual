@@ -8,6 +8,7 @@
 pub mod resolve;
 pub mod sitemap;
 pub mod matcher;
+pub mod generate;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
