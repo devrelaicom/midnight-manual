@@ -16,6 +16,7 @@
 
 pub mod cli;
 pub mod commands;
+pub mod progress;
 pub mod shared;
 
 /// Crate version stamped at build time.
