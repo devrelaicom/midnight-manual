@@ -63,6 +63,16 @@ async fn happy_path_posts_three_step_flow() {
     let captured_finalizes = Arc::new(Mutex::new(0_usize));
     let captured_bearer = Arc::new(Mutex::new(Option::<String>::None));
 
+    // Mock: GET /v1/sources/:slug — source exists, return 200.
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/v1/sources/[^/]+$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "slug": "docs",
+            "kind": "docs_site",
+        })))
+        .mount(&server)
+        .await;
+
     let starts = Arc::clone(&captured_starts);
     let bearer = Arc::clone(&captured_bearer);
     Mock::given(method("POST"))
@@ -119,11 +129,14 @@ async fn happy_path_posts_three_step_flow() {
     let args = IngestArgs {
         manifest: manifest_path,
         source_slug: "docs".to_owned(),
-        revision: "rev-1".to_owned(),
+        revision: Some("rev-1".to_owned()),
         embedding_model: "bge-base-en-v1.5@1".to_owned(),
         note: None,
         source_root: Some(dir.path().to_path_buf()),
         dry_run: false,
+        yes: false,
+        source_base_url: None,
+        batch_size: 50,
     };
     let telemetry = TelemetryClient::Disabled;
 
@@ -159,11 +172,14 @@ async fn dry_run_does_not_hit_the_server() {
     let args = IngestArgs {
         manifest: manifest_path,
         source_slug: "docs".to_owned(),
-        revision: "rev".to_owned(),
+        revision: Some("rev".to_owned()),
         embedding_model: "bge-base-en-v1.5@1".to_owned(),
         note: None,
         source_root: Some(dir.path().to_path_buf()),
         dry_run: true,
+        yes: false,
+        source_base_url: None,
+        batch_size: 50,
     };
     let telemetry = TelemetryClient::Disabled;
 
@@ -190,11 +206,14 @@ async fn missing_admin_token_errors_with_clear_message() {
     let args = IngestArgs {
         manifest: manifest_path,
         source_slug: "docs".to_owned(),
-        revision: "rev".to_owned(),
+        revision: Some("rev".to_owned()),
         embedding_model: "bge-base-en-v1.5@1".to_owned(),
         note: None,
         source_root: Some(dir.path().to_path_buf()),
         dry_run: false,
+        yes: false,
+        source_base_url: None,
+        batch_size: 50,
     };
     let telemetry = TelemetryClient::Disabled;
 
@@ -216,6 +235,16 @@ async fn missing_admin_token_errors_with_clear_message() {
 async fn aborts_run_when_upload_fails() {
     let server = MockServer::start().await;
     let abort_hit = Arc::new(Mutex::new(false));
+
+    // Mock: GET /v1/sources/:slug — source exists.
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/v1/sources/[^/]+$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "slug": "docs",
+            "kind": "docs_site",
+        })))
+        .mount(&server)
+        .await;
 
     Mock::given(method("POST"))
         .and(path_regex(r"^/v1/admin/sources/[^/]+/ingest-runs$"))
@@ -253,11 +282,14 @@ async fn aborts_run_when_upload_fails() {
     let args = IngestArgs {
         manifest: manifest_path,
         source_slug: "docs".to_owned(),
-        revision: "rev".to_owned(),
+        revision: Some("rev".to_owned()),
         embedding_model: "bge-base-en-v1.5@1".to_owned(),
         note: None,
         source_root: Some(dir.path().to_path_buf()),
         dry_run: false,
+        yes: false,
+        source_base_url: None,
+        batch_size: 50,
     };
     let telemetry = TelemetryClient::Disabled;
 
@@ -289,11 +321,14 @@ async fn manifest_missing_file_errors_before_any_http() {
     let args = IngestArgs {
         manifest: manifest_path,
         source_slug: "docs".to_owned(),
-        revision: "rev".to_owned(),
+        revision: Some("rev".to_owned()),
         embedding_model: "bge-base-en-v1.5@1".to_owned(),
         note: None,
         source_root: Some(dir.path().to_path_buf()),
         dry_run: false,
+        yes: false,
+        source_base_url: None,
+        batch_size: 50,
     };
     let telemetry = TelemetryClient::Disabled;
 

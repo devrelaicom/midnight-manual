@@ -67,7 +67,7 @@ pub async fn run(args: Args, server: Option<&str>, _json: bool) -> Result<()> {
     let revision = args
         .revision
         .clone()
-        .unwrap_or_else(|| infer_revision(&base));
+        .unwrap_or_else(|| super::infer_revision(&base));
 
     let mut b = PlanBuilder::new(&args.source_slug, SourceKind::DocsSite, &revision, prior);
     for doc in walked {
@@ -97,19 +97,6 @@ async fn fetch_prior_state(server_url: &str, slug: &str) -> Result<PriorState> {
     // Vec<PriorDocument> and build a PriorState from it.
     let _ = (server_url, slug);
     Ok(PriorState::default())
-}
-
-/// Infer the git short SHA for the source root, or return "unknown".
-fn infer_revision(base: &Path) -> String {
-    std::process::Command::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
-        .current_dir(base)
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_owned())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "unknown".to_owned())
 }
 
 /// Print the plan summary in human-readable or JSON form.

@@ -10,18 +10,21 @@
 //!
 //! 3. Load the admin bearer from `auth.toml`.
 //!
-//! 4. `POST /v1/admin/sources/:slug/ingest-runs` — allocate a building
+//! 4. Check that the source slug exists (`GET /v1/sources/:slug`); on 404,
+//!    prompt the user (or honor `--yes`) and POST to create it.
+//!
+//! 5. `POST /v1/admin/sources/:slug/ingest-runs` — allocate a building
 //!    source_version.
 //!
-//! 5. `PUT  /v1/admin/sources/:slug/ingest-runs/:id/documents` — upload
-//!    every walked document with its chunks.
+//! 6. `PUT  /v1/admin/sources/:slug/ingest-runs/:id/documents` — upload
+//!    documents in batches of `--batch-size` (default 50) each.
 //!
-//! 6. `POST /v1/admin/sources/:slug/ingest-runs/:id/finalize` — promote
+//! 7. `POST /v1/admin/sources/:slug/ingest-runs/:id/finalize` — promote
 //!    the run to `active`.
 //!
-//! 7. Emit a single `IngestComplete` telemetry event with the per-run stats.
+//! 8. Emit a single `IngestComplete` telemetry event with the per-run stats.
 //!
-//! On any failure between steps 4 and 7 the CLI calls `.../abort` so the
+//! On any failure between steps 5 and 8 the CLI calls `.../abort` so the
 //! building source_version doesn't block the next attempt (FR-022).
 
 use std::path::{Path, PathBuf};
@@ -40,20 +43,22 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-/// Args for `mnm ingest`.
+/// Args for `mnm ingest run`.
 #[derive(Debug, ClapArgs)]
 pub struct Args {
     /// Path to the `hierarchy.yaml` manifest.
     pub manifest: PathBuf,
 
-    /// Slug of the target source (must already exist in the corpus).
+    /// Slug of the target source. If the source does not exist on the server,
+    /// the CLI will prompt (or auto-create when `--yes` is passed).
     #[arg(long)]
     pub source_slug: String,
 
-    /// Free-form revision label (often a git SHA). Recorded on the
-    /// `source_version` row for reproducibility (FR-019).
-    #[arg(long, default_value = "unknown")]
-    pub revision: String,
+    /// Free-form revision label (often a git SHA). Defaults to
+    /// `git rev-parse --short HEAD` in the source root; falls back to
+    /// "unknown".
+    #[arg(long)]
+    pub revision: Option<String>,
 
     /// Embedding-model wire id (`name@revision`). Defaults to
     /// `bge-base-en-v1.5@1` to match the corpus's current model.
@@ -71,6 +76,21 @@ pub struct Args {
     /// Dry-run: walk + build the plan, print stats, do NOT post anything.
     #[arg(long)]
     pub dry_run: bool,
+
+    /// Non-interactive: auto-confirm the source-create prompt.
+    #[arg(long)]
+    pub yes: bool,
+
+    /// Base URL prepended to each document's repo-relative path to build
+    /// `source_url` when the manifest does not supply one
+    /// (e.g. `https://github.com/org/repo/blob/main/docs`).
+    #[arg(long = "source-base-url")]
+    pub source_base_url: Option<String>,
+
+    /// Number of documents per upload batch (default: 50). Reduce if you hit
+    /// 413 responses from the server.
+    #[arg(long, default_value_t = 50)]
+    pub batch_size: usize,
 }
 
 /// Dispatch.
@@ -145,7 +165,21 @@ async fn run_inner(
     auth_path: &Path,
     json: bool,
 ) -> Result<RunStats> {
-    // 1. Read + validate manifest.
+    let mut reporter = crate::progress::pick(json);
+
+    // ── Phase: resolve server ────────────────────────────────────────────────
+    reporter.phase(
+        "resolved_server",
+        serde_json::json!({"url": server_url}),
+    );
+    reporter.phase_done(
+        "resolved_server",
+        serde_json::json!({"url": server_url}),
+    );
+
+    // ── Phase: validate manifest ─────────────────────────────────────────────
+    reporter.phase("manifest_validated", serde_json::json!({}));
+
     let manifest_path = &args.manifest;
     let body = std::fs::read_to_string(manifest_path)
         .with_context(|| format!("read manifest at {}", manifest_path.display()))?;
@@ -157,26 +191,46 @@ async fn run_inner(
             .parent()
             .map_or_else(|| PathBuf::from("."), Path::to_path_buf)
     });
+
+    // ── Phase: walk source tree ──────────────────────────────────────────────
+    reporter.phase("walk", serde_json::json!({"source_root": source_root.display().to_string()}));
+
     let missing = manifest.validate_files_exist(&source_root);
     if !missing.is_empty() {
+        let list = missing
+            .iter()
+            .map(|p| format!("  - {}", p.display()))
+            .collect::<Vec<_>>()
+            .join("\n");
         return Err(anyhow!(
-            "manifest references {} missing file(s): first missing = {}",
-            missing.len(),
-            missing[0].display()
+            "manifest references {} missing file(s):\n{list}",
+            missing.len()
         ));
     }
 
-    // 2. Walk + build plan.
-    let walker = Walker::new(manifest, source_root);
+    let walker = Walker::new(manifest, source_root.clone());
     let walked_docs = walker.walk().context("walk source tree")?;
+
+    reporter.phase_done(
+        "walk",
+        serde_json::json!({"files": walked_docs.len()}),
+    );
+
+    // ── Phase: chunk ─────────────────────────────────────────────────────────
+    reporter.phase("chunk", serde_json::json!({}));
+
+    let revision = args
+        .revision
+        .clone()
+        .unwrap_or_else(|| super::infer_revision(&source_root));
 
     let mut builder = PlanBuilder::new(
         &args.source_slug,
         SourceKind::DocsSite,
-        &args.revision,
+        &revision,
         PriorState::default(),
     );
-    for doc in walked_docs {
+    for doc in &walked_docs {
         let ctx = WalkContext {
             path: doc.rel_path.clone(),
             kind: DocumentKind::Markdown,
@@ -190,6 +244,14 @@ async fn run_inner(
             .with_context(|| format!("plan add {}", doc.rel_path.display()))?;
     }
     let plan = builder.finalize();
+
+    reporter.phase_done(
+        "chunk",
+        serde_json::json!({
+            "documents": plan.stats.documents_added,
+            "chunks": plan.stats.chunks_emitted,
+        }),
+    );
 
     if args.dry_run {
         println!(
@@ -208,7 +270,7 @@ async fn run_inner(
         });
     }
 
-    // 3. Load admin bearer.
+    // ── Load admin bearer ────────────────────────────────────────────────────
     let auth_file = AuthFile::read_optional(auth_path)
         .with_context(|| format!("read auth.toml at {}", auth_path.display()))?
         .ok_or_else(|| anyhow!("no admin token — run `mnm login --user-id <id>` first"))?;
@@ -228,7 +290,60 @@ async fn run_inner(
         .build()
         .context("build HTTP client")?;
 
-    // 4. Start the run.
+    // ── Phase: auto-create source if missing ─────────────────────────────────
+    reporter.phase(
+        "check_source",
+        serde_json::json!({"slug": args.source_slug}),
+    );
+
+    let source_check = client
+        .get(format!(
+            "{server_url}/v1/sources/{}",
+            url_encode(&args.source_slug)
+        ))
+        .send()
+        .await
+        .with_context(|| format!("GET /v1/sources/{}", &args.source_slug))?;
+
+    if source_check.status() == reqwest::StatusCode::NOT_FOUND {
+        if should_create_source(args)? {
+            reporter.phase(
+                "source_creating",
+                serde_json::json!({"slug": args.source_slug}),
+            );
+            client
+                .post(format!("{server_url}/v1/admin/sources"))
+                .bearer_auth(&token)
+                .json(&serde_json::json!({
+                    "slug": args.source_slug,
+                    "display_name": args.source_slug,
+                    "kind": "docs_site",
+                    "retention_count": 5,
+                }))
+                .send()
+                .await
+                .with_context(|| "POST /v1/admin/sources")?
+                .error_for_status()
+                .with_context(|| "create source")?;
+            reporter.phase_done(
+                "source_created",
+                serde_json::json!({"slug": args.source_slug, "kind": "docs_site"}),
+            );
+        } else {
+            return Err(anyhow!(
+                "cancelled; run `mnm sources create` manually if you want different defaults"
+            ));
+        }
+    } else {
+        reporter.phase_done(
+            "check_source",
+            serde_json::json!({"slug": args.source_slug, "exists": true}),
+        );
+    }
+
+    // ── Phase: start ingest run ──────────────────────────────────────────────
+    reporter.phase("start_run", serde_json::json!({"slug": args.source_slug}));
+
     let start: StartIngestRunResponse = post_json(
         &client,
         &format!(
@@ -243,9 +358,20 @@ async fn run_inner(
         },
     )
     .await
+    .map_err(|e| translate_start_error(e, &args.embedding_model))
     .context("start ingest run")?;
 
-    // 5. Upload documents (single batch for v1).
+    reporter.phase_done(
+        "start_run",
+        serde_json::json!({"run_id": start.ingest_run_id.to_string()}),
+    );
+
+    // ── Phase: upload documents (chunked) ────────────────────────────────────
+    reporter.phase(
+        "upload_documents",
+        serde_json::json!({"documents": plan.new_documents.len()}),
+    );
+
     let docs: Vec<DocumentUpload> = plan
         .new_documents
         .iter()
@@ -253,14 +379,19 @@ async fn run_inner(
             path: d.path.display().to_string(),
             kind: d.kind,
             content_hash: d.content_hash.clone(),
-            source_url: None,
-            published_url: None,
-            language: None,
-            source_modified_at: None,
+            source_url: d.source_url.clone().or_else(|| {
+                args.source_base_url.as_ref().map(|base| {
+                    let base = base.trim_end_matches('/');
+                    format!("{base}/{}", d.path.display())
+                })
+            }),
+            published_url: d.published_url.clone(),
+            language: d.language.clone(),
+            source_modified_at: d.source_modified_at,
             frontmatter: d.frontmatter.clone(),
             provenance: d.provenance.clone(),
             char_count: i32::try_from(d.char_count).unwrap_or(i32::MAX),
-            token_count: 0,
+            token_count: i32::try_from(d.token_count).unwrap_or(i32::MAX),
             chunks: d
                 .chunks
                 .iter()
@@ -273,29 +404,60 @@ async fn run_inner(
                     symbol_path: Vec::new(),
                     start_byte: i32::try_from(c.start_byte).unwrap_or(i32::MAX),
                     end_byte: i32::try_from(c.end_byte).unwrap_or(i32::MAX),
-                    token_count: 0,
+                    token_count: i32::try_from(c.token_count).unwrap_or(i32::MAX),
                 })
                 .collect(),
         })
         .collect();
 
+    let batch_size = args.batch_size.max(1);
+    let batch_count = if docs.is_empty() {
+        1
+    } else {
+        (docs.len() + batch_size - 1) / batch_size
+    };
     let upload_url = format!(
         "{server_url}/v1/admin/sources/{slug}/ingest-runs/{id}/documents",
         slug = url_encode(&args.source_slug),
         id = start.ingest_run_id,
     );
-    let upload_result: anyhow::Result<UploadDocumentsResponse> =
-        put_json(&client, &upload_url, &token, &UploadDocumentsRequest { documents: docs }).await;
 
-    let upload = match upload_result {
-        Ok(u) => u,
-        Err(e) => {
-            abort_run(&client, server_url, &args.source_slug, start.ingest_run_id, &token).await;
-            return Err(e.context("upload documents"));
+    let mut accepted = 0usize;
+    let mut carried = 0usize;
+
+    for (i, chunk) in docs.chunks(batch_size).enumerate() {
+        reporter.batch(i + 1, batch_count, "uploading documents");
+        let body = UploadDocumentsRequest {
+            documents: chunk.to_vec(),
+            batch_index: i,
+            batch_count,
+        };
+        let result: Result<UploadDocumentsResponse> =
+            put_json(&client, &upload_url, &token, &body).await;
+        match result {
+            Ok(r) => {
+                accepted += r.accepted;
+                carried += r.carried;
+            }
+            Err(e) => {
+                abort_run(&client, server_url, &args.source_slug, start.ingest_run_id, &token)
+                    .await;
+                return Err(
+                    translate_upload_error(e, i + 1, batch_count, start.ingest_run_id)
+                        .context("upload documents"),
+                );
+            }
         }
-    };
+    }
 
-    // 6. Finalize.
+    reporter.phase_done(
+        "upload_documents",
+        serde_json::json!({"accepted": accepted, "carried": carried}),
+    );
+
+    // ── Phase: finalize ──────────────────────────────────────────────────────
+    reporter.phase("finalize", serde_json::json!({}));
+
     let finalize_url = format!(
         "{server_url}/v1/admin/sources/{slug}/ingest-runs/{id}/finalize",
         slug = url_encode(&args.source_slug),
@@ -309,9 +471,14 @@ async fn run_inner(
         }
     };
 
+    reporter.phase_done(
+        "finalize",
+        serde_json::json!({"revision": finalize.revision}),
+    );
+
     let stats = RunStats {
-        added: upload.accepted.saturating_sub(upload.carried),
-        carried: upload.carried,
+        added: accepted.saturating_sub(carried),
+        carried,
         deleted: 0,
     };
     println!(
@@ -326,6 +493,62 @@ async fn run_inner(
         )
     );
     Ok(stats)
+}
+
+/// Prompt the user (or honor `--yes` / non-TTY) for auto-creating a missing
+/// source.
+fn should_create_source(args: &Args) -> Result<bool> {
+    use std::io::{BufRead as _, IsTerminal as _, Write as _};
+    if args.yes {
+        return Ok(true);
+    }
+    if !std::io::stdin().is_terminal() {
+        return Err(anyhow!(
+            "source '{}' does not exist; re-run with --yes or create it explicitly with `mnm sources create`",
+            args.source_slug
+        ));
+    }
+    eprint!(
+        "Source '{}' doesn't exist on this server. Create it as kind=docs_site (retention=5)? [Y/n] ",
+        args.source_slug
+    );
+    std::io::stderr().flush().ok();
+    let mut line = String::new();
+    std::io::stdin().lock().read_line(&mut line)?;
+    let ans = line.trim().to_ascii_lowercase();
+    Ok(ans.is_empty() || ans == "y" || ans == "yes")
+}
+
+/// Translate a `start_ingest_run` HTTP error into a helpful message.
+fn translate_start_error(e: anyhow::Error, requested: &str) -> anyhow::Error {
+    let msg = e.to_string();
+    if msg.contains("409") {
+        return anyhow!(
+            "server's active embedding model differs from --embedding-model={requested}; \
+             run `mnm models pull` and retry, or pass --embedding-model to match"
+        );
+    }
+    e
+}
+
+/// Translate a batch-upload HTTP error into a helpful message.
+fn translate_upload_error(
+    e: anyhow::Error,
+    batch: usize,
+    of: usize,
+    run_id: Uuid,
+) -> anyhow::Error {
+    let msg = e.to_string();
+    if msg.contains("413") {
+        return anyhow!(
+            "batch {batch} exceeded server payload limit; aborted run {run_id}. \
+             Re-run with --batch-size 25 (or lower) — current default is 50 docs/batch"
+        );
+    }
+    anyhow!(
+        "upload failed at batch {batch}/{of} (network or server error); aborted run {run_id} — \
+         re-run `mnm ingest run` to retry"
+    )
 }
 
 async fn abort_run(
@@ -444,12 +667,14 @@ struct StartIngestRunResponse {
     source_version_revision: i32,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 struct UploadDocumentsRequest {
     documents: Vec<DocumentUpload>,
+    batch_index: usize,
+    batch_count: usize,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 struct DocumentUpload {
     path: String,
     kind: DocumentKind,
@@ -465,7 +690,7 @@ struct DocumentUpload {
     chunks: Vec<ChunkUpload>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 struct ChunkUpload {
     chunk_index: i32,
     total_chunks: i32,
