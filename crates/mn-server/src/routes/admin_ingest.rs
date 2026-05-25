@@ -148,6 +148,12 @@ pub struct ChunkUpload {
 pub struct UploadDocumentsRequest {
     /// Documents in this batch.
     pub documents: Vec<DocumentUpload>,
+    /// Optional batch index (0-indexed position in a multi-batch upload).
+    #[serde(default)]
+    pub batch_index: Option<usize>,
+    /// Optional total batch count for the ingest run.
+    #[serde(default)]
+    pub batch_count: Option<usize>,
 }
 
 /// Response from `PUT .../documents`.
@@ -280,6 +286,16 @@ async fn upload_documents(
     let rid = req_id.as_str();
     if let Some(resp) = admin_reject(rid, auth.as_ref()) {
         return resp;
+    }
+
+    if let (Some(i), Some(n)) = (req.batch_index, req.batch_count) {
+        tracing::info!(
+            ingest_run_id = %run_id,
+            batch_index = i,
+            batch_count = n,
+            documents = req.documents.len(),
+            "received batch"
+        );
     }
 
     // Look up the run and confirm it's in `building`.
