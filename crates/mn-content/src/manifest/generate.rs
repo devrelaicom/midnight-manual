@@ -165,7 +165,9 @@ fn build_manifest(opts: &GenerateOptions, entries: &[GenerateEntry]) -> Manifest
     if opts.hoist {
         hoist_common_url(&mut tree);
     }
-    // pin_dirs lands in Task 18.
+    if opts.pin_dirs {
+        pin_dirs(&mut tree, &opts.base, opts.pin_threshold);
+    }
 
     Manifest {
         manifest_version: 1,
@@ -191,6 +193,7 @@ fn title_case(s: &str) -> String {
 struct TreeNode {
     name: Option<String>,
     file: Option<PathBuf>,
+    path: Option<PathBuf>,
     published_url: Option<String>,
     children: HashMap<String, TreeNode>,
 }
@@ -200,6 +203,7 @@ impl TreeNode {
         Self {
             name: Some(name.into()),
             file: None,
+            path: None,
             published_url: None,
             children: HashMap::new(),
         }
@@ -209,6 +213,7 @@ impl TreeNode {
         Self {
             name: None,
             file: Some(file),
+            path: None,
             published_url: url,
             children: HashMap::new(),
         }
@@ -244,7 +249,7 @@ impl TreeNode {
         children.sort_by(|a, b| a.0.cmp(&b.0));
         ManifestNode {
             name: self.name,
-            path: None,
+            path: self.path,
             file: self.file,
             published_url: self.published_url,
             provenance: None,
@@ -287,6 +292,46 @@ fn hoist_common_url(node: &mut TreeNode) {
     for child in node.children.values_mut() {
         child.published_url = None;
     }
+}
+
+/// When a directory group has ≥ threshold leaf-only children whose
+/// per-leaf URLs have been cleared (hoisted to the parent), replace the
+/// explicit children with a single `path:` directive on the group node.
+fn pin_dirs(node: &mut TreeNode, base: &Path, threshold: usize) {
+    for child in node.children.values_mut() {
+        pin_dirs(child, base, threshold);
+    }
+    // Pin a child group if: all its children are leaves with no
+    // per-leaf URL (i.e. parent declared a hoisted URL), and the count
+    // hits threshold.
+    let leaves_only = node
+        .children
+        .values()
+        .all(|c| c.file.is_some() && c.children.is_empty() && c.published_url.is_none());
+    if leaves_only && node.children.len() >= threshold {
+        // Derive `path:` from the common parent of every child's file path.
+        let common = common_parent(
+            &node
+                .children
+                .values()
+                .filter_map(|c| c.file.clone())
+                .collect::<Vec<_>>(),
+        );
+        if let Some(parent) = common {
+            node.children.clear();
+            node.path = Some(parent);
+        }
+    }
+}
+
+fn common_parent(paths: &[PathBuf]) -> Option<PathBuf> {
+    let first = paths.first()?.parent()?.to_path_buf();
+    for p in paths {
+        if p.parent() != Some(&first) {
+            return None;
+        }
+    }
+    Some(first.join(""))
 }
 
 #[cfg(test)]
@@ -346,5 +391,31 @@ mod tests {
         );
         // Leaves no longer declare published_url (it's inherited).
         assert!(docs_group.children.iter().all(|c| c.published_url.is_none()));
+    }
+
+    #[test]
+    fn pin_dirs_collapses_dense_child_set_to_path_node() {
+        // Five files in one directory, all matched by the same rule, none
+        // with leaf-level URL overrides (after hoist).
+        let entries = (0..5)
+            .map(|i| GenerateEntry {
+                rel_path: PathBuf::from(format!("docs/cookbook/file-{i}.md")),
+                matched_url: Some(format!("https://docs.example.com/cookbook/file-{i}/")),
+                match_reason: "Leaf".to_owned(),
+            })
+            .collect::<Vec<_>>();
+        let opts = GenerateOptions {
+            root_name: Some("docs".to_owned()),
+            hoist: true,
+            pin_dirs: true,
+            pin_threshold: 5,
+            ..Default::default()
+        };
+        let m = build_manifest(&opts, &entries);
+        // docs → cookbook
+        let docs = &m.root.children[0];
+        let cookbook = &docs.children[0];
+        assert_eq!(cookbook.path.as_deref(), Some(Path::new("docs/cookbook/")));
+        assert!(cookbook.children.is_empty());
     }
 }
