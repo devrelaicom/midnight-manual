@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use mn_core::provenance::Provenance;
 use mn_core::types::DocumentKind;
 use serde::{Deserialize, Serialize};
+use serde_json;
 
 use super::Manifest;
 
@@ -40,13 +41,21 @@ pub struct ResolvedLeaf {
 #[must_use]
 pub fn resolve(manifest: &Manifest, _base: &Path) -> Vec<ResolvedLeaf> {
     let mut out = Vec::new();
-    walk(&manifest.root, None, &mut out);
+    let empty = serde_json::Map::new();
+    walk(&manifest.root, None, &empty, &mut out);
     out.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
     out
 }
 
-fn walk(node: &super::ManifestNode, parent_url: Option<&str>, out: &mut Vec<ResolvedLeaf>) {
-    let inherited = match (&node.published_url, parent_url) {
+fn walk(
+    node: &super::ManifestNode,
+    parent_url: Option<&str>,
+    parent_prov: &serde_json::Map<String, serde_json::Value>,
+    out: &mut Vec<ResolvedLeaf>,
+) {
+    let merged_prov = merge_prov(parent_prov, node.provenance.as_ref());
+
+    let inherited_url = match (&node.published_url, parent_url) {
         // Leaf-level explicit empty string = clear inheritance.
         (Some(s), _) if s.is_empty() => None,
         (Some(s), _) => Some(s.as_str()),
@@ -63,19 +72,23 @@ fn walk(node: &super::ManifestNode, parent_url: Option<&str>, out: &mut Vec<Reso
                 Some(own_url.clone())
             }
         } else {
-            compose_url(inherited, file)
+            compose_url(inherited_url, file)
         };
+        let prov_override = serde_json::from_value::<Provenance>(
+            serde_json::Value::Object(merged_prov.clone()),
+        )
+        .unwrap_or_default();
         out.push(ResolvedLeaf {
             rel_path: file.clone(),
             kind: kind_for(file),
             name: node.name.clone(),
             published_url: final_url,
             source_url: None,
-            provenance_override: Provenance::default(),
+            provenance_override: prov_override,
         });
     }
     for child in &node.children {
-        walk(child, inherited, out);
+        walk(child, inherited_url, &merged_prov, out);
     }
 }
 
@@ -101,6 +114,20 @@ fn kind_for(path: &Path) -> DocumentKind {
         Some(_) => DocumentKind::Code,
         None => DocumentKind::Plaintext,
     }
+}
+
+/// Field-by-field merge of two provenance maps: leaf wins per field.
+fn merge_prov(
+    parent: &serde_json::Map<String, serde_json::Value>,
+    leaf: Option<&serde_json::Value>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut out = parent.clone();
+    if let Some(serde_json::Value::Object(map)) = leaf {
+        for (k, v) in map {
+            out.insert(k.clone(), v.clone());
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -192,5 +219,47 @@ root:
         let m = Manifest::parse(body).unwrap();
         let leaves = resolve(&m, Path::new("."));
         assert_eq!(leaves[0].published_url, None);
+    }
+
+    #[test]
+    fn provenance_merges_field_by_field_top_down() {
+        let body = r#"
+manifest_version: 1
+root:
+  provenance:
+    attribution: foundation
+    verified: true
+    verified_by: midnight-foundation
+  children:
+    - file: a.md
+"#;
+        let m = Manifest::parse(body).unwrap();
+        let leaves = resolve(&m, Path::new("."));
+        let p = &leaves[0].provenance_override;
+        assert_eq!(p.attribution, mn_core::provenance::Attribution::Foundation);
+        assert!(p.verified);
+        assert_eq!(p.verified_by.as_deref(), Some("midnight-foundation"));
+    }
+
+    #[test]
+    fn leaf_provenance_overrides_ancestor_fieldwise() {
+        let body = r#"
+manifest_version: 1
+root:
+  provenance:
+    attribution: foundation
+    verified: true
+  children:
+    - file: a.md
+      provenance:
+        verified: false
+"#;
+        let m = Manifest::parse(body).unwrap();
+        let leaves = resolve(&m, Path::new("."));
+        let p = &leaves[0].provenance_override;
+        // Inherited attribution stays.
+        assert_eq!(p.attribution, mn_core::provenance::Attribution::Foundation);
+        // Leaf-level verified wins.
+        assert!(!p.verified);
     }
 }
