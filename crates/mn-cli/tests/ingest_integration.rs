@@ -14,7 +14,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use mn_cli::commands::ingest::Args as IngestArgs;
+use mn_cli::commands::ingest::run::Args as IngestArgs;
 use mn_core::auth_file::AuthFile;
 use mn_telemetry::TelemetryClient;
 use serde_json::json;
@@ -127,7 +127,7 @@ async fn happy_path_posts_three_step_flow() {
     };
     let telemetry = TelemetryClient::Disabled;
 
-    mn_cli::commands::ingest::run_with_paths(
+    mn_cli::commands::ingest::run::run_with_paths(
         args,
         &server.uri(),
         &auth_path,
@@ -167,7 +167,7 @@ async fn dry_run_does_not_hit_the_server() {
     };
     let telemetry = TelemetryClient::Disabled;
 
-    mn_cli::commands::ingest::run_with_paths(
+    mn_cli::commands::ingest::run::run_with_paths(
         args,
         &server.uri(),
         &auth_path,
@@ -198,7 +198,7 @@ async fn missing_admin_token_errors_with_clear_message() {
     };
     let telemetry = TelemetryClient::Disabled;
 
-    let err = mn_cli::commands::ingest::run_with_paths(
+    let err = mn_cli::commands::ingest::run::run_with_paths(
         args,
         &server.uri(),
         &auth_path,
@@ -261,7 +261,7 @@ async fn aborts_run_when_upload_fails() {
     };
     let telemetry = TelemetryClient::Disabled;
 
-    let err = mn_cli::commands::ingest::run_with_paths(
+    let err = mn_cli::commands::ingest::run::run_with_paths(
         args,
         &server.uri(),
         &auth_path,
@@ -297,7 +297,7 @@ async fn manifest_missing_file_errors_before_any_http() {
     };
     let telemetry = TelemetryClient::Disabled;
 
-    let err = mn_cli::commands::ingest::run_with_paths(
+    let err = mn_cli::commands::ingest::run::run_with_paths(
         args,
         &server.uri(),
         &auth_path,
