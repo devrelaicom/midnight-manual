@@ -129,7 +129,7 @@ pub async fn run(args: Args) -> Result<()> {
     Ok(())
 }
 
-pub(super) async fn load_sitemaps(specs: &[String]) -> Result<Vec<url::Url>> {
+pub async fn load_sitemaps(specs: &[String]) -> Result<Vec<url::Url>> {
     if specs.is_empty() {
         return Ok(Vec::new());
     }

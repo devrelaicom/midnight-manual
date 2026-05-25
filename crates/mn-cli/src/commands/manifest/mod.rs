@@ -4,6 +4,7 @@
 use anyhow::Result;
 use clap::{Args as ClapArgs, Subcommand};
 
+pub mod check;
 pub mod generate;
 pub mod init;
 
@@ -19,11 +20,14 @@ pub enum ManifestCmd {
     Init(init::Args),
     /// Populate a hierarchy.yaml from globs + optional sitemap.
     Generate(generate::Args),
+    /// Validate a manifest locally: schema, paths, file existence.
+    Check(check::Args),
 }
 
 pub async fn run(args: Args) -> Result<()> {
     match args.cmd {
         ManifestCmd::Init(a) => init::run(a),
         ManifestCmd::Generate(a) => generate::run(a).await,
+        ManifestCmd::Check(a) => check::run(a).await,
     }
 }
