@@ -2,7 +2,7 @@
 //!
 //! The MCP server is a thin local proxy — it embeds queries with the in-process
 //! `mn_embedding` models, posts to `/v1/search` on the cloud, and pretty-prints
-//! per-chunk lookups (`/v1/chunks/:id`, `/siblings`, `/parents`,
+//! per-chunk lookups (`/v1/chunks/:id`, `/parents`,
 //! `/v1/sources`). The wire shapes mirror what `mn-server` returns; rather
 //! than couple to `mn-server`'s types we deserialize to `serde_json::Value`
 //! and pass through, which keeps the MCP tool's response shape additive as
@@ -186,12 +186,6 @@ impl CloudClient {
         count: u32,
     ) -> Result<serde_json::Value, CloudError> {
         let path = format!("/v1/chunks/{id}/prev?count={count}");
-        self.get_json(&path).await
-    }
-
-    /// `GET /v1/chunks/:id/siblings`.
-    pub async fn get_chunk_siblings(&self, id: &str) -> Result<serde_json::Value, CloudError> {
-        let path = format!("/v1/chunks/{id}/siblings");
         self.get_json(&path).await
     }
 

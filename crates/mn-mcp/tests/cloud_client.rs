@@ -181,23 +181,6 @@ async fn get_chunk_404_maps_to_not_found() {
 }
 
 #[tokio::test]
-async fn get_chunk_siblings_round_trips() {
-    let server = MockServer::start().await;
-    let id = "00000000-0000-0000-0000-000000000008";
-    Mock::given(method("GET"))
-        .and(path(format!("/v1/chunks/{id}/siblings")))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
-            {"id": "a", "chunk_index": 0},
-            {"id": "b", "chunk_index": 1},
-        ])))
-        .mount(&server)
-        .await;
-    let client = CloudClient::new(&server.uri(), None).unwrap();
-    let v = client.get_chunk_siblings(id).await.unwrap();
-    assert_eq!(v.as_array().unwrap().len(), 2);
-}
-
-#[tokio::test]
 async fn get_chunk_parents_round_trips() {
     let server = MockServer::start().await;
     let id = "00000000-0000-0000-0000-000000000009";

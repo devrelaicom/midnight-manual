@@ -1,10 +1,13 @@
-//! `mn-mcp` — MCP JSON-RPC server (stdio framing) + the seven retrieval tools.
+//! `mn-mcp` — MCP JSON-RPC server (stdio framing) + the retrieval tool surface.
 //!
-//! Phase 5b landed the transport, protocol types, server loop, and two tools
-//! (`status`, `pull_models`). Phase 5c lands the remaining five — `search`,
-//! `get_chunk`, `get_chunk_siblings`, `get_chunk_parents`, `list_sources` —
-//! by wiring in an HTTP client to the cloud server and using the local
-//! embedder + reranker for the search path.
+//! Eleven tools across three categories:
+//!
+//! - Local-only: `status`, `pull_models`.
+//! - Cloud search: `search` (embeds locally, posts to `/v1/search`, optional
+//!   local rerank).
+//! - Cloud reads (pass-through): `get_chunk`, `get_chunk_next`,
+//!   `get_chunk_prev`, `get_chunk_parents`, `get_document`,
+//!   `get_document_full`, `get_document_chunks`, `list_sources`.
 
 #![doc(html_root_url = "https://docs.rs/mn-mcp/0.1.0")]
 #![allow(

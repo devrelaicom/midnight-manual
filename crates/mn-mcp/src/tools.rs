@@ -1,17 +1,15 @@
 //! MCP tool registry and per-tool handlers.
 //!
-//! Twelve tools (until `get_chunk_siblings` is removed at the end of this
-//! plan), three categories:
+//! Eleven tools, three categories:
 //!
 //! - `status` / `pull_models` — local-only; talk to the embedder/reranker
 //!   model cache. No cloud round-trip.
 //! - `search` — embed locally, post to the cloud `/v1/search`, optionally
 //!   rerank with the local cross-encoder.
 //! - All other tools (`get_chunk` / `get_chunk_next` / `get_chunk_prev` /
-//!   `get_chunk_siblings` / `get_chunk_parents` / `get_document` /
-//!   `get_document_full` / `get_document_chunks` / `list_sources`) —
-//!   pass-through to the cloud's read entry points, returning the response
-//!   JSON verbatim.
+//!   `get_chunk_parents` / `get_document` / `get_document_full` /
+//!   `get_document_chunks` / `list_sources`) — pass-through to the cloud's
+//!   read endpoints, returning the response JSON verbatim.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -30,7 +28,7 @@ use crate::server::ServerConfig;
 
 /// Build the static tool manifest sent in response to `tools/list`.
 ///
-/// All twelve tools declared in spec.md US5 / contracts/mcp-tools.json.
+/// All eleven tools declared in spec.md US5 / contracts/mcp-tools.json.
 /// Schemas here are kept in sync with the canonical document by way of the
 /// contract tests in `tests/`.
 #[must_use]
@@ -60,12 +58,6 @@ pub fn list() -> ToolsListResult {
                 description:
                     "Fetch up to `count` chunks immediately preceding the given chunk in chunk_index order, scoped to the same document. Returns `{chunks: ChunkWithContext[]}` sorted ascending (reading order). Returns `{chunks: []}` (not 404) when called on the first chunk. `embed_failed` chunks are skipped, so the returned chunk_index sequence may have gaps. count defaults to 5 and must be in [1, 100]; out-of-range values are rejected as InvalidParams before the call reaches the cloud.",
                 input_schema: chunk_nav_schema(),
-            },
-            ToolDescription {
-                name: "get_chunk_siblings",
-                description:
-                    "Fetch every chunk from the same document as the given chunk, ordered by chunk_index. Useful for reconstructing a full page from any starting point.",
-                input_schema: id_only_schema(),
             },
             ToolDescription {
                 name: "get_chunk_parents",
@@ -669,8 +661,6 @@ fn recompute_confidence(
 pub enum PassthroughKind {
     /// `/v1/chunks/:id`
     Chunk,
-    /// `/v1/chunks/:id/siblings` (DEPRECATED — removed in a later task).
-    Siblings,
     /// `/v1/chunks/:id/parents`
     Parents,
     /// `/v1/documents/:id`
@@ -844,7 +834,6 @@ pub async fn run_passthrough_id(
         .map_err(|e| PassthroughError::InvalidInput(format!("`id` is not a valid UUID: {e}")))?;
     let r = match kind {
         PassthroughKind::Chunk => cloud.get_chunk(id_str).await,
-        PassthroughKind::Siblings => cloud.get_chunk_siblings(id_str).await,
         PassthroughKind::Parents => cloud.get_chunk_parents(id_str).await,
         PassthroughKind::Document => cloud.get_document(id_str).await,
         PassthroughKind::DocumentFull => cloud.get_document_full(id_str).await,
@@ -863,9 +852,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tool_list_has_all_twelve_tools_pre_siblings_removal() {
-        // After the 5 new navigation tools are added and before
-        // `get_chunk_siblings` is removed, the manifest carries 12 tools.
+    fn tool_list_has_all_eleven_tools() {
         let m = list();
         let names: Vec<_> = m.tools.iter().map(|t| t.name).collect();
         for expected in [
@@ -873,7 +860,6 @@ mod tests {
             "get_chunk",
             "get_chunk_next",
             "get_chunk_prev",
-            "get_chunk_siblings",
             "get_chunk_parents",
             "get_document",
             "get_document_full",
@@ -884,7 +870,7 @@ mod tests {
         ] {
             assert!(names.contains(&expected), "missing tool: {expected}");
         }
-        assert_eq!(names.len(), 12, "expected 12 tools, got {}", names.len());
+        assert_eq!(names.len(), 11, "expected 11 tools, got {}", names.len());
     }
 
     #[test]

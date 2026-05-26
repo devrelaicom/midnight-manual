@@ -58,12 +58,12 @@ async fn run_passthrough_id_maps_404() {
     let server = MockServer::start().await;
     let id = "22222222-2222-2222-2222-222222222222";
     Mock::given(method("GET"))
-        .and(path(format!("/v1/chunks/{id}/siblings")))
+        .and(path(format!("/v1/documents/{id}/full")))
         .respond_with(ResponseTemplate::new(404).set_body_string("missing"))
         .mount(&server)
         .await;
     let client = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
-    let err = run_passthrough_id(&json!({"id": id}), &client, PassthroughKind::Siblings)
+    let err = run_passthrough_id(&json!({"id": id}), &client, PassthroughKind::DocumentFull)
         .await
         .unwrap_err();
     assert!(matches!(err, PassthroughError::NotFound(_)));

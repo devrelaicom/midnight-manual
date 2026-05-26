@@ -249,7 +249,6 @@ fn tool_name_for_event(name: &str) -> Option<McpToolName> {
         "get_chunk" => Some(McpToolName::GetChunk),
         "get_chunk_next" => Some(McpToolName::GetChunkNext),
         "get_chunk_prev" => Some(McpToolName::GetChunkPrev),
-        "get_chunk_siblings" => Some(McpToolName::GetChunkSiblings),
         "get_chunk_parents" => Some(McpToolName::GetChunkParents),
         "get_document" => Some(McpToolName::GetDocument),
         "get_document_full" => Some(McpToolName::GetDocumentFull),
@@ -284,9 +283,6 @@ async fn dispatch_tool_inner(
         }
         "get_chunk_prev" => {
             run_chunk_nav_dispatch(&id, &params, state, tools::ChunkNavDirection::Prev).await
-        }
-        "get_chunk_siblings" => {
-            run_passthrough_dispatch(&id, &params, state, tools::PassthroughKind::Siblings).await
         }
         "get_chunk_parents" => {
             run_passthrough_dispatch(&id, &params, state, tools::PassthroughKind::Parents).await

@@ -78,10 +78,7 @@ async fn status_tool_works_without_model_load() {
 }
 
 #[tokio::test]
-async fn tools_list_contains_all_twelve_pre_siblings_removal() {
-    // Until `get_chunk_siblings` is removed at the end of the plan, the
-    // manifest carries 12 tools. After removal this drops to 11 and the
-    // test is updated.
+async fn tools_list_contains_all_eleven() {
     let list = mn_mcp::tools::list();
     let names: Vec<_> = list.tools.iter().map(|t| t.name).collect();
     for expected in [
@@ -89,7 +86,6 @@ async fn tools_list_contains_all_twelve_pre_siblings_removal() {
         "get_chunk",
         "get_chunk_next",
         "get_chunk_prev",
-        "get_chunk_siblings",
         "get_chunk_parents",
         "get_document",
         "get_document_full",
@@ -100,7 +96,7 @@ async fn tools_list_contains_all_twelve_pre_siblings_removal() {
     ] {
         assert!(names.contains(&expected), "missing tool: {expected}");
     }
-    assert_eq!(names.len(), 12);
+    assert_eq!(names.len(), 11);
 }
 
 #[tokio::test]
