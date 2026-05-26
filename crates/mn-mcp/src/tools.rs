@@ -702,6 +702,72 @@ pub async fn run_chunk_nav(
     })
 }
 
+const DOCUMENT_CHUNKS_DEFAULT_FROM: u32 = 0;
+const DOCUMENT_CHUNKS_DEFAULT_LIMIT: u32 = 20;
+const DOCUMENT_CHUNKS_MAX_LIMIT: u32 = 100;
+
+/// Dispatch `get_document_chunks`. Parses `{id, from?, limit?}`. `from`
+/// must be `>= 0`; `limit` must be in `[1, 100]`. Out-of-range or wrong-type
+/// values are rejected as `InvalidInput` before the wire call.
+///
+/// # Errors
+///
+/// See [`PassthroughError`].
+pub async fn run_document_chunks(
+    args: &serde_json::Value,
+    cloud: &Arc<CloudClient>,
+) -> Result<serde_json::Value, PassthroughError> {
+    let obj = args.as_object().ok_or_else(|| {
+        PassthroughError::InvalidInput("arguments must be a JSON object".to_owned())
+    })?;
+    let id_str = obj
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| PassthroughError::InvalidInput("`id` (string) is required".to_owned()))?;
+    Uuid::parse_str(id_str)
+        .map_err(|e| PassthroughError::InvalidInput(format!("`id` is not a valid UUID: {e}")))?;
+
+    let from = match obj.get("from") {
+        None => DOCUMENT_CHUNKS_DEFAULT_FROM,
+        Some(v) => {
+            let Some(n) = v.as_i64() else {
+                return Err(PassthroughError::InvalidInput("`from` must be an integer".to_owned()));
+            };
+            if n < 0 {
+                return Err(PassthroughError::InvalidInput("`from` must be >= 0".to_owned()));
+            }
+            u32::try_from(n).map_err(|_| {
+                PassthroughError::InvalidInput("`from` exceeds 32-bit range".to_owned())
+            })?
+        }
+    };
+
+    let limit = match obj.get("limit") {
+        None => DOCUMENT_CHUNKS_DEFAULT_LIMIT,
+        Some(v) => {
+            let Some(n) = v.as_i64() else {
+                return Err(PassthroughError::InvalidInput(
+                    "`limit` must be an integer".to_owned(),
+                ));
+            };
+            if !(1..=i64::from(DOCUMENT_CHUNKS_MAX_LIMIT)).contains(&n) {
+                return Err(PassthroughError::InvalidInput(format!(
+                    "`limit` must be 1..={DOCUMENT_CHUNKS_MAX_LIMIT}"
+                )));
+            }
+            u32::try_from(n).expect("validated above")
+        }
+    };
+
+    cloud
+        .get_document_chunks(id_str, from, limit)
+        .await
+        .map_err(|e| match e {
+            CloudError::NotFound(msg) => PassthroughError::NotFound(msg),
+            other => PassthroughError::Cloud(other.to_string()),
+        })
+}
+
 /// Dispatch any of the `get_chunk*` tools. Returns the cloud's JSON verbatim.
 ///
 /// # Errors

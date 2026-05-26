@@ -7,7 +7,8 @@ use std::sync::Arc;
 
 use mn_mcp::cloud_client::CloudClient;
 use mn_mcp::tools::{
-    run_chunk_nav, run_passthrough_id, ChunkNavDirection, PassthroughError, PassthroughKind,
+    run_chunk_nav, run_document_chunks, run_passthrough_id, ChunkNavDirection, PassthroughError,
+    PassthroughKind,
 };
 use serde_json::json;
 use wiremock::matchers::{method, path, query_param};
@@ -225,4 +226,99 @@ async fn run_chunk_nav_rejects_invalid_uuid() {
         .await
         .unwrap_err();
     assert!(matches!(err, PassthroughError::InvalidInput(_)));
+}
+
+#[tokio::test]
+async fn run_document_chunks_sends_from_and_limit() {
+    let server = MockServer::start().await;
+    let id = "33333333-3333-3333-3333-333333333300";
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/documents/{id}/chunks")))
+        .and(query_param("from", "3"))
+        .and(query_param("limit", "7"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "chunks": [], "from": 3, "limit": 7, "total_chunks": 0,
+        })))
+        .mount(&server)
+        .await;
+    let client = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
+    let v = run_document_chunks(&json!({"id": id, "from": 3, "limit": 7}), &client)
+        .await
+        .unwrap();
+    assert_eq!(v["from"], 3);
+    assert_eq!(v["limit"], 7);
+}
+
+#[tokio::test]
+async fn run_document_chunks_defaults_from_zero_limit_twenty() {
+    let server = MockServer::start().await;
+    let id = "33333333-3333-3333-3333-333333333301";
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/documents/{id}/chunks")))
+        .and(query_param("from", "0"))
+        .and(query_param("limit", "20"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "chunks": [], "from": 0, "limit": 20, "total_chunks": 0,
+        })))
+        .mount(&server)
+        .await;
+    let client = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
+    let _ = run_document_chunks(&json!({"id": id}), &client)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn run_document_chunks_rejects_negative_from() {
+    let server = MockServer::start().await;
+    let client = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
+    let err = run_document_chunks(
+        &json!({"id": "33333333-3333-3333-3333-333333333302", "from": -1}),
+        &client,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, PassthroughError::InvalidInput(_)));
+}
+
+#[tokio::test]
+async fn run_document_chunks_rejects_limit_zero() {
+    let server = MockServer::start().await;
+    let client = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
+    let err = run_document_chunks(
+        &json!({"id": "33333333-3333-3333-3333-333333333303", "limit": 0}),
+        &client,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, PassthroughError::InvalidInput(_)));
+}
+
+#[tokio::test]
+async fn run_document_chunks_rejects_limit_over_max() {
+    let server = MockServer::start().await;
+    let client = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
+    let err = run_document_chunks(
+        &json!({"id": "33333333-3333-3333-3333-333333333304", "limit": 101}),
+        &client,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, PassthroughError::InvalidInput(_)));
+}
+
+#[tokio::test]
+async fn run_document_chunks_404_maps_to_not_found() {
+    let server = MockServer::start().await;
+    let id = "33333333-3333-3333-3333-333333333305";
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/documents/{id}/chunks")))
+        .respond_with(ResponseTemplate::new(404).set_body_string("nope"))
+        .mount(&server)
+        .await;
+    let client = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
+    let err = run_document_chunks(&json!({"id": id}), &client)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, PassthroughError::NotFound(_)));
 }
