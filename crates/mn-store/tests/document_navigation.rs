@@ -61,3 +61,27 @@ async fn get_full_signals_too_many_chunks_above_cap() {
         document::FullResult::Document(_) => panic!("expected TooManyChunks"),
     }
 }
+
+#[tokio::test]
+async fn list_chunks_window_returns_requested_range() {
+    let h = common::boot().await;
+    let fx = fixtures::ingest_n_chunk_doc(&h.pool, "window", 10).await;
+
+    let w = document::list_chunks_window(&h.pool, fx.document_id, 3, 4).await.unwrap();
+    let idxs: Vec<i32> = w.chunks.iter().map(|c| c.chunk_index).collect();
+    assert_eq!(idxs, vec![3, 4, 5, 6]);
+    assert_eq!(w.from, 3);
+    assert_eq!(w.limit, 4);
+    assert_eq!(w.total_chunks, 10);
+}
+
+#[tokio::test]
+async fn list_chunks_window_past_end_returns_empty_with_total() {
+    let h = common::boot().await;
+    let fx = fixtures::ingest_n_chunk_doc(&h.pool, "window-end", 5).await;
+
+    let w = document::list_chunks_window(&h.pool, fx.document_id, 10, 5).await.unwrap();
+    assert!(w.chunks.is_empty());
+    assert_eq!(w.from, 10);
+    assert_eq!(w.total_chunks, 5);
+}

@@ -183,6 +183,67 @@ pub async fn get_full(pool: &PgPool, id: Uuid, cap: usize) -> Result<FullResult>
     }))
 }
 
+/// Get a windowed slice of a document's chunks, starting at chunk index
+/// `from`, returning up to `limit` chunks. Also returns the document
+/// metadata and total ready-chunk count so callers can render
+/// "chunks K..K+N of M".
+///
+/// # Errors
+///
+/// Returns `StoreError::NotFound` if no document has that id.
+pub async fn list_chunks_window(
+    pool: &PgPool,
+    id: Uuid,
+    from: usize,
+    limit: usize,
+) -> Result<DocumentChunkWindow> {
+    let limit = limit.clamp(1, 100);
+    let document = get_by_id(pool, id).await?;
+    let source_slug = sqlx::query_scalar::<_, String>(
+        "SELECT s.slug FROM source s \
+         JOIN source_version sv ON sv.source_id = s.id \
+         WHERE sv.id = $1",
+    )
+    .bind(document.source_version_id)
+    .fetch_one(pool)
+    .await?;
+    let total: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM chunk WHERE document_id = $1 AND status <> 'embed_failed'",
+    )
+    .bind(id)
+    .fetch_one(pool)
+    .await?;
+    let chunks = sqlx::query_as::<_, ChunkBodyRow>(
+        "SELECT id AS chunk_id, chunk_index, content, heading_path, token_count \
+         FROM chunk \
+         WHERE document_id = $1 AND status <> 'embed_failed' \
+         ORDER BY chunk_index ASC \
+         OFFSET $2 LIMIT $3",
+    )
+    .bind(id)
+    .bind(i64::try_from(from).unwrap_or(0))
+    .bind(i64::try_from(limit).unwrap_or(20))
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(|r| ChunkBody {
+        chunk_id: r.chunk_id,
+        chunk_index: r.chunk_index,
+        content: r.content,
+        heading_path: r.heading_path,
+        token_count: r.token_count,
+    })
+    .collect();
+    Ok(DocumentChunkWindow {
+        document,
+        source: crate::entities::chunk::SourceSummary { slug: source_slug },
+        chunks,
+        from,
+        limit,
+        total_chunks: usize::try_from(total).unwrap_or(0),
+    })
+}
+
 /// One row from [`list_for_source_version`] — the minimum needed to seed an
 /// [`IngestPlanBuilder`'s prior state](super) (FR-014 carry-forward).
 ///
@@ -239,6 +300,26 @@ pub struct DocumentFull {
     pub source: crate::entities::chunk::SourceSummary,
     /// Every ready chunk in chunk_index order.
     pub chunks: Vec<ChunkBody>,
+}
+
+/// Window of chunks at offset `from` with `limit` cap.
+///
+/// Spec §1.5 of the chunk+document navigation design.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocumentChunkWindow {
+    /// Full document row.
+    #[serde(flatten)]
+    pub document: Document,
+    /// Source summary (slug only).
+    pub source: crate::entities::chunk::SourceSummary,
+    /// Requested chunk window in chunk_index order.
+    pub chunks: Vec<ChunkBody>,
+    /// Start offset (chunk index) of the requested window.
+    pub from: usize,
+    /// Requested limit; actual chunks returned may be less if end of document.
+    pub limit: usize,
+    /// Total number of ready chunks in the document.
+    pub total_chunks: usize,
 }
 
 /// Returned by `get_full` when the document exceeds the chunk cap, so the
