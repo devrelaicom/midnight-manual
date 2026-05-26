@@ -1,14 +1,17 @@
 //! MCP tool registry and per-tool handlers.
 //!
-//! Seven tools, three categories:
+//! Twelve tools (until `get_chunk_siblings` is removed at the end of this
+//! plan), three categories:
 //!
 //! - `status` / `pull_models` — local-only; talk to the embedder/reranker
 //!   model cache. No cloud round-trip.
 //! - `search` — embed locally, post to the cloud `/v1/search`, optionally
 //!   rerank with the local cross-encoder.
-//! - `get_chunk` / `get_chunk_siblings` / `get_chunk_parents` /
-//!   `list_sources` — pass-through to the cloud's read endpoints, returning
-//!   the response JSON verbatim.
+//! - All other tools (`get_chunk` / `get_chunk_next` / `get_chunk_prev` /
+//!   `get_chunk_siblings` / `get_chunk_parents` / `get_document` /
+//!   `get_document_full` / `get_document_chunks` / `list_sources`) —
+//!   pass-through to the cloud's read entry points, returning the response
+//!   JSON verbatim.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -27,9 +30,9 @@ use crate::server::ServerConfig;
 
 /// Build the static tool manifest sent in response to `tools/list`.
 ///
-/// All seven tools declared in spec.md US5 / contracts/mcp-tools.json. Schemas
-/// here are kept in sync with the canonical document by way of the contract
-/// tests in `tests/`.
+/// All twelve tools declared in spec.md US5 / contracts/mcp-tools.json.
+/// Schemas here are kept in sync with the canonical document by way of the
+/// contract tests in `tests/`.
 #[must_use]
 pub fn list() -> ToolsListResult {
     ToolsListResult {
@@ -43,8 +46,20 @@ pub fn list() -> ToolsListResult {
             ToolDescription {
                 name: "get_chunk",
                 description:
-                    "Fetch one chunk by id with full metadata, parent chain, and navigation pointers.",
+                    "Fetch one chunk by id. Returns the chunk row (id, content, chunk_index, total_chunks, content_hash, embedding_model_id, heading_path, symbol_path, start_byte, end_byte, token_count, status, created_at, document_id, source_version_id, node_id) plus a small `document` sub-object (id, source_path, published_url, source_url, language, kind, provenance) and a `source` sub-object (slug). For the chunk's parent chain call get_chunk_parents; for adjacent chunks call get_chunk_next/get_chunk_prev.",
                 input_schema: id_only_schema(),
+            },
+            ToolDescription {
+                name: "get_chunk_next",
+                description:
+                    "Fetch up to `count` chunks immediately following the given chunk in chunk_index order, scoped to the same document. Returns `{chunks: ChunkWithContext[]}` sorted ascending. Returns `{chunks: []}` (not 404) when called on the last chunk. `embed_failed` chunks are skipped, so the returned chunk_index sequence may have gaps. count defaults to 5 and must be in [1, 100]; out-of-range values are rejected as InvalidParams before the call reaches the cloud.",
+                input_schema: chunk_nav_schema(),
+            },
+            ToolDescription {
+                name: "get_chunk_prev",
+                description:
+                    "Fetch up to `count` chunks immediately preceding the given chunk in chunk_index order, scoped to the same document. Returns `{chunks: ChunkWithContext[]}` sorted ascending (reading order). Returns `{chunks: []}` (not 404) when called on the first chunk. `embed_failed` chunks are skipped, so the returned chunk_index sequence may have gaps. count defaults to 5 and must be in [1, 100]; out-of-range values are rejected as InvalidParams before the call reaches the cloud.",
+                input_schema: chunk_nav_schema(),
             },
             ToolDescription {
                 name: "get_chunk_siblings",
@@ -57,6 +72,24 @@ pub fn list() -> ToolsListResult {
                 description:
                     "Walk the parent chain from a chunk up to its source-version root. Returns nodes from immediate parent to root.",
                 input_schema: id_only_schema(),
+            },
+            ToolDescription {
+                name: "get_document",
+                description:
+                    "Document overview: metadata (id, source_version_id, node_id, source_path, published_url, source_url, language, kind, content_hash, char_count, token_count, source_modified_at, created_at, frontmatter, provenance, package_id), the source `{slug}`, and an ordered `chunk_ids` array of every ready chunk. No chunk bodies. Use get_document_full for inline bodies or get_document_chunks for a windowed slice.",
+                input_schema: id_only_schema(),
+            },
+            ToolDescription {
+                name: "get_document_full",
+                description:
+                    "Complete document: every overview field except chunk_ids, plus a `chunks` array with each chunk's `{chunk_id, chunk_index, content, heading_path, token_count}` inline (no per-chunk document/source sub-objects). Capped at 500 ready chunks. For documents over the cap the call fails with a structured `too_many_chunks` error (see error.data.next_tool); fall back to get_document_chunks.",
+                input_schema: id_only_schema(),
+            },
+            ToolDescription {
+                name: "get_document_chunks",
+                description:
+                    "Position-windowed chunk slice of a document. Returns `{chunks: ChunkBody[], from, limit, total_chunks}`. from defaults to 0 (must be >= 0); limit defaults to 20 and must be in [1, 100]. Out-of-range values are rejected as InvalidParams before the call reaches the cloud. `from` past the end returns `chunks: []` with accurate `total_chunks` (not 404). Use to page through documents larger than get_document_full's 500-chunk cap or to read a known offset.",
+                input_schema: document_chunks_schema(),
             },
             ToolDescription {
                 name: "list_sources",
@@ -98,6 +131,31 @@ fn id_only_schema() -> serde_json::Value {
         "required": ["id"],
         "properties": {
             "id": { "type": "string", "format": "uuid" },
+        },
+        "additionalProperties": false,
+    })
+}
+
+fn chunk_nav_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "required": ["id"],
+        "properties": {
+            "id": { "type": "string", "format": "uuid" },
+            "count": { "type": "integer", "minimum": 1, "maximum": 100, "default": 5 },
+        },
+        "additionalProperties": false,
+    })
+}
+
+fn document_chunks_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "required": ["id"],
+        "properties": {
+            "id": { "type": "string", "format": "uuid" },
+            "from": { "type": "integer", "minimum": 0, "default": 0 },
+            "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 },
         },
         "additionalProperties": false,
     })
@@ -805,19 +863,50 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tool_list_has_all_seven_tools() {
+    fn tool_list_has_all_twelve_tools_pre_siblings_removal() {
+        // After the 5 new navigation tools are added and before
+        // `get_chunk_siblings` is removed, the manifest carries 12 tools.
         let m = list();
         let names: Vec<_> = m.tools.iter().map(|t| t.name).collect();
         for expected in [
             "search",
             "get_chunk",
+            "get_chunk_next",
+            "get_chunk_prev",
             "get_chunk_siblings",
             "get_chunk_parents",
+            "get_document",
+            "get_document_full",
+            "get_document_chunks",
             "list_sources",
             "pull_models",
             "status",
         ] {
             assert!(names.contains(&expected), "missing tool: {expected}");
+        }
+        assert_eq!(names.len(), 12, "expected 12 tools, got {}", names.len());
+    }
+
+    #[test]
+    fn new_navigation_tools_have_object_schemas() {
+        let m = list();
+        for name in [
+            "get_chunk_next",
+            "get_chunk_prev",
+            "get_document",
+            "get_document_full",
+            "get_document_chunks",
+        ] {
+            let tool = m
+                .tools
+                .iter()
+                .find(|t| t.name == name)
+                .unwrap_or_else(|| panic!("missing tool: {name}"));
+            assert_eq!(tool.input_schema["type"], "object", "{name} schema must be object-typed");
+            assert_eq!(
+                tool.input_schema["additionalProperties"], false,
+                "{name} schema must reject additional properties"
+            );
         }
     }
 
