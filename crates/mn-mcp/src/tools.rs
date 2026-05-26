@@ -611,10 +611,14 @@ fn recompute_confidence(
 pub enum PassthroughKind {
     /// `/v1/chunks/:id`
     Chunk,
-    /// `/v1/chunks/:id/siblings`
+    /// `/v1/chunks/:id/siblings` (DEPRECATED — removed in a later task).
     Siblings,
     /// `/v1/chunks/:id/parents`
     Parents,
+    /// `/v1/documents/:id`
+    Document,
+    /// `/v1/documents/:id/full` (may return [`PassthroughError::TooManyChunks`]).
+    DocumentFull,
 }
 
 /// Errors for the chunk pass-through tools.
@@ -624,6 +628,15 @@ pub enum PassthroughError {
     InvalidInput(String),
     /// Cloud returned 404.
     NotFound(String),
+    /// Cloud returned `412 too_many_chunks` (document-full only).
+    TooManyChunks {
+        /// Reported ready-chunk count for the document.
+        chunk_count: u32,
+        /// Server's configured cap.
+        cap: u32,
+        /// Operator-facing hint from the cloud.
+        hint: String,
+    },
     /// Cloud / transport / decode failure.
     Cloud(String),
 }
@@ -648,9 +661,14 @@ pub async fn run_passthrough_id(
         PassthroughKind::Chunk => cloud.get_chunk(id_str).await,
         PassthroughKind::Siblings => cloud.get_chunk_siblings(id_str).await,
         PassthroughKind::Parents => cloud.get_chunk_parents(id_str).await,
+        PassthroughKind::Document => cloud.get_document(id_str).await,
+        PassthroughKind::DocumentFull => cloud.get_document_full(id_str).await,
     };
     r.map_err(|e| match e {
         CloudError::NotFound(msg) => PassthroughError::NotFound(msg),
+        CloudError::TooManyChunks { chunk_count, cap, hint } => {
+            PassthroughError::TooManyChunks { chunk_count, cap, hint }
+        }
         other => PassthroughError::Cloud(other.to_string()),
     })
 }

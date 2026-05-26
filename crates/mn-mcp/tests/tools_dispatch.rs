@@ -65,3 +65,62 @@ async fn run_passthrough_id_maps_404() {
         .unwrap_err();
     assert!(matches!(err, PassthroughError::NotFound(_)));
 }
+
+#[tokio::test]
+async fn run_passthrough_id_hits_document_endpoint() {
+    let server = MockServer::start().await;
+    let id = "11111111-1111-1111-1111-111111111100";
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/documents/{id}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": id})))
+        .mount(&server)
+        .await;
+    let client = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
+    let v = run_passthrough_id(&json!({"id": id}), &client, PassthroughKind::Document)
+        .await
+        .unwrap();
+    assert_eq!(v["id"], id);
+}
+
+#[tokio::test]
+async fn run_passthrough_id_hits_document_full_endpoint() {
+    let server = MockServer::start().await;
+    let id = "11111111-1111-1111-1111-111111111101";
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/documents/{id}/full")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": id, "chunks": []})))
+        .mount(&server)
+        .await;
+    let client = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
+    let v = run_passthrough_id(&json!({"id": id}), &client, PassthroughKind::DocumentFull)
+        .await
+        .unwrap();
+    assert_eq!(v["chunks"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn run_passthrough_id_maps_document_full_412() {
+    let server = MockServer::start().await;
+    let id = "11111111-1111-1111-1111-111111111102";
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/documents/{id}/full")))
+        .respond_with(ResponseTemplate::new(412).set_body_json(json!({
+            "error": "too_many_chunks",
+            "chunk_count": 1240,
+            "cap": 500,
+            "hint": "Use GET /v1/documents/.../chunks?from=K&limit=L (default L=20)",
+        })))
+        .mount(&server)
+        .await;
+    let client = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
+    let err = run_passthrough_id(&json!({"id": id}), &client, PassthroughKind::DocumentFull)
+        .await
+        .unwrap_err();
+    match err {
+        PassthroughError::TooManyChunks { chunk_count, cap, .. } => {
+            assert_eq!(chunk_count, 1240);
+            assert_eq!(cap, 500);
+        }
+        other => panic!("expected TooManyChunks, got {other:?}"),
+    }
+}

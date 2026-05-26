@@ -345,6 +345,14 @@ async fn run_passthrough_dispatch(
         Err(tools::PassthroughError::NotFound(msg)) => {
             Err(Response::err(id.clone(), ErrorCode::ToolFailed, format!("not found: {msg}")))
         }
+        Err(tools::PassthroughError::TooManyChunks { chunk_count, cap, .. }) => {
+            // Replaced with too_many_chunks_response in Task 10.
+            Err(Response::err(
+                id.clone(),
+                ErrorCode::ToolFailed,
+                format!("document has {chunk_count} chunks (cap {cap})"),
+            ))
+        }
         Err(tools::PassthroughError::Cloud(msg)) => {
             Err(Response::err(id.clone(), ErrorCode::ToolFailed, msg))
         }
