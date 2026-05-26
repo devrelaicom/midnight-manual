@@ -247,8 +247,13 @@ fn tool_name_for_event(name: &str) -> Option<McpToolName> {
     match name {
         "search" => Some(McpToolName::Search),
         "get_chunk" => Some(McpToolName::GetChunk),
+        "get_chunk_next" => Some(McpToolName::GetChunkNext),
+        "get_chunk_prev" => Some(McpToolName::GetChunkPrev),
         "get_chunk_siblings" => Some(McpToolName::GetChunkSiblings),
         "get_chunk_parents" => Some(McpToolName::GetChunkParents),
+        "get_document" => Some(McpToolName::GetDocument),
+        "get_document_full" => Some(McpToolName::GetDocumentFull),
+        "get_document_chunks" => Some(McpToolName::GetDocumentChunks),
         "list_sources" => Some(McpToolName::ListSources),
         "pull_models" => Some(McpToolName::PullModels),
         "status" => Some(McpToolName::Status),

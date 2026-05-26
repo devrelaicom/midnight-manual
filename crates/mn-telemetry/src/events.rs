@@ -169,10 +169,20 @@ pub enum McpToolName {
     Search,
     /// `get_chunk` tool.
     GetChunk,
-    /// `get_chunk_siblings` tool.
+    /// `get_chunk_next` tool.
+    GetChunkNext,
+    /// `get_chunk_prev` tool.
+    GetChunkPrev,
+    /// `get_chunk_siblings` tool (slated for removal at the end of this plan).
     GetChunkSiblings,
     /// `get_chunk_parents` tool.
     GetChunkParents,
+    /// `get_document` tool.
+    GetDocument,
+    /// `get_document_full` tool.
+    GetDocumentFull,
+    /// `get_document_chunks` tool.
+    GetDocumentChunks,
     /// `list_sources` tool.
     ListSources,
     /// `pull_models` tool.
