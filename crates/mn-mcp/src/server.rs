@@ -207,11 +207,16 @@ async fn handle_request(req: crate::protocol::Request, state: &ServerState) -> V
 async fn dispatch_tool(id: RequestId, params: ToolCallParams, state: &ServerState) -> Response {
     let started = Instant::now();
     let tool_name_for_event = tool_name_for_event(&params.name);
-    let rerank_on = params
-        .arguments
-        .get("rerank")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
+    // `rerank` is only meaningful to the `search` tool; for everything else
+    // the field doesn't exist in the schema, so the telemetry value is false.
+    // Search's own default is `true` (see parse_search_args), so an absent
+    // field there must log `true` to match what actually happened on the wire.
+    let rerank_on = params.name == "search"
+        && params
+            .arguments
+            .get("rerank")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true);
     let response = dispatch_tool_inner(id, params, state).await;
     let latency_ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
     state.tools_served.fetch_add(1, Ordering::Relaxed);
