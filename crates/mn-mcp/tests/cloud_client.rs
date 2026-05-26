@@ -277,3 +277,94 @@ async fn get_chunk_next_maps_404_to_not_found() {
     let err = client.get_chunk_next(id, 5).await.unwrap_err();
     assert!(matches!(err, CloudError::NotFound(_)));
 }
+
+#[tokio::test]
+async fn get_document_round_trips() {
+    let server = MockServer::start().await;
+    let id = "00000000-0000-0000-0000-00000000000d";
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/documents/{id}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": id,
+            "source_path": "welcome.md",
+            "chunk_ids": ["a", "b"],
+        })))
+        .mount(&server)
+        .await;
+    let client = CloudClient::new(&server.uri(), None).unwrap();
+    let v = client.get_document(id).await.unwrap();
+    assert_eq!(v["source_path"], "welcome.md");
+    assert_eq!(v["chunk_ids"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn get_document_full_returns_body_on_200() {
+    let server = MockServer::start().await;
+    let id = "00000000-0000-0000-0000-00000000000e";
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/documents/{id}/full")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": id,
+            "chunks": [{"chunk_id": "a", "chunk_index": 0, "content": "hi"}],
+        })))
+        .mount(&server)
+        .await;
+    let client = CloudClient::new(&server.uri(), None).unwrap();
+    let v = client.get_document_full(id).await.unwrap();
+    assert_eq!(v["chunks"][0]["content"], "hi");
+}
+
+#[tokio::test]
+async fn get_document_full_maps_412_to_too_many_chunks() {
+    let server = MockServer::start().await;
+    let id = "00000000-0000-0000-0000-00000000000f";
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/documents/{id}/full")))
+        .respond_with(ResponseTemplate::new(412).set_body_json(json!({
+            "error": "too_many_chunks",
+            "chunk_count": 1240,
+            "cap": 500,
+            "hint": "Use GET /v1/documents/abc/chunks?from=K&limit=L (default L=20)",
+        })))
+        .mount(&server)
+        .await;
+    let client = CloudClient::new(&server.uri(), None).unwrap();
+    let err = client.get_document_full(id).await.unwrap_err();
+    match err {
+        CloudError::TooManyChunks { chunk_count, cap, .. } => {
+            assert_eq!(chunk_count, 1240);
+            assert_eq!(cap, 500);
+        }
+        other => panic!("wrong variant: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn get_document_full_falls_back_to_status_on_unrelated_412() {
+    let server = MockServer::start().await;
+    let id = "00000000-0000-0000-0000-00000000001a";
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/documents/{id}/full")))
+        .respond_with(ResponseTemplate::new(412).set_body_json(json!({
+            "error": "something_else",
+        })))
+        .mount(&server)
+        .await;
+    let client = CloudClient::new(&server.uri(), None).unwrap();
+    let err = client.get_document_full(id).await.unwrap_err();
+    assert!(matches!(err, CloudError::Status { status: 412, .. }));
+}
+
+#[tokio::test]
+async fn get_document_404_maps_to_not_found() {
+    let server = MockServer::start().await;
+    let id = "00000000-0000-0000-0000-00000000001b";
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/documents/{id}")))
+        .respond_with(ResponseTemplate::new(404).set_body_string("nope"))
+        .mount(&server)
+        .await;
+    let client = CloudClient::new(&server.uri(), None).unwrap();
+    let err = client.get_document(id).await.unwrap_err();
+    assert!(matches!(err, CloudError::NotFound(_)));
+}

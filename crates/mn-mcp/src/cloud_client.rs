@@ -206,6 +206,52 @@ impl CloudClient {
         self.get_json("/v1/sources").await
     }
 
+    /// `GET /v1/documents/:id`.
+    pub async fn get_document(&self, id: &str) -> Result<serde_json::Value, CloudError> {
+        let path = format!("/v1/documents/{id}");
+        self.get_json(&path).await
+    }
+
+    /// `GET /v1/documents/:id/full`. Detects `412 Precondition Failed` and
+    /// translates the cloud's `too_many_chunks` body into
+    /// [`CloudError::TooManyChunks`]. Other non-2xx statuses fall through to
+    /// the standard [`CloudError::NotFound`] / [`CloudError::Status`] mapping.
+    pub async fn get_document_full(&self, id: &str) -> Result<serde_json::Value, CloudError> {
+        let path = format!("/v1/documents/{id}/full");
+        let url = self
+            .base
+            .join(&path)
+            .map_err(|e| CloudError::Transport(e.to_string()))?;
+        let mut rb = self.http.get(url);
+        if let Some(b) = &self.bearer {
+            rb = rb.bearer_auth(b);
+        }
+        let resp = rb
+            .send()
+            .await
+            .map_err(|e| CloudError::Transport(e.to_string()))?;
+        let status = resp.status();
+        if status.is_success() {
+            return resp
+                .json::<serde_json::Value>()
+                .await
+                .map_err(|e| CloudError::Decode(e.to_string()));
+        }
+        let body_bytes = resp.bytes().await.unwrap_or_default();
+        if status == reqwest::StatusCode::PRECONDITION_FAILED {
+            if let Some(typed) = parse_too_many_chunks(&body_bytes) {
+                return Err(typed);
+            }
+        }
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Err(CloudError::NotFound(String::from_utf8_lossy(&body_bytes).into_owned()));
+        }
+        Err(CloudError::Status {
+            status: status.as_u16(),
+            body: String::from_utf8_lossy(&body_bytes).into_owned(),
+        })
+    }
+
     async fn get_json(&self, path: &str) -> Result<serde_json::Value, CloudError> {
         let url = self
             .base
@@ -277,10 +323,6 @@ fn parse_mismatch(body: &[u8]) -> Option<CloudError> {
 /// body (from `412 Precondition Failed` on `/v1/documents/:id/full`) into
 /// [`CloudError::TooManyChunks`]. Returns `None` if the body shape doesn't
 /// match — caller falls back to [`CloudError::Status`].
-//
-// Wired up in a later task (12-task plan); the parser lands first as a
-// self-contained unit with tests.
-#[allow(dead_code)]
 fn parse_too_many_chunks(body: &[u8]) -> Option<CloudError> {
     let v: serde_json::Value = serde_json::from_slice(body).ok()?;
     if v.get("error")?.as_str()? != "too_many_chunks" {
