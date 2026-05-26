@@ -2,6 +2,7 @@
 
 use mn_core::provenance::Provenance;
 use mn_core::types::{Document, DocumentKind};
+use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -100,6 +101,36 @@ pub async fn get_by_id(pool: &PgPool, id: Uuid) -> Result<Document> {
     row.try_into()
 }
 
+/// Get a document overview: full document row + source slug + ordered chunk_ids.
+///
+/// # Errors
+///
+/// Returns `StoreError::NotFound` if no document has that id.
+pub async fn get_overview(pool: &PgPool, id: Uuid) -> Result<DocumentOverview> {
+    let document = get_by_id(pool, id).await?;
+    let source_slug = sqlx::query_scalar::<_, String>(
+        "SELECT s.slug FROM source s \
+         JOIN source_version sv ON sv.source_id = s.id \
+         WHERE sv.id = $1",
+    )
+    .bind(document.source_version_id)
+    .fetch_one(pool)
+    .await?;
+    let chunk_ids = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM chunk \
+         WHERE document_id = $1 AND status <> 'embed_failed' \
+         ORDER BY chunk_index ASC",
+    )
+    .bind(id)
+    .fetch_all(pool)
+    .await?;
+    Ok(DocumentOverview {
+        document,
+        source: crate::entities::chunk::SourceSummary { slug: source_slug },
+        chunk_ids,
+    })
+}
+
 /// One row from [`list_for_source_version`] — the minimum needed to seed an
 /// [`IngestPlanBuilder`'s prior state](super) (FR-014 carry-forward).
 ///
@@ -112,6 +143,21 @@ pub struct DocumentSummary {
     pub source_path: String,
     /// Normalized content hash.
     pub content_hash: String,
+}
+
+/// Document overview returned by `GET /v1/documents/:id` — full document
+/// row + the source's slug + ordered chunk_ids. No chunk bodies.
+///
+/// Spec §1.3 of the chunk+document navigation design.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DocumentOverview {
+    /// Full document row.
+    #[serde(flatten)]
+    pub document: Document,
+    /// Source summary (slug only).
+    pub source: crate::entities::chunk::SourceSummary,
+    /// Document's ready chunk IDs in chunk_index order (excluding embed_failed).
+    pub chunk_ids: Vec<Uuid>,
 }
 
 /// List every document under a given `source_version`, returning the minimal
