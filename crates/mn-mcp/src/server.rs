@@ -482,3 +482,24 @@ fn too_many_chunks_response(id: RequestId, chunk_count: u32, cap: u32, hint: &st
         }),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Adding a tool to the manifest without adding the corresponding
+    /// `McpToolName` arm here would silently drop telemetry. This test
+    /// closes that loop: if `tools::list()` grows a name that
+    /// `tool_name_for_event` can't translate, the build fails.
+    #[test]
+    fn every_manifest_tool_has_a_telemetry_name() {
+        for tool in crate::tools::list().tools {
+            assert!(
+                tool_name_for_event(tool.name).is_some(),
+                "tool `{}` is in the manifest but has no McpToolName mapping in \
+                 tool_name_for_event — add the arm to keep telemetry coverage",
+                tool.name,
+            );
+        }
+    }
+}
