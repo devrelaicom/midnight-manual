@@ -131,6 +131,58 @@ pub async fn get_overview(pool: &PgPool, id: Uuid) -> Result<DocumentOverview> {
     })
 }
 
+/// Get a complete document with every ready chunk inline, capped at `cap`.
+/// When the document has > `cap` ready chunks, returns `TooManyChunks`
+/// (the caller maps to a 412 response).
+///
+/// # Errors
+///
+/// Returns `StoreError::NotFound` if no document has that id.
+pub async fn get_full(pool: &PgPool, id: Uuid, cap: usize) -> Result<FullResult> {
+    let document = get_by_id(pool, id).await?;
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM chunk WHERE document_id = $1 AND status <> 'embed_failed'",
+    )
+    .bind(id)
+    .fetch_one(pool)
+    .await?;
+    let count_usize = usize::try_from(count).unwrap_or(0);
+    if count_usize > cap {
+        return Ok(FullResult::TooManyChunks { count: count_usize, cap });
+    }
+    let source_slug = sqlx::query_scalar::<_, String>(
+        "SELECT s.slug FROM source s \
+         JOIN source_version sv ON sv.source_id = s.id \
+         WHERE sv.id = $1",
+    )
+    .bind(document.source_version_id)
+    .fetch_one(pool)
+    .await?;
+    let chunks = sqlx::query_as::<_, ChunkBodyRow>(
+        "SELECT id AS chunk_id, chunk_index, content, heading_path, token_count \
+         FROM chunk \
+         WHERE document_id = $1 AND status <> 'embed_failed' \
+         ORDER BY chunk_index ASC",
+    )
+    .bind(id)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(|r| ChunkBody {
+        chunk_id: r.chunk_id,
+        chunk_index: r.chunk_index,
+        content: r.content,
+        heading_path: r.heading_path,
+        token_count: r.token_count,
+    })
+    .collect();
+    Ok(FullResult::Document(DocumentFull {
+        document,
+        source: crate::entities::chunk::SourceSummary { slug: source_slug },
+        chunks,
+    }))
+}
+
 /// One row from [`list_for_source_version`] — the minimum needed to seed an
 /// [`IngestPlanBuilder`'s prior state](super) (FR-014 carry-forward).
 ///
@@ -158,6 +210,50 @@ pub struct DocumentOverview {
     pub source: crate::entities::chunk::SourceSummary,
     /// Document's ready chunk IDs in chunk_index order (excluding embed_failed).
     pub chunk_ids: Vec<Uuid>,
+}
+
+/// One chunk body in a document-full or document-window response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChunkBody {
+    /// Chunk UUID.
+    pub chunk_id: Uuid,
+    /// 0-indexed position within the document's chunks.
+    pub chunk_index: i32,
+    /// Chunk content (text/markdown/code).
+    pub content: String,
+    /// Markdown heading path.
+    pub heading_path: Vec<String>,
+    /// Best-effort token count.
+    pub token_count: i32,
+}
+
+/// Complete document: metadata + every ready chunk inline.
+///
+/// Spec §1.4 of the chunk+document navigation design.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocumentFull {
+    /// Full document row.
+    #[serde(flatten)]
+    pub document: Document,
+    /// Source summary (slug only).
+    pub source: crate::entities::chunk::SourceSummary,
+    /// Every ready chunk in chunk_index order.
+    pub chunks: Vec<ChunkBody>,
+}
+
+/// Returned by `get_full` when the document exceeds the chunk cap, so the
+/// route can map to a 412 without paying the cost of a full chunk fetch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FullResult {
+    /// Document with metadata + all ready chunks.
+    Document(DocumentFull),
+    /// Document exceeds cap; count and cap are reported for diagnostics.
+    TooManyChunks {
+        /// Actual number of ready chunks.
+        count: usize,
+        /// Maximum allowed chunks.
+        cap: usize,
+    },
 }
 
 /// List every document under a given `source_version`, returning the minimal
@@ -225,6 +321,15 @@ struct DocumentRow {
     char_count: i32,
     token_count: i32,
     created_at: OffsetDateTime,
+}
+
+#[derive(sqlx::FromRow)]
+struct ChunkBodyRow {
+    chunk_id: Uuid,
+    chunk_index: i32,
+    content: String,
+    heading_path: Vec<String>,
+    token_count: i32,
 }
 
 impl TryFrom<DocumentRow> for Document {
