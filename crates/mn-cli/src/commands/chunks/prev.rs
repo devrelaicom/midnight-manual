@@ -9,7 +9,7 @@ use uuid::Uuid;
 pub struct Args {
     /// Chunk UUID.
     pub chunk_id: Uuid,
-    /// Number of chunks to fetch (clamped to [1,100] server-side).
+    /// Number of chunks to fetch (clamped to `1..=100` server-side).
     #[arg(long, default_value_t = 5)]
     pub count: u32,
     /// Show full content instead of a 240-char preview.

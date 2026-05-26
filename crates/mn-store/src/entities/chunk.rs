@@ -16,8 +16,8 @@ use crate::error::{Result, StoreError};
 
 /// Document subset bundled into chunk read responses.
 ///
-/// Intentionally smaller than [`super::document::Document`] — only the
-/// fields useful for navigation/inspection. Spec §1.1 of the chunk+document
+/// Intentionally smaller than the full `Document` row — only the fields
+/// useful for navigation/inspection. Spec §1.1 of the chunk+document
 /// navigation design.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DocumentSummary {
