@@ -641,6 +641,67 @@ pub enum PassthroughError {
     Cloud(String),
 }
 
+/// Direction for `run_chunk_nav` — selects `/next` or `/prev`.
+#[derive(Debug, Clone, Copy)]
+pub enum ChunkNavDirection {
+    /// `/v1/chunks/:id/next`
+    Next,
+    /// `/v1/chunks/:id/prev`
+    Prev,
+}
+
+const CHUNK_NAV_DEFAULT_COUNT: u32 = 5;
+const CHUNK_NAV_MAX_COUNT: u32 = 100;
+
+/// Dispatch `get_chunk_next` / `get_chunk_prev`. Parses `{id, count?}` and
+/// rejects out-of-range or non-integer `count` as `InvalidInput` before the
+/// wire call.
+///
+/// # Errors
+///
+/// See [`PassthroughError`].
+pub async fn run_chunk_nav(
+    args: &serde_json::Value,
+    cloud: &Arc<CloudClient>,
+    dir: ChunkNavDirection,
+) -> Result<serde_json::Value, PassthroughError> {
+    let obj = args.as_object().ok_or_else(|| {
+        PassthroughError::InvalidInput("arguments must be a JSON object".to_owned())
+    })?;
+    let id_str = obj
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| PassthroughError::InvalidInput("`id` (string) is required".to_owned()))?;
+    Uuid::parse_str(id_str)
+        .map_err(|e| PassthroughError::InvalidInput(format!("`id` is not a valid UUID: {e}")))?;
+
+    let count = match obj.get("count") {
+        None => CHUNK_NAV_DEFAULT_COUNT,
+        Some(v) => {
+            let Some(n) = v.as_i64() else {
+                return Err(PassthroughError::InvalidInput(
+                    "`count` must be an integer".to_owned(),
+                ));
+            };
+            if !(1..=i64::from(CHUNK_NAV_MAX_COUNT)).contains(&n) {
+                return Err(PassthroughError::InvalidInput(format!(
+                    "`count` must be 1..={CHUNK_NAV_MAX_COUNT}"
+                )));
+            }
+            u32::try_from(n).expect("validated above")
+        }
+    };
+
+    let r = match dir {
+        ChunkNavDirection::Next => cloud.get_chunk_next(id_str, count).await,
+        ChunkNavDirection::Prev => cloud.get_chunk_prev(id_str, count).await,
+    };
+    r.map_err(|e| match e {
+        CloudError::NotFound(msg) => PassthroughError::NotFound(msg),
+        other => PassthroughError::Cloud(other.to_string()),
+    })
+}
+
 /// Dispatch any of the `get_chunk*` tools. Returns the cloud's JSON verbatim.
 ///
 /// # Errors

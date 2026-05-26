@@ -6,9 +6,11 @@
 use std::sync::Arc;
 
 use mn_mcp::cloud_client::CloudClient;
-use mn_mcp::tools::{run_passthrough_id, PassthroughError, PassthroughKind};
+use mn_mcp::tools::{
+    run_chunk_nav, run_passthrough_id, ChunkNavDirection, PassthroughError, PassthroughKind,
+};
 use serde_json::json;
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[tokio::test]
@@ -123,4 +125,104 @@ async fn run_passthrough_id_maps_document_full_412() {
         }
         other => panic!("expected TooManyChunks, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn run_chunk_nav_next_uses_count_query_param() {
+    let server = MockServer::start().await;
+    let id = "22222222-2222-2222-2222-222222222200";
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/chunks/{id}/next")))
+        .and(query_param("count", "7"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"chunks": []})))
+        .mount(&server)
+        .await;
+    let client = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
+    let v = run_chunk_nav(&json!({"id": id, "count": 7}), &client, ChunkNavDirection::Next)
+        .await
+        .unwrap();
+    assert!(v["chunks"].is_array());
+}
+
+#[tokio::test]
+async fn run_chunk_nav_defaults_count_to_five() {
+    let server = MockServer::start().await;
+    let id = "22222222-2222-2222-2222-222222222201";
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/chunks/{id}/next")))
+        .and(query_param("count", "5"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"chunks": []})))
+        .mount(&server)
+        .await;
+    let client = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
+    let _ = run_chunk_nav(&json!({"id": id}), &client, ChunkNavDirection::Next)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn run_chunk_nav_prev_hits_prev_endpoint() {
+    let server = MockServer::start().await;
+    let id = "22222222-2222-2222-2222-222222222202";
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/chunks/{id}/prev")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"chunks": []})))
+        .mount(&server)
+        .await;
+    let client = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
+    let _ = run_chunk_nav(&json!({"id": id}), &client, ChunkNavDirection::Prev)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn run_chunk_nav_rejects_count_zero() {
+    let server = MockServer::start().await;
+    let client = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
+    let err = run_chunk_nav(
+        &json!({"id": "22222222-2222-2222-2222-222222222203", "count": 0}),
+        &client,
+        ChunkNavDirection::Next,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, PassthroughError::InvalidInput(_)));
+}
+
+#[tokio::test]
+async fn run_chunk_nav_rejects_count_over_max() {
+    let server = MockServer::start().await;
+    let client = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
+    let err = run_chunk_nav(
+        &json!({"id": "22222222-2222-2222-2222-222222222204", "count": 101}),
+        &client,
+        ChunkNavDirection::Next,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, PassthroughError::InvalidInput(_)));
+}
+
+#[tokio::test]
+async fn run_chunk_nav_rejects_non_integer_count() {
+    let server = MockServer::start().await;
+    let client = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
+    let err = run_chunk_nav(
+        &json!({"id": "22222222-2222-2222-2222-222222222205", "count": "five"}),
+        &client,
+        ChunkNavDirection::Next,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, PassthroughError::InvalidInput(_)));
+}
+
+#[tokio::test]
+async fn run_chunk_nav_rejects_invalid_uuid() {
+    let server = MockServer::start().await;
+    let client = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
+    let err = run_chunk_nav(&json!({"id": "not-a-uuid"}), &client, ChunkNavDirection::Next)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, PassthroughError::InvalidInput(_)));
 }
