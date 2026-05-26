@@ -252,6 +252,17 @@ impl CloudClient {
         })
     }
 
+    /// `GET /v1/documents/:id/chunks?from=K&limit=N`.
+    pub async fn get_document_chunks(
+        &self,
+        id: &str,
+        from: u32,
+        limit: u32,
+    ) -> Result<serde_json::Value, CloudError> {
+        let path = format!("/v1/documents/{id}/chunks?from={from}&limit={limit}");
+        self.get_json(&path).await
+    }
+
     async fn get_json(&self, path: &str) -> Result<serde_json::Value, CloudError> {
         let url = self
             .base

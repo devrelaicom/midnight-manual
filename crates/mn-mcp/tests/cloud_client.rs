@@ -368,3 +368,39 @@ async fn get_document_404_maps_to_not_found() {
     let err = client.get_document(id).await.unwrap_err();
     assert!(matches!(err, CloudError::NotFound(_)));
 }
+
+#[tokio::test]
+async fn get_document_chunks_sends_from_and_limit() {
+    let server = MockServer::start().await;
+    let id = "00000000-0000-0000-0000-00000000001c";
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/documents/{id}/chunks")))
+        .and(query_param("from", "5"))
+        .and(query_param("limit", "20"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "chunks": [],
+            "from": 5,
+            "limit": 20,
+            "total_chunks": 5,
+        })))
+        .mount(&server)
+        .await;
+    let client = CloudClient::new(&server.uri(), None).unwrap();
+    let v = client.get_document_chunks(id, 5, 20).await.unwrap();
+    assert_eq!(v["from"], 5);
+    assert_eq!(v["total_chunks"], 5);
+}
+
+#[tokio::test]
+async fn get_document_chunks_404_maps_to_not_found() {
+    let server = MockServer::start().await;
+    let id = "00000000-0000-0000-0000-00000000001d";
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/documents/{id}/chunks")))
+        .respond_with(ResponseTemplate::new(404).set_body_string("nope"))
+        .mount(&server)
+        .await;
+    let client = CloudClient::new(&server.uri(), None).unwrap();
+    let err = client.get_document_chunks(id, 0, 20).await.unwrap_err();
+    assert!(matches!(err, CloudError::NotFound(_)));
+}
