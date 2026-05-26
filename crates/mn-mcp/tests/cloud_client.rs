@@ -9,7 +9,7 @@
 
 use mn_mcp::cloud_client::{CloudClient, CloudError, QueryPair, SearchRequest};
 use serde_json::json;
-use wiremock::matchers::{body_partial_json, header, method, path};
+use wiremock::matchers::{body_partial_json, header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn make_search_req() -> SearchRequest {
@@ -228,4 +228,52 @@ async fn list_sources_round_trips() {
     let client = CloudClient::new(&server.uri(), None).unwrap();
     let v = client.list_sources().await.unwrap();
     assert_eq!(v[0]["slug"], "midnight-docs");
+}
+
+#[tokio::test]
+async fn get_chunk_next_sends_count_query() {
+    let server = MockServer::start().await;
+    let id = "00000000-0000-0000-0000-00000000000a";
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/chunks/{id}/next")))
+        .and(query_param("count", "7"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "chunks": [{"id": "x", "chunk_index": 4}],
+        })))
+        .mount(&server)
+        .await;
+    let client = CloudClient::new(&server.uri(), None).unwrap();
+    let v = client.get_chunk_next(id, 7).await.unwrap();
+    assert_eq!(v["chunks"][0]["chunk_index"], 4);
+}
+
+#[tokio::test]
+async fn get_chunk_prev_sends_count_query() {
+    let server = MockServer::start().await;
+    let id = "00000000-0000-0000-0000-00000000000b";
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/chunks/{id}/prev")))
+        .and(query_param("count", "3"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "chunks": [{"id": "y", "chunk_index": 0}],
+        })))
+        .mount(&server)
+        .await;
+    let client = CloudClient::new(&server.uri(), None).unwrap();
+    let v = client.get_chunk_prev(id, 3).await.unwrap();
+    assert_eq!(v["chunks"][0]["chunk_index"], 0);
+}
+
+#[tokio::test]
+async fn get_chunk_next_maps_404_to_not_found() {
+    let server = MockServer::start().await;
+    let id = "00000000-0000-0000-0000-00000000000c";
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/chunks/{id}/next")))
+        .respond_with(ResponseTemplate::new(404).set_body_string("missing"))
+        .mount(&server)
+        .await;
+    let client = CloudClient::new(&server.uri(), None).unwrap();
+    let err = client.get_chunk_next(id, 5).await.unwrap_err();
+    assert!(matches!(err, CloudError::NotFound(_)));
 }

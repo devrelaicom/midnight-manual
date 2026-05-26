@@ -169,6 +169,26 @@ impl CloudClient {
         self.get_json(&path).await
     }
 
+    /// `GET /v1/chunks/:id/next?count=N`.
+    pub async fn get_chunk_next(
+        &self,
+        id: &str,
+        count: u32,
+    ) -> Result<serde_json::Value, CloudError> {
+        let path = format!("/v1/chunks/{id}/next?count={count}");
+        self.get_json(&path).await
+    }
+
+    /// `GET /v1/chunks/:id/prev?count=N`.
+    pub async fn get_chunk_prev(
+        &self,
+        id: &str,
+        count: u32,
+    ) -> Result<serde_json::Value, CloudError> {
+        let path = format!("/v1/chunks/{id}/prev?count={count}");
+        self.get_json(&path).await
+    }
+
     /// `GET /v1/chunks/:id/siblings`.
     pub async fn get_chunk_siblings(&self, id: &str) -> Result<serde_json::Value, CloudError> {
         let path = format!("/v1/chunks/{id}/siblings");
