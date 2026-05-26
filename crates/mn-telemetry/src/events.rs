@@ -210,6 +210,10 @@ pub enum CliCommandName {
     Ratelimits,
     /// `mnm manifest` (any sub).
     Manifest,
+    /// `mnm chunks` (any sub).
+    Chunks,
+    /// `mnm documents` (any sub).
+    Documents,
 }
 
 /// The top-level event envelope written to `telemetry_event_raw.fields` (plus

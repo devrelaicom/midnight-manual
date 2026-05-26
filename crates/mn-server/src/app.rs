@@ -180,6 +180,7 @@ pub fn build_with_limiter(
         .merge(crate::routes::models::router())
         .merge(crate::routes::search::router())
         .merge(crate::routes::chunks::router())
+        .merge(crate::routes::documents::router())
         .merge(crate::routes::auth::router())
         .merge(crate::routes::admin_ingest::router())
         .merge(crate::routes::admin_ratelimits::router())

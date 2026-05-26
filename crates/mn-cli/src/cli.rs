@@ -96,6 +96,10 @@ pub enum Command {
     Ratelimits(commands::ratelimits::Args),
     /// Manifest authoring + validation (local only).
     Manifest(commands::manifest::Args),
+    /// Inspect chunks: show, next, prev.
+    Chunks(commands::chunks::Args),
+    /// Inspect documents: show, full, chunks.
+    Documents(commands::documents::Args),
 }
 
 /// Subcommand names that are admin-only and therefore hidden from `--help`
@@ -169,6 +173,20 @@ pub async fn run() -> Result<()> {
             commands::ratelimits::run(args, cli.server.as_deref(), cli.json).await
         }
         Command::Manifest(args) => commands::manifest::run(args).await,
+        Command::Chunks(args) => {
+            commands::chunks::run(args, cli.server.as_deref(), &telemetry, crate::VERSION, cli.json)
+                .await
+        }
+        Command::Documents(args) => {
+            commands::documents::run(
+                args,
+                cli.server.as_deref(),
+                &telemetry,
+                crate::VERSION,
+                cli.json,
+            )
+            .await
+        }
     };
 
     let duration_ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
@@ -213,6 +231,8 @@ const fn cli_command_name(cmd: &Command) -> CliCommandName {
         Command::Ingest(_) => CliCommandName::Ingest,
         Command::Ratelimits(_) => CliCommandName::Ratelimits,
         Command::Manifest(_) => CliCommandName::Manifest,
+        Command::Chunks(_) => CliCommandName::Chunks,
+        Command::Documents(_) => CliCommandName::Documents,
     }
 }
 

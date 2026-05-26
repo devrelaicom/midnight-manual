@@ -1,4 +1,4 @@
-//! Integration tests for `GET /v1/chunks/:id` + `/siblings` + `/parents`.
+//! Integration tests for `GET /v1/chunks/:id` + `/parents`.
 
 #![cfg(feature = "integration")]
 #![allow(
@@ -158,29 +158,6 @@ async fn get_chunk_returns_404_for_unknown_id() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-}
-
-#[tokio::test]
-async fn get_chunk_siblings_returns_both_chunks_in_order() {
-    let h = common::boot().await;
-    let (_, a, b) = seed_two_chunks(&h.pool).await;
-    let app = app::build(h.pool.clone(), cfg()).expect("build app");
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .uri(format!("/v1/chunks/{a}/siblings"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
-    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    let arr = v.as_array().unwrap();
-    assert_eq!(arr.len(), 2);
-    assert_eq!(arr[0]["id"].as_str().unwrap(), a.to_string());
-    assert_eq!(arr[1]["id"].as_str().unwrap(), b.to_string());
 }
 
 #[tokio::test]
