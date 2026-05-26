@@ -76,3 +76,50 @@ async fn status_tool_works_without_model_load() {
     let json = serde_json::to_value(&out).unwrap();
     assert!(json["model_state"].is_string());
 }
+
+#[tokio::test]
+async fn tools_list_contains_all_twelve_pre_siblings_removal() {
+    // Until `get_chunk_siblings` is removed at the end of the plan, the
+    // manifest carries 12 tools. After removal this drops to 11 and the
+    // test is updated.
+    let list = mn_mcp::tools::list();
+    let names: Vec<_> = list.tools.iter().map(|t| t.name).collect();
+    for expected in [
+        "search",
+        "get_chunk",
+        "get_chunk_next",
+        "get_chunk_prev",
+        "get_chunk_siblings",
+        "get_chunk_parents",
+        "get_document",
+        "get_document_full",
+        "get_document_chunks",
+        "list_sources",
+        "pull_models",
+        "status",
+    ] {
+        assert!(names.contains(&expected), "missing tool: {expected}");
+    }
+    assert_eq!(names.len(), 12);
+}
+
+#[tokio::test]
+async fn new_navigation_tool_schemas_are_well_formed() {
+    let list = mn_mcp::tools::list();
+    for name in [
+        "get_chunk_next",
+        "get_chunk_prev",
+        "get_document",
+        "get_document_full",
+        "get_document_chunks",
+    ] {
+        let t = list
+            .tools
+            .iter()
+            .find(|t| t.name == name)
+            .unwrap_or_else(|| panic!("missing tool: {name}"));
+        assert_eq!(t.input_schema["type"], "object");
+        assert!(t.input_schema["required"].as_array().is_some());
+        assert!(t.input_schema["properties"]["id"]["format"] == "uuid");
+    }
+}
