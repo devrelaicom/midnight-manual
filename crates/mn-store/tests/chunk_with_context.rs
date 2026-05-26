@@ -28,10 +28,10 @@ async fn get_with_context_returns_chunk_plus_document_and_source() {
 
 #[tokio::test]
 async fn get_with_context_embed_failed_returns_not_found() {
-    use mn_core::types::ChunkStatus;
-    use mn_store::entities::{chunk, embedding_model, node, source, source_version};
-    use mn_core::types::{DocumentKind, NodeKind, SourceKind};
     use mn_core::provenance::Provenance;
+    use mn_core::types::ChunkStatus;
+    use mn_core::types::{DocumentKind, NodeKind, SourceKind};
+    use mn_store::entities::{chunk, embedding_model, node, source, source_version};
     use uuid::Uuid;
 
     let h = common::boot().await;
@@ -44,17 +44,15 @@ async fn get_with_context_embed_failed_returns_not_found() {
         source::insert(&h.pool, &slug, "Ctx Failed Test", SourceKind::DocsSite, None, 5)
             .await
             .unwrap();
-    let (sv_id, _) =
-        source_version::create_building(&h.pool, source_id, model_id, "0.1.0", "h")
-            .await
-            .unwrap();
+    let (sv_id, _) = source_version::create_building(&h.pool, source_id, model_id, "0.1.0", "h")
+        .await
+        .unwrap();
     let root = node::insert(&h.pool, sv_id, None, NodeKind::Root, "root", 0)
         .await
         .unwrap();
-    let doc_node =
-        node::insert(&h.pool, sv_id, Some(root), NodeKind::Document, "fail.md", 0)
-            .await
-            .unwrap();
+    let doc_node = node::insert(&h.pool, sv_id, Some(root), NodeKind::Document, "fail.md", 0)
+        .await
+        .unwrap();
     let provenance = Provenance::default();
     let doc_id = mn_store::entities::document::insert(
         &h.pool,
@@ -77,10 +75,9 @@ async fn get_with_context_embed_failed_returns_not_found() {
     )
     .await
     .unwrap();
-    let chunk_node =
-        node::insert(&h.pool, sv_id, Some(doc_node), NodeKind::Chunk, "c1", 0)
-            .await
-            .unwrap();
+    let chunk_node = node::insert(&h.pool, sv_id, Some(doc_node), NodeKind::Chunk, "c1", 0)
+        .await
+        .unwrap();
     let failed_id = chunk::insert(
         &h.pool,
         chunk::NewChunk {

@@ -26,7 +26,8 @@ fn cfg() -> ServerConfig {
 #[tokio::test]
 async fn get_chunk_returns_document_and_source_context() {
     let h = common::boot().await;
-    let fx = fixtures::ingest_n_chunk_doc(&h.pool, &format!("ctx-{}", Uuid::new_v4().simple()), 3).await;
+    let fx =
+        fixtures::ingest_n_chunk_doc(&h.pool, &format!("ctx-{}", Uuid::new_v4().simple()), 3).await;
     let app = app::build(h.pool.clone(), cfg()).expect("build app");
 
     let resp = app
@@ -44,14 +45,18 @@ async fn get_chunk_returns_document_and_source_context() {
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(v["id"].as_str().unwrap(), fx.chunk_ids[1].to_string());
     // document context is bundled
-    assert!(v["document"]["published_url"].is_string(), "document.published_url should be present");
+    assert!(
+        v["document"]["published_url"].is_string(),
+        "document.published_url should be present"
+    );
     assert!(v["source"]["slug"].is_string(), "source.slug should be present");
 }
 
 #[tokio::test]
 async fn get_next_returns_chunks_after_anchor() {
     let h = common::boot().await;
-    let fx = fixtures::ingest_n_chunk_doc(&h.pool, &format!("next-{}", Uuid::new_v4().simple()), 5).await;
+    let fx = fixtures::ingest_n_chunk_doc(&h.pool, &format!("next-{}", Uuid::new_v4().simple()), 5)
+        .await;
     let app = app::build(h.pool.clone(), cfg()).expect("build app");
 
     let resp = app
@@ -76,7 +81,8 @@ async fn get_next_returns_chunks_after_anchor() {
 #[tokio::test]
 async fn get_prev_returns_chunks_before_anchor() {
     let h = common::boot().await;
-    let fx = fixtures::ingest_n_chunk_doc(&h.pool, &format!("prev-{}", Uuid::new_v4().simple()), 5).await;
+    let fx = fixtures::ingest_n_chunk_doc(&h.pool, &format!("prev-{}", Uuid::new_v4().simple()), 5)
+        .await;
     let app = app::build(h.pool.clone(), cfg()).expect("build app");
 
     let resp = app
@@ -93,7 +99,10 @@ async fn get_prev_returns_chunks_before_anchor() {
     let body = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let chunks = v["chunks"].as_array().unwrap();
-    let idxs: Vec<i64> = chunks.iter().map(|c| c["chunk_index"].as_i64().unwrap()).collect();
+    let idxs: Vec<i64> = chunks
+        .iter()
+        .map(|c| c["chunk_index"].as_i64().unwrap())
+        .collect();
     assert_eq!(idxs, vec![2, 3]);
 }
 

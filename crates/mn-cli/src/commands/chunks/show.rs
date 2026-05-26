@@ -4,12 +4,14 @@ use anyhow::{Context as _, Result};
 use clap::Args as ClapArgs;
 use uuid::Uuid;
 
+/// Arguments for `mnm chunks show`.
 #[derive(Debug, ClapArgs)]
 pub struct Args {
     /// Chunk UUID.
     pub chunk_id: Uuid,
 }
 
+/// Run the `chunks show` subcommand.
 pub async fn run(args: Args, server: Option<&str>, json: bool) -> Result<()> {
     let server_url = crate::shared::resolve_server_url(server);
     let url = format!("{server_url}/v1/chunks/{}", args.chunk_id);
@@ -39,7 +41,9 @@ pub async fn run(args: Args, server: Option<&str>, json: bool) -> Result<()> {
 fn resolve_best_bearer_optional() -> Option<String> {
     use mn_core::config::StdEnv;
     let auth_path = mn_core::paths::auth_file_path(&StdEnv)?;
-    let file = mn_core::auth_file::AuthFile::read_optional(&auth_path).ok().flatten()?;
+    let file = mn_core::auth_file::AuthFile::read_optional(&auth_path)
+        .ok()
+        .flatten()?;
     let now = time::OffsetDateTime::now_utc();
     file.active_admin_token(now)
         .or_else(|| file.active_read_uplift_token(now))

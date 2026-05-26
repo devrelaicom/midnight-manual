@@ -26,12 +26,9 @@ fn cfg() -> ServerConfig {
 #[tokio::test]
 async fn get_document_returns_overview_with_chunk_ids() {
     let h = common::boot().await;
-    let fx = fixtures::ingest_n_chunk_doc(
-        &h.pool,
-        &format!("doc-ov-{}", Uuid::new_v4().simple()),
-        3,
-    )
-    .await;
+    let fx =
+        fixtures::ingest_n_chunk_doc(&h.pool, &format!("doc-ov-{}", Uuid::new_v4().simple()), 3)
+            .await;
     let app = app::build(h.pool.clone(), cfg()).expect("build app");
 
     let resp = app
@@ -52,10 +49,7 @@ async fn get_document_returns_overview_with_chunk_ids() {
         fx.document_id.to_string(),
         "response id should match document_id"
     );
-    assert!(
-        v["source"]["slug"].is_string(),
-        "source.slug should be present"
-    );
+    assert!(v["source"]["slug"].is_string(), "source.slug should be present");
     let ids = v["chunk_ids"].as_array().unwrap();
     assert_eq!(ids.len(), 3, "should return 3 chunk_ids");
 }
@@ -63,12 +57,9 @@ async fn get_document_returns_overview_with_chunk_ids() {
 #[tokio::test]
 async fn get_document_full_returns_chunks_inline() {
     let h = common::boot().await;
-    let fx = fixtures::ingest_n_chunk_doc(
-        &h.pool,
-        &format!("doc-full-{}", Uuid::new_v4().simple()),
-        2,
-    )
-    .await;
+    let fx =
+        fixtures::ingest_n_chunk_doc(&h.pool, &format!("doc-full-{}", Uuid::new_v4().simple()), 2)
+            .await;
     let app = app::build(h.pool.clone(), cfg()).expect("build app");
 
     let resp = app
@@ -86,10 +77,7 @@ async fn get_document_full_returns_chunks_inline() {
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let chunks = v["chunks"].as_array().unwrap();
     assert_eq!(chunks.len(), 2, "should return 2 chunks inline");
-    assert!(
-        chunks[0]["content"].is_string(),
-        "chunk[0].content should be a string"
-    );
+    assert!(chunks[0]["content"].is_string(), "chunk[0].content should be a string");
 }
 
 #[tokio::test]
@@ -106,12 +94,9 @@ async fn get_document_full_returns_412_above_cap() {
     std::env::set_var("MIDNIGHT_MANUAL_DOCUMENT_FULL_CHUNK_CAP", "5");
 
     let h = common::boot().await;
-    let fx = fixtures::ingest_n_chunk_doc(
-        &h.pool,
-        &format!("doc-cap-{}", Uuid::new_v4().simple()),
-        6,
-    )
-    .await;
+    let fx =
+        fixtures::ingest_n_chunk_doc(&h.pool, &format!("doc-cap-{}", Uuid::new_v4().simple()), 6)
+            .await;
     // Build app AFTER setting the env var so effective_cap() picks it up.
     let app = app::build(h.pool.clone(), cfg()).expect("build app");
 
@@ -143,21 +128,15 @@ async fn get_document_full_returns_412_above_cap() {
 #[tokio::test]
 async fn get_document_chunks_returns_windowed_slice() {
     let h = common::boot().await;
-    let fx = fixtures::ingest_n_chunk_doc(
-        &h.pool,
-        &format!("doc-win-{}", Uuid::new_v4().simple()),
-        10,
-    )
-    .await;
+    let fx =
+        fixtures::ingest_n_chunk_doc(&h.pool, &format!("doc-win-{}", Uuid::new_v4().simple()), 10)
+            .await;
     let app = app::build(h.pool.clone(), cfg()).expect("build app");
 
     let resp = app
         .oneshot(
             Request::builder()
-                .uri(format!(
-                    "/v1/documents/{}/chunks?from=3&limit=4",
-                    fx.document_id
-                ))
+                .uri(format!("/v1/documents/{}/chunks?from=3&limit=4", fx.document_id))
                 .body(Body::empty())
                 .unwrap(),
         )

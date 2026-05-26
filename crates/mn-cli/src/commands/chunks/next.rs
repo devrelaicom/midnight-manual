@@ -4,8 +4,10 @@ use anyhow::Result;
 use clap::Args as ClapArgs;
 use uuid::Uuid;
 
+/// Arguments for `mnm chunks next`.
 #[derive(Debug, ClapArgs)]
 pub struct Args {
+    /// Chunk UUID.
     pub chunk_id: Uuid,
     /// Number of chunks to fetch (clamped to [1,100] server-side).
     #[arg(long, default_value_t = 5)]
@@ -15,13 +17,14 @@ pub struct Args {
     pub full: bool,
 }
 
+/// Run the `chunks next` subcommand.
 pub async fn run(args: Args, server: Option<&str>, json: bool) -> Result<()> {
     super::run_chunk_list(args, server, json, "next").await
 }
 
 pub(super) fn render_chunks(body: &str, full: bool) -> anyhow::Result<()> {
-    let v: serde_json::Value = serde_json::from_str(body)
-        .map_err(|e| anyhow::anyhow!("parse response body: {e}"))?;
+    let v: serde_json::Value =
+        serde_json::from_str(body).map_err(|e| anyhow::anyhow!("parse response body: {e}"))?;
     let chunks = v["chunks"].as_array().cloned().unwrap_or_default();
     if chunks.is_empty() {
         println!("(no further chunks)");

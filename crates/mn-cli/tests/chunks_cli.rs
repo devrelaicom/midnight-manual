@@ -45,21 +45,29 @@ async fn chunks_show_renders_chunk_and_context() {
         .await;
 
     let out = Command::new(env!("CARGO_BIN_EXE_mnm"))
-        .args(["--server", &server.uri(), "chunks", "show",
-               "11111111-1111-1111-1111-111111111111"])
+        .args([
+            "--server",
+            &server.uri(),
+            "chunks",
+            "show",
+            "11111111-1111-1111-1111-111111111111",
+        ])
         .output()
         .unwrap();
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("Hello world body text"), "stdout: {stdout}");
-    assert!(stdout.contains("welcome.md") || stdout.contains("https://example.com/welcome/"),
-            "expected document context in output: {stdout}");
+    assert!(
+        stdout.contains("welcome.md") || stdout.contains("https://example.com/welcome/"),
+        "expected document context in output: {stdout}"
+    );
 }
 
 #[tokio::test]
 async fn chunks_next_renders_two_chunks() {
     let server = MockServer::start().await;
-    let body = serde_json::json!({ "chunks": [chunk_with_context_json(), chunk_with_context_json()] });
+    let body =
+        serde_json::json!({ "chunks": [chunk_with_context_json(), chunk_with_context_json()] });
     Mock::given(method("GET"))
         .and(path_regex(r"^/v1/chunks/[0-9a-f-]+/next$"))
         .respond_with(ResponseTemplate::new(200).set_body_json(body))
@@ -67,8 +75,15 @@ async fn chunks_next_renders_two_chunks() {
         .await;
 
     let out = Command::new(env!("CARGO_BIN_EXE_mnm"))
-        .args(["--server", &server.uri(), "chunks", "next",
-               "11111111-1111-1111-1111-111111111111", "--count", "2"])
+        .args([
+            "--server",
+            &server.uri(),
+            "chunks",
+            "next",
+            "11111111-1111-1111-1111-111111111111",
+            "--count",
+            "2",
+        ])
         .output()
         .unwrap();
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
@@ -85,8 +100,13 @@ async fn chunks_prev_renders_two_chunks() {
         .await;
 
     let out = Command::new(env!("CARGO_BIN_EXE_mnm"))
-        .args(["--server", &server.uri(), "chunks", "prev",
-               "11111111-1111-1111-1111-111111111111"])
+        .args([
+            "--server",
+            &server.uri(),
+            "chunks",
+            "prev",
+            "11111111-1111-1111-1111-111111111111",
+        ])
         .output()
         .unwrap();
     assert!(out.status.success());

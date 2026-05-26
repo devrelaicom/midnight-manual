@@ -160,7 +160,6 @@ async fn get_chunk_returns_404_for_unknown_id() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
-
 #[tokio::test]
 async fn get_chunk_parents_walks_to_root() {
     let h = common::boot().await;

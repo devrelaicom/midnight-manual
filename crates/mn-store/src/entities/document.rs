@@ -176,16 +176,17 @@ pub async fn get_full(pool: &PgPool, id: Uuid, cap: usize) -> Result<FullResult>
         token_count: r.token_count,
     })
     .collect();
-    Ok(FullResult::Document(DocumentFull {
+    Ok(FullResult::Document(Box::new(DocumentFull {
         document,
         source: crate::entities::chunk::SourceSummary { slug: source_slug },
         chunks,
-    }))
+    })))
 }
 
-/// Get a windowed slice of a document's chunks, starting at chunk index
-/// `from`, returning up to `limit` chunks. Also returns the document
-/// metadata and total ready-chunk count so callers can render
+/// Get a windowed slice of a document's chunks.
+///
+/// Starts at chunk index `from`, returning up to `limit` chunks. Also returns
+/// the document metadata and total ready-chunk count so callers can render
 /// "chunks K..K+N of M".
 ///
 /// # Errors
@@ -262,7 +263,7 @@ pub struct DocumentSummary {
 /// row + the source's slug + ordered chunk_ids. No chunk bodies.
 ///
 /// Spec §1.3 of the chunk+document navigation design.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DocumentOverview {
     /// Full document row.
     #[serde(flatten)]
@@ -327,7 +328,7 @@ pub struct DocumentChunkWindow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FullResult {
     /// Document with metadata + all ready chunks.
-    Document(DocumentFull),
+    Document(Box<DocumentFull>),
     /// Document exceeds cap; count and cap are reported for diagnostics.
     TooManyChunks {
         /// Actual number of ready chunks.

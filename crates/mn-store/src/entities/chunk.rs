@@ -346,8 +346,9 @@ pub async fn list_next(pool: &PgPool, anchor: Uuid, count: usize) -> Result<Vec<
     rows.into_iter().map(TryInto::try_into).collect()
 }
 
-/// List the previous `count` chunks before `anchor` in the same document,
-/// returned in ascending `chunk_index` (reading) order. SQL fetches the
+/// List the previous `count` chunks before `anchor` in the same document.
+///
+/// Returned in ascending `chunk_index` (reading) order. SQL fetches the
 /// `count` immediately-preceding rows via DESC LIMIT, then the helper
 /// reverses to ascending. Skips `embed_failed` chunks.
 ///

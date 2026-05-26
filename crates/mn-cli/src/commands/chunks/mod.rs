@@ -4,9 +4,9 @@ use anyhow::{Context as _, Result};
 use clap::{Args as ClapArgs, Subcommand};
 use mn_telemetry::TelemetryClient;
 
-pub mod show;
 pub mod next;
 pub mod prev;
+pub mod show;
 
 /// Chunks namespace arguments.
 #[derive(Debug, ClapArgs)]
@@ -56,7 +56,11 @@ pub(super) async fn run_chunk_list(
         .timeout(std::time::Duration::from_secs(15))
         .build()
         .context("build HTTP client")?;
-    let resp = client.get(&url).send().await.with_context(|| format!("GET {url}"))?;
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?;
     let status = resp.status();
     let body = resp.text().await.unwrap_or_default();
     if !status.is_success() {

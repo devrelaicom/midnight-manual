@@ -1,4 +1,4 @@
-//! Store-level navigation tests for chunk::list_next / list_prev.
+//! Store-level navigation tests for `chunk::list_next` / `list_prev`.
 
 #![cfg(feature = "integration")]
 #![allow(clippy::too_many_lines, clippy::doc_markdown)]

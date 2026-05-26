@@ -173,8 +173,20 @@ pub async fn run() -> Result<()> {
             commands::ratelimits::run(args, cli.server.as_deref(), cli.json).await
         }
         Command::Manifest(args) => commands::manifest::run(args).await,
-        Command::Chunks(args) => commands::chunks::run(args, cli.server.as_deref(), &telemetry, crate::VERSION, cli.json).await,
-        Command::Documents(args) => commands::documents::run(args, cli.server.as_deref(), &telemetry, crate::VERSION, cli.json).await,
+        Command::Chunks(args) => {
+            commands::chunks::run(args, cli.server.as_deref(), &telemetry, crate::VERSION, cli.json)
+                .await
+        }
+        Command::Documents(args) => {
+            commands::documents::run(
+                args,
+                cli.server.as_deref(),
+                &telemetry,
+                crate::VERSION,
+                cli.json,
+            )
+            .await
+        }
     };
 
     let duration_ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);

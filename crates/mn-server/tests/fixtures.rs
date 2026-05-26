@@ -5,11 +5,7 @@
 //! on mn-store's test infrastructure directly. Duplication is intentional —
 //! test code isolation is more important than DRY here.
 
-#![allow(
-    dead_code,
-    missing_docs,
-    clippy::too_many_lines,
-)]
+#![allow(dead_code, missing_docs, clippy::too_many_lines)]
 
 use mn_core::provenance::Provenance;
 use mn_core::types::{ChunkStatus, DocumentKind, NodeKind, SourceKind};
@@ -36,22 +32,16 @@ pub struct MinimalDocFixture {
 /// All chunks have `status = 'ready'`.
 pub async fn ingest_n_chunk_doc(pool: &PgPool, slug: &str, n: usize) -> MinimalDocFixture {
     assert!(n >= 1, "ingest_n_chunk_doc requires at least 1 chunk");
-    let n = n as i32;
+    let n = i32::try_from(n).expect("chunk count fits in i32");
 
     let model_id = embedding_model::upsert(pool, "bge-base-en-v1.5", 1, 768, "baai")
         .await
         .expect("upsert embedding model");
 
-    let source_id = source::insert(
-        pool,
-        slug,
-        &format!("{slug} (fixture)"),
-        SourceKind::DocsSite,
-        None,
-        5,
-    )
-    .await
-    .expect("insert source");
+    let source_id =
+        source::insert(pool, slug, &format!("{slug} (fixture)"), SourceKind::DocsSite, None, 5)
+            .await
+            .expect("insert source");
 
     let (sv_id, _) = source_version::create_building(pool, source_id, model_id, "0.1.0", "h")
         .await
@@ -61,16 +51,9 @@ pub async fn ingest_n_chunk_doc(pool: &PgPool, slug: &str, n: usize) -> MinimalD
         .await
         .expect("insert root node");
 
-    let doc_node = node::insert(
-        pool,
-        sv_id,
-        Some(root_node),
-        NodeKind::Document,
-        "first.md",
-        0,
-    )
-    .await
-    .expect("insert document node");
+    let doc_node = node::insert(pool, sv_id, Some(root_node), NodeKind::Document, "first.md", 0)
+        .await
+        .expect("insert document node");
 
     let provenance = Provenance::default();
     let published_url = format!("https://example.com/{slug}/first/");
@@ -97,18 +80,12 @@ pub async fn ingest_n_chunk_doc(pool: &PgPool, slug: &str, n: usize) -> MinimalD
     .await
     .expect("insert document");
 
-    let mut chunk_ids = Vec::with_capacity(n as usize);
+    let mut chunk_ids = Vec::with_capacity(usize::try_from(n).unwrap_or(0));
     for i in 0..n {
-        let chunk_node = node::insert(
-            pool,
-            sv_id,
-            Some(doc_node),
-            NodeKind::Chunk,
-            &format!("c{i}"),
-            i,
-        )
-        .await
-        .expect("insert chunk node");
+        let chunk_node =
+            node::insert(pool, sv_id, Some(doc_node), NodeKind::Chunk, &format!("c{i}"), i)
+                .await
+                .expect("insert chunk node");
 
         let chunk_id = chunk::insert(
             pool,
