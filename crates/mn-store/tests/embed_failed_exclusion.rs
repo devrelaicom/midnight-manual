@@ -1,6 +1,6 @@
 //! US1 acceptance #9 / EC-03: chunks with `status = 'embed_failed'` are excluded
-//! from the read API (`get_by_id_ready`, `list_siblings`) but remain listable
-//! via the admin-facing `get_by_id_admin`.
+//! from the read API (`get_by_id_ready`) but remain listable via the
+//! admin-facing `get_by_id_admin`.
 
 #![cfg(feature = "integration")]
 #![allow(clippy::too_many_lines, clippy::doc_markdown)]
@@ -128,9 +128,4 @@ async fn embed_failed_excluded_from_read_path_but_admin_visible() {
     chunk::get_by_id_admin(&h.pool, failed_id)
         .await
         .expect("admin sees failed");
-
-    // Siblings list: only ready chunk.
-    let siblings = chunk::list_siblings(&h.pool, doc_id).await.unwrap();
-    assert_eq!(siblings.len(), 1, "embed_failed chunk excluded from siblings");
-    assert_eq!(siblings[0].id, ready_id);
 }

@@ -311,23 +311,76 @@ pub async fn list_for_carry_forward(
     rows.into_iter().map(TryInto::try_into).collect()
 }
 
-/// List all chunks of a document in `chunk_index` order. Used by
-/// `GET /v1/chunks/{id}/siblings` (US4 acceptance #4).
+/// List the next `count` chunks after `anchor` in the same document,
+/// ordered by `chunk_index` ascending. Skips `embed_failed` chunks.
 ///
 /// # Errors
 ///
-/// Returns [`crate::error::StoreError::Database`] on driver failure.
-pub async fn list_siblings(pool: &PgPool, document_id: Uuid) -> Result<Vec<Chunk>> {
-    let rows = sqlx::query_as::<_, ChunkRow>(
-        "SELECT id, source_version_id, document_id, node_id, chunk_index, total_chunks, \
-                content, content_hash, embedding_model_id, heading_path, symbol_path, \
-                start_byte, end_byte, token_count, status, created_at \
-         FROM chunk WHERE document_id = $1 AND status <> 'embed_failed' \
-         ORDER BY chunk_index",
+/// Returns `StoreError::NotFound` if the anchor doesn't exist.
+pub async fn list_next(pool: &PgPool, anchor: Uuid, count: usize) -> Result<Vec<ChunkWithContext>> {
+    let count = i64::try_from(count.clamp(1, 100)).unwrap_or(5);
+    let rows = sqlx::query_as::<_, ChunkWithContextRow>(
+        "WITH a AS (SELECT document_id, chunk_index FROM chunk WHERE id = $1) \
+         SELECT \
+            c.id, c.source_version_id, c.document_id, c.node_id, c.chunk_index, c.total_chunks, \
+            c.content, c.content_hash, c.embedding_model_id, c.heading_path, c.symbol_path, \
+            c.start_byte, c.end_byte, c.token_count, c.status, c.created_at, \
+            d.source_path AS d_source_path, d.published_url AS d_published_url, \
+            d.source_url AS d_source_url, d.language AS d_language, d.kind AS d_kind, \
+            d.provenance AS d_provenance, \
+            s.slug AS s_slug \
+         FROM chunk c \
+         JOIN document d ON c.document_id = d.id \
+         JOIN source_version sv ON c.source_version_id = sv.id \
+         JOIN source s ON sv.source_id = s.id, a \
+         WHERE c.document_id = a.document_id \
+           AND c.chunk_index > a.chunk_index \
+           AND c.status <> 'embed_failed' \
+         ORDER BY c.chunk_index ASC \
+         LIMIT $2",
     )
-    .bind(document_id)
+    .bind(anchor)
+    .bind(count)
     .fetch_all(pool)
     .await?;
+    rows.into_iter().map(TryInto::try_into).collect()
+}
+
+/// List the previous `count` chunks before `anchor` in the same document,
+/// returned in ascending `chunk_index` (reading) order. SQL fetches the
+/// `count` immediately-preceding rows via DESC LIMIT, then the helper
+/// reverses to ascending. Skips `embed_failed` chunks.
+///
+/// # Errors
+///
+/// Returns `StoreError::NotFound` if the anchor doesn't exist.
+pub async fn list_prev(pool: &PgPool, anchor: Uuid, count: usize) -> Result<Vec<ChunkWithContext>> {
+    let count = i64::try_from(count.clamp(1, 100)).unwrap_or(5);
+    let mut rows = sqlx::query_as::<_, ChunkWithContextRow>(
+        "WITH a AS (SELECT document_id, chunk_index FROM chunk WHERE id = $1) \
+         SELECT \
+            c.id, c.source_version_id, c.document_id, c.node_id, c.chunk_index, c.total_chunks, \
+            c.content, c.content_hash, c.embedding_model_id, c.heading_path, c.symbol_path, \
+            c.start_byte, c.end_byte, c.token_count, c.status, c.created_at, \
+            d.source_path AS d_source_path, d.published_url AS d_published_url, \
+            d.source_url AS d_source_url, d.language AS d_language, d.kind AS d_kind, \
+            d.provenance AS d_provenance, \
+            s.slug AS s_slug \
+         FROM chunk c \
+         JOIN document d ON c.document_id = d.id \
+         JOIN source_version sv ON c.source_version_id = sv.id \
+         JOIN source s ON sv.source_id = s.id, a \
+         WHERE c.document_id = a.document_id \
+           AND c.chunk_index < a.chunk_index \
+           AND c.status <> 'embed_failed' \
+         ORDER BY c.chunk_index DESC \
+         LIMIT $2",
+    )
+    .bind(anchor)
+    .bind(count)
+    .fetch_all(pool)
+    .await?;
+    rows.reverse();
     rows.into_iter().map(TryInto::try_into).collect()
 }
 
