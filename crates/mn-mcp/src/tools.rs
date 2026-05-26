@@ -1,14 +1,15 @@
 //! MCP tool registry and per-tool handlers.
 //!
-//! Seven tools, three categories:
+//! Eleven tools, three categories:
 //!
 //! - `status` / `pull_models` — local-only; talk to the embedder/reranker
 //!   model cache. No cloud round-trip.
 //! - `search` — embed locally, post to the cloud `/v1/search`, optionally
 //!   rerank with the local cross-encoder.
-//! - `get_chunk` / `get_chunk_siblings` / `get_chunk_parents` /
-//!   `list_sources` — pass-through to the cloud's read endpoints, returning
-//!   the response JSON verbatim.
+//! - All other tools (`get_chunk` / `get_chunk_next` / `get_chunk_prev` /
+//!   `get_chunk_parents` / `get_document` / `get_document_full` /
+//!   `get_document_chunks` / `list_sources`) — pass-through to the cloud's
+//!   read endpoints, returning the response JSON verbatim.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -27,9 +28,9 @@ use crate::server::ServerConfig;
 
 /// Build the static tool manifest sent in response to `tools/list`.
 ///
-/// All seven tools declared in spec.md US5 / contracts/mcp-tools.json. Schemas
-/// here are kept in sync with the canonical document by way of the contract
-/// tests in `tests/`.
+/// All eleven tools declared in spec.md US5 / contracts/mcp-tools.json.
+/// Schemas here are kept in sync with the canonical document by way of the
+/// contract tests in `tests/`.
 #[must_use]
 pub fn list() -> ToolsListResult {
     ToolsListResult {
@@ -43,20 +44,44 @@ pub fn list() -> ToolsListResult {
             ToolDescription {
                 name: "get_chunk",
                 description:
-                    "Fetch one chunk by id with full metadata, parent chain, and navigation pointers.",
+                    "Fetch one chunk by id. Returns the chunk row (id, content, chunk_index, total_chunks, content_hash, embedding_model_id, heading_path, symbol_path, start_byte, end_byte, token_count, status, created_at, document_id, source_version_id, node_id) plus a small `document` sub-object (id, source_path, published_url, source_url, language, kind, provenance) and a `source` sub-object (slug). For the chunk's parent chain call get_chunk_parents; for adjacent chunks call get_chunk_next/get_chunk_prev.",
                 input_schema: id_only_schema(),
             },
             ToolDescription {
-                name: "get_chunk_siblings",
+                name: "get_chunk_next",
                 description:
-                    "Fetch every chunk from the same document as the given chunk, ordered by chunk_index. Useful for reconstructing a full page from any starting point.",
-                input_schema: id_only_schema(),
+                    "Fetch up to `count` chunks immediately following the given chunk in chunk_index order, scoped to the same document. Returns `{chunks: ChunkWithContext[]}` sorted ascending. Returns `{chunks: []}` (not 404) when called on the last chunk. `embed_failed` chunks are skipped, so the returned chunk_index sequence may have gaps. count defaults to 5 and must be in [1, 100]; out-of-range values are rejected as InvalidParams before the call reaches the cloud.",
+                input_schema: chunk_nav_schema(),
+            },
+            ToolDescription {
+                name: "get_chunk_prev",
+                description:
+                    "Fetch up to `count` chunks immediately preceding the given chunk in chunk_index order, scoped to the same document. Returns `{chunks: ChunkWithContext[]}` sorted ascending (reading order). Returns `{chunks: []}` (not 404) when called on the first chunk. `embed_failed` chunks are skipped, so the returned chunk_index sequence may have gaps. count defaults to 5 and must be in [1, 100]; out-of-range values are rejected as InvalidParams before the call reaches the cloud.",
+                input_schema: chunk_nav_schema(),
             },
             ToolDescription {
                 name: "get_chunk_parents",
                 description:
                     "Walk the parent chain from a chunk up to its source-version root. Returns nodes from immediate parent to root.",
                 input_schema: id_only_schema(),
+            },
+            ToolDescription {
+                name: "get_document",
+                description:
+                    "Document overview: metadata (id, source_version_id, node_id, source_path, published_url, source_url, language, kind, content_hash, char_count, token_count, source_modified_at, created_at, frontmatter, provenance, package_id), the source `{slug}`, and an ordered `chunk_ids` array of every ready chunk. No chunk bodies. Use get_document_full for inline bodies or get_document_chunks for a windowed slice.",
+                input_schema: id_only_schema(),
+            },
+            ToolDescription {
+                name: "get_document_full",
+                description:
+                    "Complete document: every overview field except chunk_ids, plus a `chunks` array with each chunk's `{chunk_id, chunk_index, content, heading_path, token_count}` inline (no per-chunk document/source sub-objects). Capped at 500 ready chunks. For documents over the cap the call fails with a structured `too_many_chunks` error (see error.data.next_tool); fall back to get_document_chunks.",
+                input_schema: id_only_schema(),
+            },
+            ToolDescription {
+                name: "get_document_chunks",
+                description:
+                    "Position-windowed chunk slice of a document. Returns `{chunks: ChunkBody[], from, limit, total_chunks}`. from defaults to 0 (must be >= 0); limit defaults to 20 and must be in [1, 100]. Out-of-range values are rejected as InvalidParams before the call reaches the cloud. `from` past the end returns `chunks: []` with accurate `total_chunks` (not 404). Use to page through documents larger than get_document_full's 500-chunk cap or to read a known offset.",
+                input_schema: document_chunks_schema(),
             },
             ToolDescription {
                 name: "list_sources",
@@ -98,6 +123,31 @@ fn id_only_schema() -> serde_json::Value {
         "required": ["id"],
         "properties": {
             "id": { "type": "string", "format": "uuid" },
+        },
+        "additionalProperties": false,
+    })
+}
+
+fn chunk_nav_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "required": ["id"],
+        "properties": {
+            "id": { "type": "string", "format": "uuid" },
+            "count": { "type": "integer", "minimum": 1, "maximum": 100, "default": 5 },
+        },
+        "additionalProperties": false,
+    })
+}
+
+fn document_chunks_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "required": ["id"],
+        "properties": {
+            "id": { "type": "string", "format": "uuid" },
+            "from": { "type": "integer", "minimum": 0, "default": 0 },
+            "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 },
         },
         "additionalProperties": false,
     })
@@ -611,10 +661,12 @@ fn recompute_confidence(
 pub enum PassthroughKind {
     /// `/v1/chunks/:id`
     Chunk,
-    /// `/v1/chunks/:id/siblings`
-    Siblings,
     /// `/v1/chunks/:id/parents`
     Parents,
+    /// `/v1/documents/:id`
+    Document,
+    /// `/v1/documents/:id/full` (may return [`PassthroughError::TooManyChunks`]).
+    DocumentFull,
 }
 
 /// Errors for the chunk pass-through tools.
@@ -624,8 +676,144 @@ pub enum PassthroughError {
     InvalidInput(String),
     /// Cloud returned 404.
     NotFound(String),
+    /// Cloud returned `412 too_many_chunks` (document-full only).
+    TooManyChunks {
+        /// Reported ready-chunk count for the document.
+        chunk_count: u32,
+        /// Server's configured cap.
+        cap: u32,
+        /// Operator-facing hint from the cloud.
+        hint: String,
+    },
     /// Cloud / transport / decode failure.
     Cloud(String),
+}
+
+/// Direction for `run_chunk_nav` — selects `/next` or `/prev`.
+#[derive(Debug, Clone, Copy)]
+pub enum ChunkNavDirection {
+    /// `/v1/chunks/:id/next`
+    Next,
+    /// `/v1/chunks/:id/prev`
+    Prev,
+}
+
+const CHUNK_NAV_DEFAULT_COUNT: u32 = 5;
+const CHUNK_NAV_MAX_COUNT: u32 = 100;
+
+/// Dispatch `get_chunk_next` / `get_chunk_prev`. Parses `{id, count?}` and
+/// rejects out-of-range or non-integer `count` as `InvalidInput` before the
+/// wire call.
+///
+/// # Errors
+///
+/// See [`PassthroughError`].
+pub async fn run_chunk_nav(
+    args: &serde_json::Value,
+    cloud: &Arc<CloudClient>,
+    dir: ChunkNavDirection,
+) -> Result<serde_json::Value, PassthroughError> {
+    let obj = args.as_object().ok_or_else(|| {
+        PassthroughError::InvalidInput("arguments must be a JSON object".to_owned())
+    })?;
+    let id_str = obj
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| PassthroughError::InvalidInput("`id` (string) is required".to_owned()))?;
+    Uuid::parse_str(id_str)
+        .map_err(|e| PassthroughError::InvalidInput(format!("`id` is not a valid UUID: {e}")))?;
+
+    let count = match obj.get("count") {
+        None => CHUNK_NAV_DEFAULT_COUNT,
+        Some(v) => {
+            let Some(n) = v.as_i64() else {
+                return Err(PassthroughError::InvalidInput(
+                    "`count` must be an integer".to_owned(),
+                ));
+            };
+            if !(1..=i64::from(CHUNK_NAV_MAX_COUNT)).contains(&n) {
+                return Err(PassthroughError::InvalidInput(format!(
+                    "`count` must be 1..={CHUNK_NAV_MAX_COUNT}"
+                )));
+            }
+            u32::try_from(n).expect("validated above")
+        }
+    };
+
+    let r = match dir {
+        ChunkNavDirection::Next => cloud.get_chunk_next(id_str, count).await,
+        ChunkNavDirection::Prev => cloud.get_chunk_prev(id_str, count).await,
+    };
+    r.map_err(|e| match e {
+        CloudError::NotFound(msg) => PassthroughError::NotFound(msg),
+        other => PassthroughError::Cloud(other.to_string()),
+    })
+}
+
+const DOCUMENT_CHUNKS_DEFAULT_FROM: u32 = 0;
+const DOCUMENT_CHUNKS_DEFAULT_LIMIT: u32 = 20;
+const DOCUMENT_CHUNKS_MAX_LIMIT: u32 = 100;
+
+/// Dispatch `get_document_chunks`. Parses `{id, from?, limit?}`. `from`
+/// must be `>= 0`; `limit` must be in `[1, 100]`. Out-of-range or wrong-type
+/// values are rejected as `InvalidInput` before the wire call.
+///
+/// # Errors
+///
+/// See [`PassthroughError`].
+pub async fn run_document_chunks(
+    args: &serde_json::Value,
+    cloud: &Arc<CloudClient>,
+) -> Result<serde_json::Value, PassthroughError> {
+    let obj = args.as_object().ok_or_else(|| {
+        PassthroughError::InvalidInput("arguments must be a JSON object".to_owned())
+    })?;
+    let id_str = obj
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| PassthroughError::InvalidInput("`id` (string) is required".to_owned()))?;
+    Uuid::parse_str(id_str)
+        .map_err(|e| PassthroughError::InvalidInput(format!("`id` is not a valid UUID: {e}")))?;
+
+    let from = match obj.get("from") {
+        None => DOCUMENT_CHUNKS_DEFAULT_FROM,
+        Some(v) => {
+            let Some(n) = v.as_i64() else {
+                return Err(PassthroughError::InvalidInput("`from` must be an integer".to_owned()));
+            };
+            if n < 0 {
+                return Err(PassthroughError::InvalidInput("`from` must be >= 0".to_owned()));
+            }
+            u32::try_from(n).map_err(|_| {
+                PassthroughError::InvalidInput("`from` exceeds 32-bit range".to_owned())
+            })?
+        }
+    };
+
+    let limit = match obj.get("limit") {
+        None => DOCUMENT_CHUNKS_DEFAULT_LIMIT,
+        Some(v) => {
+            let Some(n) = v.as_i64() else {
+                return Err(PassthroughError::InvalidInput(
+                    "`limit` must be an integer".to_owned(),
+                ));
+            };
+            if !(1..=i64::from(DOCUMENT_CHUNKS_MAX_LIMIT)).contains(&n) {
+                return Err(PassthroughError::InvalidInput(format!(
+                    "`limit` must be 1..={DOCUMENT_CHUNKS_MAX_LIMIT}"
+                )));
+            }
+            u32::try_from(n).expect("validated above")
+        }
+    };
+
+    cloud
+        .get_document_chunks(id_str, from, limit)
+        .await
+        .map_err(|e| match e {
+            CloudError::NotFound(msg) => PassthroughError::NotFound(msg),
+            other => PassthroughError::Cloud(other.to_string()),
+        })
 }
 
 /// Dispatch any of the `get_chunk*` tools. Returns the cloud's JSON verbatim.
@@ -646,11 +834,15 @@ pub async fn run_passthrough_id(
         .map_err(|e| PassthroughError::InvalidInput(format!("`id` is not a valid UUID: {e}")))?;
     let r = match kind {
         PassthroughKind::Chunk => cloud.get_chunk(id_str).await,
-        PassthroughKind::Siblings => cloud.get_chunk_siblings(id_str).await,
         PassthroughKind::Parents => cloud.get_chunk_parents(id_str).await,
+        PassthroughKind::Document => cloud.get_document(id_str).await,
+        PassthroughKind::DocumentFull => cloud.get_document_full(id_str).await,
     };
     r.map_err(|e| match e {
         CloudError::NotFound(msg) => PassthroughError::NotFound(msg),
+        CloudError::TooManyChunks { chunk_count, cap, hint } => {
+            PassthroughError::TooManyChunks { chunk_count, cap, hint }
+        }
         other => PassthroughError::Cloud(other.to_string()),
     })
 }
@@ -660,19 +852,47 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tool_list_has_all_seven_tools() {
+    fn tool_list_has_all_eleven_tools() {
         let m = list();
         let names: Vec<_> = m.tools.iter().map(|t| t.name).collect();
         for expected in [
             "search",
             "get_chunk",
-            "get_chunk_siblings",
+            "get_chunk_next",
+            "get_chunk_prev",
             "get_chunk_parents",
+            "get_document",
+            "get_document_full",
+            "get_document_chunks",
             "list_sources",
             "pull_models",
             "status",
         ] {
             assert!(names.contains(&expected), "missing tool: {expected}");
+        }
+        assert_eq!(names.len(), 11, "expected 11 tools, got {}", names.len());
+    }
+
+    #[test]
+    fn new_navigation_tools_have_object_schemas() {
+        let m = list();
+        for name in [
+            "get_chunk_next",
+            "get_chunk_prev",
+            "get_document",
+            "get_document_full",
+            "get_document_chunks",
+        ] {
+            let tool = m
+                .tools
+                .iter()
+                .find(|t| t.name == name)
+                .unwrap_or_else(|| panic!("missing tool: {name}"));
+            assert_eq!(tool.input_schema["type"], "object", "{name} schema must be object-typed");
+            assert_eq!(
+                tool.input_schema["additionalProperties"], false,
+                "{name} schema must reject additional properties"
+            );
         }
     }
 

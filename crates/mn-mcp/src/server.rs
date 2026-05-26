@@ -247,8 +247,12 @@ fn tool_name_for_event(name: &str) -> Option<McpToolName> {
     match name {
         "search" => Some(McpToolName::Search),
         "get_chunk" => Some(McpToolName::GetChunk),
-        "get_chunk_siblings" => Some(McpToolName::GetChunkSiblings),
+        "get_chunk_next" => Some(McpToolName::GetChunkNext),
+        "get_chunk_prev" => Some(McpToolName::GetChunkPrev),
         "get_chunk_parents" => Some(McpToolName::GetChunkParents),
+        "get_document" => Some(McpToolName::GetDocument),
+        "get_document_full" => Some(McpToolName::GetDocumentFull),
+        "get_document_chunks" => Some(McpToolName::GetDocumentChunks),
         "list_sources" => Some(McpToolName::ListSources),
         "pull_models" => Some(McpToolName::PullModels),
         "status" => Some(McpToolName::Status),
@@ -274,12 +278,23 @@ async fn dispatch_tool_inner(
         "get_chunk" => {
             run_passthrough_dispatch(&id, &params, state, tools::PassthroughKind::Chunk).await
         }
-        "get_chunk_siblings" => {
-            run_passthrough_dispatch(&id, &params, state, tools::PassthroughKind::Siblings).await
+        "get_chunk_next" => {
+            run_chunk_nav_dispatch(&id, &params, state, tools::ChunkNavDirection::Next).await
+        }
+        "get_chunk_prev" => {
+            run_chunk_nav_dispatch(&id, &params, state, tools::ChunkNavDirection::Prev).await
         }
         "get_chunk_parents" => {
             run_passthrough_dispatch(&id, &params, state, tools::PassthroughKind::Parents).await
         }
+        "get_document" => {
+            run_passthrough_dispatch(&id, &params, state, tools::PassthroughKind::Document).await
+        }
+        "get_document_full" => {
+            run_passthrough_dispatch(&id, &params, state, tools::PassthroughKind::DocumentFull)
+                .await
+        }
+        "get_document_chunks" => run_document_chunks_dispatch(&id, &params, state).await,
         "list_sources" => match state.cloud.list_sources().await {
             Ok(v) => Ok(v.to_string()),
             Err(CloudError::NotFound(msg)) => {
@@ -345,6 +360,62 @@ async fn run_passthrough_dispatch(
         Err(tools::PassthroughError::NotFound(msg)) => {
             Err(Response::err(id.clone(), ErrorCode::ToolFailed, format!("not found: {msg}")))
         }
+        Err(tools::PassthroughError::TooManyChunks { chunk_count, cap, hint }) => {
+            Err(too_many_chunks_response(id.clone(), chunk_count, cap, &hint))
+        }
+        Err(tools::PassthroughError::Cloud(msg)) => {
+            Err(Response::err(id.clone(), ErrorCode::ToolFailed, msg))
+        }
+    }
+}
+
+async fn run_chunk_nav_dispatch(
+    id: &RequestId,
+    params: &ToolCallParams,
+    state: &ServerState,
+    dir: tools::ChunkNavDirection,
+) -> Result<String, Response> {
+    match tools::run_chunk_nav(&params.arguments, &state.cloud, dir).await {
+        Ok(v) => Ok(v.to_string()),
+        Err(tools::PassthroughError::InvalidInput(msg)) => {
+            Err(Response::err(id.clone(), ErrorCode::InvalidParams, msg))
+        }
+        Err(tools::PassthroughError::NotFound(msg)) => {
+            Err(Response::err(id.clone(), ErrorCode::ToolFailed, format!("not found: {msg}")))
+        }
+        Err(tools::PassthroughError::TooManyChunks { .. }) => {
+            // Not reachable for next/prev (no 412 on /next or /prev), but
+            // exhaustively matched so the compiler catches additions.
+            Err(Response::err(
+                id.clone(),
+                ErrorCode::ToolFailed,
+                "unexpected too_many_chunks on /next or /prev".to_owned(),
+            ))
+        }
+        Err(tools::PassthroughError::Cloud(msg)) => {
+            Err(Response::err(id.clone(), ErrorCode::ToolFailed, msg))
+        }
+    }
+}
+
+async fn run_document_chunks_dispatch(
+    id: &RequestId,
+    params: &ToolCallParams,
+    state: &ServerState,
+) -> Result<String, Response> {
+    match tools::run_document_chunks(&params.arguments, &state.cloud).await {
+        Ok(v) => Ok(v.to_string()),
+        Err(tools::PassthroughError::InvalidInput(msg)) => {
+            Err(Response::err(id.clone(), ErrorCode::InvalidParams, msg))
+        }
+        Err(tools::PassthroughError::NotFound(msg)) => {
+            Err(Response::err(id.clone(), ErrorCode::ToolFailed, format!("not found: {msg}")))
+        }
+        Err(tools::PassthroughError::TooManyChunks { .. }) => Err(Response::err(
+            id.clone(),
+            ErrorCode::ToolFailed,
+            "unexpected too_many_chunks on /chunks window".to_owned(),
+        )),
         Err(tools::PassthroughError::Cloud(msg)) => {
             Err(Response::err(id.clone(), ErrorCode::ToolFailed, msg))
         }
@@ -379,6 +450,29 @@ fn mismatch_response(
             } else {
                 message.to_owned()
             },
+            data: Some(data),
+        }),
+    }
+}
+
+/// Build a JSON-RPC error response for the cloud's 412 `too_many_chunks`
+/// body, putting the count + cap + hint in the `data` field so an AI client
+/// can render a structured remediation (next_tool = "get_document_chunks").
+fn too_many_chunks_response(id: RequestId, chunk_count: u32, cap: u32, hint: &str) -> Response {
+    let data = serde_json::json!({
+        "kind": "too_many_chunks",
+        "chunk_count": chunk_count,
+        "cap": cap,
+        "hint": hint,
+        "next_tool": "get_document_chunks",
+    });
+    Response {
+        jsonrpc: JSONRPC,
+        id,
+        result: None,
+        error: Some(JsonRpcError {
+            code: ErrorCode::ToolFailed as i32,
+            message: format!("document has {chunk_count} chunks (cap {cap})"),
             data: Some(data),
         }),
     }
