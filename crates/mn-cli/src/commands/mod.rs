@@ -1,7 +1,9 @@
 //! Per-subcommand modules.
 
 pub mod auth;
+pub mod chunks;
 pub mod config;
+pub mod documents;
 pub mod doctor;
 pub mod ingest;
 pub mod keys;
