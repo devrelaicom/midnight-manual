@@ -7,11 +7,62 @@
 
 use mn_core::types::{Chunk, ChunkStatus};
 use pgvector::Vector;
+use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::error::Result;
+use crate::error::{Result, StoreError};
+
+/// Document subset bundled into chunk read responses.
+///
+/// Intentionally smaller than [`super::document::Document`] — only the
+/// fields useful for navigation/inspection. Spec §1.1 of the chunk+document
+/// navigation design.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocumentSummary {
+    /// Document UUID.
+    pub id: Uuid,
+    /// Repo-relative source path.
+    pub source_path: String,
+    /// Public published URL, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub published_url: Option<String>,
+    /// Public source URL, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_url: Option<String>,
+    /// ISO language tag, if known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    /// Document kind discriminator.
+    pub kind: mn_core::types::DocumentKind,
+    /// Materialized provenance JSON.
+    pub provenance: serde_json::Value,
+}
+
+/// Source subset bundled into chunk read responses.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceSummary {
+    /// Source slug (human-readable unique identifier).
+    pub slug: String,
+}
+
+/// Chunk + bundled document + source context returned by the navigation
+/// read endpoints (`GET /v1/chunks/:id`, `/next`, `/prev`).
+///
+/// The existing chunk fields stay at the top level via `#[serde(flatten)]`
+/// so callers that deserialize into a struct containing only chunk fields
+/// still work (they ignore the extra `document` and `source` keys).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChunkWithContext {
+    /// The chunk itself.
+    #[serde(flatten)]
+    pub chunk: Chunk,
+    /// Parent document summary.
+    pub document: DocumentSummary,
+    /// Owning source summary.
+    pub source: SourceSummary,
+}
 
 /// Parameters for inserting a new chunk — grouped because the table is wide.
 #[derive(Debug, Clone)]
@@ -278,6 +329,111 @@ pub async fn list_siblings(pool: &PgPool, document_id: Uuid) -> Result<Vec<Chunk
     .fetch_all(pool)
     .await?;
     rows.into_iter().map(TryInto::try_into).collect()
+}
+
+/// Get a chunk plus its document + source context. One JOIN query.
+///
+/// # Errors
+///
+/// Returns `StoreError::NotFound` when no chunk exists with that id (or
+/// its status is `embed_failed`). Returns `StoreError::Database` on any
+/// SQL failure.
+pub async fn get_with_context(pool: &PgPool, id: Uuid) -> Result<ChunkWithContext> {
+    let row = sqlx::query_as::<_, ChunkWithContextRow>(
+        "SELECT \
+            c.id, c.source_version_id, c.document_id, c.node_id, c.chunk_index, c.total_chunks, \
+            c.content, c.content_hash, c.embedding_model_id, c.heading_path, c.symbol_path, \
+            c.start_byte, c.end_byte, c.token_count, c.status, c.created_at, \
+            d.source_path AS d_source_path, d.published_url AS d_published_url, \
+            d.source_url AS d_source_url, d.language AS d_language, d.kind AS d_kind, \
+            d.provenance AS d_provenance, \
+            s.slug AS s_slug \
+         FROM chunk c \
+         JOIN document d ON c.document_id = d.id \
+         JOIN source_version sv ON c.source_version_id = sv.id \
+         JOIN source s ON sv.source_id = s.id \
+         WHERE c.id = $1 AND c.status <> 'embed_failed'",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or(StoreError::NotFound)?;
+    row.try_into()
+}
+
+#[derive(sqlx::FromRow)]
+struct ChunkWithContextRow {
+    // 16 chunk columns (same as ChunkRow):
+    id: Uuid,
+    source_version_id: Uuid,
+    document_id: Uuid,
+    node_id: Uuid,
+    chunk_index: i32,
+    total_chunks: i32,
+    content: String,
+    content_hash: String,
+    embedding_model_id: Uuid,
+    heading_path: Vec<String>,
+    symbol_path: Vec<String>,
+    start_byte: i32,
+    end_byte: i32,
+    token_count: i32,
+    status: String,
+    created_at: time::OffsetDateTime,
+    // 6 document columns:
+    d_source_path: String,
+    d_published_url: Option<String>,
+    d_source_url: Option<String>,
+    d_language: Option<String>,
+    d_kind: String,
+    d_provenance: serde_json::Value,
+    // 1 source column:
+    s_slug: String,
+}
+
+impl TryFrom<ChunkWithContextRow> for ChunkWithContext {
+    type Error = StoreError;
+    fn try_from(r: ChunkWithContextRow) -> Result<Self> {
+        // Mirror the existing ChunkRow → Chunk pattern: round-trip the
+        // status string through serde_json so the enum's existing serde
+        // impl handles the decode.
+        let status: ChunkStatus = serde_json::from_value(serde_json::Value::String(r.status))
+            .map_err(|e| StoreError::Json(e.to_string()))?;
+        let doc_kind: mn_core::types::DocumentKind =
+            serde_json::from_value(serde_json::Value::String(r.d_kind))
+                .map_err(|e| StoreError::Json(e.to_string()))?;
+        let chunk = Chunk {
+            id: r.id,
+            source_version_id: r.source_version_id,
+            document_id: r.document_id,
+            node_id: r.node_id,
+            chunk_index: r.chunk_index,
+            total_chunks: r.total_chunks,
+            content: r.content,
+            content_hash: r.content_hash,
+            embedding_model_id: r.embedding_model_id,
+            heading_path: r.heading_path,
+            symbol_path: r.symbol_path,
+            start_byte: r.start_byte,
+            end_byte: r.end_byte,
+            token_count: r.token_count,
+            status,
+            created_at: r.created_at,
+        };
+        Ok(Self {
+            chunk,
+            document: DocumentSummary {
+                id: r.document_id,
+                source_path: r.d_source_path,
+                published_url: r.d_published_url,
+                source_url: r.d_source_url,
+                language: r.d_language,
+                kind: doc_kind,
+                provenance: r.d_provenance,
+            },
+            source: SourceSummary { slug: r.s_slug },
+        })
+    }
 }
 
 #[derive(sqlx::FromRow)]
