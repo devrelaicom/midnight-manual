@@ -143,7 +143,15 @@ async fn local_listener_ignores_non_oauth_paths() {
     });
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let client = reqwest::Client::new();
+    // Disable HTTP keep-alive / connection pooling. The server writes
+    // `Connection: close` and `socket.shutdown().await` after each
+    // response, so a pooled second request can race with the FIN and
+    // intermittently fail. Forcing a fresh TCP connection per call
+    // makes this test deterministic.
+    let client = reqwest::Client::builder()
+        .pool_max_idle_per_host(0)
+        .build()
+        .unwrap();
     // First a 404 path — the listener should respond 404 and keep listening.
     let r = client
         .get(format!("http://127.0.0.1:{port}/favicon.ico"))
