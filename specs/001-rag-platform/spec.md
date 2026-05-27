@@ -170,7 +170,7 @@ Frontmatter `provenance` merges on top of node-level `provenance:`. Files absent
 1. **Given** a single search query, **When** `POST /v1/search` is called with `{text, vector}`, **Then** the API runs FTS (Postgres tsvector / `ts_rank_cd`) and pgvector ANN in parallel, merges via RRF (k=60), and returns up to `limit` chunks (default 20, max 100) with full chunk + document + source + parent_chain + navigation + scores.
 2. **Given** a multi-query request with N `{text, vector}` pairs, **When** `POST /v1/search` is called, **Then** retrieval runs hybrid per pair and RRF merges across both retrieval modes and across pairs; the response's `scores.matched_queries` lists which pairs contributed to each result.
 3. **Given** a chunk id, **When** `GET /v1/chunks/{id}` is called, **Then** the API returns the chunk with full metadata, document, source, `parent_chain`, navigation, and the corpus embedding model identifier.
-4. **Given** a chunk id, **When** `GET /v1/chunks/{id}/siblings` is called, **Then** the API returns every chunk from the same document ordered by `chunk_index`, suitable for full-page reconstruction.
+4. **Given** a chunk id, **When** `GET /v1/chunks/{id}/next` or `GET /v1/chunks/{id}/prev` is called, **Then** the API returns up to `count` (default 5, max 100) adjacent chunks from the same document in `chunk_index` order, skipping `embed_failed` chunks, suitable for reading-order navigation. (PR #52 replaced the older `/siblings` endpoint with windowed next/prev plus document-scoped lookups under `/v1/documents/{id}`.)
 5. **Given** a chunk id, **When** `GET /v1/chunks/{id}/parents` is called, **Then** the API returns the parent chain from the chunk's node up to the source-version root.
 6. **Given** a request with `client_embedding_model` that does not match the active corpus model, **When** any search-or-chunk endpoint is hit, **Then** the API responds with HTTP 409 and a typed body of shape `{error: {code: "embedding_model_mismatch", message, remediation, context: {corpus_model, client_model}}}`.
 7. **Given** any read endpoint, **When** any version of any source is not active, **Then** chunks/documents from that version are excluded by default; querying historical versions requires an explicit `?source_version_revision=N` parameter.
@@ -192,10 +192,12 @@ GET  /v1/sources/{slug}                      # source detail
 GET  /v1/sources/{slug}/versions             # list source_versions
 GET  /v1/sources/{slug}/versions/{revision}  # version detail (active or historical)
 GET  /v1/chunks/{id}                         # chunk detail
-GET  /v1/chunks/{id}/siblings                # all chunks in same document
+GET  /v1/chunks/{id}/next                    # next N chunks in reading order
+GET  /v1/chunks/{id}/prev                    # prev N chunks in reading order
 GET  /v1/chunks/{id}/parents                 # parent chain to source root
-GET  /v1/documents/{id}                      # document detail
-GET  /v1/documents/{id}/chunks               # all chunks of a document, ordered
+GET  /v1/documents/{id}                      # document detail (overview + chunk_ids)
+GET  /v1/documents/{id}/full                 # document detail + inline chunk bodies (capped at 500)
+GET  /v1/documents/{id}/chunks               # windowed chunk slice (from/limit)
 GET  /v1/nodes/{id}                          # node detail
 GET  /v1/nodes/{id}/children                 # node's direct children
 GET  /v1/models/active                       # current corpus embedding model
@@ -320,7 +322,7 @@ All codes use the same typed envelope shape; new codes added via additive minor 
 7. **Given** the local embedding or reranker model is missing on first retrieval, **When** the tool runs, **Then** the server returns a typed `models_missing` error with the precise tool name to invoke (`pull_models`) and which model is needed.
 8. **Given** the `pull_models` tool is called, **When** it runs, **Then** it downloads the embedding and reranker models to `$XDG_DATA_HOME/midnight-manual/models/`, emits MCP progress notifications during download, and returns `{embedding_model, reranker_model, total_bytes, took_ms}` on success.
 9. **Given** the `status` tool is called, **When** it runs, **Then** it returns `{server_version, cloud_reachable, corpus_embedding_model, local_embedding_model, local_reranker_model, model_state, rate_limit_tier}` without requiring models to be loaded; `model_state` ∈ `{ready, missing, stale, loading, corrupt}`.
-10. **Given** `get_chunk`, `get_chunk_siblings`, `get_chunk_parents`, or `list_sources` is called, **When** processed, **Then** the server proxies to the corresponding cloud endpoint and returns the raw JSON result; no embedding or reranking is involved.
+10. **Given** `get_chunk`, `get_chunk_next`, `get_chunk_prev`, `get_chunk_parents`, `get_document`, `get_document_full`, `get_document_chunks`, or `list_sources` is called, **When** processed, **Then** the server proxies to the corresponding cloud endpoint and returns the raw JSON result; no embedding or reranking is involved. `get_document_full` may surface a typed `too_many_chunks` JSON-RPC error (with `data.next_tool = "get_document_chunks"`) for documents over the 500-chunk inline cap.
 11. **Given** the cloud is unreachable (network error / 503), **When** any retrieval tool is called, **Then** the tool returns a typed `service_unavailable` error including any `Retry-After` from the cloud response; the MCP server never crashes the AI client (Constitution V).
 12. **Given** the config supplies a bearer token (per D17/D18) and the `MIDNIGHT_MANUAL_DISABLE_TELEMETRY` flag is unset, **When** any tool runs, **Then** the bearer is included in cloud requests via `Authorization: Bearer <token>` and an anonymized telemetry event (`tool_name`, `latency_ms`, `result_count`, `model_state`, `rerank_on`) is emitted — never query content, never the token, never chunk content (Constitution VII).
 13. **Given** two concurrent `search` calls arrive while models are loading, **When** they are processed, **Then** both await the single in-flight load (no double-load, no double-download) and complete in order once models are ready.
@@ -329,13 +331,17 @@ All codes use the same typed envelope shape; new codes added via additive minor 
 **MCP tool surface**:
 
 ```
-search             — primary retrieval tool (text → reranked chunks)
-get_chunk          — fetch one chunk by id with full metadata
-get_chunk_siblings — fetch all chunks of the chunk's document, ordered
-get_chunk_parents  — walk the chunk's parent chain to source root
-list_sources       — enumerate available sources for filter-narrowing
-pull_models        — download/update local embedding and reranker models
-status             — health and model-state introspection
+search              — primary retrieval tool (text → reranked chunks)
+get_chunk           — fetch one chunk by id with full metadata
+get_chunk_next      — fetch up to N chunks following a chunk (reading order)
+get_chunk_prev      — fetch up to N chunks preceding a chunk (reading order)
+get_chunk_parents   — walk the chunk's parent chain to source root
+get_document        — document overview + ordered chunk_ids (no bodies)
+get_document_full   — document + every chunk body inline (capped at 500)
+get_document_chunks — windowed chunk slice of a document ({from, limit})
+list_sources        — enumerate available sources for filter-narrowing
+pull_models         — download/update local embedding and reranker models
+status              — health and model-state introspection
 ```
 
 **`search` input schema**:

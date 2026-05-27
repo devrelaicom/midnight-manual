@@ -1,11 +1,11 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "midnight-manual MCP tools",
-  "description": "MCP tool input/output schemas for the 7 tools exposed by `mnm mcp serve`. Each tool's description is treated as part of the public contract per Constitution I and FR-037.",
-  "version": "1.0.0",
+  "description": "MCP tool input/output schemas for the 11 tools exposed by `mnm mcp serve`. Each tool's description is treated as part of the public contract per Constitution I and FR-037. The runtime manifest lives at `crates/mn-mcp/src/tools.rs::list()`; this document mirrors it. PR #52 grew the surface from 7 to 11 tools (dropped `get_chunk_siblings`; added `get_chunk_next`, `get_chunk_prev`, `get_document`, `get_document_full`, `get_document_chunks`).",
+  "version": "1.1.0",
   "tools": {
     "search": {
-      "description": "Hybrid (FTS + vector) retrieval over the Midnight corpus with optional cross-encoder reranking and trust-aware confidence scoring.\n\n**Patterns** (FR-091):\n- `hyde`: pass the user's question AND an LLM-generated hypothetical answer as two queries.\n- `multi_query`: pass 2–3 paraphrases of the question (different vocabulary).\n- `step_back`: pass the user's question AND a more abstract version of it.\nSee docs/cookbook/query-enhancement.md for worked examples.",
+      "description": "Hybrid (FTS + vector) retrieval over the Midnight corpus, with optional cross-encoder reranking and trust-aware confidence scoring. Provide the single-query `{query, vector}` form, or a `queries` array of 1-10 `{text, vector}` pairs that RRF fuses across. The caller embeds each text. Rate-limit cost is max(1, distinct queries) tokens (D25).\n\nPatterns (full worked examples in docs/cookbook/query-enhancement.md):\n- hyde: send the question plus a hypothetical answer as a second query, e.g. queries=[\"<the user's question>\", \"<a 1-2 sentence hypothetical answer the agent drafts>\"]. Lifts recall when the question is short or jargon-light.\n- multi_query: send 2-3 paraphrases varying vocabulary and breadth, e.g. queries=[\"compile a contract\", \"build source into a deployable artifact\", \"smart-contract build step\"]. Helps when synonyms matter.\n- step_back: send the question plus a more abstract framing, e.g. queries=[\"why did this specific call fail?\", \"how does the platform validate calls?\"]. Helps when the question is over-specific.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -26,27 +26,16 @@
             "minimum": 1,
             "maximum": 50,
             "default": 10,
-            "description": "Max results returned. Capped at 50 to keep reranker latency within the 1s p95 budget."
+            "description": "Max results returned to the caller. Capped at 50 (FR-088)."
           },
           "rerank": {
             "type": "boolean",
             "default": true,
             "description": "Apply local cross-encoder reranking. Disable for ultra-low-latency callers."
           },
-          "sort_by": {
-            "type": "string",
-            "enum": ["confidence", "trust", "relevance", "score"],
-            "default": "confidence"
-          },
-          "min_confidence": {
-            "type": "number",
-            "minimum": 0.0,
-            "maximum": 1.0,
-            "default": 0.0
-          },
           "filters": {
             "type": "object",
-            "description": "Same shape as cloud /v1/search filters.",
+            "description": "Filter spec forwarded verbatim to the cloud /v1/search endpoint. Same shape as cloud filters.",
             "additionalProperties": false,
             "properties": {
               "source_slug": { "type": "array", "items": { "type": "string" } },
@@ -97,25 +86,50 @@
     },
 
     "get_chunk": {
-      "description": "Fetch one chunk by id with full metadata, parent chain, and navigation pointers.",
+      "description": "Fetch one chunk by id. Returns the chunk row (id, content, chunk_index, total_chunks, content_hash, embedding_model_id, heading_path, symbol_path, start_byte, end_byte, token_count, status, created_at, document_id, source_version_id, node_id) plus a small `document` sub-object (id, source_path, published_url, source_url, language, kind, provenance) and a `source` sub-object (slug). For the chunk's parent chain call get_chunk_parents; for adjacent chunks call get_chunk_next/get_chunk_prev.",
       "input_schema": {
         "type": "object",
         "required": ["id"],
         "properties": {
           "id": { "type": "string", "format": "uuid" }
-        }
+        },
+        "additionalProperties": false
       },
       "output_schema": { "$ref": "#/$defs/ChunkResult" }
     },
 
-    "get_chunk_siblings": {
-      "description": "Fetch every chunk from the same document as the given chunk, ordered by chunk_index. Useful for reconstructing a full page from any starting point.",
+    "get_chunk_next": {
+      "description": "Fetch up to `count` chunks immediately following the given chunk in chunk_index order, scoped to the same document. Returns `{chunks: ChunkWithContext[]}` sorted ascending. Returns `{chunks: []}` (not 404) when called on the last chunk. `embed_failed` chunks are skipped, so the returned chunk_index sequence may have gaps. count defaults to 5 and must be in [1, 100]; out-of-range values are rejected as InvalidParams before the call reaches the cloud.",
       "input_schema": {
         "type": "object",
         "required": ["id"],
         "properties": {
-          "id": { "type": "string", "format": "uuid" }
+          "id": { "type": "string", "format": "uuid" },
+          "count": { "type": "integer", "minimum": 1, "maximum": 100, "default": 5 }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "chunks": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/ChunkResult" }
+          }
         }
+      }
+    },
+
+    "get_chunk_prev": {
+      "description": "Fetch up to `count` chunks immediately preceding the given chunk in chunk_index order, scoped to the same document. Returns `{chunks: ChunkWithContext[]}` sorted ascending (reading order). Returns `{chunks: []}` (not 404) when called on the first chunk. `embed_failed` chunks are skipped, so the returned chunk_index sequence may have gaps. count defaults to 5 and must be in [1, 100]; out-of-range values are rejected as InvalidParams before the call reaches the cloud.",
+      "input_schema": {
+        "type": "object",
+        "required": ["id"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "count": { "type": "integer", "minimum": 1, "maximum": 100, "default": 5 }
+        },
+        "additionalProperties": false
       },
       "output_schema": {
         "type": "object",
@@ -135,7 +149,8 @@
         "required": ["id"],
         "properties": {
           "id": { "type": "string", "format": "uuid" }
-        }
+        },
+        "additionalProperties": false
       },
       "output_schema": {
         "type": "object",
@@ -148,10 +163,101 @@
       }
     },
 
+    "get_document": {
+      "description": "Document overview: metadata (id, source_version_id, node_id, source_path, published_url, source_url, language, kind, content_hash, char_count, token_count, source_modified_at, created_at, frontmatter, provenance, package_id), the source `{slug}`, and an ordered `chunk_ids` array of every ready chunk. No chunk bodies. Use get_document_full for inline bodies or get_document_chunks for a windowed slice.",
+      "input_schema": {
+        "type": "object",
+        "required": ["id"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "document": { "type": "object" },
+          "source": { "type": "object" },
+          "chunk_ids": {
+            "type": "array",
+            "items": { "type": "string", "format": "uuid" }
+          }
+        }
+      }
+    },
+
+    "get_document_full": {
+      "description": "Complete document: every overview field except chunk_ids, plus a `chunks` array with each chunk's `{chunk_id, chunk_index, content, heading_path, token_count}` inline (no per-chunk document/source sub-objects). Capped at 500 ready chunks. For documents over the cap the call fails with a structured `too_many_chunks` error (see error.data.next_tool); fall back to get_document_chunks.",
+      "input_schema": {
+        "type": "object",
+        "required": ["id"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "document": { "type": "object" },
+          "source": { "type": "object" },
+          "chunks": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "chunk_id": { "type": "string", "format": "uuid" },
+                "chunk_index": { "type": "integer" },
+                "content": { "type": "string" },
+                "heading_path": { "type": "array", "items": { "type": "string" } },
+                "token_count": { "type": "integer" }
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "get_document_chunks": {
+      "description": "Position-windowed chunk slice of a document. Returns `{chunks: ChunkBody[], from, limit, total_chunks}`. from defaults to 0 (must be >= 0); limit defaults to 20 and must be in [1, 100]. Out-of-range values are rejected as InvalidParams before the call reaches the cloud. `from` past the end returns `chunks: []` with accurate `total_chunks` (not 404). Use to page through documents larger than get_document_full's 500-chunk cap or to read a known offset.",
+      "input_schema": {
+        "type": "object",
+        "required": ["id"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "from": { "type": "integer", "minimum": 0, "default": 0 },
+          "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "chunks": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "chunk_id": { "type": "string", "format": "uuid" },
+                "chunk_index": { "type": "integer" },
+                "content": { "type": "string" },
+                "heading_path": { "type": "array", "items": { "type": "string" } },
+                "token_count": { "type": "integer" }
+              }
+            }
+          },
+          "from": { "type": "integer" },
+          "limit": { "type": "integer" },
+          "total_chunks": { "type": "integer" }
+        }
+      }
+    },
+
     "list_sources": {
       "description": "Enumerate the corpus's available sources so an agent can narrow filters.",
       "input_schema": {
         "type": "object",
+        "properties": {},
         "additionalProperties": false
       },
       "output_schema": {
@@ -174,23 +280,19 @@
     },
 
     "pull_models": {
-      "description": "Download or update the local embedding and reranker models. Required on first use and after a corpus-side model migration (signalled by an `embedding_model_mismatch` error from search).",
+      "description": "Download / load the embedder (bge-base-en-v1.5) and reranker (bge-reranker-base) into the local model cache. Required on first use and after a corpus-side model migration (signalled by an `embedding_model_mismatch` error from search).",
       "input_schema": {
         "type": "object",
-        "properties": {
-          "name": {
-            "type": "string",
-            "description": "Specific model name to pull. Omit to pull whichever model the corpus is currently using."
-          }
-        },
+        "properties": {},
         "additionalProperties": false
       },
       "output_schema": {
         "type": "object",
         "properties": {
-          "embedding_model": { "type": "string" },
-          "reranker_model": { "type": "string" },
-          "total_bytes": { "type": "integer" },
+          "embedder": { "type": "string" },
+          "reranker": { "type": "string" },
+          "embedder_loaded": { "type": "boolean" },
+          "reranker_loaded": { "type": "boolean" },
           "took_ms": { "type": "integer" }
         }
       }
@@ -200,25 +302,49 @@
       "description": "Report health and model state. Works without models loaded.",
       "input_schema": {
         "type": "object",
+        "properties": {},
         "additionalProperties": false
       },
       "output_schema": {
         "type": "object",
         "properties": {
           "server_version": { "type": "string" },
-          "cloud_reachable": { "type": "boolean" },
-          "corpus_embedding_model": { "type": "string" },
-          "local_embedding_model": { "type": "string", "nullable": true },
-          "local_reranker_model": { "type": "string", "nullable": true },
+          "embedder": { "type": "string" },
+          "reranker": { "type": "string" },
           "model_state": {
             "type": "string",
-            "enum": ["ready", "missing", "stale", "loading", "corrupt"]
+            "enum": ["ready", "missing"]
           },
-          "rate_limit_tier": {
-            "type": "string",
-            "enum": ["anonymous", "read_uplift", "cidr_override"]
-          },
-          "admin_visibility_resolved_from": { "type": "string", "enum": ["env", "config", "default"] }
+          "cache_dir": { "type": "string", "nullable": true }
+        }
+      }
+    }
+  },
+
+  "error_envelopes": {
+    "description": "Typed MCP errors that tools may surface. JSON-RPC errors are returned with a numeric `code`, a human `message`, and a structured `data` object whose `kind` discriminator AI clients can switch on for remediation.",
+    "envelopes": {
+      "embedding_model_mismatch": {
+        "description": "The local embedder revision doesn't match the corpus's active revision (FR-038 / D12). Returned by `search` when the cloud responds with HTTP 409. The client should call `pull_models` and retry.",
+        "raised_by": ["search"],
+        "data": {
+          "kind": "embedding_model_mismatch",
+          "next_tool": "pull_models",
+          "corpus_model": "string ({name}@{revision} of the corpus's active embedder)",
+          "client_model": "string ({name}@{revision} of the local embedder)",
+          "message": "string (operator-facing description)",
+          "remediation": "string (concrete next step)"
+        }
+      },
+      "too_many_chunks": {
+        "description": "The requested document exceeds the inline-bodies cap (500 ready chunks). Returned by `get_document_full` when the cloud responds with HTTP 412. The client should fall back to `get_document_chunks` for windowed pagination.",
+        "raised_by": ["get_document_full"],
+        "data": {
+          "kind": "too_many_chunks",
+          "next_tool": "get_document_chunks",
+          "chunk_count": "integer (the document's ready-chunk count)",
+          "cap": "integer (the server's configured cap, currently 500)",
+          "hint": "string (operator-facing hint)"
         }
       }
     }
@@ -227,7 +353,7 @@
   "$defs": {
     "ChunkResult": {
       "type": "object",
-      "description": "Single search result. Same shape as cloud /v1/search per-result, plus rerank_score when rerank=true.",
+      "description": "Single chunk result. Same shape as cloud /v1/search per-result, plus rerank_score when rerank=true on search.",
       "properties": {
         "chunk": { "type": "object" },
         "document": { "type": "object" },
