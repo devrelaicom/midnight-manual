@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use anyhow::{anyhow, Context as _, Result};
 use clap::Args as ClapArgs;
 use mn_content::manifest::generate::{generate, GenerateOptions};
-use mn_content::manifest::sitemap;
+use mn_content::manifest::{robots, sitemap};
 
 /// Arguments for `mnm manifest generate`.
 #[derive(Debug, ClapArgs)]
@@ -132,6 +132,12 @@ pub async fn run(args: Args) -> Result<()> {
 }
 
 /// Fetch and parse sitemaps from HTTP URLs or local file paths.
+///
+/// When the caller passes a bare site URL (one whose path doesn't already
+/// look like a sitemap), we first probe `<origin>/robots.txt` for any
+/// `Sitemap:` directives and use those instead. If robots.txt is missing,
+/// non-2xx, or has no `Sitemap:` lines we fall back to the user-supplied
+/// URL — auto-discovery is a best-effort hint, never a hard requirement.
 pub async fn load_sitemaps(specs: &[String]) -> Result<Vec<url::Url>> {
     if specs.is_empty() {
         return Ok(Vec::new());
@@ -144,7 +150,29 @@ pub async fn load_sitemaps(specs: &[String]) -> Result<Vec<url::Url>> {
     for spec in specs {
         if sitemap::is_http(spec) {
             let url = url::Url::parse(spec).with_context(|| format!("parse {spec}"))?;
-            out.extend(sitemap::load_from_url(&client, &url).await?);
+            let urls_to_load = if robots::looks_like_sitemap_spec(spec) {
+                vec![url]
+            } else {
+                let discovered = robots::discover_sitemaps(&client, &url).await;
+                if discovered.is_empty() {
+                    tracing::debug!(
+                        target: "mn-cli::manifest::generate",
+                        spec = %spec,
+                        "robots.txt yielded no Sitemap: directives; using user-supplied URL"
+                    );
+                    vec![url]
+                } else {
+                    eprintln!(
+                        "discovered {} sitemap(s) from {}/robots.txt",
+                        discovered.len(),
+                        url.origin().ascii_serialization()
+                    );
+                    discovered
+                }
+            };
+            for u in urls_to_load {
+                out.extend(sitemap::load_from_url(&client, &u).await?);
+            }
         } else {
             out.extend(sitemap::load_from_path(std::path::Path::new(spec))?);
         }

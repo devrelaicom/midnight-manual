@@ -8,6 +8,7 @@
 pub mod generate;
 pub mod matcher;
 pub mod resolve;
+pub mod robots;
 pub mod sitemap;
 
 use std::collections::HashSet;
