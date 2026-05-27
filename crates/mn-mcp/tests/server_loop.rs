@@ -78,7 +78,7 @@ async fn status_tool_works_without_model_load() {
 }
 
 #[tokio::test]
-async fn tools_list_contains_all_eleven() {
+async fn tools_list_contains_all_twelve() {
     let list = mn_mcp::tools::list();
     let names: Vec<_> = list.tools.iter().map(|t| t.name).collect();
     for expected in [
@@ -86,6 +86,7 @@ async fn tools_list_contains_all_eleven() {
         "get_chunk",
         "get_chunk_next",
         "get_chunk_prev",
+        "get_chunk_neighbors",
         "get_chunk_parents",
         "get_document",
         "get_document_full",
@@ -96,7 +97,7 @@ async fn tools_list_contains_all_eleven() {
     ] {
         assert!(names.contains(&expected), "missing tool: {expected}");
     }
-    assert_eq!(names.len(), 11);
+    assert_eq!(names.len(), 12);
 }
 
 #[tokio::test]
@@ -105,6 +106,7 @@ async fn new_navigation_tool_schemas_are_well_formed() {
     for name in [
         "get_chunk_next",
         "get_chunk_prev",
+        "get_chunk_neighbors",
         "get_document",
         "get_document_full",
         "get_document_chunks",

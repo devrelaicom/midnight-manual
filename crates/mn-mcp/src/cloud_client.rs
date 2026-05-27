@@ -195,6 +195,37 @@ impl CloudClient {
         self.get_json(&path).await
     }
 
+    /// Compose `get_chunk_prev` + `get_chunk` + `get_chunk_next` into a single
+    /// round-trip by issuing the three HTTP calls concurrently with
+    /// `tokio::try_join!`. The cost on the wire is one connection (reqwest's
+    /// connection pool keeps things keep-alive), but with three parallel
+    /// in-flight responses — so latency is `max(prev, get, next)` rather than
+    /// their sum.
+    ///
+    /// Returns `{prev, chunk, next}` where `prev`/`next` are the cloud's full
+    /// `{chunks: ChunkWithContext[]}` envelopes and `chunk` is the cloud's
+    /// `/v1/chunks/:id` body verbatim. Any of the three failing aborts the
+    /// other two and propagates the error — most importantly, a 404 on the
+    /// anchor `chunk` yields the same [`CloudError::NotFound`] a plain
+    /// `get_chunk` would.
+    pub async fn get_chunk_neighbors(
+        &self,
+        id: &str,
+        prev_count: u32,
+        next_count: u32,
+    ) -> Result<serde_json::Value, CloudError> {
+        let (prev, chunk, next) = tokio::try_join!(
+            self.get_chunk_prev(id, prev_count),
+            self.get_chunk(id),
+            self.get_chunk_next(id, next_count),
+        )?;
+        Ok(serde_json::json!({
+            "prev": prev,
+            "chunk": chunk,
+            "next": next,
+        }))
+    }
+
     /// `GET /v1/sources`.
     pub async fn list_sources(&self) -> Result<serde_json::Value, CloudError> {
         self.get_json("/v1/sources").await

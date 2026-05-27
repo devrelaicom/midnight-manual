@@ -173,6 +173,8 @@ pub enum McpToolName {
     GetChunkNext,
     /// `get_chunk_prev` tool.
     GetChunkPrev,
+    /// `get_chunk_neighbors` tool. Bundles prev + current + next in one call.
+    GetChunkNeighbors,
     /// `get_chunk_parents` tool.
     GetChunkParents,
     /// `get_document` tool.
