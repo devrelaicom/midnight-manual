@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use mn_mcp::cloud_client::CloudClient;
 use mn_mcp::tools::{
-    run_chunk_nav, run_document_chunks, run_passthrough_id, ChunkNavDirection, PassthroughError,
-    PassthroughKind,
+    run_chunk_nav, run_chunk_neighbors, run_document_chunks, run_passthrough_id, ChunkNavDirection,
+    PassthroughError, PassthroughKind,
 };
 use serde_json::json;
 use wiremock::matchers::{method, path, query_param};
@@ -300,6 +300,178 @@ async fn run_document_chunks_rejects_limit_over_max() {
     let client = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
     let err = run_document_chunks(
         &json!({"id": "33333333-3333-3333-3333-333333333304", "limit": 101}),
+        &client,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, PassthroughError::InvalidInput(_)));
+}
+
+#[tokio::test]
+async fn run_chunk_neighbors_bundles_three_endpoints() {
+    let server = MockServer::start().await;
+    let id = "44444444-4444-4444-4444-444444444400";
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/chunks/{id}/prev")))
+        .and(query_param("count", "2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"chunks": [
+            {"id": "prev-1", "content": "p1"},
+        ]})))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/chunks/{id}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": id, "content": "anchor",
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/chunks/{id}/next")))
+        .and(query_param("count", "2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"chunks": [
+            {"id": "next-1", "content": "n1"},
+            {"id": "next-2", "content": "n2"},
+        ]})))
+        .mount(&server)
+        .await;
+    let client = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
+    let v = run_chunk_neighbors(&json!({"id": id}), &client)
+        .await
+        .unwrap();
+    assert_eq!(v["chunk"]["id"], id);
+    assert_eq!(v["chunk"]["content"], "anchor");
+    assert_eq!(v["prev"]["chunks"].as_array().unwrap().len(), 1);
+    assert_eq!(v["next"]["chunks"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn run_chunk_neighbors_honours_count() {
+    let server = MockServer::start().await;
+    let id = "44444444-4444-4444-4444-444444444401";
+    // The handler applies `count` symmetrically: prev=next=4. Each mock asserts
+    // the query param explicitly, so a regression (e.g. desync between
+    // prev/next) would fail this test rather than silently passing.
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/chunks/{id}/prev")))
+        .and(query_param("count", "4"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"chunks": []})))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/chunks/{id}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": id})))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/chunks/{id}/next")))
+        .and(query_param("count", "4"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"chunks": []})))
+        .mount(&server)
+        .await;
+    let client = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
+    let _ = run_chunk_neighbors(&json!({"id": id, "count": 4}), &client)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn run_chunk_neighbors_returns_empty_edges_on_first_or_last() {
+    let server = MockServer::start().await;
+    let id = "44444444-4444-4444-4444-444444444402";
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/chunks/{id}/prev")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"chunks": []})))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/chunks/{id}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": id})))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/chunks/{id}/next")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"chunks": []})))
+        .mount(&server)
+        .await;
+    let client = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
+    let v = run_chunk_neighbors(&json!({"id": id}), &client)
+        .await
+        .unwrap();
+    assert!(v["prev"]["chunks"].as_array().unwrap().is_empty());
+    assert!(v["next"]["chunks"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn run_chunk_neighbors_anchor_404_maps_to_not_found() {
+    let server = MockServer::start().await;
+    let id = "44444444-4444-4444-4444-444444444403";
+    // The anchor 404s. With try_join! the other legs may or may not race
+    // back; either way the call surfaces NotFound.
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/chunks/{id}/prev")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"chunks": []})))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/chunks/{id}")))
+        .respond_with(ResponseTemplate::new(404).set_body_string("missing"))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/chunks/{id}/next")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"chunks": []})))
+        .mount(&server)
+        .await;
+    let client = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
+    let err = run_chunk_neighbors(&json!({"id": id}), &client)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, PassthroughError::NotFound(_)));
+}
+
+#[tokio::test]
+async fn run_chunk_neighbors_rejects_invalid_uuid() {
+    let server = MockServer::start().await;
+    let client = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
+    let err = run_chunk_neighbors(&json!({"id": "not-a-uuid"}), &client)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, PassthroughError::InvalidInput(_)));
+}
+
+#[tokio::test]
+async fn run_chunk_neighbors_rejects_count_zero() {
+    let server = MockServer::start().await;
+    let client = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
+    let err = run_chunk_neighbors(
+        &json!({"id": "44444444-4444-4444-4444-444444444404", "count": 0}),
+        &client,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, PassthroughError::InvalidInput(_)));
+}
+
+#[tokio::test]
+async fn run_chunk_neighbors_rejects_count_over_max() {
+    let server = MockServer::start().await;
+    let client = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
+    let err = run_chunk_neighbors(
+        &json!({"id": "44444444-4444-4444-4444-444444444405", "count": 101}),
+        &client,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, PassthroughError::InvalidInput(_)));
+}
+
+#[tokio::test]
+async fn run_chunk_neighbors_rejects_non_integer_count() {
+    let server = MockServer::start().await;
+    let client = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
+    let err = run_chunk_neighbors(
+        &json!({"id": "44444444-4444-4444-4444-444444444406", "count": "two"}),
         &client,
     )
     .await

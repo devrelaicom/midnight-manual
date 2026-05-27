@@ -254,6 +254,7 @@ fn tool_name_for_event(name: &str) -> Option<McpToolName> {
         "get_chunk" => Some(McpToolName::GetChunk),
         "get_chunk_next" => Some(McpToolName::GetChunkNext),
         "get_chunk_prev" => Some(McpToolName::GetChunkPrev),
+        "get_chunk_neighbors" => Some(McpToolName::GetChunkNeighbors),
         "get_chunk_parents" => Some(McpToolName::GetChunkParents),
         "get_document" => Some(McpToolName::GetDocument),
         "get_document_full" => Some(McpToolName::GetDocumentFull),
@@ -289,6 +290,7 @@ async fn dispatch_tool_inner(
         "get_chunk_prev" => {
             run_chunk_nav_dispatch(&id, &params, state, tools::ChunkNavDirection::Prev).await
         }
+        "get_chunk_neighbors" => run_chunk_neighbors_dispatch(&id, &params, state).await,
         "get_chunk_parents" => {
             run_passthrough_dispatch(&id, &params, state, tools::PassthroughKind::Parents).await
         }
@@ -395,6 +397,39 @@ async fn run_chunk_nav_dispatch(
                 id.clone(),
                 ErrorCode::ToolFailed,
                 "unexpected too_many_chunks on /next or /prev".to_owned(),
+            ))
+        }
+        Err(tools::PassthroughError::Cloud(msg)) => {
+            Err(Response::err(id.clone(), ErrorCode::ToolFailed, msg))
+        }
+    }
+}
+
+async fn run_chunk_neighbors_dispatch(
+    id: &RequestId,
+    params: &ToolCallParams,
+    state: &ServerState,
+) -> Result<String, Response> {
+    // NOTE: this is the fourth dispatch helper that follows the same
+    // InvalidInput / NotFound / TooManyChunks / Cloud shape. A follow-up PR
+    // will collapse all four into a single generic helper; keeping them
+    // separate here keeps this PR focused on the new tool.
+    match tools::run_chunk_neighbors(&params.arguments, &state.cloud).await {
+        Ok(v) => Ok(v.to_string()),
+        Err(tools::PassthroughError::InvalidInput(msg)) => {
+            Err(Response::err(id.clone(), ErrorCode::InvalidParams, msg))
+        }
+        Err(tools::PassthroughError::NotFound(msg)) => {
+            Err(Response::err(id.clone(), ErrorCode::ToolFailed, format!("not found: {msg}")))
+        }
+        Err(tools::PassthroughError::TooManyChunks { .. }) => {
+            // Not reachable: the cloud doesn't raise 412 on /:id, /:id/next,
+            // or /:id/prev. Exhaustively matched so a future variant addition
+            // fails the build instead of getting silently swallowed.
+            Err(Response::err(
+                id.clone(),
+                ErrorCode::ToolFailed,
+                "unexpected too_many_chunks on /neighbors".to_owned(),
             ))
         }
         Err(tools::PassthroughError::Cloud(msg)) => {

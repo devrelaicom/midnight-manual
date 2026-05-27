@@ -1,15 +1,17 @@
 //! MCP tool registry and per-tool handlers.
 //!
-//! Eleven tools, three categories:
+//! Twelve tools, three categories:
 //!
 //! - `status` / `pull_models` — local-only; talk to the embedder/reranker
 //!   model cache. No cloud round-trip.
 //! - `search` — embed locally, post to the cloud `/v1/search`, optionally
 //!   rerank with the local cross-encoder.
 //! - All other tools (`get_chunk` / `get_chunk_next` / `get_chunk_prev` /
-//!   `get_chunk_parents` / `get_document` / `get_document_full` /
-//!   `get_document_chunks` / `list_sources`) — pass-through to the cloud's
-//!   read endpoints, returning the response JSON verbatim.
+//!   `get_chunk_neighbors` / `get_chunk_parents` / `get_document` /
+//!   `get_document_full` / `get_document_chunks` / `list_sources`) —
+//!   pass-through to the cloud's read endpoints, returning the response JSON
+//!   verbatim. `get_chunk_neighbors` is the only one that fans out to three
+//!   cloud endpoints concurrently and bundles the results.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -28,7 +30,7 @@ use crate::server::ServerConfig;
 
 /// Build the static tool manifest sent in response to `tools/list`.
 ///
-/// All eleven tools declared in spec.md US5 / contracts/mcp-tools.json.
+/// All twelve tools declared in spec.md US5 / contracts/mcp-tools.json.
 /// Schemas here are kept in sync with the canonical document by way of the
 /// contract tests in `tests/`.
 #[must_use]
@@ -58,6 +60,12 @@ pub fn list() -> ToolsListResult {
                 description:
                     "Fetch up to `count` chunks immediately preceding the given chunk in chunk_index order, scoped to the same document. Returns `{chunks: ChunkWithContext[]}` sorted ascending (reading order). Returns `{chunks: []}` (not 404) when called on the first chunk. `embed_failed` chunks are skipped, so the returned chunk_index sequence may have gaps. count defaults to 5 and must be in [1, 100]; out-of-range values are rejected as InvalidParams before the call reaches the cloud.",
                 input_schema: chunk_nav_schema(),
+            },
+            ToolDescription {
+                name: "get_chunk_neighbors",
+                description:
+                    "Bundle `get_chunk_prev` + `get_chunk` + `get_chunk_next` in one round-trip. Returns `{prev: {chunks: ChunkWithContext[]}, chunk: ChunkWithContext, next: {chunks: ChunkWithContext[]}}` where `prev`/`next` are the same envelopes the standalone tools return (so an empty corpus edge yields `chunks: []`, not 404). The three cloud calls are issued in parallel, so latency is roughly that of the slowest leg. `count` defaults to 2 (chunks on each side) and must be in [1, 100]; out-of-range values are rejected as InvalidParams before any wire call. A 404 on the anchor chunk surfaces the same not-found envelope a plain `get_chunk` would.",
+                input_schema: chunk_neighbors_schema(),
             },
             ToolDescription {
                 name: "get_chunk_parents",
@@ -135,6 +143,18 @@ fn chunk_nav_schema() -> serde_json::Value {
         "properties": {
             "id": { "type": "string", "format": "uuid" },
             "count": { "type": "integer", "minimum": 1, "maximum": 100, "default": 5 },
+        },
+        "additionalProperties": false,
+    })
+}
+
+fn chunk_neighbors_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "required": ["id"],
+        "properties": {
+            "id": { "type": "string", "format": "uuid" },
+            "count": { "type": "integer", "minimum": 1, "maximum": 100, "default": 2 },
         },
         "additionalProperties": false,
     })
@@ -750,6 +770,63 @@ pub async fn run_chunk_nav(
     })
 }
 
+/// Default chunks on each side of the anchor for `get_chunk_neighbors`. Two is
+/// the same default `mnm chunks neighbors` uses on the CLI side — small enough
+/// to keep payloads compact, big enough to surround a search hit with context.
+const CHUNK_NEIGHBORS_DEFAULT_COUNT: u32 = 2;
+
+/// Dispatch `get_chunk_neighbors`. Parses `{id, count?}` (same shape as
+/// `get_chunk_next`/`get_chunk_prev`, but with a smaller default), validates
+/// the UUID and range, then asks the cloud client to fan out three parallel
+/// requests.
+///
+/// `count` is applied symmetrically to prev and next. The `too_many_chunks`
+/// envelope is unreachable here (neither `/next`, `/prev`, nor `/:id` raises
+/// 412), so we exhaustively match it as an internal-error sanity gate.
+///
+/// # Errors
+///
+/// See [`PassthroughError`].
+pub async fn run_chunk_neighbors(
+    args: &serde_json::Value,
+    cloud: &Arc<CloudClient>,
+) -> Result<serde_json::Value, PassthroughError> {
+    let obj = args.as_object().ok_or_else(|| {
+        PassthroughError::InvalidInput("arguments must be a JSON object".to_owned())
+    })?;
+    let id_str = obj
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| PassthroughError::InvalidInput("`id` (string) is required".to_owned()))?;
+    Uuid::parse_str(id_str)
+        .map_err(|e| PassthroughError::InvalidInput(format!("`id` is not a valid UUID: {e}")))?;
+
+    let count = match obj.get("count") {
+        None => CHUNK_NEIGHBORS_DEFAULT_COUNT,
+        Some(v) => {
+            let Some(n) = v.as_i64() else {
+                return Err(PassthroughError::InvalidInput(
+                    "`count` must be an integer".to_owned(),
+                ));
+            };
+            if !(1..=i64::from(CHUNK_NAV_MAX_COUNT)).contains(&n) {
+                return Err(PassthroughError::InvalidInput(format!(
+                    "`count` must be 1..={CHUNK_NAV_MAX_COUNT}"
+                )));
+            }
+            u32::try_from(n).expect("validated above")
+        }
+    };
+
+    cloud
+        .get_chunk_neighbors(id_str, count, count)
+        .await
+        .map_err(|e| match e {
+            CloudError::NotFound(msg) => PassthroughError::NotFound(msg),
+            other => PassthroughError::Cloud(other.to_string()),
+        })
+}
+
 const DOCUMENT_CHUNKS_DEFAULT_FROM: u32 = 0;
 const DOCUMENT_CHUNKS_DEFAULT_LIMIT: u32 = 20;
 const DOCUMENT_CHUNKS_MAX_LIMIT: u32 = 100;
@@ -852,7 +929,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tool_list_has_all_eleven_tools() {
+    fn tool_list_has_all_twelve_tools() {
         let m = list();
         let names: Vec<_> = m.tools.iter().map(|t| t.name).collect();
         for expected in [
@@ -860,6 +937,7 @@ mod tests {
             "get_chunk",
             "get_chunk_next",
             "get_chunk_prev",
+            "get_chunk_neighbors",
             "get_chunk_parents",
             "get_document",
             "get_document_full",
@@ -870,7 +948,7 @@ mod tests {
         ] {
             assert!(names.contains(&expected), "missing tool: {expected}");
         }
-        assert_eq!(names.len(), 11, "expected 11 tools, got {}", names.len());
+        assert_eq!(names.len(), 12, "expected 12 tools, got {}", names.len());
     }
 
     #[test]
@@ -879,6 +957,7 @@ mod tests {
         for name in [
             "get_chunk_next",
             "get_chunk_prev",
+            "get_chunk_neighbors",
             "get_document",
             "get_document_full",
             "get_document_chunks",
