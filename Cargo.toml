@@ -112,6 +112,12 @@ tree-sitter-javascript = "0.23"
 
 # ML
 fastembed        = "4"
+# tokenizers is already a transitive dep of fastembed; we promote it to a
+# direct workspace dep so mn-content can compute real BPE token counts
+# without dragging in the embedder. default-features disabled to drop the
+# `progressbar` (indicatif) and `onig` (Oniguruma C lib) baggage we do not
+# need for offline encode-only usage.
+tokenizers       = { version = "0.21", default-features = false, features = ["fancy-regex"] }
 
 # Observability
 tracing                    = "0.1"
