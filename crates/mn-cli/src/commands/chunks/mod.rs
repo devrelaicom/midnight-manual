@@ -4,6 +4,7 @@ use anyhow::{Context as _, Result};
 use clap::{Args as ClapArgs, Subcommand};
 use mn_telemetry::TelemetryClient;
 
+pub mod neighbors;
 pub mod next;
 pub mod prev;
 pub mod show;
@@ -25,6 +26,8 @@ pub enum ChunksCmd {
     Next(next::Args),
     /// Fetch the previous N chunks before the anchor in the same document.
     Prev(prev::Args),
+    /// Fetch prev + anchor + next in one call (composes `prev`, `show`, `next`).
+    Neighbors(neighbors::Args),
 }
 
 /// Dispatcher for chunks namespace.
@@ -39,6 +42,7 @@ pub async fn run(
         ChunksCmd::Show(a) => show::run(a, server, json).await,
         ChunksCmd::Next(a) => next::run(a, server, json).await,
         ChunksCmd::Prev(a) => prev::run(a, server, json).await,
+        ChunksCmd::Neighbors(a) => neighbors::run(a, server, json).await,
     }
 }
 
