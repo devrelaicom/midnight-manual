@@ -96,7 +96,7 @@ pub enum Command {
     Ratelimits(commands::ratelimits::Args),
     /// Manifest authoring + validation (local only).
     Manifest(commands::manifest::Args),
-    /// Inspect chunks: show, next, prev.
+    /// Inspect chunks: show, next, prev, neighbors.
     Chunks(commands::chunks::Args),
     /// Inspect documents: show, full, chunks.
     Documents(commands::documents::Args),
