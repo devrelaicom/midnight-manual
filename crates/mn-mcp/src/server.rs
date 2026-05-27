@@ -207,11 +207,16 @@ async fn handle_request(req: crate::protocol::Request, state: &ServerState) -> V
 async fn dispatch_tool(id: RequestId, params: ToolCallParams, state: &ServerState) -> Response {
     let started = Instant::now();
     let tool_name_for_event = tool_name_for_event(&params.name);
-    let rerank_on = params
-        .arguments
-        .get("rerank")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
+    // `rerank` is only meaningful to the `search` tool; for everything else
+    // the field doesn't exist in the schema, so the telemetry value is false.
+    // Search's own default is `true` (see parse_search_args), so an absent
+    // field there must log `true` to match what actually happened on the wire.
+    let rerank_on = params.name == "search"
+        && params
+            .arguments
+            .get("rerank")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true);
     let response = dispatch_tool_inner(id, params, state).await;
     let latency_ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
     state.tools_served.fetch_add(1, Ordering::Relaxed);
@@ -475,5 +480,26 @@ fn too_many_chunks_response(id: RequestId, chunk_count: u32, cap: u32, hint: &st
             message: format!("document has {chunk_count} chunks (cap {cap})"),
             data: Some(data),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Adding a tool to the manifest without adding the corresponding
+    /// `McpToolName` arm here would silently drop telemetry. This test
+    /// closes that loop: if `tools::list()` grows a name that
+    /// `tool_name_for_event` can't translate, the build fails.
+    #[test]
+    fn every_manifest_tool_has_a_telemetry_name() {
+        for tool in crate::tools::list().tools {
+            assert!(
+                tool_name_for_event(tool.name).is_some(),
+                "tool `{}` is in the manifest but has no McpToolName mapping in \
+                 tool_name_for_event — add the arm to keep telemetry coverage",
+                tool.name,
+            );
+        }
     }
 }
