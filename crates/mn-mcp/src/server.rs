@@ -281,27 +281,14 @@ async fn dispatch_tool_inner(
             .map(|out| serde_json::to_string(&out).unwrap_or_else(|e| format!("serialize: {e}")))
             .map_err(|msg| Response::err(id.clone(), ErrorCode::ToolFailed, msg)),
         "search" => run_search_dispatch(&id, &params, state).await,
-        "get_chunk" => {
-            run_passthrough_dispatch(&id, &params, state, tools::PassthroughKind::Chunk).await
-        }
-        "get_chunk_next" => {
-            run_chunk_nav_dispatch(&id, &params, state, tools::ChunkNavDirection::Next).await
-        }
-        "get_chunk_prev" => {
-            run_chunk_nav_dispatch(&id, &params, state, tools::ChunkNavDirection::Prev).await
-        }
-        "get_chunk_neighbors" => run_chunk_neighbors_dispatch(&id, &params, state).await,
-        "get_chunk_parents" => {
-            run_passthrough_dispatch(&id, &params, state, tools::PassthroughKind::Parents).await
-        }
-        "get_document" => {
-            run_passthrough_dispatch(&id, &params, state, tools::PassthroughKind::Document).await
-        }
-        "get_document_full" => {
-            run_passthrough_dispatch(&id, &params, state, tools::PassthroughKind::DocumentFull)
-                .await
-        }
-        "get_document_chunks" => run_document_chunks_dispatch(&id, &params, state).await,
+        "get_chunk"
+        | "get_chunk_next"
+        | "get_chunk_prev"
+        | "get_chunk_neighbors"
+        | "get_chunk_parents"
+        | "get_document"
+        | "get_document_full"
+        | "get_document_chunks" => run_passthrough_tool(&id, &params, state).await,
         "list_sources" => match state.cloud.list_sources().await {
             Ok(v) => Ok(v.to_string()),
             Err(CloudError::NotFound(msg)) => {
@@ -353,109 +340,118 @@ async fn run_search_dispatch(
     }
 }
 
-async fn run_passthrough_dispatch(
-    id: &RequestId,
-    params: &ToolCallParams,
-    state: &ServerState,
-    kind: tools::PassthroughKind,
-) -> Result<String, Response> {
-    match tools::run_passthrough_id(&params.arguments, &state.cloud, kind).await {
-        Ok(v) => Ok(v.to_string()),
-        Err(tools::PassthroughError::InvalidInput(msg)) => {
-            Err(Response::err(id.clone(), ErrorCode::InvalidParams, msg))
-        }
-        Err(tools::PassthroughError::NotFound(msg)) => {
-            Err(Response::err(id.clone(), ErrorCode::ToolFailed, format!("not found: {msg}")))
-        }
-        Err(tools::PassthroughError::TooManyChunks { chunk_count, cap, hint }) => {
-            Err(too_many_chunks_response(id.clone(), chunk_count, cap, &hint))
-        }
-        Err(tools::PassthroughError::Cloud(msg)) => {
-            Err(Response::err(id.clone(), ErrorCode::ToolFailed, msg))
-        }
-    }
-}
-
-async fn run_chunk_nav_dispatch(
-    id: &RequestId,
-    params: &ToolCallParams,
-    state: &ServerState,
-    dir: tools::ChunkNavDirection,
-) -> Result<String, Response> {
-    match tools::run_chunk_nav(&params.arguments, &state.cloud, dir).await {
-        Ok(v) => Ok(v.to_string()),
-        Err(tools::PassthroughError::InvalidInput(msg)) => {
-            Err(Response::err(id.clone(), ErrorCode::InvalidParams, msg))
-        }
-        Err(tools::PassthroughError::NotFound(msg)) => {
-            Err(Response::err(id.clone(), ErrorCode::ToolFailed, format!("not found: {msg}")))
-        }
-        Err(tools::PassthroughError::TooManyChunks { .. }) => {
-            // Not reachable for next/prev (no 412 on /next or /prev), but
-            // exhaustively matched so the compiler catches additions.
-            Err(Response::err(
-                id.clone(),
-                ErrorCode::ToolFailed,
-                "unexpected too_many_chunks on /next or /prev".to_owned(),
-            ))
-        }
-        Err(tools::PassthroughError::Cloud(msg)) => {
-            Err(Response::err(id.clone(), ErrorCode::ToolFailed, msg))
-        }
-    }
-}
-
-async fn run_chunk_neighbors_dispatch(
+/// Dispatch any of the eight chunk/document passthrough tools. Pairs the
+/// per-tool future with the right `TooManyChunksPolicy`, then defers the
+/// shared error translation to [`run_passthrough`].
+///
+/// Returns `Err(Response::ToolNotFound)` for an unknown name; callers should
+/// have already routed those out, but the safety net keeps the function
+/// total.
+async fn run_passthrough_tool(
     id: &RequestId,
     params: &ToolCallParams,
     state: &ServerState,
 ) -> Result<String, Response> {
-    // NOTE: this is the fourth dispatch helper that follows the same
-    // InvalidInput / NotFound / TooManyChunks / Cloud shape. A follow-up PR
-    // will collapse all four into a single generic helper; keeping them
-    // separate here keeps this PR focused on the new tool.
-    match tools::run_chunk_neighbors(&params.arguments, &state.cloud).await {
-        Ok(v) => Ok(v.to_string()),
-        Err(tools::PassthroughError::InvalidInput(msg)) => {
-            Err(Response::err(id.clone(), ErrorCode::InvalidParams, msg))
+    let cloud = &state.cloud;
+    let args = &params.arguments;
+    match params.name.as_str() {
+        "get_chunk" => {
+            let fut = tools::run_passthrough_id(args, cloud, tools::PassthroughKind::Chunk);
+            run_passthrough(id, fut, TooManyChunksPolicy::Structured).await
         }
-        Err(tools::PassthroughError::NotFound(msg)) => {
-            Err(Response::err(id.clone(), ErrorCode::ToolFailed, format!("not found: {msg}")))
+        "get_chunk_next" => {
+            let fut = tools::run_chunk_nav(args, cloud, tools::ChunkNavDirection::Next);
+            let policy =
+                TooManyChunksPolicy::Unreachable("unexpected too_many_chunks on /next or /prev");
+            run_passthrough(id, fut, policy).await
         }
-        Err(tools::PassthroughError::TooManyChunks { .. }) => {
-            // Not reachable: the cloud doesn't raise 412 on /:id, /:id/next,
-            // or /:id/prev. Exhaustively matched so a future variant addition
-            // fails the build instead of getting silently swallowed.
-            Err(Response::err(
-                id.clone(),
-                ErrorCode::ToolFailed,
-                "unexpected too_many_chunks on /neighbors".to_owned(),
-            ))
+        "get_chunk_prev" => {
+            let fut = tools::run_chunk_nav(args, cloud, tools::ChunkNavDirection::Prev);
+            let policy =
+                TooManyChunksPolicy::Unreachable("unexpected too_many_chunks on /next or /prev");
+            run_passthrough(id, fut, policy).await
         }
-        Err(tools::PassthroughError::Cloud(msg)) => {
-            Err(Response::err(id.clone(), ErrorCode::ToolFailed, msg))
+        "get_chunk_neighbors" => {
+            let fut = tools::run_chunk_neighbors(args, cloud);
+            let policy =
+                TooManyChunksPolicy::Unreachable("unexpected too_many_chunks on /neighbors");
+            run_passthrough(id, fut, policy).await
         }
-    }
-}
-
-async fn run_document_chunks_dispatch(
-    id: &RequestId,
-    params: &ToolCallParams,
-    state: &ServerState,
-) -> Result<String, Response> {
-    match tools::run_document_chunks(&params.arguments, &state.cloud).await {
-        Ok(v) => Ok(v.to_string()),
-        Err(tools::PassthroughError::InvalidInput(msg)) => {
-            Err(Response::err(id.clone(), ErrorCode::InvalidParams, msg))
+        "get_chunk_parents" => {
+            let fut = tools::run_passthrough_id(args, cloud, tools::PassthroughKind::Parents);
+            run_passthrough(id, fut, TooManyChunksPolicy::Structured).await
         }
-        Err(tools::PassthroughError::NotFound(msg)) => {
-            Err(Response::err(id.clone(), ErrorCode::ToolFailed, format!("not found: {msg}")))
+        "get_document" => {
+            let fut = tools::run_passthrough_id(args, cloud, tools::PassthroughKind::Document);
+            run_passthrough(id, fut, TooManyChunksPolicy::Structured).await
         }
-        Err(tools::PassthroughError::TooManyChunks { .. }) => Err(Response::err(
+        "get_document_full" => {
+            let fut = tools::run_passthrough_id(args, cloud, tools::PassthroughKind::DocumentFull);
+            run_passthrough(id, fut, TooManyChunksPolicy::Structured).await
+        }
+        "get_document_chunks" => {
+            let fut = tools::run_document_chunks(args, cloud);
+            let policy =
+                TooManyChunksPolicy::Unreachable("unexpected too_many_chunks on /chunks window");
+            run_passthrough(id, fut, policy).await
+        }
+        other => Err(Response::err(
             id.clone(),
-            ErrorCode::ToolFailed,
-            "unexpected too_many_chunks on /chunks window".to_owned(),
+            ErrorCode::ToolNotFound,
+            format!("unknown passthrough tool: {other}"),
         )),
+    }
+}
+
+/// How a given tool dispatch should handle a `PassthroughError::TooManyChunks`
+/// from the cloud.
+///
+/// Only the `/v1/documents/:id/full` endpoint actually emits 412
+/// `too_many_chunks` (it's the one tool that can return an arbitrarily large
+/// body). Every other passthrough tool exhaustively matches the variant so
+/// the compiler catches additions, but a 412 there would be a cloud-side bug.
+#[derive(Debug, Clone, Copy)]
+enum TooManyChunksPolicy {
+    /// Translate to a structured JSON-RPC error with `chunk_count` / `cap` /
+    /// `hint` in `data` so an AI client can render a "use get_document_chunks"
+    /// remediation. Used by `get_document_full` (and harmlessly by the other
+    /// id-only tools, which never trigger it).
+    Structured,
+    /// Translate to a plain `ToolFailed` error with the given message. Used by
+    /// the navigation / window tools where 412 is not reachable from the
+    /// cloud surface; the static message names the offending endpoint to make
+    /// future regressions obvious in logs.
+    Unreachable(&'static str),
+}
+
+/// Single dispatch helper for every tool that returns
+/// `Result<serde_json::Value, PassthroughError>`. Awaits the per-tool future,
+/// serialises the success body to a JSON string, and translates each error
+/// variant to the matching JSON-RPC response.
+async fn run_passthrough<F>(
+    id: &RequestId,
+    fut: F,
+    too_many: TooManyChunksPolicy,
+) -> Result<String, Response>
+where
+    F: std::future::Future<Output = Result<serde_json::Value, tools::PassthroughError>>,
+{
+    match fut.await {
+        Ok(v) => Ok(v.to_string()),
+        Err(tools::PassthroughError::InvalidInput(msg)) => {
+            Err(Response::err(id.clone(), ErrorCode::InvalidParams, msg))
+        }
+        Err(tools::PassthroughError::NotFound(msg)) => {
+            Err(Response::err(id.clone(), ErrorCode::ToolFailed, format!("not found: {msg}")))
+        }
+        Err(tools::PassthroughError::TooManyChunks { chunk_count, cap, hint }) => match too_many {
+            TooManyChunksPolicy::Structured => {
+                Err(too_many_chunks_response(id.clone(), chunk_count, cap, &hint))
+            }
+            TooManyChunksPolicy::Unreachable(msg) => {
+                Err(Response::err(id.clone(), ErrorCode::ToolFailed, msg.to_owned()))
+            }
+        },
         Err(tools::PassthroughError::Cloud(msg)) => {
             Err(Response::err(id.clone(), ErrorCode::ToolFailed, msg))
         }
