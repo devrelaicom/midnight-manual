@@ -12,6 +12,9 @@ pub mod rust;
 #[cfg(feature = "core-grammars")]
 pub mod ts;
 
+#[cfg(feature = "core-grammars")]
+pub mod js;
+
 use crate::chunk::{Chunk, Chunker, ChunkerConfig};
 use crate::code::symbols::{symbol_path_at, KindTable};
 use language::Language;
@@ -126,6 +129,8 @@ pub fn chunker_for_ext(lang: Language, ext: &str) -> Box<dyn Chunker> {
         Language::TypeScript => Box::new(ts::TypeScriptChunker {
             tsx: ext.eq_ignore_ascii_case("tsx"),
         }),
+        #[cfg(feature = "core-grammars")]
+        Language::JavaScript => Box::new(js::JavaScriptChunker),
         _ => Box::new(LineWindowChunker),
     }
 }
