@@ -26,7 +26,7 @@
 
 # Phase A — Shared types, migration, dependencies
 
-## Task 1: `SymbolSegment` type in `mn-core`
+## Task 1: `SymbolSegment` type in `mn-core` ✅ DONE
 
 **Files:**
 - Modify: `crates/mn-core/src/types.rs` (add after `DocumentKind`, ~line 236)
@@ -84,7 +84,7 @@ git commit -m "feat(mn-core): add SymbolSegment type for structured symbol paths
 
 ---
 
-## Task 2: Migration 0007 — `chunk.symbol_path` → JSONB
+## Task 2: Migration 0007 — `chunk.symbol_path` → JSONB ✅ DONE
 
 **Files:**
 - Create: `crates/mn-store/migrations/0007_symbol_path_jsonb.sql`
@@ -133,7 +133,7 @@ git commit -m "feat(mn-store): migrate chunk.symbol_path to jsonb (0007)"
 
 ---
 
-## Task 3: `mn-store` chunk entity → structured symbol_path
+## Task 3: `mn-store` chunk entity → structured symbol_path ✅ DONE
 
 **Files:**
 - Modify: `crates/mn-store/src/entities/chunk.rs` (`NewChunk` field ~line 92; INSERT bind ~line 133; any read struct ~line 275)
@@ -214,7 +214,7 @@ git commit -m "feat(mn-store): structured symbol_path via JSONB in chunk entity"
 
 ---
 
-## Task 4: `mn-server` ChunkUpload → structured symbol_path
+## Task 4: `mn-server` ChunkUpload → structured symbol_path ✅ DONE
 
 **Files:**
 - Modify: `crates/mn-server/src/routes/admin_ingest.rs` (`ChunkUpload.symbol_path` ~line 134; the two `symbol_path: &chunk_upload.symbol_path` / `&prior.symbol_path` binds ~lines 659, 726; any prior-chunk read struct)
@@ -268,7 +268,7 @@ git commit -m "feat(mn-server): structured symbol_path on ChunkUpload + carry pa
 
 ---
 
-## Task 5: Dependencies + feature flags
+## Task 5: Dependencies + feature flags ✅ DONE (text-splitter pinned 0.27 not 0.30; crates are tree-sitter-toml-ng / tree-sitter-kotlin-ng; runtime tree-sitter 0.25.10)
 
 **Files:**
 - Modify: `Cargo.toml` (workspace `[workspace.dependencies]`)
