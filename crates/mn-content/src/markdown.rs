@@ -170,32 +170,23 @@ fn token_window_split(
     let mut window_start_line = 0usize;
 
     while window_start_line < n_lines {
-        // Build up the window line by line.
-        let mut window_end_line = window_start_line; // inclusive last line index
-        loop {
-            let candidate_end = window_end_line + 1;
-            if candidate_end > n_lines {
+        // Grow: find the largest end (exclusive) such that lines[start..end] fits
+        // the token budget.  We always include at least one line so that a single
+        // over-budget line is emitted whole (no infinite loop).
+        let mut end_line = window_start_line + 1; // at least one line
+        while end_line < n_lines {
+            let slice = &text[line_starts[window_start_line]..line_end(end_line)];
+            if crate::tokens::count(slice) > cfg.max_tokens {
+                // Adding line `end_line` would overflow — stop before it.
                 break;
             }
-            let slice_start = line_starts[window_start_line];
-            let slice_end = line_end(candidate_end.saturating_sub(1));
-            let slice = &text[slice_start..slice_end];
-            if crate::tokens::count(slice) > cfg.max_tokens && window_end_line > window_start_line {
-                // Adding this next line would exceed the budget and we already
-                // have at least one line — emit what we have.
-                break;
-            }
-            window_end_line = candidate_end.saturating_sub(1);
-            if candidate_end >= n_lines {
-                // Reached the end of text.
-                break;
-            }
-            // Try to add one more line next iteration.
-            window_end_line = candidate_end;
+            end_line += 1;
         }
-
+        // lines [window_start_line ..= end_line-1] is the in-budget window
+        // (or a single over-budget line when end_line == window_start_line + 1).
+        let last_line = end_line - 1;
         let slice_start = line_starts[window_start_line];
-        let slice_end = line_end(window_end_line);
+        let slice_end = line_end(last_line);
         let slice = &text[slice_start..slice_end];
 
         // Guard: never emit empty slices.
@@ -214,34 +205,12 @@ fn token_window_split(
         }
 
         // Step the start forward, then back by overlap, ensuring forward progress.
-        let lines_in_window = window_end_line.saturating_sub(window_start_line) + 1;
-        let step = if lines_in_window > overlap_lines {
-            lines_in_window - overlap_lines
-        } else {
-            1 // always advance at least one line to avoid infinite loops
-        };
+        let lines_in_window = last_line - window_start_line + 1;
+        let step = lines_in_window.saturating_sub(overlap_lines).max(1);
         window_start_line += step;
     }
 
     out
-}
-
-/// Find the largest index `<= idx` that is a valid UTF-8 char boundary in `s`.
-const fn char_boundary_at_or_below(s: &str, mut idx: usize) -> usize {
-    if idx >= s.len() {
-        return s.len();
-    }
-    while idx > 0 && !s.is_char_boundary(idx) {
-        idx -= 1;
-    }
-    idx
-}
-
-// Keep the function accessible so it isn't dead-code warned if we ever call it
-// from token_window_split in a future hard-split path.
-#[allow(dead_code)]
-const fn _char_boundary_at_or_below_export(s: &str, idx: usize) -> usize {
-    char_boundary_at_or_below(s, idx)
 }
 
 #[cfg(test)]
@@ -303,13 +272,17 @@ mod tests {
         let md = format!("# Title\n\n{big_body}");
         let chunks = MarkdownChunker.chunk(&md, &small_cfg()).unwrap();
         assert!(chunks.len() > 1, "oversized chunk must split into windows");
+        let cfg = small_cfg();
         for c in &chunks {
-            // Each window must fit within budget (with tolerance for a single
-            // line that can't be split further).
+            // Every chunk must either fit within the token budget, OR be a single
+            // line that exceeds the budget on its own (unavoidable — can't split
+            // finer than one line).
+            let single_line = c.content.trim_end().lines().count() == 1;
             assert!(
-                c.token_count <= small_cfg().max_tokens * 2,
-                "chunk token_count={} exceeds 2× budget",
-                c.token_count
+                c.token_count <= cfg.max_tokens || single_line,
+                "chunk token_count={} exceeds budget={} and is not a single line",
+                c.token_count,
+                cfg.max_tokens
             );
         }
         // Verify the trait contract: markdown windowing sets fallback_used=false
