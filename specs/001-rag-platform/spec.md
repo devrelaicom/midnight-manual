@@ -97,6 +97,14 @@ Developers building on the Midnight Network need accurate, current, and well-att
 
 **Story 2 CLI surface**:
 
+> **Superseded (2026-05-28):** the PR #50 ingest-UX rework replaced the per-content-type
+> `mnm ingest md` / `mnm ingest code` commands with a single manifest-driven
+> `mnm ingest run`. Chunker selection is now **per file, by extension** (Markdown →
+> heading chunker, code → language chunker, unknown → line-window), so one `ingest run`
+> over a mixed tree routes every file to its best chunker. The `mnm ingest md`/`code`
+> invocations and flag lists below are retained for historical trace only; the live flag
+> set is on `mnm ingest run` (see `crates/mn-cli/src/commands/ingest/run.rs`).
+
 ```
 mnm sources add <slug> --kind <docs_site|code_repo|standalone|mixed> [--display-name <name>] [--origin-url <url>] [--retention-count <n>]
                                                                               # display_name defaults to slug if omitted
@@ -446,6 +454,14 @@ If the file is missing both sections, the MCP server starts anonymously and surf
 13. **Given** the `--dry-run`, `--json`, `--strict`, and `--force-new` flags, **When** ingest runs, **Then** they behave identically to `mnm ingest md` (re-uses FR-018, FR-019, FR-020, FR-021).
 
 **CLI surface introduced by this story**:
+
+> **Superseded (2026-05-28):** there is no separate `mnm ingest code` command. Code
+> chunking is handled by the unified `mnm ingest run` (see the Story 2 superseding note),
+> which dispatches to the correct chunker per file by extension. The code-specific flags
+> (`--code-chunk-tokens`, `--code-chunk-lines`, `--code-chunk-overlap`, `--include`,
+> `--exclude`, `--max-file-size`) hang on `mnm ingest run`. Git-mode clone-and-ingest
+> (`--git`/`--ref`) is deferred to its own follow-up; it is a source-acquisition feature
+> orthogonal to chunking. The snippet below is retained for historical trace only.
 
 ```
 mnm ingest code <slug> <path>
