@@ -21,6 +21,15 @@ pub mod bash;
 #[cfg(feature = "scheme")]
 pub mod scheme;
 
+#[cfg(feature = "extended-grammars")]
+pub mod go;
+
+#[cfg(feature = "extended-grammars")]
+pub mod python;
+
+#[cfg(feature = "extended-grammars")]
+pub mod solidity;
+
 use crate::chunk::{Chunk, Chunker, ChunkerConfig};
 use crate::code::symbols::{symbol_path_at, KindTable};
 use language::Language;
@@ -141,6 +150,12 @@ pub fn chunker_for_ext(lang: Language, ext: &str) -> Box<dyn Chunker> {
         Language::Bash => Box::new(bash::BashChunker),
         #[cfg(feature = "scheme")]
         Language::Scheme => Box::new(scheme::SchemeChunker),
+        #[cfg(feature = "extended-grammars")]
+        Language::Go => Box::new(go::GoChunker),
+        #[cfg(feature = "extended-grammars")]
+        Language::Python => Box::new(python::PythonChunker),
+        #[cfg(feature = "extended-grammars")]
+        Language::Solidity => Box::new(solidity::SolidityChunker),
         _ => Box::new(LineWindowChunker),
     }
 }
