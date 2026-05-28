@@ -1981,7 +1981,7 @@ Boot the server against testcontainers Postgres (mirror `f_bug_e2e.rs` from PR #
 
 ---
 
-## Task 26: CI feature matrix
+## Task 26: CI feature matrix ✅ DONE (added test-all-grammars job; clippy --all-features already covers all-grammars clippy)
 
 **Files:**
 - Modify: `.github/workflows/ci.yml`
