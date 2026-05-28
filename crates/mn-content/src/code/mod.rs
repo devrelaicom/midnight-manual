@@ -4,6 +4,7 @@
 pub mod language;
 pub mod line_window;
 pub mod splitter;
+pub mod symbols;
 
 use crate::chunk::Chunker;
 use language::Language;
