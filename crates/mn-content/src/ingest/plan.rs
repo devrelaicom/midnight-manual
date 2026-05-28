@@ -11,10 +11,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::chunk::ChunkerConfig;
+use crate::chunk::{Chunker, ChunkerConfig};
 use crate::content_hash::{chunk_hash, document_hash};
 use crate::frontmatter::FrontmatterSplit;
-use crate::markdown::chunk_markdown;
 
 /// One pre-existing document carried over from the prior active source version.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -267,15 +266,24 @@ impl PlanBuilder {
             }
         }
 
-        let chunks = match walked.kind {
-            DocumentKind::Markdown => chunk_markdown(&walked.split.body, self.chunker_config),
-            DocumentKind::Code | DocumentKind::Plaintext => {
-                // Phase 9a only ships the Markdown chunker through the
-                // orchestrator. Code chunking lands in a follow-up — for now
-                // route through the Markdown chunker's fallback windowing
-                // path, which is content-agnostic.
-                chunk_markdown(&walked.split.body, self.chunker_config)
+        let chunks: Vec<crate::chunk::Chunk> = match walked.kind {
+            DocumentKind::Markdown => crate::markdown::MarkdownChunker
+                .chunk(&walked.split.body, &self.chunker_config)
+                .unwrap_or_default(),
+            DocumentKind::Code => {
+                let ext = walked
+                    .path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("");
+                let lang = crate::code::language::Language::for_extension(ext);
+                crate::code::chunker_for_ext(lang, ext)
+                    .chunk(&walked.split.body, &self.chunker_config)
+                    .unwrap_or_default()
             }
+            DocumentKind::Plaintext => crate::code::line_window::LineWindowChunker
+                .chunk(&walked.split.body, &self.chunker_config)
+                .unwrap_or_default(),
         };
         let total = u32::try_from(chunks.len()).unwrap_or(u32::MAX);
         let planned_chunks: Vec<PlannedChunk> = chunks
@@ -743,6 +751,48 @@ mod tests {
         let plan = b.finalize();
         let pc = &plan.new_documents[0].chunks[0];
         assert!(pc.symbol_path.is_empty());
+    }
+
+    #[cfg(feature = "core-grammars")]
+    #[test]
+    fn code_documents_get_symbol_paths() {
+        use crate::manifest::resolve::ResolvedLeaf;
+        use mn_core::types::DocumentKind;
+
+        let code = "impl Foo {\n    fn bar(&self) { let x = 1; }\n}\n";
+        let split = split_frontmatter(code);
+        let leaf = ResolvedLeaf {
+            rel_path: PathBuf::from("src/lib.rs"),
+            kind: DocumentKind::Code,
+            name: None,
+            published_url: None,
+            source_url: None,
+            provenance_override: Provenance::default(),
+        };
+        let ctx = WalkContext {
+            path: PathBuf::from("src/lib.rs"),
+            kind: DocumentKind::Code,
+            content: code,
+            split: &split,
+            resolved: &leaf,
+            source_modified_at: None,
+            package: None,
+        };
+        let mut b = empty_builder();
+        b.add_walked_document(&ctx).expect("add_walked_document");
+        let plan = b.finalize();
+
+        let chunks = &plan.new_documents[0].chunks;
+        assert!(
+            chunks
+                .iter()
+                .any(|c| c.symbol_path.iter().any(|s| s.kind == "impl" && s.name == "Foo")),
+            "expected a chunk with symbol_path containing {{kind:\"impl\", name:\"Foo\"}}, got: {chunks:?}"
+        );
+        assert!(
+            chunks.iter().all(|c| c.heading_path.is_empty()),
+            "code chunks should have empty heading_path"
+        );
     }
 }
 

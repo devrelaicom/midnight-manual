@@ -277,7 +277,7 @@ async fn run_inner(
     for doc in &walked_docs {
         let ctx = WalkContext {
             path: doc.rel_path.clone(),
-            kind: DocumentKind::Markdown,
+            kind: doc.resolved.kind,
             content: &doc.content,
             split: &doc.split,
             resolved: &doc.resolved,
