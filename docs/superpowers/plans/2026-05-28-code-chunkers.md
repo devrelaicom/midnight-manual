@@ -1647,7 +1647,7 @@ After all twelve: `cargo test -p mn-content --features all-grammars code::` shou
 
 # Phase D — File filtering + package detection
 
-## Task 19: `ignore`-based file filter with precedence ladder
+## Task 19: `ignore`-based file filter with precedence ladder ✅ DONE (glob anchoring solved via dual basename+full-path match; walk returns Vec<PathBuf>)
 
 **Files:**
 - Create: `crates/mn-content/src/ingest/filter.rs`
@@ -1695,7 +1695,7 @@ mod tests {
 
 ---
 
-## Task 20: Wire the filter into walk + manifest generation
+## Task 20: Wire the filter into walk + manifest generation ✅ DONE (generate.rs uses FileFilter::walk; empty-include→none preserved; require_git(false) added so gitignore honored outside .git; walker.rs is manifest-only, untouched)
 
 **Files:**
 - Modify: `crates/mn-content/src/manifest/generate.rs` (use `FileFilter::walk` for the generated file list)
@@ -1715,7 +1715,7 @@ Add a test that `manifest generate` over a temp tree with a `.gitignore` and a `
 
 ---
 
-## Task 21: Package detection (`package.rs`)
+## Task 21: Package detection (`package.rs`) ✅ DONE
 
 **Files:**
 - Create: `crates/mn-content/src/package.rs`
@@ -1834,7 +1834,7 @@ Add `toml` to `mn-content`'s deps if absent (workspace already has `toml`).
 
 ---
 
-## Task 22: Persist package membership
+## Task 22: Persist package membership ✅ DONE (PackageRef in mn-core; detection in run.rs via WalkContext.package — planner stays pure; reused existing package::upsert; insert_new_document takes &PgPool so compatible)
 
 **Files:**
 - Modify: `crates/mn-content/src/ingest/plan.rs` (`PlannedDocument` already has no package field — add one)
