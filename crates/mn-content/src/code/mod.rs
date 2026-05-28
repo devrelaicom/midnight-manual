@@ -15,6 +15,9 @@ pub mod ts;
 #[cfg(feature = "core-grammars")]
 pub mod js;
 
+#[cfg(feature = "scheme")]
+pub mod scheme;
+
 use crate::chunk::{Chunk, Chunker, ChunkerConfig};
 use crate::code::symbols::{symbol_path_at, KindTable};
 use language::Language;
@@ -131,6 +134,8 @@ pub fn chunker_for_ext(lang: Language, ext: &str) -> Box<dyn Chunker> {
         }),
         #[cfg(feature = "core-grammars")]
         Language::JavaScript => Box::new(js::JavaScriptChunker),
+        #[cfg(feature = "scheme")]
+        Language::Scheme => Box::new(scheme::SchemeChunker),
         _ => Box::new(LineWindowChunker),
     }
 }

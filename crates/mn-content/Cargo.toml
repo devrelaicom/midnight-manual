@@ -43,6 +43,7 @@ globset               = { workspace = true }
 pulldown-cmark        = { workspace = true }
 quick-xml             = { workspace = true }
 tree-sitter           = { workspace = true }
+tree-sitter-language  = { workspace = true }
 text-splitter         = { workspace = true }
 ignore                = { workspace = true }
 tree-sitter-rust       = { workspace = true, optional = true }

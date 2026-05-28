@@ -24,7 +24,12 @@ homepage      = "https://midnight.network"
 description   = "RAG platform for the Midnight Network: CLI, local MCP server, and cloud read API."
 
 [workspace.lints.rust]
-unsafe_code     = "forbid"
+# `deny` (not `forbid`) so the single FFI binding to the vendored tree-sitter
+# Scheme grammar in mn-content can opt in with a narrowly-scoped
+# `#[allow(unsafe_code)]`. Unsafe remains denied everywhere by default; only that
+# one documented FFI declaration is permitted. `forbid` would make even that
+# scoped allow a hard error.
+unsafe_code     = "deny"
 missing_docs    = "warn"
 unused_imports  = "warn"
 
@@ -113,6 +118,9 @@ quick-xml        = "0.31"
 # `tree-sitter-language ^0.1` (their direct `tree-sitter` req is dev-only), so
 # they unify against this runtime. See build verification in commit message.
 tree-sitter      = "0.25"     # selects 0.25.10
+# ABI shim for FFI grammar bindings (LanguageFn). Already in the graph via every
+# grammar crate; declared directly here for the vendored Scheme grammar.
+tree-sitter-language = "0.1"  # selects 0.1.7
 # text-splitter: code+tokenizers features. Pinned to 0.27 (last release on the
 # tokenizers-0.21 line; 0.28+ requires tokenizers 0.22 which cannot unify with
 # the workspace tokenizers 0.21 that fastembed + tokens.rs depend on).

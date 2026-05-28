@@ -2844,6 +2844,7 @@ dependencies = [
  "tree-sitter-java",
  "tree-sitter-javascript",
  "tree-sitter-kotlin-ng",
+ "tree-sitter-language",
  "tree-sitter-python",
  "tree-sitter-ruby",
  "tree-sitter-rust",
