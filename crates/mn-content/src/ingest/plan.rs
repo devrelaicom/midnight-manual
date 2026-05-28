@@ -11,9 +11,10 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::chunk::ChunkerConfig;
 use crate::content_hash::{chunk_hash, document_hash};
 use crate::frontmatter::FrontmatterSplit;
-use crate::markdown::{chunk_markdown, ChunkerConfig};
+use crate::markdown::chunk_markdown;
 
 /// One pre-existing document carried over from the prior active source version.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
