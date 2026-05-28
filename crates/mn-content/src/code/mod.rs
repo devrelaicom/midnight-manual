@@ -30,6 +30,18 @@ pub mod python;
 #[cfg(feature = "extended-grammars")]
 pub mod solidity;
 
+#[cfg(feature = "markup-grammars")]
+pub mod toml;
+
+#[cfg(feature = "markup-grammars")]
+pub mod yaml;
+
+#[cfg(feature = "markup-grammars")]
+pub mod html;
+
+#[cfg(feature = "markup-grammars")]
+pub mod xml;
+
 use crate::chunk::{Chunk, Chunker, ChunkerConfig};
 use crate::code::symbols::{symbol_path_at, KindTable};
 use language::Language;
@@ -156,6 +168,14 @@ pub fn chunker_for_ext(lang: Language, ext: &str) -> Box<dyn Chunker> {
         Language::Python => Box::new(python::PythonChunker),
         #[cfg(feature = "extended-grammars")]
         Language::Solidity => Box::new(solidity::SolidityChunker),
+        #[cfg(feature = "markup-grammars")]
+        Language::Toml => Box::new(toml::TomlChunker),
+        #[cfg(feature = "markup-grammars")]
+        Language::Yaml => Box::new(yaml::YamlChunker),
+        #[cfg(feature = "markup-grammars")]
+        Language::Html => Box::new(html::HtmlChunker),
+        #[cfg(feature = "markup-grammars")]
+        Language::Xml => Box::new(xml::XmlChunker),
         _ => Box::new(LineWindowChunker),
     }
 }

@@ -34,12 +34,16 @@ pub fn symbol_path_at(
     let mut node = tree.root_node();
     loop {
         if let Some(entry) = table.iter().find(|e| e.node_kind == node.kind()) {
-            if let Some(name) = node_name(node, src, entry.name_field) {
-                path.push(SymbolSegment {
-                    kind: entry.label.to_string(),
-                    name,
-                });
-            }
+            // `node_name` returns `None` when no identifying child exists (e.g.
+            // markup-language structural nodes whose header is a `bare_key` /
+            // `tag_name` child rather than an `*identifier*` child).  For those
+            // cases we still emit the path segment with an empty name so that
+            // callers can match on `kind` alone.
+            let name = node_name(node, src, entry.name_field).unwrap_or_default();
+            path.push(SymbolSegment {
+                kind: entry.label.to_string(),
+                name,
+            });
         }
         let next = {
             let mut cursor = node.walk();
