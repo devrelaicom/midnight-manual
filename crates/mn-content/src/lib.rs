@@ -7,6 +7,7 @@
 #![doc(html_root_url = "https://docs.rs/mn-content/0.1.0")]
 
 pub mod chunk;
+pub mod code;
 pub mod content_hash;
 pub mod frontmatter;
 pub mod ingest;
