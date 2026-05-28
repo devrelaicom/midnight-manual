@@ -70,53 +70,42 @@ pub struct GenerateResult {
 
 /// Run the generator with the given options and return the manifest + coverage entries.
 pub fn generate(opts: &GenerateOptions) -> anyhow::Result<GenerateResult> {
-    let files = collect_files(opts)?;
+    let files = collect_files(opts);
     let entries = build_entries(opts, &files)?;
     let manifest = build_manifest(opts, &entries);
     Ok(GenerateResult { manifest, entries })
 }
 
-fn collect_files(opts: &GenerateOptions) -> anyhow::Result<Vec<PathBuf>> {
-    use globset::{Glob, GlobSetBuilder};
+fn collect_files(opts: &GenerateOptions) -> Vec<PathBuf> {
+    use crate::ingest::filter::{FileFilter, FilterOptions};
 
-    let mut inc = GlobSetBuilder::new();
-    for pat in &opts.include {
-        inc.add(Glob::new(pat)?);
+    // Preserve pre-existing semantics: an empty include list produced zero
+    // files under the old walkdir+globset path (an empty GlobSet never
+    // matches). `FileFilter` interprets empty includes as "allow all", which
+    // would be a breaking change for callers that rely on the old behaviour.
+    // CLI toggles for `respect_gitignore` and `default_ignore_list` are out
+    // of scope for this task; both are hardcoded to `true` here.
+    if opts.include.is_empty() {
+        return Vec::new();
     }
-    let inc = inc.build()?;
-    let mut exc = GlobSetBuilder::new();
-    for pat in &opts.exclude {
-        exc.add(Glob::new(pat)?);
-    }
-    let exc = exc.build()?;
 
-    let mut out = Vec::new();
-    for entry in walkdir::WalkDir::new(&opts.base)
+    let filter = FileFilter::new(FilterOptions {
+        includes: opts.include.clone(),
+        excludes: opts.exclude.clone(),
+        respect_gitignore: true,
+        default_ignore_list: true,
+    });
+
+    // `FileFilter::walk` returns absolute paths; strip the base prefix to
+    // recover the repo-relative `rel` shape the rest of this module expects.
+    let mut out: Vec<PathBuf> = filter
+        .walk(&opts.base)
         .into_iter()
-        .filter_entry(|e| {
-            // Only filter hidden files from subdirectories, not the base.
-            if e.path() == opts.base {
-                return true;
-            }
-            !e.file_name().to_string_lossy().starts_with('.')
-        })
-        .flatten()
-    {
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let rel = entry.path().strip_prefix(&opts.base)?.to_path_buf();
-        if !inc.is_match(&rel) {
-            continue;
-        }
-        if exc.is_match(&rel) {
-            continue;
-        }
-        out.push(rel);
-    }
+        .filter_map(|abs| abs.strip_prefix(&opts.base).ok().map(PathBuf::from))
+        .collect();
     out.sort();
     out.dedup();
-    Ok(out)
+    out
 }
 
 fn build_entries(opts: &GenerateOptions, files: &[PathBuf]) -> anyhow::Result<Vec<GenerateEntry>> {
@@ -359,6 +348,62 @@ pub fn emit_yaml(manifest: &Manifest, date: &str) -> anyhow::Result<String> {
 mod tests {
     use super::*;
 
+    /// Verifies that `collect_files` (and therefore `generate`) respects
+    /// `.gitignore` files and the default-skip list (e.g. `node_modules/`).
+    #[test]
+    fn collect_files_respects_gitignore_and_default_skip_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+
+        // A regular Rust source file — must be included.
+        std::fs::write(base.join("keep.rs"), "fn x() {}").unwrap();
+        // A markdown file — must be included.
+        std::fs::write(base.join("notes.md"), "# Notes").unwrap();
+        // A .gitignore that ignores `ignored.rs`.
+        std::fs::write(base.join(".gitignore"), "ignored.rs\n").unwrap();
+        // A file that should be excluded by .gitignore.
+        std::fs::write(base.join("ignored.rs"), "fn y() {}").unwrap();
+        // A file under node_modules/ — excluded by the default-skip list.
+        std::fs::create_dir_all(base.join("node_modules/pkg")).unwrap();
+        std::fs::write(base.join("node_modules/pkg/dep.rs"), "fn z() {}").unwrap();
+
+        let opts = GenerateOptions {
+            base: base.to_path_buf(),
+            // Include both .rs and .md files.
+            include: vec!["*.rs".to_owned(), "*.md".to_owned()],
+            ..Default::default()
+        };
+        let files = collect_files(&opts);
+
+        // `keep.rs` and `notes.md` must be present.
+        assert!(
+            files
+                .iter()
+                .any(|p| p == &std::path::PathBuf::from("keep.rs")),
+            "keep.rs should be included; got: {files:?}",
+        );
+        assert!(
+            files
+                .iter()
+                .any(|p| p == &std::path::PathBuf::from("notes.md")),
+            "notes.md should be included; got: {files:?}",
+        );
+
+        // `ignored.rs` must be absent (respecting .gitignore).
+        assert!(
+            !files
+                .iter()
+                .any(|p| p == &std::path::PathBuf::from("ignored.rs")),
+            "ignored.rs should be excluded by .gitignore; got: {files:?}",
+        );
+
+        // Nothing under node_modules/ must appear.
+        assert!(
+            !files.iter().any(|p| p.starts_with("node_modules")),
+            "node_modules entries should be excluded; got: {files:?}",
+        );
+    }
+
     #[test]
     fn emit_yaml_starts_with_header_comment() {
         let m = Manifest {
@@ -393,7 +438,7 @@ mod tests {
             exclude: vec!["docs/draft.md".to_owned()],
             ..Default::default()
         };
-        let files = collect_files(&opts).unwrap();
+        let files = collect_files(&opts);
         assert_eq!(files, vec![PathBuf::from("docs/a.md"), PathBuf::from("docs/b.md")]);
     }
 

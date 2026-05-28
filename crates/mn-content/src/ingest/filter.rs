@@ -243,6 +243,9 @@ impl FileFilter {
         builder.git_exclude(self.opts.respect_gitignore);
         builder.ignore(self.opts.respect_gitignore);
         builder.parents(self.opts.respect_gitignore);
+        // Apply .gitignore rules even when no `.git` directory is present
+        // (e.g. in subdirectories or temporary trees used during testing).
+        builder.require_git(false);
 
         let mut out = Vec::new();
         for entry in builder.build() {
