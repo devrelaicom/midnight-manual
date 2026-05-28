@@ -1860,7 +1860,7 @@ Server-side integration test: upload a code document with a `package` payload; a
 
 # Phase E — CLI flags + dispatch swap
 
-## Task 23: New `ingest run` flags
+## Task 23: New `ingest run` flags ✅ DONE (8 flags; ChunkerConfig wired via with_chunker_config; filter flags parsed, await directory-discovery consumer)
 
 **Files:**
 - Modify: `crates/mn-cli/src/commands/ingest/run.rs` (`Args` + plumb into `ChunkerConfig` and `FilterOptions`)
@@ -1906,7 +1906,7 @@ Map them into `ChunkerConfig` (`with_chunker_config`) and `FilterOptions` where 
 
 ---
 
-## Task 24: Swap the planner dispatch to the code chunkers
+## Task 24: Swap the planner dispatch to the code chunkers ✅ DONE (dispatch by walked.kind; run.rs now uses doc.resolved.kind; chunk_markdown now dead repo-wide — remove in final cleanup)
 
 **Files:**
 - Modify: `crates/mn-content/src/ingest/plan.rs` (the `match walked.kind` block ~line 262; `resolve.rs::kind_for` to also surface the extension)
