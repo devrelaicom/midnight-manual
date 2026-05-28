@@ -385,7 +385,7 @@ async fn run_inner(
                     content: c.content.clone(),
                     content_hash: c.content_hash.clone(),
                     heading_path: c.heading_path.clone(),
-                    symbol_path: Vec::new(),
+                    symbol_path: c.symbol_path.clone(),
                     start_byte: i32::try_from(c.start_byte).unwrap_or(i32::MAX),
                     end_byte: i32::try_from(c.end_byte).unwrap_or(i32::MAX),
                     token_count: i32::try_from(c.token_count).unwrap_or(i32::MAX),

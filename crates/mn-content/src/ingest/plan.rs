@@ -51,6 +51,8 @@ pub struct PlannedChunk {
     /// Ancestor heading path from the Markdown chunker. Empty for code /
     /// plaintext or for pre-heading content.
     pub heading_path: Vec<String>,
+    /// Structured code-symbol path. Empty for markdown/plaintext.
+    pub symbol_path: Vec<mn_core::types::SymbolSegment>,
     /// 0-indexed position among the document's chunks.
     pub chunk_index: u32,
     /// Total chunks in the document, for `total_chunks` column.
@@ -279,6 +281,7 @@ impl PlanBuilder {
                 PlannedChunk {
                     content: c.content,
                     heading_path: c.heading_path,
+                    symbol_path: c.symbol_path,
                     chunk_index: c.chunk_index,
                     total_chunks: total,
                     start_byte: c.start_byte,
@@ -720,6 +723,17 @@ mod tests {
         let chunk_sum: u32 = doc.chunks.iter().map(|c| c.token_count).sum();
         assert!(doc.token_count > 0);
         assert_eq!(doc.token_count, chunk_sum);
+    }
+
+    #[test]
+    fn planned_chunk_has_symbol_path_field() {
+        // Build a minimal markdown PlannedDocument using the existing test helpers,
+        // get its first planned chunk, and assert symbol_path is an empty Vec.
+        let mut b = empty_builder();
+        feed(&mut b, "intro.md", "# Hello\n\nWelcome to the docs.");
+        let plan = b.finalize();
+        let pc = &plan.new_documents[0].chunks[0];
+        assert!(pc.symbol_path.is_empty());
     }
 }
 
