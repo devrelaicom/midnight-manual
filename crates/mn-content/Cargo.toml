@@ -66,6 +66,7 @@ tree-sitter-java       = { workspace = true, optional = true }
 tokenizers            = { workspace = true }
 serde                 = { workspace = true }
 serde_json            = { workspace = true }
+toml                  = { workspace = true }
 serde_yaml            = { workspace = true }
 thiserror             = { workspace = true }
 sha2                  = { workspace = true }

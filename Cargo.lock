@@ -2834,6 +2834,7 @@ dependencies = [
  "thiserror 2.0.18",
  "time",
  "tokenizers",
+ "toml",
  "tracing",
  "tree-sitter",
  "tree-sitter-bash",

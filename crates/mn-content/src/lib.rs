@@ -14,6 +14,7 @@ pub mod ingest;
 pub mod language;
 pub mod manifest;
 pub mod markdown;
+pub mod package;
 pub mod tokens;
 
 /// Crate version stamped at build time.
