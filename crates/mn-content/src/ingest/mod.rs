@@ -24,6 +24,7 @@
 //!
 //! [`document_hash`]: crate::content_hash::document_hash
 
+pub mod filter;
 pub mod plan;
 pub mod walker;
 
