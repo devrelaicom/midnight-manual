@@ -1,5 +1,5 @@
 //! Code chunkers: tree-sitter + text-splitter per language, plus the shared
-//! line-window fallback. Dispatch via [`chunker_for`].
+//! line-window fallback. Dispatch via [`chunker_for`] or [`chunker_for_ext`].
 
 pub mod language;
 pub mod line_window;
@@ -8,6 +8,9 @@ pub mod symbols;
 
 #[cfg(feature = "core-grammars")]
 pub mod rust;
+
+#[cfg(feature = "core-grammars")]
+pub mod ts;
 
 use crate::chunk::{Chunk, Chunker, ChunkerConfig};
 use crate::code::symbols::{symbol_path_at, KindTable};
@@ -108,16 +111,29 @@ fn count_error_bytes(node: tree_sitter::Node<'_>) -> usize {
     }
 }
 
-/// Return the best chunker for `lang`.
+/// Return the best chunker for `lang`, using `ext` to disambiguate where needed
+/// (e.g. `.tsx` selects the JSX TypeScript grammar).
 ///
 /// Languages whose grammar feature is not compiled fall back to line-window
 /// (graceful degradation). Per-language arms are added as each grammar lands
 /// (Task 13+).
 #[must_use]
-pub fn chunker_for(lang: Language) -> Box<dyn Chunker> {
+pub fn chunker_for_ext(lang: Language, ext: &str) -> Box<dyn Chunker> {
     match lang {
         #[cfg(feature = "core-grammars")]
         Language::Rust => Box::new(rust::RustChunker),
+        #[cfg(feature = "core-grammars")]
+        Language::TypeScript => Box::new(ts::TypeScriptChunker {
+            tsx: ext.eq_ignore_ascii_case("tsx"),
+        }),
         _ => Box::new(LineWindowChunker),
     }
+}
+
+/// Return the best chunker for `lang` (extension-agnostic).
+///
+/// Delegates to [`chunker_for_ext`] with an empty extension string.
+#[must_use]
+pub fn chunker_for(lang: Language) -> Box<dyn Chunker> {
+    chunker_for_ext(lang, "")
 }
