@@ -42,6 +42,24 @@ pub mod html;
 #[cfg(feature = "markup-grammars")]
 pub mod xml;
 
+#[cfg(feature = "all-grammars")]
+pub mod swift;
+
+#[cfg(feature = "all-grammars")]
+pub mod ruby;
+
+#[cfg(feature = "all-grammars")]
+pub mod kotlin;
+
+#[cfg(feature = "all-grammars")]
+pub mod csharp;
+
+#[cfg(feature = "all-grammars")]
+pub mod haskell;
+
+#[cfg(feature = "all-grammars")]
+pub mod java;
+
 use crate::chunk::{Chunk, Chunker, ChunkerConfig};
 use crate::code::symbols::{symbol_path_at, KindTable};
 use language::Language;
@@ -176,6 +194,18 @@ pub fn chunker_for_ext(lang: Language, ext: &str) -> Box<dyn Chunker> {
         Language::Html => Box::new(html::HtmlChunker),
         #[cfg(feature = "markup-grammars")]
         Language::Xml => Box::new(xml::XmlChunker),
+        #[cfg(feature = "all-grammars")]
+        Language::Swift => Box::new(swift::SwiftChunker),
+        #[cfg(feature = "all-grammars")]
+        Language::Ruby => Box::new(ruby::RubyChunker),
+        #[cfg(feature = "all-grammars")]
+        Language::Kotlin => Box::new(kotlin::KotlinChunker),
+        #[cfg(feature = "all-grammars")]
+        Language::CSharp => Box::new(csharp::CSharpChunker),
+        #[cfg(feature = "all-grammars")]
+        Language::Haskell => Box::new(haskell::HaskellChunker),
+        #[cfg(feature = "all-grammars")]
+        Language::Java => Box::new(java::JavaChunker),
         _ => Box::new(LineWindowChunker),
     }
 }
