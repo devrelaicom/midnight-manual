@@ -234,6 +234,16 @@ pub enum DocumentKind {
     Plaintext,
 }
 
+/// One segment of a code chunk's symbol path — e.g. `{kind:"impl", name:"Foo"}`.
+/// Persisted as JSONB in `chunk.symbol_path`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SymbolSegment {
+    /// Syntactic kind: "impl", "fn", "class", "interface", "key", "element", …
+    pub kind: String,
+    /// Identifier or label for this segment.
+    pub name: String,
+}
+
 /// A single ingested document (a Markdown page or source-code file).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Document {
@@ -358,6 +368,18 @@ mod tests {
             serde_json::to_value(ChunkStatus::EmbedFailed).unwrap(),
             serde_json::Value::String("embed_failed".into())
         );
+    }
+
+    #[test]
+    fn symbol_segment_json_roundtrip() {
+        let seg = SymbolSegment {
+            kind: "impl".to_string(),
+            name: "Foo".to_string(),
+        };
+        let json = serde_json::to_string(&seg).unwrap();
+        assert_eq!(json, r#"{"kind":"impl","name":"Foo"}"#);
+        let back: SymbolSegment = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, seg);
     }
 
     #[test]
