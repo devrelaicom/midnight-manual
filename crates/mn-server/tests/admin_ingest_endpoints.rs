@@ -477,6 +477,98 @@ async fn duplicate_path_in_batch_records_conflict() {
 }
 
 #[tokio::test]
+async fn chunk_upload_persists_structured_symbol_path() {
+    let h = common::boot().await;
+    let kp = Keypair::generate();
+    let cfg = cfg_with_auth(user_store_for("aaron", &kp), vec![7u8; 32]);
+    let app = app::build(h.pool.clone(), cfg).expect("build app");
+    let token = mint_admin_token(app.clone(), "aaron", &kp).await;
+    let (slug, source_id) = seed_source(&h.pool).await;
+
+    // Build a code document payload with a non-empty structured symbol_path.
+    let content = "pub struct Widget { pub x: i32 }";
+    let content_hash = format!("h:widget.rs:{}", hash_of(content));
+    let chunk_hash = format!("c:widget.rs:{}", hash_of(content));
+    let doc_payload = json!({
+        "path": "widget.rs",
+        "kind": "code",
+        "language": "rust",
+        "content_hash": content_hash,
+        "char_count": content.len(),
+        "token_count": 0,
+        "provenance": {},
+        "chunks": [{
+            "chunk_index": 0,
+            "total_chunks": 1,
+            "content": content,
+            "content_hash": chunk_hash,
+            "heading_path": [],
+            "symbol_path": [{"kind": "class", "name": "Widget"}],
+            "start_byte": 0,
+            "end_byte": content.len(),
+            "token_count": 0,
+        }],
+    });
+
+    // 1. Start run.
+    let (status, body) = json_call(
+        app.clone(),
+        "POST",
+        &format!("/v1/admin/sources/{slug}/ingest-runs"),
+        Some(&token),
+        Some(json!({
+            "ingest_cli_version": "0.1.0-test",
+            "embedding_model": "bge-base-en-v1.5@1",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "start: {body}");
+    let run_id = body["ingest_run_id"].as_str().unwrap().to_owned();
+
+    // 2. Upload the code document.
+    let (status, body) = json_call(
+        app.clone(),
+        "PUT",
+        &format!("/v1/admin/sources/{slug}/ingest-runs/{run_id}/documents"),
+        Some(&token),
+        Some(json!({"documents": [doc_payload]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "upload: {body}");
+    assert_eq!(body["accepted"], 1);
+
+    // 3. Finalize.
+    let (status, body) = json_call(
+        app,
+        "POST",
+        &format!("/v1/admin/sources/{slug}/ingest-runs/{run_id}/finalize"),
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "finalize: {body}");
+
+    // 4. Read the persisted chunk back and assert the structured symbol_path survived.
+    let chunk_id: Uuid = sqlx::query_scalar(
+        "SELECT c.id FROM chunk c JOIN document d ON d.id = c.document_id \
+         WHERE d.source_path = $1 AND d.source_version_id = \
+           (SELECT id FROM source_version WHERE source_id = $2 AND revision = 1)",
+    )
+    .bind("widget.rs")
+    .bind(source_id)
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+
+    let segs = mn_store::entities::chunk::symbol_path_of(&h.pool, chunk_id)
+        .await
+        .unwrap();
+    assert_eq!(segs.len(), 1, "expected exactly one symbol segment");
+    assert_eq!(segs[0].kind, "class");
+    assert_eq!(segs[0].name, "Widget");
+}
+
+#[tokio::test]
 async fn cross_source_run_id_404s() {
     let h = common::boot().await;
     let kp = Keypair::generate();
