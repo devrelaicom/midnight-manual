@@ -234,6 +234,7 @@ async fn run_inner(
             split: &doc.split,
             resolved: &doc.resolved,
             source_modified_at: doc.source_modified_at,
+            package: detect_package_ref(&source_root, &doc.rel_path),
         };
         builder
             .add_walked_document(&ctx)
@@ -391,6 +392,7 @@ async fn run_inner(
                     token_count: i32::try_from(c.token_count).unwrap_or(i32::MAX),
                 })
                 .collect(),
+            package: d.package.clone(),
         })
         .collect();
 
@@ -669,6 +671,8 @@ struct DocumentUpload {
     char_count: i32,
     token_count: i32,
     chunks: Vec<ChunkUpload>,
+    /// Detected package membership (rust/npm) for this document, if any.
+    package: Option<mn_core::types::PackageRef>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -702,6 +706,22 @@ struct FinalizeResult {
     is_active: bool,
     #[serde(default)]
     demoted_revision: Option<i32>,
+}
+
+/// Detect package membership for a single file by walking up to the source root
+/// and looking for the nearest `Cargo.toml` or `package.json` manifest.
+///
+/// Returns `None` for files that are not enclosed by any known manifest.
+fn detect_package_ref(
+    source_root: &std::path::Path,
+    rel_path: &std::path::Path,
+) -> Option<mn_core::types::PackageRef> {
+    let abs = source_root.join(rel_path);
+    mn_content::package::detect(&abs, source_root).map(|p| mn_core::types::PackageRef {
+        kind: p.kind,
+        name: p.name,
+        manifest_path: Some(p.manifest_path.display().to_string()),
+    })
 }
 
 #[derive(Debug, Serialize)]

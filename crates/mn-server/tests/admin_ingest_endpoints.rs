@@ -569,6 +569,110 @@ async fn chunk_upload_persists_structured_symbol_path() {
 }
 
 #[tokio::test]
+async fn document_package_membership_persists() {
+    let h = common::boot().await;
+    let kp = Keypair::generate();
+    let cfg = cfg_with_auth(user_store_for("aaron", &kp), vec![7u8; 32]);
+    let app = app::build(h.pool.clone(), cfg).expect("build app");
+    let token = mint_admin_token(app.clone(), "aaron", &kp).await;
+    let (slug, source_id) = seed_source(&h.pool).await;
+
+    // Build a code document payload that carries package membership.
+    let content = "pub fn init() {}";
+    let content_hash = format!("h:lib.rs:{}", hash_of(content));
+    let chunk_hash = format!("c:lib.rs:{}", hash_of(content));
+    let doc_payload = json!({
+        "path": "lib.rs",
+        "kind": "code",
+        "language": "rust",
+        "content_hash": content_hash,
+        "char_count": content.len(),
+        "token_count": 0,
+        "provenance": {},
+        "package": {
+            "kind": "rust",
+            "name": "midnight-foo",
+            "manifest_path": "Cargo.toml"
+        },
+        "chunks": [{
+            "chunk_index": 0,
+            "total_chunks": 1,
+            "content": content,
+            "content_hash": chunk_hash,
+            "heading_path": [],
+            "symbol_path": [],
+            "start_byte": 0,
+            "end_byte": content.len(),
+            "token_count": 0,
+        }],
+    });
+
+    // 1. Start run.
+    let (status, body) = json_call(
+        app.clone(),
+        "POST",
+        &format!("/v1/admin/sources/{slug}/ingest-runs"),
+        Some(&token),
+        Some(json!({
+            "ingest_cli_version": "0.1.0-test",
+            "embedding_model": "bge-base-en-v1.5@1",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "start: {body}");
+    let run_id = body["ingest_run_id"].as_str().unwrap().to_owned();
+    let sv_id: Uuid = run_id.parse().unwrap();
+
+    // 2. Upload.
+    let (status, body) = json_call(
+        app.clone(),
+        "PUT",
+        &format!("/v1/admin/sources/{slug}/ingest-runs/{run_id}/documents"),
+        Some(&token),
+        Some(json!({"documents": [doc_payload]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "upload: {body}");
+    assert_eq!(body["accepted"], 1);
+
+    // 3. Finalize.
+    let (status, body) = json_call(
+        app,
+        "POST",
+        &format!("/v1/admin/sources/{slug}/ingest-runs/{run_id}/finalize"),
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "finalize: {body}");
+
+    // 4. Assert a package row exists for this source_version with name "midnight-foo".
+    let pkg_id: Option<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM package WHERE source_version_id = $1 AND name = 'midnight-foo'",
+    )
+    .bind(sv_id)
+    .fetch_optional(&h.pool)
+    .await
+    .unwrap();
+    assert!(pkg_id.is_some(), "expected a package row for midnight-foo");
+
+    // 5. Assert the document's package_id points to that package row.
+    let doc_package_id: Option<Uuid> = sqlx::query_scalar(
+        "SELECT d.package_id FROM document d \
+         WHERE d.source_path = 'lib.rs' AND d.source_version_id = \
+           (SELECT id FROM source_version WHERE source_id = $1 AND revision = 1)",
+    )
+    .bind(source_id)
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        doc_package_id, pkg_id,
+        "document.package_id must point to the midnight-foo package row"
+    );
+}
+
+#[tokio::test]
 async fn cross_source_run_id_404s() {
     let h = common::boot().await;
     let kp = Keypair::generate();

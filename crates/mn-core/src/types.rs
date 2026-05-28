@@ -202,6 +202,18 @@ pub enum PackageKind {
     Other,
 }
 
+/// A detected package membership as carried through the ingest pipeline
+/// (plan → upload). Lighter than [`Package`] (no DB id / `source_version_id`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PackageRef {
+    /// Ecosystem: `"rust"` or `"npm"`.
+    pub kind: String,
+    /// Package name.
+    pub name: String,
+    /// Manifest path relative to the source root, if known.
+    pub manifest_path: Option<String>,
+}
+
 /// Detected package membership for a document/chunk (FR-049, FR-050).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Package {

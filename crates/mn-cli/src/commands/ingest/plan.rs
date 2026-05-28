@@ -78,6 +78,7 @@ pub async fn run(args: Args, server: Option<&str>, _json: bool) -> Result<()> {
             split: &doc.split,
             resolved: &doc.resolved,
             source_modified_at: doc.source_modified_at,
+            package: None,
         };
         b.add_walked_document(&ctx)
             .with_context(|| format!("plan add {}", doc.rel_path.display()))?;

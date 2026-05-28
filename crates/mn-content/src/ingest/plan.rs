@@ -99,6 +99,9 @@ pub struct PlannedDocument {
     /// Token count of the document body (computed once at chunk time and
     /// summed across chunks; landed in Task 12).
     pub token_count: u32,
+    /// Detected package membership for code documents (rust/npm). None otherwise.
+    #[serde(default)]
+    pub package: Option<mn_core::types::PackageRef>,
 }
 
 /// A document whose `content_hash` matched the prior active version. The
@@ -186,6 +189,8 @@ pub struct WalkContext<'a> {
     /// Filesystem modification timestamp at walk time (`None` if the OS
     /// could not supply `mtime`).
     pub source_modified_at: Option<time::OffsetDateTime>,
+    /// Pre-detected package membership (computed by the caller; the planner does no filesystem I/O).
+    pub package: Option<mn_core::types::PackageRef>,
 }
 
 /// Stateful builder for [`IngestPlan`]. One instance per ingest run.
@@ -310,6 +315,7 @@ impl PlanBuilder {
             source_modified_at: walked.source_modified_at,
             language: crate::language::from_path(&walked.resolved.rel_path).map(str::to_owned),
             token_count: doc_tokens,
+            package: walked.package.clone(),
         });
         Ok(())
     }
@@ -436,6 +442,7 @@ mod tests {
             split: &split,
             resolved: &leaf,
             source_modified_at: None,
+            package: None,
         };
         builder
             .add_walked_document(&ctx)
@@ -617,6 +624,7 @@ mod tests {
             split: &split,
             resolved: &leaf,
             source_modified_at: None,
+            package: None,
         };
         let err = b.add_walked_document(&ctx).unwrap_err();
         assert!(matches!(err, IngestError::DuplicatePath(_)));
@@ -705,6 +713,7 @@ mod tests {
             split: &split,
             resolved: &leaf,
             source_modified_at: None,
+            package: None,
         };
         b.add_walked_document(&ctx).unwrap();
         let plan = b.finalize();
@@ -815,6 +824,7 @@ mod proptests {
                     split: &split,
                     resolved: &leaf,
                     source_modified_at: None,
+                    package: None,
                 };
                 builder
                     .add_walked_document(&ctx)
