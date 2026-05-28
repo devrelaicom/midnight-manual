@@ -108,14 +108,6 @@ impl Chunker for MarkdownChunker {
     }
 }
 
-/// Convenience wrapper retained for the planner. Markdown chunking never errors
-/// (it recovers internally), so this unwraps to an empty vec on the impossible
-/// error path.
-#[must_use]
-pub fn chunk_markdown(body: &str, cfg: ChunkerConfig) -> Vec<Chunk> {
-    MarkdownChunker.chunk(body, &cfg).unwrap_or_default()
-}
-
 #[derive(Debug, Clone)]
 struct HeadingSegment {
     start: usize,
