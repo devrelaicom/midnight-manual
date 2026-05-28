@@ -678,7 +678,7 @@ struct ChunkUpload {
     content: String,
     content_hash: String,
     heading_path: Vec<String>,
-    symbol_path: Vec<String>,
+    symbol_path: Vec<mn_core::types::SymbolSegment>,
     start_byte: i32,
     end_byte: i32,
     token_count: i32,

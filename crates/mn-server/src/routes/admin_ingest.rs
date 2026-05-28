@@ -129,9 +129,9 @@ pub struct ChunkUpload {
     /// Heading path (Markdown).
     #[serde(default)]
     pub heading_path: Vec<String>,
-    /// Symbol path (code).
+    /// Symbol path (code, structured segments).
     #[serde(default)]
-    pub symbol_path: Vec<String>,
+    pub symbol_path: Vec<mn_core::types::SymbolSegment>,
     /// Start byte in source.
     #[serde(default)]
     pub start_byte: i32,

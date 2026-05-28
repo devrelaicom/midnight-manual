@@ -324,8 +324,9 @@ pub struct Chunk {
     #[serde(default)]
     pub heading_path: Vec<String>,
     /// Code-symbol path leading to this chunk (mod/impl/fn for Rust, etc.).
+    /// Structured segments persisted as JSONB in the database.
     #[serde(default)]
-    pub symbol_path: Vec<String>,
+    pub symbol_path: Vec<SymbolSegment>,
     /// Start byte offset in the source document.
     pub start_byte: i32,
     /// End byte offset in the source document.

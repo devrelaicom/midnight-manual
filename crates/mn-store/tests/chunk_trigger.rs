@@ -124,3 +124,95 @@ async fn chunk_with_mismatched_model_id_is_rejected() {
     .await
     .expect("chunk with matching model_id inserts");
 }
+
+#[tokio::test]
+async fn chunk_symbol_path_roundtrips_structured() {
+    use mn_core::provenance::Provenance;
+    use mn_core::types::{DocumentKind, SymbolSegment};
+    use mn_store::entities::{chunk, document};
+
+    let h = common::boot().await;
+
+    let model_id = embedding_model::upsert(&h.pool, "bge-base-en-v1.5", 1, 768, "baai")
+        .await
+        .unwrap();
+
+    let slug = format!("sym-path-{}", Uuid::new_v4());
+    let source_id =
+        source::insert(&h.pool, &slug, "Symbol Path Test", SourceKind::Standalone, None, 5)
+            .await
+            .unwrap();
+    let (sv_id, _) = source_version::create_building(&h.pool, source_id, model_id, "0.1.0", "h")
+        .await
+        .unwrap();
+    let root = node::insert(&h.pool, sv_id, None, NodeKind::Root, "root", 0)
+        .await
+        .unwrap();
+    let doc_node = node::insert(&h.pool, sv_id, Some(root), NodeKind::Document, "src.rs", 0)
+        .await
+        .unwrap();
+
+    let provenance = Provenance::default();
+    let doc_id = document::insert(
+        &h.pool,
+        document::NewDocument {
+            source_version_id: sv_id,
+            node_id: doc_node,
+            kind: DocumentKind::Code,
+            source_url: None,
+            published_url: None,
+            source_path: "src.rs",
+            language: Some("rust"),
+            content_hash: "h-sym",
+            source_modified_at: None,
+            frontmatter: None,
+            provenance: &provenance,
+            package_id: None,
+            char_count: 0,
+            token_count: 0,
+        },
+    )
+    .await
+    .unwrap();
+
+    let chunk_node = node::insert(&h.pool, sv_id, Some(doc_node), NodeKind::Chunk, "c0", 0)
+        .await
+        .unwrap();
+
+    let segs = vec![
+        SymbolSegment {
+            kind: "impl".into(),
+            name: "Foo".into(),
+        },
+        SymbolSegment {
+            kind: "fn".into(),
+            name: "bar".into(),
+        },
+    ];
+
+    let id = chunk::insert(
+        &h.pool,
+        chunk::NewChunk {
+            source_version_id: sv_id,
+            document_id: doc_id,
+            node_id: chunk_node,
+            chunk_index: 0,
+            total_chunks: 1,
+            content: "fn bar() {}",
+            content_hash: "ch-sym",
+            embedding: None,
+            embedding_model_id: model_id,
+            heading_path: &[],
+            symbol_path: &segs,
+            start_byte: 0,
+            end_byte: 11,
+            token_count: 3,
+            status: ChunkStatus::Ready,
+        },
+    )
+    .await
+    .unwrap();
+
+    let got = chunk::symbol_path_of(&h.pool, id).await.unwrap();
+    assert_eq!(got, segs);
+}
