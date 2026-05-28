@@ -770,7 +770,7 @@ git commit -m "feat(mn-content): thread structured symbol_path from chunk to upl
 
 # Phase C — Code chunker engine + languages
 
-## Task 10: `Language` enum + dispatch
+## Task 10: `Language` enum + dispatch ✅ DONE
 
 **Files:**
 - Create: `crates/mn-content/src/code/language.rs`
@@ -907,7 +907,7 @@ git commit -m "feat(mn-content): Language enum + chunker_for dispatch"
 
 ---
 
-## Task 11: `text-splitter` wrapper (`splitter.rs`)
+## Task 11: `text-splitter` wrapper (`splitter.rs`) ✅ DONE (text-splitter 0.27 API confirmed: CodeSplitter::new returns Result, chunk_indices, &Tokenizer:ChunkSizer)
 
 **Files:**
 - Create: `crates/mn-content/src/code/splitter.rs`
@@ -993,7 +993,7 @@ git commit -m "feat(mn-content): text-splitter wrapper for token-budgeted code r
 
 ---
 
-## Task 12: Symbol-path extraction (`symbols.rs`)
+## Task 12: Symbol-path extraction (`symbols.rs`) ✅ DONE (impl_item name via "type" field)
 
 **Files:**
 - Create: `crates/mn-content/src/code/symbols.rs`
@@ -1105,7 +1105,7 @@ git commit -m "feat(mn-content): generic tree-sitter symbol-path extractor"
 
 ---
 
-## Task 13: Rust chunker (fully-worked language template)
+## Task 13: Rust chunker (fully-worked language template) ✅ DONE (catastrophic heuristic = root.has_error() + full-descendant ERROR/MISSING byte sum >50%)
 
 **This task is the template every other language follows.** It combines: a kind table, a `Chunker` impl that runs the parser, the splitter, symbol-path extraction, and parser-error fallback.
 
@@ -1269,7 +1269,7 @@ git commit -m "feat(mn-content): Rust chunker + shared tree-sitter driver"
 
 ---
 
-## Task 14: TypeScript chunker (`.ts` + `.tsx`)
+## Task 14: TypeScript chunker (`.ts` + `.tsx`) ✅ DONE
 
 **Files:**
 - Create: `crates/mn-content/src/code/ts.rs`
@@ -1363,7 +1363,7 @@ git commit -m "feat(mn-content): TypeScript/TSX chunker"
 
 ---
 
-## Task 15: JavaScript chunker (`.js`/`.jsx`/`.mjs`/`.cjs`)
+## Task 15: JavaScript chunker (`.js`/`.jsx`/`.mjs`/`.cjs`) ✅ DONE
 
 **Files:**
 - Create: `crates/mn-content/src/code/js.rs`
@@ -1434,7 +1434,7 @@ git commit -m "feat(mn-content): JavaScript/JSX chunker"
 
 ---
 
-## Task 16: Scheme chunker (vendored grammar)
+## Task 16: Scheme chunker (vendored grammar) ✅ DONE (FFI via LanguageFn::from_raw; build.rs uses CARGO_FEATURE_SCHEME env var; workspace unsafe_code forbid→deny — FLAG TO USER; scheme_kind_table=&[] as grammar has no clean define node)
 
 **Files:**
 - Create: `crates/mn-content/vendor/tree-sitter-scheme/` (vendored `src/parser.c`, `src/tree_sitter/*.h`, `grammar.js`, LICENSE)
@@ -1528,7 +1528,7 @@ git commit -m "feat(mn-content): vendored Scheme chunker (compact compiler langu
 
 ---
 
-## Task 17: Bash chunker
+## Task 17: Bash chunker ✅ DONE
 
 **Files:**
 - Create: `crates/mn-content/src/code/bash.rs`; Modify `mod.rs`.
@@ -1576,7 +1576,7 @@ Dispatch: `#[cfg(feature = "core-grammars")]` `pub mod bash;` + arm `Language::B
 
 ---
 
-## Task 18: Extended + markup + all-grammars languages (template + data table)
+## Task 18: Extended + markup + all-grammars languages (template + data table) ✅ DONE (18 langs; symbols.rs now emits kind-only segments for nameless markup nodes; kotlin=tree_sitter_kotlin_ng, toml=tree_sitter_toml_ng, xml=LANGUAGE_XML; none dropped)
 
 Each remaining language follows the **exact Task-13 template**: a module `code/<lang>.rs` with a kind table + a `Chunker` impl calling `run_tree_sitter`, a `#[cfg]`-gated module + dispatch arm, and a fixture test asserting one symbol path. Below is one fully-worked example (Go), then the precise per-language data table — node kinds verified against each grammar's `node-types.json`; adjust if a grammar version differs.
 
