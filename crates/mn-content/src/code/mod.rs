@@ -15,6 +15,9 @@ pub mod ts;
 #[cfg(feature = "core-grammars")]
 pub mod js;
 
+#[cfg(feature = "core-grammars")]
+pub mod bash;
+
 #[cfg(feature = "scheme")]
 pub mod scheme;
 
@@ -134,6 +137,8 @@ pub fn chunker_for_ext(lang: Language, ext: &str) -> Box<dyn Chunker> {
         }),
         #[cfg(feature = "core-grammars")]
         Language::JavaScript => Box::new(js::JavaScriptChunker),
+        #[cfg(feature = "core-grammars")]
+        Language::Bash => Box::new(bash::BashChunker),
         #[cfg(feature = "scheme")]
         Language::Scheme => Box::new(scheme::SchemeChunker),
         _ => Box::new(LineWindowChunker),
