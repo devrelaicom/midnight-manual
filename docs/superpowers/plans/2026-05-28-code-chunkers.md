@@ -1961,7 +1961,7 @@ Then map `Chunk` → `PlannedChunk` forwarding both `heading_path` and `symbol_p
 
 # Phase F — Integration + CI
 
-## Task 25: End-to-end smoke (mixed tree, testcontainers)
+## Task 25: End-to-end smoke (mixed tree, testcontainers) ✅ DONE (compile-verified only — Docker unavailable locally, execution defers to CI; also forward-ported f_bug_e2e.rs's IngestArgs which Task 23 had silently broken under --features integration)
 
 **Files:**
 - Create: `crates/mn-server/tests/code_ingest_e2e.rs`
