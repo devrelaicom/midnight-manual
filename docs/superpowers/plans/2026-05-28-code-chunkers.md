@@ -372,7 +372,7 @@ git commit -m "build(mn-content): add tree-sitter/text-splitter/ignore deps + gr
 
 # Phase B — Shared trait, config, fallback, markdown refactor
 
-## Task 6: Shared `Chunker` trait + `Chunk` + `ChunkerConfig` + `ChunkError`
+## Task 6: Shared `Chunker` trait + `Chunk` + `ChunkerConfig` + `ChunkError` ✅ DONE
 
 **Files:**
 - Create: `crates/mn-content/src/chunk.rs`
@@ -500,7 +500,7 @@ git commit -m "feat(mn-content): shared Chunker trait, Chunk, token-budgeted Chu
 
 ---
 
-## Task 7: Line-window fallback chunker
+## Task 7: Line-window fallback chunker ✅ DONE
 
 **Files:**
 - Create: `crates/mn-content/src/code/line_window.rs`
@@ -626,7 +626,7 @@ git commit -m "feat(mn-content): line-window fallback chunker"
 
 ---
 
-## Task 8: Refactor markdown chunker to implement `Chunker` (token units)
+## Task 8: Refactor markdown chunker to implement `Chunker` (token units) ✅ DONE
 
 **Files:**
 - Modify: `crates/mn-content/src/markdown.rs` (replace `ChunkerConfig` usage with the shared one; impl `Chunker`; switch to token budgeting; update tests)
@@ -711,7 +711,7 @@ git commit -m "refactor(mn-content): markdown chunker implements Chunker, token-
 
 ---
 
-## Task 9: Planner — add `symbol_path` to `PlannedChunk`, map through to upload
+## Task 9: Planner — add `symbol_path` to `PlannedChunk`, map through to upload ✅ DONE
 
 **Files:**
 - Modify: `crates/mn-content/src/ingest/plan.rs` (`PlannedChunk` ~line 47; chunk-build loop ~line 273)
