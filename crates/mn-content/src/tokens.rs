@@ -33,7 +33,10 @@ const BGE_BASE_TOKENIZER_BYTES: &[u8] = include_bytes!("../assets/bge-base-en-v1
 /// `&self`-only, so there is no locking on the hot path.
 static TOKENIZER: OnceLock<Tokenizer> = OnceLock::new();
 
-fn tokenizer() -> &'static Tokenizer {
+/// Return the process-wide `bge-base-en-v1.5` tokenizer instance.
+///
+/// Initialised once via `OnceLock`; every subsequent call is a cheap load.
+pub(crate) fn tokenizer() -> &'static Tokenizer {
     TOKENIZER.get_or_init(|| {
         // The bytes are compiled into the binary — a parse failure means the
         // build is broken, not a recoverable runtime condition.
