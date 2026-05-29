@@ -224,6 +224,8 @@ pub enum CliCommandName {
     Chunks,
     /// `mnm documents` (any sub).
     Documents,
+    /// `mnm skills` (any sub).
+    Skills,
 }
 
 /// The top-level event envelope written to `telemetry_event_raw.fields` (plus

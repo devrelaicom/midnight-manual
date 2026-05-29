@@ -13,6 +13,7 @@ pub mod mcp;
 pub mod models;
 pub mod ratelimits;
 pub mod search;
+pub mod skills;
 pub mod sources;
 pub mod telemetry;
 pub mod users;

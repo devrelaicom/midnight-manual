@@ -35,6 +35,7 @@ mn-content    = { path = "../mn-content" }
 mn-embedding  = { path = "../mn-embedding" }
 mn-mcp        = { path = "../mn-mcp" }
 mn-retrieval  = { path = "../mn-retrieval" }
+mn-skills     = { path = "../mn-skills" }
 mn-telemetry  = { path = "../mn-telemetry" }
 clap          = { workspace = true }
 serde         = { workspace = true }
