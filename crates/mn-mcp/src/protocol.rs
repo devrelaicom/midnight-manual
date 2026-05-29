@@ -136,6 +136,8 @@ pub enum ErrorCode {
     ToolNotFound = -32_001,
     /// Tool call failed at runtime (MCP-specific).
     ToolFailed = -32_002,
+    /// Prompt not found (MCP-specific).
+    PromptNotFound = -32_003,
 }
 
 /// Server capabilities advertised in the `initialize` response.
@@ -143,12 +145,22 @@ pub enum ErrorCode {
 pub struct ServerCapabilities {
     /// Tool support.
     pub tools: ToolsCapability,
+    /// Prompt support.
+    pub prompts: PromptsCapability,
 }
 
 /// Tool capability flags.
 #[derive(Debug, Serialize)]
 pub struct ToolsCapability {
     /// Whether tool descriptions can change at runtime.
+    #[serde(rename = "listChanged")]
+    pub list_changed: bool,
+}
+
+/// Prompt capability flags.
+#[derive(Debug, Serialize)]
+pub struct PromptsCapability {
+    /// Whether the prompt list can change at runtime.
     #[serde(rename = "listChanged")]
     pub list_changed: bool,
 }
@@ -192,6 +204,63 @@ pub struct ToolDescription {
 pub struct ToolsListResult {
     /// All available tools.
     pub tools: Vec<ToolDescription>,
+}
+
+/// One declared argument of a prompt.
+#[derive(Debug, Serialize)]
+pub struct PromptArgument {
+    /// Argument name.
+    pub name: &'static str,
+    /// Human-readable description.
+    pub description: &'static str,
+    /// Whether the client must supply it.
+    pub required: bool,
+}
+
+/// One prompt declaration in a `prompts/list` response.
+#[derive(Debug, Serialize)]
+pub struct PromptDescription {
+    /// Prompt name (e.g. `add_advanced_search_skill`).
+    pub name: &'static str,
+    /// Human-readable description (shown in client prompt menus).
+    pub description: &'static str,
+    /// Declared arguments.
+    pub arguments: Vec<PromptArgument>,
+}
+
+/// `prompts/list` response payload.
+#[derive(Debug, Serialize)]
+pub struct PromptsListResult {
+    /// All available prompts.
+    pub prompts: Vec<PromptDescription>,
+}
+
+/// `prompts/get` request params.
+#[derive(Debug, Deserialize)]
+pub struct PromptGetParams {
+    /// Prompt name to render.
+    pub name: String,
+    /// Caller-supplied arguments (string -> string map per MCP).
+    #[serde(default)]
+    pub arguments: serde_json::Value,
+}
+
+/// One message in a rendered prompt.
+#[derive(Debug, Serialize)]
+pub struct PromptMessage {
+    /// `"user"` or `"assistant"`.
+    pub role: &'static str,
+    /// Message content (a single text block).
+    pub content: ContentBlock,
+}
+
+/// `prompts/get` response payload.
+#[derive(Debug, Serialize)]
+pub struct PromptGetResult {
+    /// Human-readable description of the rendered prompt.
+    pub description: String,
+    /// The rendered messages.
+    pub messages: Vec<PromptMessage>,
 }
 
 /// `tools/call` request params.

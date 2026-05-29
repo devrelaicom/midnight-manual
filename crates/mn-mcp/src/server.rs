@@ -14,10 +14,11 @@ use tokio::io::{stdin, stdout, Stdin, Stdout};
 use tracing::{debug, info, warn};
 
 use crate::cloud_client::{CloudClient, CloudError};
+use crate::prompts;
 use crate::protocol::{
-    ContentBlock, ErrorCode, Incoming, InitializeResult, JsonRpcError, RequestId, Response,
-    ServerCapabilities, ServerInfo, ToolCallParams, ToolCallResult, ToolsCapability, JSONRPC,
-    MCP_PROTOCOL_VERSION,
+    ContentBlock, ErrorCode, Incoming, InitializeResult, JsonRpcError, PromptGetParams,
+    PromptsCapability, RequestId, Response, ServerCapabilities, ServerInfo, ToolCallParams,
+    ToolCallResult, ToolsCapability, JSONRPC, MCP_PROTOCOL_VERSION,
 };
 use crate::tools;
 use crate::transport::{FrameReader, FrameWriter};
@@ -179,6 +180,7 @@ async fn handle_request(req: crate::protocol::Request, state: &ServerState) -> V
                 protocol_version: MCP_PROTOCOL_VERSION,
                 capabilities: ServerCapabilities {
                     tools: ToolsCapability { list_changed: false },
+                    prompts: PromptsCapability { list_changed: false },
                 },
                 server_info: ServerInfo {
                     name: "midnight-manual-mcp",
@@ -193,6 +195,14 @@ async fn handle_request(req: crate::protocol::Request, state: &ServerState) -> V
         ),
         "tools/call" => match serde_json::from_value::<ToolCallParams>(req.params.clone()) {
             Ok(params) => dispatch_tool(id.clone(), params, state).await,
+            Err(e) => Response::err(id.clone(), ErrorCode::InvalidParams, e.to_string()),
+        },
+        "prompts/list" => Response::success(
+            id.clone(),
+            serde_json::to_value(prompts::list()).expect("serialize prompt list"),
+        ),
+        "prompts/get" => match serde_json::from_value::<PromptGetParams>(req.params.clone()) {
+            Ok(params) => prompts::get(id.clone(), &params),
             Err(e) => Response::err(id.clone(), ErrorCode::InvalidParams, e.to_string()),
         },
         // Pings and shutdown follow MCP convention.
@@ -537,5 +547,20 @@ mod tests {
                 tool.name,
             );
         }
+    }
+
+    /// `initialize` must advertise the prompts capability so clients query it.
+    #[test]
+    fn initialize_advertises_prompts_capability() {
+        let init = InitializeResult {
+            protocol_version: MCP_PROTOCOL_VERSION,
+            capabilities: ServerCapabilities {
+                tools: ToolsCapability { list_changed: false },
+                prompts: PromptsCapability { list_changed: false },
+            },
+            server_info: ServerInfo { name: "x", version: "0" },
+        };
+        let v = serde_json::to_value(&init).unwrap();
+        assert_eq!(v["capabilities"]["prompts"]["listChanged"], false);
     }
 }

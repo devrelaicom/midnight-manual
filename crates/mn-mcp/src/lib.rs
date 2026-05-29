@@ -21,6 +21,7 @@
 )]
 
 pub mod cloud_client;
+pub mod prompts;
 pub mod protocol;
 pub mod server;
 pub mod tools;
