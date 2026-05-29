@@ -5,8 +5,10 @@
 #![doc(html_root_url = "https://docs.rs/mn-skills/0.1.0")]
 
 pub mod env;
+pub mod harness;
 
 pub use env::{SkillEnv, StdSkillEnv};
+pub use harness::{Harness, Scope};
 
 /// The skill's folder name and frontmatter `name` (open Agent Skills standard
 /// requires the two to match).
