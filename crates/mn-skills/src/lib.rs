@@ -8,11 +8,16 @@ pub mod detect;
 pub mod env;
 pub mod error;
 pub mod harness;
+pub mod install;
 
 pub use detect::{base_dir, detect};
 pub use env::{SkillEnv, StdSkillEnv};
 pub use error::SkillError;
 pub use harness::{Harness, Scope};
+pub use install::{
+    install, remove, status, HarnessInstall, HarnessRemove, HarnessStatus, InstallAction,
+    InstallReport, RemoveAction, RemoveReport, StatusReport,
+};
 
 /// The skill's folder name and frontmatter `name` (open Agent Skills standard
 /// requires the two to match).

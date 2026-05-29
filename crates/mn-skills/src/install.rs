@@ -1,0 +1,449 @@
+//! Idempotent install / remove / status over the owned
+//! `midnight-advanced-search/` directory.
+
+use std::fs;
+use std::path::PathBuf;
+
+use serde::Serialize;
+
+use crate::detect::{base_dir, detect};
+use crate::error::SkillError;
+use crate::harness::{Harness, Scope};
+use crate::{skill_markdown, SkillEnv, SKILL_NAME};
+
+/// What an install did to a single harness's owned dir.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InstallAction {
+    /// The skill file did not exist; it was written.
+    Created,
+    /// The skill file existed with different content; it was overwritten.
+    Updated,
+    /// The skill file existed with byte-identical content; no write.
+    Unchanged,
+}
+
+/// Per-harness install outcome.
+#[derive(Debug, Clone, Serialize)]
+pub struct HarnessInstall {
+    /// Harness id (`claude-code`, …).
+    pub harness: String,
+    /// Scope (`user` / `project`).
+    pub scope: String,
+    /// The `SKILL.md` path written.
+    pub path: PathBuf,
+    /// What happened.
+    pub action: InstallAction,
+    /// The "reload your skills" instruction for this harness.
+    pub reload_step: String,
+}
+
+/// Result of an [`install`] call.
+#[derive(Debug, Clone, Serialize)]
+pub struct InstallReport {
+    /// The installed skill's name.
+    pub skill_name: String,
+    /// Scope all writes targeted.
+    pub scope: String,
+    /// One entry per harness written.
+    pub installed: Vec<HarnessInstall>,
+    /// Harness ids probed but not detected (empty when `--harness` was forced).
+    pub not_detected: Vec<String>,
+}
+
+/// Per-harness removal outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoveAction {
+    /// The owned dir existed and was deleted.
+    Removed,
+    /// The owned dir did not exist.
+    Absent,
+}
+
+/// One harness's removal result.
+#[derive(Debug, Clone, Serialize)]
+pub struct HarnessRemove {
+    /// Harness id.
+    pub harness: String,
+    /// Scope.
+    pub scope: String,
+    /// The owned skill **directory** deleted (not the `SKILL.md` file), e.g.
+    /// `.../skills/midnight-advanced-search/`. Contrast with
+    /// [`HarnessInstall::path`], which is the file.
+    pub path: PathBuf,
+    /// What happened.
+    pub action: RemoveAction,
+}
+
+/// Result of a [`remove`] call.
+#[derive(Debug, Clone, Serialize)]
+pub struct RemoveReport {
+    /// The skill's name.
+    pub skill_name: String,
+    /// Scope.
+    pub scope: String,
+    /// One entry per harness targeted.
+    pub removed: Vec<HarnessRemove>,
+}
+
+/// One harness's status at a scope.
+#[derive(Debug, Clone, Serialize)]
+pub struct HarnessStatus {
+    /// Harness id.
+    pub harness: String,
+    /// Scope.
+    pub scope: String,
+    /// Whether the harness's marker is present.
+    pub detected: bool,
+    /// Whether our `SKILL.md` is installed.
+    pub installed: bool,
+    /// Whether the installed copy is byte-identical to the embedded skill.
+    /// `false` when not installed or when it differs (stale / user-edited).
+    pub up_to_date: bool,
+    /// The resolved `SKILL.md` path.
+    pub path: PathBuf,
+}
+
+/// Result of a [`status`] call.
+#[derive(Debug, Clone, Serialize)]
+pub struct StatusReport {
+    /// The skill's name.
+    pub skill_name: String,
+    /// Scope.
+    pub scope: String,
+    /// One entry per supported harness.
+    pub harnesses: Vec<HarnessStatus>,
+}
+
+/// Resolve which harnesses to act on:
+/// - `Some(list)` → exactly those (forced; detection skipped, `not_detected`
+///   empty).
+/// - `None` → auto-detect; errors [`SkillError::NoHarnessDetected`] if none.
+///
+/// Returns the targets plus the ids that were probed-but-absent (only
+/// meaningful in the auto-detect branch).
+fn resolve_targets(
+    explicit: Option<&[Harness]>,
+    scope: Scope,
+    env: &impl SkillEnv,
+) -> Result<(Vec<Harness>, Vec<String>), SkillError> {
+    if let Some(list) = explicit {
+        return Ok((list.to_vec(), Vec::new()));
+    }
+    let detected = detect(scope, env)?;
+    if detected.is_empty() {
+        return Err(SkillError::NoHarnessDetected {
+            scope: scope.as_str().to_owned(),
+            probed: Harness::ALL
+                .iter()
+                .map(|h| h.id())
+                .collect::<Vec<_>>()
+                .join(", "),
+        });
+    }
+    let not_detected = Harness::ALL
+        .into_iter()
+        .filter(|h| !detected.contains(h))
+        .map(|h| h.id().to_owned())
+        .collect();
+    Ok((detected, not_detected))
+}
+
+/// Install the embedded skill for `explicit` harnesses (or auto-detected ones),
+/// idempotently, at `scope`.
+///
+/// # Errors
+///
+/// [`SkillError::NoHarnessDetected`] when auto-detect finds nothing,
+/// path-resolution errors, or [`SkillError::Io`] on a failed write.
+pub fn install(
+    explicit: Option<&[Harness]>,
+    scope: Scope,
+    env: &impl SkillEnv,
+) -> Result<InstallReport, SkillError> {
+    let base = base_dir(scope, env)?;
+    let (targets, not_detected) = resolve_targets(explicit, scope, env)?;
+    let body = skill_markdown();
+    let mut installed = Vec::with_capacity(targets.len());
+    for h in targets {
+        let dir = h.skill_dir(scope, &base);
+        let file = dir.join("SKILL.md");
+        let action = match fs::read_to_string(&file) {
+            Ok(existing) if existing == body => InstallAction::Unchanged,
+            Ok(_) => {
+                write_file(&file, body)?;
+                InstallAction::Updated
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                fs::create_dir_all(&dir)
+                    .map_err(|source| SkillError::Io { path: dir.clone(), source })?;
+                write_file(&file, body)?;
+                InstallAction::Created
+            }
+            Err(source) => {
+                return Err(SkillError::Io { path: file, source });
+            }
+        };
+        installed.push(HarnessInstall {
+            harness: h.id().to_owned(),
+            scope: scope.as_str().to_owned(),
+            path: file,
+            action,
+            reload_step: h.reload_step().to_owned(),
+        });
+    }
+    Ok(InstallReport {
+        skill_name: SKILL_NAME.to_owned(),
+        scope: scope.as_str().to_owned(),
+        installed,
+        not_detected,
+    })
+}
+
+/// Write `body` to `path`, mapping any io failure to [`SkillError::Io`] with
+/// the path attached.
+fn write_file(path: &std::path::Path, body: &str) -> Result<(), SkillError> {
+    fs::write(path, body).map_err(|source| SkillError::Io {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+/// Remove the owned skill dir for `explicit` harnesses (or auto-detected ones)
+/// at `scope`.
+///
+/// # Errors
+///
+/// [`SkillError::NoHarnessDetected`] when auto-detect finds nothing,
+/// [`SkillError::NoHome`] / [`SkillError::NoCwd`] on an unresolvable base dir,
+/// or [`SkillError::Io`] on a failed delete.
+pub fn remove(
+    explicit: Option<&[Harness]>,
+    scope: Scope,
+    env: &impl SkillEnv,
+) -> Result<RemoveReport, SkillError> {
+    let base = base_dir(scope, env)?;
+    let (targets, _) = resolve_targets(explicit, scope, env)?;
+    let mut removed = Vec::with_capacity(targets.len());
+    for h in targets {
+        let dir = h.skill_dir(scope, &base);
+        let action = if dir.exists() {
+            fs::remove_dir_all(&dir)
+                .map_err(|source| SkillError::Io { path: dir.clone(), source })?;
+            RemoveAction::Removed
+        } else {
+            RemoveAction::Absent
+        };
+        removed.push(HarnessRemove {
+            harness: h.id().to_owned(),
+            scope: scope.as_str().to_owned(),
+            path: dir,
+            action,
+        });
+    }
+    Ok(RemoveReport {
+        skill_name: SKILL_NAME.to_owned(),
+        scope: scope.as_str().to_owned(),
+        removed,
+    })
+}
+
+/// Report detection + install state for every supported harness at `scope`.
+/// Never errors on "nothing detected" — only on an unresolvable base dir.
+///
+/// # Errors
+///
+/// Path-resolution errors only.
+pub fn status(scope: Scope, env: &impl SkillEnv) -> Result<StatusReport, SkillError> {
+    let base = base_dir(scope, env)?;
+    let body = skill_markdown();
+    let harnesses = Harness::ALL
+        .into_iter()
+        .map(|h| {
+            let file = h.skill_file(scope, &base);
+            let detected = h.markers(scope, &base).iter().any(|m| m.exists());
+            let installed_content = fs::read_to_string(&file).ok();
+            let installed = installed_content.is_some();
+            let up_to_date = installed_content.as_deref() == Some(body);
+            HarnessStatus {
+                harness: h.id().to_owned(),
+                scope: scope.as_str().to_owned(),
+                detected,
+                installed,
+                up_to_date,
+                path: file,
+            }
+        })
+        .collect();
+    Ok(StatusReport {
+        skill_name: SKILL_NAME.to_owned(),
+        scope: scope.as_str().to_owned(),
+        harnesses,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+
+    struct FakeEnv {
+        home: PathBuf,
+    }
+    impl SkillEnv for FakeEnv {
+        fn home_dir(&self) -> Option<PathBuf> {
+            Some(self.home.clone())
+        }
+        fn current_dir(&self) -> Option<PathBuf> {
+            Some(self.home.clone())
+        }
+    }
+
+    fn env_with_marker(harness: Harness) -> (TempDir, FakeEnv) {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().to_path_buf();
+        if let Some(m) = harness.markers(Scope::User, &home).into_iter().next() {
+            std::fs::create_dir_all(&m).unwrap();
+        }
+        let env = FakeEnv { home };
+        (tmp, env)
+    }
+
+    #[test]
+    fn install_then_reinstall_is_idempotent() {
+        let (_tmp, env) = env_with_marker(Harness::ClaudeCode);
+        let first = install(None, Scope::User, &env).unwrap();
+        assert_eq!(first.installed.len(), 1);
+        assert_eq!(first.installed[0].action, InstallAction::Created);
+        assert!(first.installed[0].path.exists());
+
+        let second = install(None, Scope::User, &env).unwrap();
+        assert_eq!(second.installed[0].action, InstallAction::Unchanged);
+    }
+
+    #[test]
+    fn install_overwrites_stale_content_as_updated() {
+        let (_tmp, env) = env_with_marker(Harness::ClaudeCode);
+        let report = install(None, Scope::User, &env).unwrap();
+        let path = report.installed[0].path.clone();
+        std::fs::write(&path, "stale body").unwrap();
+
+        let again = install(None, Scope::User, &env).unwrap();
+        assert_eq!(again.installed[0].action, InstallAction::Updated);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), skill_markdown());
+    }
+
+    #[test]
+    fn explicit_harness_forces_install_even_when_undetected() {
+        let tmp = TempDir::new().unwrap();
+        let env = FakeEnv { home: tmp.path().to_path_buf() };
+        let report = install(Some(&[Harness::Cursor]), Scope::User, &env).unwrap();
+        assert_eq!(report.installed.len(), 1);
+        assert_eq!(report.installed[0].harness, "cursor");
+        assert!(report.not_detected.is_empty());
+    }
+
+    #[test]
+    fn autodetect_with_no_harness_errors() {
+        let tmp = TempDir::new().unwrap();
+        let env = FakeEnv { home: tmp.path().to_path_buf() };
+        let err = install(None, Scope::User, &env).unwrap_err();
+        assert!(matches!(err, SkillError::NoHarnessDetected { .. }));
+    }
+
+    #[test]
+    fn not_detected_lists_absent_harnesses_on_autodetect() {
+        let (_tmp, env) = env_with_marker(Harness::ClaudeCode);
+        let report = install(None, Scope::User, &env).unwrap();
+        assert_eq!(report.installed.len(), 1);
+        let mut nd = report.not_detected;
+        nd.sort();
+        let mut expected: Vec<String> = Harness::ALL
+            .into_iter()
+            .filter(|h| *h != Harness::ClaudeCode)
+            .map(|h| h.id().to_owned())
+            .collect();
+        expected.sort();
+        assert_eq!(nd, expected);
+    }
+
+    #[test]
+    fn status_reports_installed_and_stale() {
+        let (_tmp, env) = env_with_marker(Harness::ClaudeCode);
+        install(None, Scope::User, &env).unwrap();
+        let st = status(Scope::User, &env).unwrap();
+        let cc = st
+            .harnesses
+            .iter()
+            .find(|h| h.harness == "claude-code")
+            .unwrap();
+        assert!(cc.detected && cc.installed && cc.up_to_date);
+        let cursor = st.harnesses.iter().find(|h| h.harness == "cursor").unwrap();
+        assert!(!cursor.detected && !cursor.installed && !cursor.up_to_date);
+
+        std::fs::write(&cc.path, "stale").unwrap();
+        let st2 = status(Scope::User, &env).unwrap();
+        let cc2 = st2
+            .harnesses
+            .iter()
+            .find(|h| h.harness == "claude-code")
+            .unwrap();
+        assert!(cc2.installed && !cc2.up_to_date);
+    }
+
+    #[test]
+    fn remove_deletes_then_reports_absent() {
+        let (_tmp, env) = env_with_marker(Harness::ClaudeCode);
+        install(None, Scope::User, &env).unwrap();
+        let r1 = remove(Some(&[Harness::ClaudeCode]), Scope::User, &env).unwrap();
+        assert_eq!(r1.removed[0].action, RemoveAction::Removed);
+        assert!(!r1.removed[0].path.exists());
+        let r2 = remove(Some(&[Harness::ClaudeCode]), Scope::User, &env).unwrap();
+        assert_eq!(r2.removed[0].action, RemoveAction::Absent);
+    }
+
+    #[test]
+    fn report_serializes_to_expected_json_shape() {
+        let (_tmp, env) = env_with_marker(Harness::ClaudeCode);
+        let report = install(None, Scope::User, &env).unwrap();
+        let v = serde_json::to_value(&report).unwrap();
+        assert_eq!(v["skill_name"], "midnight-advanced-search");
+        assert_eq!(v["scope"], "user");
+        assert_eq!(v["installed"][0]["harness"], "claude-code");
+        assert_eq!(v["installed"][0]["action"], "created");
+        assert!(v["installed"][0]["reload_step"].is_string());
+    }
+
+    #[test]
+    fn install_propagates_non_notfound_read_error() {
+        // A directory where SKILL.md is itself a directory makes read_to_string
+        // fail with something other than NotFound; install must surface Io, not
+        // mis-report Created.
+        let (_tmp, env) = env_with_marker(Harness::ClaudeCode);
+        let dir = Harness::ClaudeCode.skill_dir(Scope::User, &env.home);
+        std::fs::create_dir_all(dir.join("SKILL.md")).unwrap(); // SKILL.md is a dir
+        let err = install(None, Scope::User, &env).unwrap_err();
+        assert!(matches!(err, SkillError::Io { .. }));
+    }
+
+    #[test]
+    fn install_project_scope_writes_under_repo_root() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::create_dir_all(root.join(".claude")).unwrap();
+        // FakeEnv.current_dir() == home == root; base_dir(Project) walks to .git at root.
+        let env = FakeEnv { home: root.to_path_buf() };
+        let report = install(None, Scope::Project, &env).unwrap();
+        assert_eq!(report.scope, "project");
+        let cc = report
+            .installed
+            .iter()
+            .find(|h| h.harness == "claude-code")
+            .unwrap();
+        assert_eq!(cc.path, root.join(".claude/skills/midnight-advanced-search/SKILL.md"));
+        assert!(cc.path.exists());
+    }
+}
