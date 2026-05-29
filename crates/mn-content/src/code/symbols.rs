@@ -60,6 +60,47 @@ pub fn symbol_path_at(
     path
 }
 
+/// Find the start byte of the first node (in document order) whose kind is in
+/// `table` and that begins within `[range_start, range_end)`.
+///
+/// Used to give a meaningful symbol path to chunks that begin with file-level
+/// preamble — doc comments, `use`/`import` statements, attributes — before the
+/// first named item. When [`symbol_path_at`] at a chunk's start byte is empty
+/// (the chunk opens with such preamble), the caller retries at this offset so a
+/// small single-chunk file still records the symbol it contains.
+#[must_use]
+pub fn first_symbol_start(
+    tree: &tree_sitter::Tree,
+    range_start: usize,
+    range_end: usize,
+    table: KindTable,
+) -> Option<usize> {
+    // Pre-order (parent-before-children, siblings left-to-right) cursor walk,
+    // returning the first in-table node that begins within the range.
+    let mut cursor = tree.root_node().walk();
+    loop {
+        let node = cursor.node();
+        let start = node.start_byte();
+        if start >= range_start
+            && start < range_end
+            && table.iter().any(|e| e.node_kind == node.kind())
+        {
+            return Some(start);
+        }
+        if cursor.goto_first_child() {
+            continue;
+        }
+        loop {
+            if cursor.goto_next_sibling() {
+                break;
+            }
+            if !cursor.goto_parent() {
+                return None;
+            }
+        }
+    }
+}
+
 fn node_name(node: tree_sitter::Node<'_>, src: &str, field: Option<&str>) -> Option<String> {
     let n = if let Some(f) = field {
         node.child_by_field_name(f)?

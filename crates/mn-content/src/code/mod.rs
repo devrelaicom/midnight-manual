@@ -113,9 +113,20 @@ pub(crate) fn run_tree_sitter(
         if content.trim().is_empty() {
             continue;
         }
+        // Prefer the symbol path enclosing the chunk's first byte. If that is
+        // empty — the chunk opens with file-level preamble (doc comments,
+        // `use`/`import`, attributes) before any named item — retry at the
+        // first in-table node contained in the chunk, so small single-chunk
+        // files still record the symbol they contain.
+        let mut symbol_path = symbol_path_at(&tree, body, r.start, table);
+        if symbol_path.is_empty() {
+            if let Some(off) = symbols::first_symbol_start(&tree, r.start, r.end, table) {
+                symbol_path = symbol_path_at(&tree, body, off, table);
+            }
+        }
         chunks.push(Chunk {
             token_count: crate::tokens::count(&content),
-            symbol_path: symbol_path_at(&tree, body, r.start, table),
+            symbol_path,
             content,
             heading_path: Vec::new(),
             start_byte: r.start,

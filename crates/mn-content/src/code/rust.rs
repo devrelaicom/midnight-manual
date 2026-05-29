@@ -78,6 +78,26 @@ mod tests {
     }
 
     #[test]
+    fn leading_preamble_still_yields_symbol_path() {
+        // A small file that fits in a single chunk and opens with file-level
+        // preamble (doc comment + `use`) before the first item: the chunk's
+        // start byte is outside any named item, so the symbol path must be
+        // recovered from the first item contained in the chunk (regression for
+        // the code-ingest E2E, where real files begin with comments/imports).
+        let src = "//! Crate docs.\nuse std::fmt;\n\npub struct Widget {\n    x: i32,\n}\n\npub fn helper() -> i32 {\n    1\n}\n";
+        let chunks = RustChunker.chunk(src, &ChunkerConfig::default()).unwrap();
+        assert!(!chunks.is_empty());
+        assert!(
+            chunks
+                .iter()
+                .any(|c| c.symbol_path.iter().any(|s| s.name == "Widget")),
+            "single-chunk file with leading preamble must still record a symbol_path: {:?}",
+            chunks.iter().map(|c| &c.symbol_path).collect::<Vec<_>>()
+        );
+        assert!(chunks.iter().all(|c| !c.fallback_used));
+    }
+
+    #[test]
     fn malformed_falls_back_to_line_window() {
         let src = "fn broken( { { { unterminated\n".repeat(40);
         let chunks = RustChunker.chunk(&src, &ChunkerConfig::default()).unwrap();
