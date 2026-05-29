@@ -78,7 +78,7 @@ async fn status_tool_works_without_model_load() {
 }
 
 #[tokio::test]
-async fn tools_list_contains_all_twelve() {
+async fn tools_list_contains_all_thirteen() {
     let list = mn_mcp::tools::list();
     let names: Vec<_> = list.tools.iter().map(|t| t.name).collect();
     for expected in [
@@ -94,10 +94,11 @@ async fn tools_list_contains_all_twelve() {
         "list_sources",
         "pull_models",
         "status",
+        "install_search_skill",
     ] {
         assert!(names.contains(&expected), "missing tool: {expected}");
     }
-    assert_eq!(names.len(), 12);
+    assert_eq!(names.len(), 13);
 }
 
 #[tokio::test]

@@ -20,6 +20,7 @@ integration = []
 mn-core       = { path = "../mn-core" }
 mn-embedding  = { path = "../mn-embedding" }
 mn-retrieval  = { path = "../mn-retrieval" }
+mn-skills     = { path = "../mn-skills" }
 mn-telemetry  = { path = "../mn-telemetry" }
 serde         = { workspace = true }
 serde_json    = { workspace = true }

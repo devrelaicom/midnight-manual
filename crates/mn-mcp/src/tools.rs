@@ -1,6 +1,6 @@
 //! MCP tool registry and per-tool handlers.
 //!
-//! Twelve tools, three categories:
+//! Thirteen tools, four categories:
 //!
 //! - `status` / `pull_models` — local-only; talk to the embedder/reranker
 //!   model cache. No cloud round-trip.
@@ -12,6 +12,8 @@
 //!   pass-through to the cloud's read endpoints, returning the response JSON
 //!   verbatim. `get_chunk_neighbors` is the only one that fans out to three
 //!   cloud endpoints concurrently and bundles the results.
+//! - Local install: `install_search_skill` (writes the advanced-search
+//!   `SKILL.md` into the user's AI harness(es)).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -30,7 +32,7 @@ use crate::server::ServerConfig;
 
 /// Build the static tool manifest sent in response to `tools/list`.
 ///
-/// All twelve tools declared in spec.md US5 / contracts/mcp-tools.json.
+/// All thirteen tools declared in spec.md US5 / contracts/mcp-tools.json.
 /// Schemas here are kept in sync with the canonical document by way of the
 /// contract tests in `tests/`.
 #[must_use]
@@ -120,6 +122,12 @@ pub fn list() -> ToolsListResult {
                     "properties": {},
                     "additionalProperties": false,
                 }),
+            },
+            ToolDescription {
+                name: "install_search_skill",
+                description:
+                    "Install the midnight-advanced-search Agent Skill (a persistent retrieval playbook) into the user's AI harness(es). Writes the same SKILL.md to each detected harness's native skills directory; re-running updates in place. Returns, per harness, the scope, the exact path written, the action (created/updated/unchanged), and the reload step to relay to the user. Optional `harness` (subset of claude-code/codex/opencode/cursor) forces specific targets; omit to auto-detect. Optional `scope` is user (default) or project.",
+                input_schema: install_search_skill_schema(),
             },
         ],
     }
@@ -211,6 +219,90 @@ fn search_input_schema() -> serde_json::Value {
             { "required": ["queries"] },
         ],
     })
+}
+
+fn install_search_skill_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "harness": {
+                "type": "array",
+                "items": { "type": "string", "enum": ["claude-code", "codex", "opencode", "cursor"] },
+                "description": "Harnesses to install for. Omit to auto-detect."
+            },
+            "scope": {
+                "type": "string",
+                "enum": ["user", "project"],
+                "default": "user",
+                "description": "Install scope."
+            }
+        },
+        "additionalProperties": false,
+    })
+}
+
+/// Parse the tool arguments and run the install against the real process
+/// environment. Returns the JSON report as a string on success, or an
+/// `(ErrorCode, message)` pair the dispatcher turns into a JSON-RPC error.
+///
+/// # Errors
+///
+/// Returns `InvalidParams` for a bad `harness`/`scope`, `ToolFailed` for a
+/// filesystem failure or no-harness-detected.
+pub fn run_install_search_skill(
+    args: &serde_json::Value,
+) -> Result<String, (crate::protocol::ErrorCode, String)> {
+    run_install_search_skill_in(args, &mn_skills::StdSkillEnv)
+}
+
+/// Inner form that takes the [`mn_skills::SkillEnv`] explicitly, so tests can
+/// inject a fake home/cwd instead of mutating the global `HOME`.
+///
+/// # Errors
+///
+/// As [`run_install_search_skill`].
+pub(crate) fn run_install_search_skill_in(
+    args: &serde_json::Value,
+    env: &impl mn_skills::SkillEnv,
+) -> Result<String, (crate::protocol::ErrorCode, String)> {
+    use crate::protocol::ErrorCode;
+    use mn_skills::{Harness, Scope};
+    use std::str::FromStr as _;
+
+    let scope = match args.get("scope") {
+        None => Scope::User,
+        Some(serde_json::Value::String(s)) => Scope::from_str(s)
+            .map_err(|bad| (ErrorCode::InvalidParams, format!("unknown scope `{bad}`")))?,
+        Some(_) => return Err((ErrorCode::InvalidParams, "scope must be a string".to_owned())),
+    };
+
+    let explicit: Option<Vec<Harness>> = match args.get("harness") {
+        None => None,
+        Some(serde_json::Value::Array(items)) => {
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                let s = item.as_str().ok_or_else(|| {
+                    (ErrorCode::InvalidParams, "harness entries must be strings".to_owned())
+                })?;
+                let h = Harness::from_str(s).map_err(|bad| {
+                    (ErrorCode::InvalidParams, format!("unknown harness `{bad}`"))
+                })?;
+                if !out.contains(&h) {
+                    out.push(h);
+                }
+            }
+            if out.is_empty() {
+                return Err((ErrorCode::InvalidParams, "harness array was empty".to_owned()));
+            }
+            Some(out)
+        }
+        Some(_) => return Err((ErrorCode::InvalidParams, "harness must be an array".to_owned())),
+    };
+
+    let report = mn_skills::install(explicit.as_deref(), scope, env)
+        .map_err(|e| (ErrorCode::ToolFailed, e.to_string()))?;
+    serde_json::to_string(&report)
+        .map_err(|e| (ErrorCode::ToolFailed, format!("serialize report: {e}")))
 }
 
 // ---------------------------------------------------------------------------
@@ -929,7 +1021,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tool_list_has_all_twelve_tools() {
+    fn tool_list_has_all_thirteen_tools() {
         let m = list();
         let names: Vec<_> = m.tools.iter().map(|t| t.name).collect();
         for expected in [
@@ -945,10 +1037,11 @@ mod tests {
             "list_sources",
             "pull_models",
             "status",
+            "install_search_skill",
         ] {
             assert!(names.contains(&expected), "missing tool: {expected}");
         }
-        assert_eq!(names.len(), 12, "expected 12 tools, got {}", names.len());
+        assert_eq!(names.len(), 13, "expected 13 tools, got {}", names.len());
     }
 
     #[test]
@@ -1107,5 +1200,81 @@ mod tests {
         assert_eq!(s.embedder, "bge-base-en-v1.5");
         assert_eq!(s.reranker, "bge-reranker-base");
         assert!(matches!(s.model_state, ModelState::Missing | ModelState::Ready));
+    }
+}
+
+#[cfg(test)]
+mod install_skill_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn manifest_includes_install_search_skill() {
+        assert!(list()
+            .tools
+            .iter()
+            .any(|t| t.name == "install_search_skill"));
+    }
+
+    #[test]
+    fn install_rejects_bad_scope() {
+        let args = json!({ "scope": "global" });
+        let err = run_install_search_skill(&args).unwrap_err();
+        assert!(matches!(err.0, crate::protocol::ErrorCode::InvalidParams));
+    }
+
+    #[test]
+    fn install_rejects_unknown_harness() {
+        let args = json!({ "harness": ["windsurf"] });
+        let err = run_install_search_skill(&args).unwrap_err();
+        assert!(matches!(err.0, crate::protocol::ErrorCode::InvalidParams));
+    }
+
+    #[test]
+    fn install_with_no_harness_detected_gives_tool_failed() {
+        struct EmptyEnv {
+            home: std::path::PathBuf,
+        }
+        impl mn_skills::SkillEnv for EmptyEnv {
+            fn home_dir(&self) -> Option<std::path::PathBuf> {
+                Some(self.home.clone())
+            }
+            fn current_dir(&self) -> Option<std::path::PathBuf> {
+                Some(self.home.clone())
+            }
+        }
+        let tmp = tempfile::TempDir::new().unwrap();
+        let env = EmptyEnv { home: tmp.path().to_path_buf() };
+        // No markers under the temp home -> auto-detect finds nothing ->
+        // mn_skills::install returns NoHarnessDetected -> mapped to ToolFailed.
+        let err = run_install_search_skill_in(&json!({}), &env).unwrap_err();
+        assert!(matches!(err.0, crate::protocol::ErrorCode::ToolFailed));
+    }
+
+    #[test]
+    fn install_writes_into_injected_fake_home() {
+        // No global env mutation: inject a fake SkillEnv pointing at a tempdir.
+        struct FakeEnv {
+            home: std::path::PathBuf,
+        }
+        impl mn_skills::SkillEnv for FakeEnv {
+            fn home_dir(&self) -> Option<std::path::PathBuf> {
+                Some(self.home.clone())
+            }
+            fn current_dir(&self) -> Option<std::path::PathBuf> {
+                Some(self.home.clone())
+            }
+        }
+        let tmp = tempfile::TempDir::new().unwrap();
+        let env = FakeEnv { home: tmp.path().to_path_buf() };
+        let text =
+            run_install_search_skill_in(&json!({ "harness": ["cursor"], "scope": "user" }), &env)
+                .expect("install ok");
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["installed"][0]["harness"], "cursor");
+        assert!(tmp
+            .path()
+            .join(".cursor/skills/midnight-advanced-search/SKILL.md")
+            .exists());
     }
 }

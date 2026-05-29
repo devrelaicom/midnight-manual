@@ -262,6 +262,7 @@ fn tool_name_for_event(name: &str) -> Option<McpToolName> {
         "list_sources" => Some(McpToolName::ListSources),
         "pull_models" => Some(McpToolName::PullModels),
         "status" => Some(McpToolName::Status),
+        "install_search_skill" => Some(McpToolName::InstallSearchSkill),
         _ => None,
     }
 }
@@ -295,6 +296,10 @@ async fn dispatch_tool_inner(
                 Err(Response::err(id.clone(), ErrorCode::ToolFailed, format!("not found: {msg}")))
             }
             Err(e) => Err(Response::err(id.clone(), ErrorCode::ToolFailed, e.to_string())),
+        },
+        "install_search_skill" => match tools::run_install_search_skill(&params.arguments) {
+            Ok(text) => Ok(text),
+            Err((code, msg)) => Err(Response::err(id.clone(), code, msg)),
         },
         other => {
             return Response::err(id, ErrorCode::ToolNotFound, format!("unknown tool: {other}"));

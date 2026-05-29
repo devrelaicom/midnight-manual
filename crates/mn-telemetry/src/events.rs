@@ -189,6 +189,8 @@ pub enum McpToolName {
     PullModels,
     /// `status` tool.
     Status,
+    /// `install_search_skill` tool.
+    InstallSearchSkill,
 }
 
 /// Closed enum of CLI subcommand names. Adding a new noun-first subcommand

@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "midnight-manual MCP tools",
-  "description": "MCP tool input/output schemas for the 11 tools exposed by `mnm mcp serve`. Each tool's description is treated as part of the public contract per Constitution I and FR-037. The runtime manifest lives at `crates/mn-mcp/src/tools.rs::list()`; this document mirrors it. PR #52 grew the surface from 7 to 11 tools (dropped `get_chunk_siblings`; added `get_chunk_next`, `get_chunk_prev`, `get_document`, `get_document_full`, `get_document_chunks`).",
-  "version": "1.1.0",
+  "description": "MCP tool input/output schemas for the 13 tools exposed by `mnm mcp serve`. Each tool's description is treated as part of the public contract per Constitution I and FR-037. The runtime manifest lives at `crates/mn-mcp/src/tools.rs::list()`; this document mirrors it. PR #52 grew the surface from 7 to 11 tools (dropped `get_chunk_siblings`; added `get_chunk_next`, `get_chunk_prev`, `get_document`, `get_document_full`, `get_document_chunks`). PR #59 added get_chunk_neighbors; PR #64 added install_search_skill (13 tools total).",
+  "version": "1.2.0",
   "tools": {
     "search": {
       "description": "Hybrid (FTS + vector) retrieval over the Midnight corpus, with optional cross-encoder reranking and trust-aware confidence scoring. Provide the single-query `{query, vector}` form, or a `queries` array of 1-10 `{text, vector}` pairs that RRF fuses across. The caller embeds each text. Rate-limit cost is max(1, distinct queries) tokens (D25).\n\nPatterns (full worked examples in docs/cookbook/query-enhancement.md):\n- hyde: send the question plus a hypothetical answer as a second query, e.g. queries=[\"<the user's question>\", \"<a 1-2 sentence hypothetical answer the agent drafts>\"]. Lifts recall when the question is short or jargon-light.\n- multi_query: send 2-3 paraphrases varying vocabulary and breadth, e.g. queries=[\"compile a contract\", \"build source into a deployable artifact\", \"smart-contract build step\"]. Helps when synonyms matter.\n- step_back: send the question plus a more abstract framing, e.g. queries=[\"why did this specific call fail?\", \"how does the platform validate calls?\"]. Helps when the question is over-specific.",
@@ -138,6 +138,27 @@
             "type": "array",
             "items": { "$ref": "#/$defs/ChunkResult" }
           }
+        }
+      }
+    },
+
+    "get_chunk_neighbors": {
+      "description": "Bundle `get_chunk_prev` + `get_chunk` + `get_chunk_next` in one round-trip. Returns `{prev: {chunks: ChunkWithContext[]}, chunk: ChunkWithContext, next: {chunks: ChunkWithContext[]}}` where `prev`/`next` are the same envelopes the standalone tools return (so an empty corpus edge yields `chunks: []`, not 404). The three cloud calls are issued in parallel, so latency is roughly that of the slowest leg. `count` defaults to 2 (chunks on each side) and must be in [1, 100]; out-of-range values are rejected as InvalidParams before any wire call. A 404 on the anchor chunk surfaces the same not-found envelope a plain `get_chunk` would.",
+      "input_schema": {
+        "type": "object",
+        "required": ["id"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "count": { "type": "integer", "minimum": 1, "maximum": 100, "default": 2 }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "prev": { "type": "object" },
+          "chunk": { "$ref": "#/$defs/ChunkResult" },
+          "next": { "type": "object" }
         }
       }
     },
@@ -316,6 +337,41 @@
             "enum": ["ready", "missing"]
           },
           "cache_dir": { "type": "string", "nullable": true }
+        }
+      }
+    },
+    "install_search_skill": {
+      "description": "Install the midnight-advanced-search Agent Skill (a persistent retrieval playbook) into the user's AI harness(es). Writes the same SKILL.md to each detected harness's native skills directory; re-running updates in place. Returns, per harness, the scope, the exact path written, the action (created/updated/unchanged), and the reload step to relay to the user. Optional `harness` (subset of claude-code/codex/opencode/cursor) forces specific targets; omit to auto-detect. Optional `scope` is user (default) or project.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "harness": {
+            "type": "array",
+            "items": { "type": "string", "enum": ["claude-code", "codex", "opencode", "cursor"] }
+          },
+          "scope": { "type": "string", "enum": ["user", "project"], "default": "user" }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "skill_name": { "type": "string" },
+          "scope": { "type": "string" },
+          "installed": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "harness": { "type": "string" },
+                "scope": { "type": "string" },
+                "path": { "type": "string" },
+                "action": { "type": "string", "enum": ["created", "updated", "unchanged"] },
+                "reload_step": { "type": "string" }
+              }
+            }
+          },
+          "not_detected": { "type": "array", "items": { "type": "string" } }
         }
       }
     }
