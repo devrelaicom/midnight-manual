@@ -152,7 +152,10 @@ async fn prompts_list_and_get_through_framed_io() {
 
     let list_result = mn_mcp::prompts::list();
     assert!(
-        list_result.prompts.iter().any(|p| p.name == "add_advanced_search_skill"),
+        list_result
+            .prompts
+            .iter()
+            .any(|p| p.name == "add_advanced_search_skill"),
         "prompts/list must include add_advanced_search_skill"
     );
 

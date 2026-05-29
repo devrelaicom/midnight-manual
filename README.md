@@ -231,14 +231,14 @@ Agents can install it too: the MCP server exposes an **`install_search_skill`** 
 
 ### Supported harnesses
 
-The skill ships in each harness's native format — the same portable `SKILL.md` everywhere it's supported, and an adapted rule where it isn't:
+The skill ships as the same portable `SKILL.md` in every supported harness:
 
 | Harness | Format | Installs to |
 | --- | --- | --- |
 | **Claude Code** | `SKILL.md` (Agent Skill) | `~/.claude/skills/` · `.claude/skills/` |
 | **Codex CLI** | `SKILL.md` (open Agent Skills standard) | `~/.agents/skills/` · `<repo>/.agents/skills/` |
 | **OpenCode** | `SKILL.md` (native) | `~/.config/opencode/skills/` · `.opencode/skills/` |
-| **Cursor** | Project Rule (`.mdc`) | `.cursor/rules/` |
+| **Cursor** | `SKILL.md` (Agent Skill, Cursor 2.4+) | `~/.cursor/skills/` · `.cursor/skills/` |
 
 **Coming soon:** Gemini CLI · Windsurf · Zed · Cline · Continue.
 
