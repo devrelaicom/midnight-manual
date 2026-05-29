@@ -1,108 +1,690 @@
-# midnight-manual
+<p align="center">
+  <img src="docs/assets/readme/hero.png" alt="midnight-manual — a retrieval engine for the Midnight Network" width="100%">
+</p>
 
-A Rust-based RAG platform for the [Midnight Network](https://midnight.network).
-Three deliverables from one Cargo workspace:
+<h1 align="center">midnight-manual</h1>
 
-- **CLI** — `midnight-manual` / `mnm` for developers and admins.
-- **Local MCP server** — `mnm mcp serve` over stdio, exposing seven retrieval
-  tools to AI clients (Claude Code, Cursor, etc.).
-- **Cloud server** — `midnight-manual-server` on Fly.io, hosting the corpus
-  and the search API.
+<p align="center">
+  <strong>A privacy-respecting retrieval engine for the <a href="https://midnight.network">Midnight Network</a> — purpose-built so your AI assistant answers from the <em>real</em> docs and source, not from a stale training set.</strong>
+</p>
 
-See [`CONSTITUTION.md`](CONSTITUTION.md) for non-negotiable principles and
-[`specs/001-rag-platform/`](specs/001-rag-platform/) for the v1 spec, plan,
-data model, contracts, and quickstart.
+<p align="center">
+  <img src="https://img.shields.io/badge/built_with-Rust_1.91-CE412B" alt="Rust 1.91">
+  <img src="https://img.shields.io/badge/interface-MCP_+_CLI_+_HTTP-4C6FFF" alt="MCP + CLI + HTTP">
+  <img src="https://img.shields.io/badge/models-local_%26_offline-2DBfA5" alt="local models">
+  <img src="https://img.shields.io/badge/telemetry-opt--out_%E2%80%A2_canary--enforced-6E56CF" alt="privacy">
+  <img src="https://img.shields.io/badge/status-pre--production-E5A000" alt="pre-production">
+</p>
 
-## Telemetry & Privacy
+`midnight-manual` is one Cargo workspace that ships three things that work together:
 
-Telemetry is **opt-out**, **never** carries user query content, chunk content,
-bearer tokens, filesystem paths, or environment-variable values, and is
-gated by a CI canary suite that fails any build leaking forbidden strings
-(FR-107..114, Constitution VII).
+- **`mnm` — a local MCP server.** Drop it into Claude Code, Codex, Cursor, or any MCP client and your assistant gains hybrid semantic search over the Midnight corpus, with reranking, source-aware confidence scoring, and document navigation.
+- **`mnm` — a developer & admin CLI.** Search the corpus from your terminal, inspect chunks and documents, manage local models, and (for maintainers) run the whole ingestion pipeline.
+- **`midnight-manual-server` — the cloud corpus.** An `axum` service backed by PostgreSQL + pgvector that hosts the indexed corpus and the search API. A hosted instance lives at **`https://midnight-manual.midnightntwrk.expert`** and is the compiled-in default — most users never run the server themselves.
+
+> [!WARNING]
+> **`midnight-manual` is pre-production.** The hosted corpus is reset frequently and without notice, the database may be wiped between deploys, search results and ingested content can disappear, and **interfaces may change at any time** — the MCP tool contract, CLI flags, HTTP routes, config keys, and the manifest format are all still moving. Do not build anything load-bearing on top of it yet. Pin to a release and expect breakage on `main`.
+
+---
+
+## Table of contents
+
+- [Quick start](#quick-start)
+- [The MCP server](#the-mcp-server)
+- [Advanced search skills](#advanced-search-skills)
+- [Rate limits and uplift](#rate-limits-and-uplift)
+- [The CLI](#the-cli)
+- [Local models](#local-models)
+- [The smart chunker](#the-smart-chunker)
+- [The ingestion pipeline](#the-ingestion-pipeline)
+- [Admin & operations](#admin--operations)
+- [The cloud server](#the-cloud-server)
+- [Telemetry & privacy](#telemetry--privacy)
+- [Configuration](#configuration)
+- [Deep dives](#deep-dives)
+- [Project links](#project-links)
+
+---
+
+![Quick start](docs/assets/readme/quickstart.png)
+
+## Quick start
+
+You need a [Rust toolchain](https://rustup.rs) (1.91+). Everything else — the corpus, the embedding models — is fetched on demand. There is **no database, no API key, and no account** required to search.
+
+### 1. Build the CLI from source
+
+```bash
+git clone https://github.com/devrelaicom/midnight-manual.git
+cd midnight-manual
+cargo build --release -p mn-cli
+```
+
+This produces two identical binaries, `midnight-manual` and its short alias `mnm`, in `target/release/`. Put one on your `PATH`:
+
+```bash
+install -m 0755 target/release/mnm ~/.local/bin/mnm   # or anywhere on $PATH
+mnm doctor                                            # verify reachability + model state
+```
+
+`mnm doctor` checks that the cloud corpus is reachable, reports whether the local models are present, and flags anything misconfigured.
+
+### 2. Search straight away
+
+```bash
+mnm search "how do I write a Compact contract with a sealed ledger?"
+```
+
+The first search downloads the embedding + reranker models (a one-time ~hundreds-of-MB fetch into your local cache), then returns ranked, source-attributed results — each with a **confidence score** and a one-line provenance breakdown.
+
+### 3. Install the MCP server into your AI client
+
+`mnm mcp serve` speaks MCP (JSON-RPC 2.0) over stdio. Point any MCP-capable assistant at it.
+
+<details open>
+<summary><strong>Claude Code</strong></summary>
+
+```bash
+claude mcp add midnight-manual -- mnm mcp serve
+```
+
+…or add it by hand to your MCP config:
+
+```json
+{
+  "mcpServers": {
+    "midnight-manual": {
+      "command": "mnm",
+      "args": ["mcp", "serve"]
+    }
+  }
+}
+```
+</details>
+
+<details>
+<summary><strong>Codex</strong></summary>
+
+Add to `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.midnight-manual]
+command = "mnm"
+args = ["mcp", "serve"]
+```
+</details>
+
+<details>
+<summary><strong>Cursor</strong></summary>
+
+Add to `~/.cursor/mcp.json` (global) or `.cursor/mcp.json` (per-project):
+
+```json
+{
+  "mcpServers": {
+    "midnight-manual": {
+      "command": "mnm",
+      "args": ["mcp", "serve"]
+    }
+  }
+}
+```
+</details>
+
+> Prefer it scripted? `mnm mcp install --agent claude-code` (also `--agent cursor`, `--agent continue`) writes the config for you.
+
+Restart your client and ask it something Midnight-specific. It will reach for the `search` tool, pull back grounded passages, and cite the source it used.
+
+---
+
+![The MCP server](docs/assets/readme/mcp-server.png)
+
+## The MCP server
+
+`mnm mcp serve` is a hand-rolled MCP server (JSON-RPC 2.0 framed over stdio) with **lazy model loading** — it starts in well under half a second and only loads the embedder/reranker the first time a query actually needs them, so adding it to your client costs you nothing at idle.
+
+It exposes **11 tools**, grouped by what they do:
+
+### Search
+
+| Tool | What it does |
+| --- | --- |
+| **`search`** | Hybrid full-text + vector retrieval. Supports a single `query` or an array of `queries` (for HyDE / query-expansion fusion), optional cross-encoder `rerank`, and a `filters` object (by source, attribution tier, language, or package). `limit` defaults to 10, capped at 50. Every hit carries a confidence score and per-factor trust breakdown. |
+
+### Read a hit in context
+
+A search result is a chunk. These tools let your assistant pull exactly as much surrounding context as it needs — no more, no less — instead of dumping whole files into the window:
+
+| Tool | What it does |
+| --- | --- |
+| **`get_chunk`** | Fetch one chunk by id, plus its parent document metadata and source slug. |
+| **`get_chunk_next`** / **`get_chunk_prev`** | Walk forward/backward `count` chunks (default 5, max 100). Skips `embed_failed` gaps. |
+| **`get_chunk_parents`** | Walk the parent chain up to the source-version root — great for "where does this live?". |
+| **`get_document`** | Document metadata + the ordered list of its chunk ids (no bodies). |
+| **`get_document_full`** | The whole document with chunks inlined (capped at 500 ready chunks; over that it points you to `get_document_chunks`). |
+| **`get_document_chunks`** | A windowed slice of a document's chunks with `from` / `limit` pagination. |
+
+### Corpus & models
+
+| Tool | What it does |
+| --- | --- |
+| **`list_sources`** | Enumerate corpus sources — slug, display name, kind, active revision. |
+| **`pull_models`** | Download the embedder + reranker on demand; reports load state and timing. |
+| **`status`** | Health report: server version, model names, `ready`/`missing` state, cache dir. |
+
+### Why it's good
+
+- **Hybrid retrieval, not just vectors.** Lexical (PostgreSQL full-text) and semantic (pgvector) results are fused with [Reciprocal Rank Fusion](#deep-dives) so exact-term matches and conceptual matches both surface.
+- **Optional cross-encoder reranking.** Flip `rerank: true` and a `bge-reranker-base` cross-encoder re-scores the candidate set for precision on hard queries.
+- **Confidence you can reason about.** Each result blends a **trust score** (source attribution, verification, freshness, deprecation, version-match) with relevance — and returns the factor breakdown so your assistant can say *why* a passage is trustworthy without another round-trip.
+- **Structured errors that self-correct.** If the corpus's embedding model has rolled forward, `search` returns an `embedding_model_mismatch` envelope that tells the client to call `pull_models` — no cryptic failures.
+
+---
+
+![Advanced search skills](docs/assets/readme/skills.png)
+
+## Advanced search skills
+
+The MCP server gives your assistant the *power tools* — hybrid retrieval, reranking, trust scoring, chunk navigation. The **Advanced Search Skill** teaches it the *technique*: how to combine those tools like a seasoned researcher instead of firing one naive query and hoping. It's a persistent, auto-loaded [Agent Skill](https://agentskills.io) (`SKILL.md`) — once installed, your agent reaches for the right retrieval pattern on its own, no prompting required.
+
+### Install it in one line
+
+From inside your AI harness, run the bootstrap prompt:
+
+```text
+/mnm:add-advanced-search-skill
+```
+
+The agent checks whether the skill is already present and, if not, installs it through the MCP server, then tells you to reload skills. No manual file copying.
+
+> The exact slash spelling depends on your client — some namespace MCP prompts (e.g. `/mcp__midnight-manual__add_advanced_search_skill`). Your client's prompt menu will list it.
+
+### What the skill teaches
+
+| Technique | How it works | Why it helps |
+| --- | --- | --- |
+| **HyDE** (pseudo-answer) | The agent drafts a 1–2 sentence hypothetical answer and searches with it alongside the question; both embeddings fuse via RRF. | Lifts recall when the question is short or uses different words than the docs. |
+| **Multi-query** | 2–3 paraphrases varying vocabulary and breadth, fused in a single `search` call. | Beats synonym mismatch between your phrasing and the corpus's. |
+| **Step-back** | Pairs the specific question with a more abstract framing. | Rescues over-specific questions and raw error messages. |
+| **Lexical anchoring** | Sends exact identifiers / error codes verbatim so the full-text half of hybrid search nails exact matches. | Catches the precise symbol, flag, or error the vector half would blur. |
+| **Symbol-aware code search** | Scopes by `package` / `language`, then navigates hits by their structured `symbol_path`. | Lands on the *named* circuit, contract, or function — not an arbitrary window. |
+| **Retrieve-read-retrieve** | Broad first pass → read hits with `get_chunk_next` / `get_chunk_parents` → refine with newly-learned terms → search again. | Converges on precise answers the way a human researcher iterates. |
+| **Trust-weighted selection** | Ranks and prunes on each result's `trust_score` and `confidence_factors` (attribution, verification, freshness, version-match). | Authoritative, version-matched sources rise; stale or deprecated ones sink. |
+| **Cross-source comparison** | Pulls from multiple sources and surfaces disagreement instead of silently picking one. | Compensates for the deliberate absence of automatic contradiction detection. |
+
+Worked examples for every pattern live in [`docs/cookbook/query-enhancement.md`](docs/cookbook/query-enhancement.md).
+
+### Manual & scripted install
+
+Prefer to drive it yourself? The CLI installs the skill into every harness it detects:
+
+```bash
+mnm skills add                              # auto-detect installed harnesses
+mnm skills add --harness claude-code,codex  # target a specific set
+mnm skills add --scope project              # this repo only (default: user)
+```
+
+- `--harness` takes a comma-separated list: `claude-code`, `codex`, `opencode`, `cursor`.
+- `--scope` is `user` (all your projects) or `project` (committed to the repo), mirroring how each harness scopes skills/rules.
+
+Agents can install it too: the MCP server exposes an **`install_search_skill`** tool that performs the add and returns the installation status, which harnesses it wrote to, the exact paths, and the per-harness "reload your skills" step to relay back to you.
+
+### Supported harnesses
+
+The skill ships in each harness's native format — the same portable `SKILL.md` everywhere it's supported, and an adapted rule where it isn't:
+
+| Harness | Format | Installs to |
+| --- | --- | --- |
+| **Claude Code** | `SKILL.md` (Agent Skill) | `~/.claude/skills/` · `.claude/skills/` |
+| **Codex CLI** | `SKILL.md` (open Agent Skills standard) | `~/.agents/skills/` · `<repo>/.agents/skills/` |
+| **OpenCode** | `SKILL.md` (native) | `~/.config/opencode/skills/` · `.opencode/skills/` |
+| **Cursor** | Project Rule (`.mdc`) | `.cursor/rules/` |
+
+**Coming soon:** Gemini CLI · Windsurf · Zed · Cline · Continue.
+
+> After installing, reload skills in your client (restart the session, or run its skills-reload command) so the new guidance is picked up — `mnm skills add` and the MCP tool both print the exact step for each harness they touched.
+
+---
+
+![Rate limits and uplift](docs/assets/readme/rate-limits.png)
+
+## Rate limits and uplift
+
+The hosted corpus is open and anonymous — no key to search — so it's rate-limited to keep it fast and fair for everyone. Limits are enforced by a per-request **token bucket**: each tier gets a refill rate in requests/second, and the bucket holds one second's worth of burst. Every response carries `x-ratelimit-limit`, `x-ratelimit-remaining`, and `x-ratelimit-reset`; exceeding your budget returns `429 Too Many Requests` with a `Retry-After`.
+
+### Tiers & current limits
+
+Your tier is resolved per request in this order — **CIDR override → admin → read-uplift → anonymous** — and you're charged against the matching bucket:
+
+| Tier | How you get it | Limit | Keyed by |
+| --- | --- | --- | --- |
+| **Anonymous** | default — no token | **10 req/s** | client IP |
+| **Read-uplift** | `mnm auth github` (GitHub SSO) | **60 req/s** | your user |
+| **Admin** | maintainer Ed25519 token | **1000 req/s** | your user |
+| **CIDR override** | admin-granted, per network block | **custom** | the CIDR |
+
+> Multi-query searches cost `max(1, distinct queries)` tokens (D25) — a 3-query HyDE fan-out spends 3 — so the [Advanced Search Skill](#advanced-search-skills) is mindful of how many formulations it sends.
+
+### The uplift mechanism
+
+Anything beyond casual use should grab the free read-uplift — a **6× lift** (10 → 60 req/s) at no cost:
+
+```bash
+mnm auth github      # opens GitHub OAuth; mints a 30-day read-uplift token
+mnm auth status      # show the active token and its expiry
+```
+
+The token (a 30-day JWT, configurable `[1, 90]` days) is stored in your local auth file and sent automatically by the CLI and MCP server. It **only raises your rate limit** — a read-uplift token can never write to the corpus (the tier guard runs before the role check), so it's safe to mint freely.
+
+### Boosting limits for hackathons & events
+
+Running a workshop or hackathon where a room full of people share an IP or NAT range? An admin can grant a **per-CIDR override** that lifts everyone behind that network block for a fixed window — no per-attendee signup:
+
+```bash
+# Lift an entire venue's network to 200 req/s for the weekend
+mnm ratelimits add --cidr 203.0.113.0/24 --limit 200 --ttl 72h
+
+mnm ratelimits list                 # see active overrides + expiry
+mnm ratelimits extend <id> --ttl 24h  # give it more time
+mnm ratelimits remove <id>          # revoke early
+```
+
+Overrides are time-boxed (they expire on their `--ttl`) and the server refreshes its override cache every ~30s, so grants and revocations take effect promptly. This is the recommended path for events — far simpler than minting tokens for every participant.
+
+> Self-hosting? Every limit is tunable via env (`MIDNIGHT_MANUAL_RATE_LIMIT_ANONYMOUS_RPS`, `…_UPLIFT_RPS`, `…_ADMIN_RPS`), and the whole subsystem can be toggled with `MIDNIGHT_MANUAL_RATE_LIMIT_ENABLED`.
+
+---
+
+![The CLI](docs/assets/readme/cli.png)
+
+## The CLI
+
+`midnight-manual` / `mnm` is a noun-first command tree: pick a noun, then a verb. No account or API key is required — embedding and reranking run **locally on your machine**; only the search request itself reaches the hosted corpus. Add `--json` to any command for scripting.
+
+```text
+mnm search   "<query>"                 ad-hoc hybrid search
+mnm sources  list | show               browse corpus sources
+mnm versions list | show | promote …   inspect source versions
+mnm chunks   show | next | prev        walk the chunk graph by id
+mnm documents show | full | chunks     read documents, windowed
+mnm models   pull | list | prune       manage local embedder/reranker
+mnm config   show | edit | defaults    resolved configuration
+mnm telemetry disable | enable | status opt out (or back in)
+mnm auth     github | status           GitHub OAuth for rate-limit uplift
+mnm manifest init | check | generate   author ingestion manifests
+mnm mcp      serve | install            run / wire up the MCP server
+mnm doctor                             environment & connectivity report
+mnm version                            build metadata
+```
+
+Some highlights:
+
+```bash
+# Search and get machine-readable output
+mnm search "nullifier double-spend prevention" --limit 5 --json
+
+# Follow a chunk's neighbours to read around a hit
+mnm chunks next <chunk-id> --count 10
+
+# Read a whole document, or a window of it
+mnm documents full <doc-id>
+mnm documents chunks <doc-id> --from 0 --limit 20
+
+# Manage local models
+mnm models pull          # fetch embedder + reranker
+mnm models list          # what's cached
+mnm models prune --keep bge-base-en-v1.5
+```
+
+### Global flags
+
+| Flag | Purpose |
+| --- | --- |
+| `--server <url>` | Point at a different corpus (env: `MIDNIGHT_MANUAL_SERVER`). Defaults to the hosted instance. |
+| `--json` | JSON output instead of human-formatted text. |
+| `--config <path>` | Use a specific config file. |
+| `--token <jwt>` | Supply an auth token (admins / rate-limit uplift). |
+| `--log-level <lvl>` | `error` … `trace` (env: `RUST_LOG`). |
+| `--no-telemetry` | Disable telemetry for this one invocation. |
+
+> Maintainer commands (`keys`, `users`, `ingest`, `ratelimits`, `login`) are hidden from `--help` by default to keep the surface clean for everyday users. Set `MIDNIGHT_MANUAL_SHOW_ADMIN_CMDS=1` (or `cli.show_admin_cmds = true`) to reveal them — they're always invocable by name regardless. See [Admin & operations](#admin--operations).
+
+---
+
+![Local models](docs/assets/readme/local-models.png)
+
+## Local models
+
+Embedding and reranking run **on your machine**, not in a third-party API. Your queries are turned into vectors locally; only the resulting search request hits the corpus.
+
+| Role | Model | Notes |
+| --- | --- | --- |
+| Embedder | **`bge-base-en-v1.5`** | 768-dimensional sentence embeddings. |
+| Reranker | **`bge-reranker-base`** | Cross-encoder, used only when `rerank` is requested. |
+
+- **Powered by [`fastembed`](https://github.com/Anush008/fastembed-rs)** over the ONNX runtime — no Python, no GPU required.
+- **Lazy & cached.** Models download on first use into `$XDG_DATA_HOME/midnight-manual/models/` (override with `models.cache_dir`). Subsequent runs load from disk; the MCP server only loads them when a query needs them.
+- **Pin & prune.** `mnm models pull`, `mnm models list`, and `mnm models prune --keep <name>` give you full control of what's on disk.
+- **Version-aware.** The corpus advertises its active embedding model as `name@revision` (e.g. `bge-base-en-v1.5@1`). If the corpus rolls forward, clients are told to `pull_models` rather than silently returning mis-scored results.
+
+---
+
+![The smart chunker](docs/assets/readme/chunker.png)
+
+## The smart chunker
+
+Retrieval quality is only as good as your chunks. `midnight-manual` doesn't blindly slice text every N characters — it understands structure.
+
+### Markdown → heading-aware chunks
+
+Markdown is parsed with `pulldown-cmark` and split along its heading hierarchy. Every chunk carries its **`heading_path`** (the chain of ancestor headings), so a hit knows exactly where in the document outline it came from.
+
+### Code → semantic, symbol-aware chunks
+
+Source files are parsed with [`tree-sitter`](https://tree-sitter.github.io/) and split on real syntactic boundaries — functions, classes, `impl` blocks, modules — never mid-expression. Each code chunk records a structured **`symbol_path`** (e.g. `impl Widget › fn render`) so search hits land on a *named thing*, not an arbitrary window.
+
+**Supported languages** (by extension):
+
+| | | |
+| --- | --- | --- |
+| **Compact** `.compact` | Rust `.rs` | TypeScript `.ts` `.tsx` |
+| JavaScript `.js` `.jsx` `.mjs` `.cjs` | Python `.py` | Go `.go` |
+| Solidity `.sol` | Java `.java` | C# `.cs` |
+| Kotlin `.kt` `.kts` | Swift `.swift` | Ruby `.rb` |
+| Haskell `.hs` | Bash `.sh` `.bash` | Scheme `.scm` `.ss` |
+| TOML `.toml` | YAML `.yaml` `.yml` | HTML / XML |
+
+> **Compact is a first-class citizen.** Midnight's smart-contract language is chunked with full symbol awareness — circuits, ledger declarations, witnesses, and contracts all become their own semantically-bounded, attributable chunks.
+
+Grammars are **Cargo-feature-gated** into tiers (`core-grammars` → `markup-grammars` → `extended-grammars` → `all-grammars`) so a lean build stays small. Crucially, **an absent grammar degrades gracefully**: an unknown or unbuilt language falls back to a line-window chunker (60-line windows, 20-line overlap) so it's still ingestible — just without symbol paths.
+
+### The details that matter
+
+- **Token-budgeted.** Chunks target a real BPE token budget (default **400 tokens**) so they fit the embedder cleanly — measured with the same tokenizer the model uses, not a character heuristic.
+- **`.gitignore`-aware file discovery.** File lists are built with the [`ignore`](https://docs.rs/ignore) crate. A precedence ladder governs what's included: `.git/` is always excluded → built-in skips (`node_modules`, `target`, `vendor`, `dist`, `*.min.js`, …) → `.gitignore`/`.ignore` → your `--exclude` globs → your `--include` whitelist.
+- **Package detection.** Walking up from each file, the chunker attaches **package membership** — Rust crates (`Cargo.toml` `[package]`, workspace roots skipped) and npm packages (`package.json` `.name`) — so results can be filtered and attributed by package.
+- **Never fails the run for one bad file.** A catastrophically malformed file falls back to line-window chunking and is flagged, rather than aborting the whole ingest.
+
+---
+
+![The ingestion pipeline](docs/assets/readme/ingestion.png)
+
+## The ingestion pipeline
+
+Getting content into the corpus is a single, resumable, atomically-promoted flow. The orchestrator is pure — it never touches the database directly — which makes ingestion predictable and testable.
+
+```text
+manifest ─▶ .gitignore-aware walk ─▶ per-file chunker ─▶ local embedder ─▶ versioned corpus ─▶ promote
+   (or auto-generated)          (markdown / code / fallback)            (carry-forward unchanged docs)
+```
+
+What makes it nice:
+
+- **Versioned, atomic promotion.** Every ingest builds a new `source_version` in a `building` state, invisible to search. A single `finalize` step flips it `active` and demotes the previous one in one transaction — readers never see a half-built corpus, and rollback is one command.
+- **Carry-forward.** If a document's content hash is unchanged from the active version, its chunks (and their embeddings) are re-linked instead of re-embedded. Re-ingesting a docs site where two pages changed costs you two pages of work, not the whole site.
+- **Per-file dispatch.** A `README.md` next to a `lib.rs` next to a `Cargo.toml` each routes to the right chunker automatically, by extension (and shebang).
+- **Resilient.** Binary files are sniffed and skipped, oversize files (>10 MiB) are skipped with a warning, and chunks the embedder rejects land in an `embed_failed` state and are simply skipped by readers (so navigation has clean gaps, never broken links).
+- **Observable.** Each run emits an `ingest_complete` event with documents added / updated / skipped and duration — counts only, never content (see [privacy](#telemetry--privacy)).
+
+---
+
+![Admin & operations](docs/assets/readme/admin.png)
+
+## Admin & operations
+
+> Admin commands are hidden by default. Reveal them with `export MIDNIGHT_MANUAL_SHOW_ADMIN_CMDS=1`.
+
+### User management
+
+Users live in a TOML store (committed to the corpus repo, loaded server-side from `MIDNIGHT_MANUAL_USER_STORE`). Auth is **Ed25519 challenge-response** — no passwords, no shared secrets in the store, just public keys.
+
+```bash
+# 1. A new maintainer generates a keypair locally (private key never leaves their machine)
+mnm keys generate --user-id alice
+# → writes alice.private locally and prints the public half in wire form:
+#   ed25519:Base64NoPad…
+
+# 2. An existing admin adds them to the user store and commits it
+mnm users add --user-id alice --role writer --public-key "ed25519:Base64NoPad…"
+mnm users list
+
+# 3. The new maintainer logs in (signs a server-issued nonce) to mint a short-lived JWT
+mnm login
+```
+
+Roles: **`admin`** (full surface, including user + rate-limit management) and **`writer`** (ingest only). JWTs are HS256, carry the role and an auth *tier*, and a read-uplift tier (see [the server](#the-cloud-server)) can never escalate to write.
+
+### Running an ingest job — quick start
+
+An ingest needs a **manifest** (what to ingest and how to attribute it) and a **source root** (where the files are).
+
+#### Example A — ingest the Midnight docs (Markdown, with a manifest)
+
+Clone the docs, write a manifest that attributes them and maps them to their published URLs, then ingest:
+
+```bash
+git clone https://github.com/midnightntwrk/midnight-docs.git
+```
+
+`hierarchy.yaml`:
+
+```yaml
+manifest_version: 1
+root:
+  name: "Midnight Docs"
+  path: "docs"
+  published_url: "https://docs.midnight.network"
+  provenance:
+    attribution: foundation      # Foundation-authored → highest trust
+    verified_by: foundation
+  include: ["**/*.md", "**/*.mdx"]
+  exclude: ["**/_drafts/**"]
+  children:
+    - name: "Tutorials"
+      path: "docs/tutorials"
+    - name: "Reference"
+      path: "docs/reference"
+```
+
+```bash
+mnm ingest run \
+  --manifest hierarchy.yaml \
+  --source-slug midnight-docs \
+  --source-root ./midnight-docs
+```
+
+The CLI chunks every file, embeds locally, uploads in batches, and finalizes the new version — atomically promoting it live when the run completes.
+
+#### Example B — ingest a code repo **without hand-writing a manifest**
+
+For source repos you don't have to author anything by hand — let `mnm manifest generate` walk the tree (honouring `.gitignore`) and build the manifest for you, then ingest it:
+
+```bash
+# OpenZeppelin's Compact contracts
+git clone https://github.com/OpenZeppelin/compact-contracts.git
+mnm manifest generate --base ./compact-contracts \
+    --include '**/*.compact' --include '**/*.ts' --include '**/*.md' \
+    --output compact-contracts.yaml
+mnm ingest run --manifest compact-contracts.yaml \
+               --source-slug openzeppelin-compact \
+               --source-root ./compact-contracts
+
+# A full example dApp — the Midnight "kitties" sample
+git clone https://github.com/midnightntwrk/example-kitties.git
+mnm manifest generate --base ./example-kitties \
+    --include '**/*.compact' --include '**/*.ts' --include '**/*.tsx' --include '**/*.md' \
+    --output kitties.yaml
+mnm ingest run --manifest kitties.yaml \
+               --source-slug example-kitties \
+               --source-root ./example-kitties
+```
+
+`mnm manifest generate` walks the tree (honouring `.gitignore`), classifies each file by extension against your `--include` globs, and writes a ready-to-use `hierarchy.yaml` you can ingest as-is or hand-tune. Fine-tune discovery with `manifest generate`'s `--include` / `--exclude` globs, and the chunker itself with `ingest run`'s `--code-chunk-tokens`, `--code-chunk-lines`, and `--code-chunk-overlap`. Run `mnm manifest generate --help` and `mnm ingest run --help` for the full set.
+
+> The `.compact`, `.ts`, and `.tsx` files in those repos are chunked with full symbol awareness, so a search for a specific circuit or contract lands on exactly that definition — attributed back to the OpenZeppelin or Midnight source it came from.
+
+### Managing versions & rate limits
+
+```bash
+mnm versions list     midnight-docs            # see revisions and which is active
+mnm versions rollback midnight-docs            # promote the previous active version
+mnm versions retire   old-source --revision 3  # mark a revision for the retention sweep
+
+mnm ratelimits add  --cidr 203.0.113.0/24 --limit 20 --ttl 90d
+mnm ratelimits list
+```
+
+A background sweep job retires stale and aborted versions on a grace window, so the corpus stays tidy without manual cleanup.
+
+---
+
+![The cloud server](docs/assets/readme/server.png)
+
+## The cloud server
+
+`midnight-manual-server` is the corpus host. Most people never run it — they use the hosted instance — but it's a single self-contained binary if you want your own.
+
+- **Stack:** `axum` + `tower` over PostgreSQL 16 with the `pgvector` extension. An HNSW index powers vector search; a GIN index powers full-text. 
+- **API surface:** anonymous **read** endpoints (`/v1/search`, `/v1/chunks/{id}`, `/v1/documents/{id}`, `/v1/sources/{slug}`, `/v1/models/active`) and authenticated **admin** endpoints (the ingest-run protocol, rate-limit management).
+- **Tiered rate limiting.** Anonymous traffic is limited per-IP; signing in via **GitHub OAuth** (org membership → a 30-day read-uplift token) raises your limit; admins can add per-CIDR overrides. A tier guard runs before the role guard, so an uplift token can never gain write access.
+- **Operable by default.** `/health` for readiness, `/metrics` in Prometheus format, request-ID propagation on every request for traceability, and automatic migrations on startup.
+- **Ships small.** Multi-stage Docker build onto `gcr.io/distroless/cc` (no shell, no toolchain), built for `linux/amd64` + `linux/arm64`, deployed on Fly.io.
+
+Run your own against a local Postgres:
+
+```bash
+export DATABASE_URL=postgres://localhost/midnight_manual
+export MIDNIGHT_MANUAL_USER_STORE=./users.toml
+export MIDNIGHT_MANUAL_JWT_SECRET=…           # HS256 signing secret
+cargo run --release -p mn-server
+```
+
+---
+
+![Telemetry & privacy](docs/assets/readme/privacy.png)
+
+## Telemetry & privacy
+
+Telemetry is **opt-out**, carries **no** query content, chunk content, bearer tokens, filesystem paths, or environment values, and is enforced by a **CI canary suite** that fails any build leaking a forbidden string (Constitution VII).
 
 ### What is collected
 
-Six event types, each a fixed shape of coarse-grained scalars / enums:
+Six event types, each a fixed shape of coarse scalars and closed enums:
 
-| Event type        | Fields                                                                                       | Where           |
-| ----------------- | -------------------------------------------------------------------------------------------- | --------------- |
-| `mcp_tool_call`   | `tool_name`, `latency_ms`, `result_count`, `model_state`, `rerank_on`, `outcome`             | MCP server      |
-| `cli_command`     | `command`, `duration_ms`, `outcome`                                                          | CLI             |
-| `ingest_complete` | `documents_added/updated/skipped`, `duration_ms`, `outcome`                                  | CLI (admin)     |
-| `pull_models`     | `embedder_downloaded`, `reranker_downloaded`, `duration_ms`, `outcome`                       | CLI / MCP       |
-| `mcp_startup`     | `startup_ms`, `model_state`                                                                  | MCP server      |
-| `mcp_shutdown`    | `uptime_s`, `tools_served`                                                                   | MCP server      |
+| Event | Fields | Source |
+| --- | --- | --- |
+| `mcp_tool_call` | `tool_name`, `latency_ms`, `result_count`, `model_state`, `rerank_on`, `outcome` | MCP |
+| `cli_command` | `command`, `duration_ms`, `outcome` | CLI |
+| `ingest_complete` | `documents_added/updated/skipped`, `duration_ms`, `outcome` | CLI (admin) |
+| `pull_models` | `embedder_downloaded`, `reranker_downloaded`, `duration_ms`, `outcome` | CLI / MCP |
+| `mcp_startup` | `startup_ms`, `model_state` | MCP |
+| `mcp_shutdown` | `uptime_s`, `tools_served` | MCP |
 
-Every emission carries `component` (`cli` / `mcp` / `server`), the crate
-`version`, and an optional `request_id` for log correlation. Adding a
-field requires a coordinated bump on both the client schema and the
-server-side validator (FR-109); unknown fields are dropped at the wire
-boundary with a structured warning.
+Every emission also carries the `component` (`cli`/`mcp`/`server`), the crate `version`, and an optional `request_id` for log correlation.
 
-### What is NOT collected (forbidden set)
+### What is NOT collected
 
-- Verbatim text of any user query.
-- Verbatim text of any returned chunk.
+- Verbatim text of any query or returned chunk.
 - Bearer tokens, JWTs, API keys, signing secrets.
-- Filesystem paths from your machine.
-- Resolved environment-variable values.
-- IP addresses on event rows (IPs are used transiently for rate-limiting and
-  never persisted with events).
+- Filesystem paths or resolved environment-variable values.
+- IP addresses on event rows (used transiently for rate-limiting, never persisted with events).
 - Email addresses or user identifiers on event rows.
 
-### Where it goes
+### How to opt out — any one of these is enough
 
-Events `POST` to `/v1/telemetry/events` on the configured cloud server (default
-`https://manual.midnight.network`). The endpoint is anonymous (no bearer
-required, any supplied bearer is ignored per FR-116), returns `202 Accepted`,
-and is the only auth-free POST in the surface. Client-side, events are
-batched in memory and flushed every 30 seconds OR every 100 events, whichever
-comes first. Failed flushes retry with jittered exponential backoff up to
-three attempts within a ten-second wall-clock budget; 4xx responses drop the
-batch immediately, since re-sending a malformed batch is futile.
+1. **Environment:** `MIDNIGHT_MANUAL_DISABLE_TELEMETRY=1`.
+2. **Config:** `telemetry.enabled = false` in your config file.
+3. **Runtime:** `mnm telemetry disable` (writes a persistent marker read at every startup; reverse with `mnm telemetry enable`, inspect with `mnm telemetry status`).
 
-### How to opt out
+When disabled, no connection is ever opened to the telemetry endpoint and any queued events are discarded. Events otherwise batch in memory and flush every 30 seconds or 100 events, with jittered backoff on failure.
 
-Three equivalent mechanisms; any one of them disables telemetry:
+### The canary
 
-1. **Environment**: set `MIDNIGHT_MANUAL_DISABLE_TELEMETRY=1` (truthy values:
-   `1`, `true`, `yes`, `on`).
-2. **Config**: `telemetry.enabled = false` in `~/.config/midnight-manual/config.toml`.
-3. **Runtime**: `mnm telemetry disable` writes a persistent marker at
-   `$XDG_CONFIG_HOME/midnight-manual/telemetry-disabled` (or
-   `$HOME/.config/midnight-manual/telemetry-disabled`). Every CLI / MCP
-   invocation reads it at startup. Reverse with `mnm telemetry enable`.
-   Inspect with `mnm telemetry status`.
+A CI test feeds query stand-ins, fake tokens, fake paths, and fake env values through every code path that touches user content, then greps every captured log and telemetry row for the canary set. **Any match fails the build.** The infrastructure lives in [`crates/mn-telemetry/src/canary.rs`](crates/mn-telemetry/src/canary.rs).
 
-When disabled, the client never opens a connection to `/v1/telemetry`, any
-in-memory queued events are discarded (FR-108), and the dropped-by-optout
-counter is exposed via the local client API.
+---
 
-### Retention
+![Configuration](docs/assets/readme/config.png)
 
-- `telemetry_event_raw`: rolling **7 days** (configurable via
-  `MIDNIGHT_MANUAL_TELEMETRY_RAW_RETENTION_DAYS`, clamped to `[1, 365]`).
-  The sweep job rolls expired rows into `telemetry_aggregate_daily` and
-  deletes them inside a single transaction — counters always reflect the
-  rows that were actually removed (SC-065).
-- `telemetry_aggregate_daily`: kept indefinitely; numeric counters only.
-  Exposed at `GET /metrics` as Prometheus counter rows
-  (`midnight_manual_telemetry_events_total{event_type,component}`) and a
-  same-shape `midnight_manual_telemetry_events_today` gauge.
+## Configuration
 
-### Privacy canary
+Configuration resolves in a clear precedence order — **command-line flag › environment variable › config file › compiled-in default** — so you can override anything at any layer.
 
-A CI test feeds a set of canary strings — query stand-ins, fake bearer
-tokens, fake paths, fake env values — through every code path that handles
-user-controllable content. Post-run, every captured log file and every row
-of `telemetry_event_raw` is grepped for the canary set. Any match fails the
-build (FR-112 / SC-061). The canary infrastructure lives in
-[`crates/mn-telemetry/src/canary.rs`](crates/mn-telemetry/src/canary.rs)
-and expands to cover every endpoint and tool as call sites land.
+**Config file** (TOML), found via `--config`, then `MIDNIGHT_MANUAL_CONFIG`, then `$XDG_CONFIG_HOME/midnight-manual/config.toml`:
 
-## Quick links
+```toml
+[server]
+url = "https://midnight-manual.midnightntwrk.expert"
 
-- Spec: [`specs/001-rag-platform/spec.md`](specs/001-rag-platform/spec.md)
-- Constitution: [`CONSTITUTION.md`](CONSTITUTION.md)
-- Architecture: [`specs/001-rag-platform/plan.md`](specs/001-rag-platform/plan.md)
-- Project guide for AI assistants: [`CLAUDE.md`](CLAUDE.md)
+[models]
+embedding = "bge-base-en-v1.5"
+reranker  = "bge-reranker-base"
+# cache_dir = "/custom/model/cache"   # optional
+
+[telemetry]
+enabled = true
+
+[cli]
+show_admin_cmds = false
+```
+
+Inspect or edit the resolved config any time:
+
+```bash
+mnm config show       # the effective, merged config
+mnm config defaults   # the compiled-in baseline
+mnm config edit       # open it in $EDITOR
+```
+
+**Key environment variables:**
+
+| Variable | Effect |
+| --- | --- |
+| `MIDNIGHT_MANUAL_SERVER` | Corpus URL (same as `--server`). |
+| `MIDNIGHT_MANUAL_CONFIG` | Config file path. |
+| `MIDNIGHT_MANUAL_DISABLE_TELEMETRY` | Opt out of telemetry. |
+| `MIDNIGHT_MANUAL_SHOW_ADMIN_CMDS` | Reveal admin subcommands. |
+| `RUST_LOG` | Log verbosity. |
+| `MIDNIGHT_MANUAL_USER_STORE` / `MIDNIGHT_MANUAL_JWT_SECRET` | Server-side: user store + JWT secret. |
+
+---
+
+## Deep dives
+
+### Confidence = trust × relevance
+
+Most retrieval systems give you a relevance score and stop. `midnight-manual` multiplies relevance by a **trust score** derived from where the content comes from:
+
+- **Attribution** — Foundation > Partner > Third-party > Community > Unknown.
+- **Verification** — verified by the Foundation, a partner, someone, or unverified.
+- **Freshness** — exponential decay by age, so fast-moving docs don't out-rank by staleness.
+- **Deprecation** — flagged-deprecated content is down-weighted.
+- **Version match** — content that targets the language/SDK version you're asking about is boosted.
+
+The result carries the **per-factor breakdown**, so your assistant can explain *why* a passage scored the way it did — "Foundation-authored, verified, recent, version matches" — without another call. The scoring policy is data-driven (loaded from a policy file), so trust weights can be tuned without a rebuild.
+
+### Hybrid retrieval & RRF
+
+Lexical and semantic candidate lists are merged with **Reciprocal Rank Fusion** (`k = 60`, the canonical constant), normalized into `[0, 1)`. Exact-term hits and conceptual hits both get a fair shot at the top, and the optional cross-encoder reranker (`bge-reranker-base`) sharpens the final ordering when you ask for it.
+
+### Multi-query / HyDE
+
+`search` accepts an array of `queries` (1–50). Pair a literal query with a hypothetical-answer (HyDE) or step-back rephrase and let RRF fuse the results — a simple, powerful recall boost. See [`docs/cookbook/query-enhancement.md`](docs/cookbook/query-enhancement.md).
+
+### Built for speed and many platforms
+
+Cold-start to MCP handshake is sub-500 ms; p95 retrieval is under a second against the hosted corpus. Prebuilt binaries target macOS (x86-64 + Apple silicon), Linux (gnu + musl, x86-64 + aarch64), and Windows x86-64.
+
+---
+
+## Project links
+
+- **Spec:** [`specs/001-rag-platform/spec.md`](specs/001-rag-platform/spec.md)
+- **Architecture & plan:** [`specs/001-rag-platform/plan.md`](specs/001-rag-platform/plan.md)
+- **Constitution** (non-negotiable principles): [`CONSTITUTION.md`](CONSTITUTION.md)
+- **Query-enhancement cookbook:** [`docs/cookbook/query-enhancement.md`](docs/cookbook/query-enhancement.md)
+- **Guide for AI assistants working in this repo:** [`CLAUDE.md`](CLAUDE.md)
+
+---
+
+<p align="center"><sub>Pre-production software for the Midnight Network. Expect change. Build something anyway.</sub></p>
