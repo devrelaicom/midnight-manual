@@ -7,6 +7,7 @@ members = [
     "crates/mn-embedding",
     "crates/mn-auth",
     "crates/mn-telemetry",
+    "crates/mn-skills",
     "crates/mn-mcp",
     "crates/mn-cli",
     "crates/mn-server",
