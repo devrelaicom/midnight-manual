@@ -1,0 +1,24 @@
+manifest_version: 1
+root:
+  name: corpus
+  children:
+    # Rust source files — tree-sitter chunker, symbol_path expected
+    - file: src/lib.rs
+    - file: src/util.rs
+    # Malformed Rust — triggers catastrophic-error fallback → line-window,
+    # symbol_path will be empty (used as the fallback_used proxy in the E2E test)
+    - file: src/broken.rs
+    # TypeScript / TSX — tree-sitter chunker, symbol_path expected
+    - file: web/app.ts
+    - file: web/component.tsx
+    # Markdown files — heading-aware chunker, heading_path expected
+    - file: README.md
+    - file: docs/guide.md
+    # Plain text — line-window chunker, no symbol_path or heading_path
+    - file: notes.txt
+    # NOTE: Cargo.toml and web/package.json are NOT listed here as ingest
+    # documents. They exist on disk only for package DETECTION (the walker
+    # calls mn_content::package::detect() by walking up from each source file).
+    # Listing them would just add TOML/JSON docs to the ingest, which is
+    # harmless but unnecessary. Keeping them out keeps the assertion counts
+    # predictable (8 documents total).

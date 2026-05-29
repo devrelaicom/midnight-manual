@@ -1,4 +1,4 @@
-//! Markdown chunker — heading-based splits with a fixed-window fallback.
+//! Markdown chunker — heading-based splits with a token-budgeted window fallback.
 //!
 //! Heading-based strategy (FR-007): every H1-H6 heading begins a new chunk.
 //! Chunks carry a `heading_path` of their ancestor headings so the caller can
@@ -6,147 +6,106 @@
 //! further via the fallback windowing.
 //!
 //! Fallback strategy (EC-07): documents with no headings fall through to a
-//! fixed-token-count window with overlap (defaults: 800 tokens, 100-token overlap).
+//! token-counted line-growth window with overlap. Defaults driven by
+//! `ChunkerConfig::default()` (400 tokens max, 20-line overlap).
 //!
-//! Tokenization here is byte-count-based — fast and good enough for chunk-size
-//! gating. The real embedding tokenizer (BPE in `mn-embedding`) is used at
-//! embed time.
+//! Tokenization uses the real BPE tokenizer via `crate::tokens::count` so
+//! chunk-size gating matches what the embedder actually sees.
 
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag};
-use serde::{Deserialize, Serialize};
 
-/// One chunk emitted by [`chunk_markdown`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MarkdownChunk {
-    /// Verbatim chunk content (Markdown, including the leading heading line
-    /// that began the chunk where applicable).
-    pub content: String,
-    /// Ancestor heading text from root → immediate parent. Empty for
-    /// pre-heading content or for heading-less documents.
-    pub heading_path: Vec<String>,
-    /// Byte offset of the chunk's first character in the source document.
-    pub start_byte: usize,
-    /// Byte offset just past the chunk's last character.
-    pub end_byte: usize,
-    /// 0-indexed position among the document's chunks.
-    pub chunk_index: u32,
-}
+use crate::chunk::{Chunk, ChunkError, Chunker, ChunkerConfig};
 
-/// Configuration for the chunker.
-#[derive(Debug, Clone, Copy)]
-pub struct ChunkerConfig {
-    /// Maximum chunk size in bytes before the fallback window kicks in.
-    pub max_bytes: usize,
-    /// Fixed-window size for heading-less / over-sized chunks (bytes).
-    pub window_bytes: usize,
-    /// Overlap between adjacent windows (bytes).
-    pub overlap_bytes: usize,
-}
+/// The stateless markdown chunker. Construct with `MarkdownChunker` and call
+/// via the [`Chunker`] trait.
+pub struct MarkdownChunker;
 
-impl Default for ChunkerConfig {
-    fn default() -> Self {
-        // Defaults from spec EC-07: 800 tokens ≈ 3200 bytes with avg 4-byte
-        // tokens, 100-token overlap ≈ 400 bytes. Keeping byte units throughout
-        // the chunker for predictability.
-        Self {
-            max_bytes: 4096,
-            window_bytes: 3200,
-            overlap_bytes: 400,
+impl Chunker for MarkdownChunker {
+    fn chunk(&self, body: &str, cfg: &ChunkerConfig) -> Result<Vec<Chunk>, ChunkError> {
+        if body.trim().is_empty() {
+            return Ok(Vec::new());
         }
-    }
-}
 
-/// Split a Markdown body into chunks. Returns at least one chunk for any
-/// non-empty input.
-#[must_use]
-pub fn chunk_markdown(body: &str, cfg: ChunkerConfig) -> Vec<MarkdownChunk> {
-    if body.trim().is_empty() {
-        return Vec::new();
-    }
+        // ── First pass: walk the parser and emit heading-bounded segments ──
+        let mut segments: Vec<HeadingSegment> = Vec::new();
+        let mut current = HeadingSegment {
+            start: 0,
+            end: 0,
+            heading_path: Vec::new(),
+        };
+        let mut stack: Vec<(HeadingLevel, String)> = Vec::new();
+        let mut in_heading: Option<HeadingLevel> = None;
+        let mut heading_buf = String::new();
 
-    // First pass: walk the parser and emit heading-bounded segments.
-    let mut segments: Vec<HeadingSegment> = Vec::new();
-    let mut current = HeadingSegment {
-        start: 0,
-        end: 0,
-        heading_path: Vec::new(),
-    };
-    let mut stack: Vec<(HeadingLevel, String)> = Vec::new();
-    let mut in_heading: Option<HeadingLevel> = None;
-    let mut heading_buf = String::new();
-
-    let parser = Parser::new_ext(body, Options::all()).into_offset_iter();
-    for (event, range) in parser {
-        match event {
-            Event::Start(Tag::Heading { level, .. }) => {
-                if range.start > current.start {
-                    current.end = range.start;
-                    segments.push(current.clone());
+        let parser = Parser::new_ext(body, Options::all()).into_offset_iter();
+        for (event, range) in parser {
+            match event {
+                Event::Start(Tag::Heading { level, .. }) => {
+                    if range.start > current.start {
+                        current.end = range.start;
+                        segments.push(current.clone());
+                    }
+                    // Same-level (or higher-level) entries are siblings or aunts,
+                    // not ancestors, of this new heading. Pop them BEFORE snapshotting
+                    // so heading_path reflects only true ancestors.
+                    while stack.last().is_some_and(|(l, _)| *l >= level) {
+                        stack.pop();
+                    }
+                    in_heading = Some(level);
+                    heading_buf.clear();
+                    current = HeadingSegment {
+                        start: range.start,
+                        end: range.start,
+                        heading_path: stack.iter().map(|(_, t)| t.clone()).collect(),
+                    };
                 }
-                // Same-level (or higher-level) entries are siblings or aunts,
-                // not ancestors, of this new heading. Pop them BEFORE snapshotting
-                // so heading_path reflects only true ancestors.
-                while stack.last().is_some_and(|(l, _)| *l >= level) {
-                    stack.pop();
+                Event::Text(t) if in_heading.is_some() => heading_buf.push_str(&t),
+                Event::Code(t) if in_heading.is_some() => heading_buf.push_str(&t),
+                Event::End(_) if in_heading.is_some() => {
+                    let level = in_heading.take().expect("inside heading");
+                    stack.push((level, heading_buf.trim().to_owned()));
+                    // Don't mutate current.heading_path here: the heading is the
+                    // segment's OWN heading, not an ancestor.
                 }
-                in_heading = Some(level);
-                heading_buf.clear();
-                current = HeadingSegment {
-                    start: range.start,
-                    end: range.start,
-                    heading_path: stack.iter().map(|(_, t)| t.clone()).collect(),
-                };
+                _ => {}
             }
-            Event::Text(t) if in_heading.is_some() => heading_buf.push_str(&t),
-            Event::Code(t) if in_heading.is_some() => heading_buf.push_str(&t),
-            Event::End(_) if in_heading.is_some() => {
-                let level = in_heading.take().expect("inside heading");
-                stack.push((level, heading_buf.trim().to_owned()));
-                // Don't mutate current.heading_path here: the heading is the
-                // segment's OWN heading, not an ancestor.
-            }
-            _ => {}
         }
-    }
-    current.end = body.len();
-    if current.end > current.start {
-        segments.push(current);
-    }
+        current.end = body.len();
+        if current.end > current.start {
+            segments.push(current);
+        }
 
-    // Second pass: split over-large segments via the fixed-window fallback.
-    let mut chunks: Vec<MarkdownChunk> = Vec::new();
-    for seg in segments {
-        let text = &body[seg.start..seg.end];
-        if text.trim().is_empty() {
-            continue;
-        }
-        if text.len() <= cfg.max_bytes {
-            chunks.push(MarkdownChunk {
-                content: text.to_owned(),
-                heading_path: seg.heading_path.clone(),
-                start_byte: seg.start,
-                end_byte: seg.end,
-                chunk_index: 0, // filled in below
-            });
-        } else {
-            for window in window_split(text, seg.start, cfg.window_bytes, cfg.overlap_bytes) {
-                chunks.push(MarkdownChunk {
-                    content: window.content,
+        // ── Second pass: split over-large segments via token-budgeted line windows ──
+        let mut chunks: Vec<Chunk> = Vec::new();
+        for seg in segments {
+            let text = &body[seg.start..seg.end];
+            if text.trim().is_empty() {
+                continue;
+            }
+            if crate::tokens::count(text) <= cfg.max_tokens {
+                chunks.push(Chunk {
+                    content: text.to_owned(),
                     heading_path: seg.heading_path.clone(),
-                    start_byte: window.start_byte,
-                    end_byte: window.end_byte,
-                    chunk_index: 0,
+                    symbol_path: Vec::new(),
+                    start_byte: seg.start,
+                    end_byte: seg.end,
+                    token_count: crate::tokens::count(text),
+                    chunk_index: 0, // filled in below
+                    fallback_used: false,
                 });
+            } else {
+                for window in token_window_split(text, seg.start, &seg.heading_path, cfg) {
+                    chunks.push(window);
+                }
             }
         }
-    }
 
-    // Heading-less documents produce a single oversized segment; if the
-    // document has no chunks (all-whitespace), early-returned above.
-    for (i, c) in chunks.iter_mut().enumerate() {
-        c.chunk_index = u32::try_from(i).unwrap_or(u32::MAX);
+        // Assign sequential chunk indices.
+        for (i, c) in chunks.iter_mut().enumerate() {
+            c.chunk_index = u32::try_from(i).unwrap_or(u32::MAX);
+        }
+        Ok(chunks)
     }
-    chunks
 }
 
 #[derive(Debug, Clone)]
@@ -156,78 +115,140 @@ struct HeadingSegment {
     heading_path: Vec<String>,
 }
 
-struct Window {
-    content: String,
-    start_byte: usize,
-    end_byte: usize,
-}
-
-/// Yields overlapping fixed-size windows over `text`. Returned slices respect
-/// UTF-8 character boundaries.
-fn window_split(text: &str, base_offset: usize, window: usize, overlap: usize) -> Vec<Window> {
-    if text.len() <= window {
-        return vec![Window {
-            content: text.to_owned(),
-            start_byte: base_offset,
-            end_byte: base_offset + text.len(),
-        }];
+/// Split `text` into overlapping token-budgeted windows, growing line by line.
+///
+/// `base_offset` is the byte offset of `text[0]` within the original document,
+/// used to compute absolute `start_byte`/`end_byte` on each emitted `Chunk`.
+///
+/// The algorithm:
+/// 1. Collect all lines from `text`.
+/// 2. Grow a window by appending lines until adding the next line would push the
+///    token count over `cfg.max_tokens`.
+/// 3. Emit the window as a `Chunk`.
+/// 4. Step back by `cfg.fallback_overlap_lines` lines to create overlap, then
+///    continue from that position.
+/// 5. A single line that exceeds the budget on its own is emitted whole (no
+///    infinite loop).
+fn token_window_split(
+    text: &str,
+    base_offset: usize,
+    heading_path: &[String],
+    cfg: &ChunkerConfig,
+) -> Vec<Chunk> {
+    // Collect (line_str, absolute_start_byte_within_text).
+    let mut line_starts: Vec<usize> = Vec::new();
+    let mut pos = 0usize;
+    for line in text.split('\n') {
+        line_starts.push(pos);
+        // +1 for the '\n' that split consumed (except possibly the very last line)
+        pos += line.len() + 1;
     }
-    let step = window.saturating_sub(overlap).max(1);
-    let mut out = Vec::new();
-    let mut start = 0;
-    while start < text.len() {
-        let end = (start + window).min(text.len());
-        // Snap end to char boundary
-        let end_snapped = char_boundary_at_or_below(text, end);
-        // Snap start to char boundary
-        let start_snapped = char_boundary_at_or_below(text, start);
-        out.push(Window {
-            content: text[start_snapped..end_snapped].to_owned(),
-            start_byte: base_offset + start_snapped,
-            end_byte: base_offset + end_snapped,
-        });
-        if end_snapped == text.len() {
-            break;
+    let n_lines = line_starts.len();
+    if n_lines == 0 {
+        return Vec::new();
+    }
+    // End byte of line i within `text` (exclusive, capped at text.len()).
+    let line_end = |i: usize| -> usize {
+        if i + 1 < n_lines {
+            // Start of next line (which includes the '\n' we consumed)
+            line_starts[i + 1]
+        } else {
+            text.len()
         }
-        start = start_snapped.saturating_add(step);
-    }
-    out
-}
+    };
 
-const fn char_boundary_at_or_below(s: &str, mut idx: usize) -> usize {
-    if idx >= s.len() {
-        return s.len();
+    let overlap_lines = usize::try_from(cfg.fallback_overlap_lines).unwrap_or(usize::MAX);
+    let mut out: Vec<Chunk> = Vec::new();
+    let mut window_start_line = 0usize;
+
+    while window_start_line < n_lines {
+        // Grow: find the largest end (exclusive) such that lines[start..end] fits
+        // the token budget.  We always include at least one line so that a single
+        // over-budget line is emitted whole (no infinite loop).
+        let mut end_line = window_start_line + 1; // at least one line
+        while end_line < n_lines {
+            let slice = &text[line_starts[window_start_line]..line_end(end_line)];
+            if crate::tokens::count(slice) > cfg.max_tokens {
+                // Adding line `end_line` would overflow — stop before it.
+                break;
+            }
+            end_line += 1;
+        }
+        // lines [window_start_line ..= end_line-1] is the in-budget window
+        // (or a single over-budget line when end_line == window_start_line + 1).
+        let last_line = end_line - 1;
+        let slice_start = line_starts[window_start_line];
+        let slice_end = line_end(last_line);
+        let slice = &text[slice_start..slice_end];
+
+        // Guard: never emit empty slices.
+        if !slice.trim().is_empty() {
+            let tok = crate::tokens::count(slice);
+            out.push(Chunk {
+                content: slice.to_owned(),
+                heading_path: heading_path.to_vec(),
+                symbol_path: Vec::new(),
+                start_byte: base_offset + slice_start,
+                end_byte: base_offset + slice_end,
+                token_count: tok,
+                chunk_index: 0, // caller will renumber
+                fallback_used: false,
+            });
+        }
+
+        // Step the start forward, then back by overlap, ensuring forward progress.
+        let lines_in_window = last_line - window_start_line + 1;
+        let step = lines_in_window.saturating_sub(overlap_lines).max(1);
+        window_start_line += step;
     }
-    while idx > 0 && !s.is_char_boundary(idx) {
-        idx -= 1;
-    }
-    idx
+
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chunk::ChunkerConfig;
+
+    // ── helpers ─────────────────────────────────────────────────────────────
+
+    fn default_cfg() -> ChunkerConfig {
+        ChunkerConfig::default()
+    }
+
+    fn small_cfg() -> ChunkerConfig {
+        // 50-token budget — small enough that a few hundred-word body splits.
+        ChunkerConfig {
+            max_tokens: 50,
+            ..ChunkerConfig::default()
+        }
+    }
+
+    // ── tests ────────────────────────────────────────────────────────────────
 
     #[test]
     fn empty_input_produces_no_chunks() {
-        let chunks = chunk_markdown("   \n\t  ", ChunkerConfig::default());
+        let chunks = MarkdownChunker.chunk("   \n\t  ", &default_cfg()).unwrap();
         assert!(chunks.is_empty());
     }
 
     #[test]
     fn single_heading_produces_one_chunk() {
         let md = "# Title\n\nBody text here.";
-        let chunks = chunk_markdown(md, ChunkerConfig::default());
+        let chunks = MarkdownChunker.chunk(md, &default_cfg()).unwrap();
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].chunk_index, 0);
         assert!(chunks[0].content.contains("Body text"));
         assert!(chunks[0].heading_path.is_empty());
+        // Markdown chunks must have empty symbol_path and fallback_used=false.
+        assert!(chunks[0].symbol_path.is_empty());
+        assert!(!chunks[0].fallback_used);
     }
 
     #[test]
     fn nested_headings_record_path() {
         let md = "# Top\n\nintro\n\n## Sub A\n\ncontent A\n\n## Sub B\n\ncontent B\n";
-        let chunks = chunk_markdown(md, ChunkerConfig::default());
+        let chunks = MarkdownChunker.chunk(md, &default_cfg()).unwrap();
         assert_eq!(chunks.len(), 3);
         // First chunk is from `# Top` heading; its path is empty (it IS Top).
         assert_eq!(chunks[1].heading_path, vec!["Top".to_string()]);
@@ -236,46 +257,55 @@ mod tests {
 
     #[test]
     fn over_sized_chunk_falls_back_to_window() {
-        let big = "x".repeat(10_000);
-        let md = format!("# Title\n\n{big}");
-        let cfg = ChunkerConfig {
-            max_bytes: 1000,
-            window_bytes: 800,
-            overlap_bytes: 100,
-        };
-        let chunks = chunk_markdown(&md, cfg);
+        // Build a segment whose token count comfortably exceeds max_tokens=50.
+        // Each line is ~10 tokens; 20 lines * 10 ≈ 200 tokens >> 50.
+        let line = "the quick brown fox jumps over the lazy dog near the river\n";
+        let big_body: String = line.repeat(20);
+        let md = format!("# Title\n\n{big_body}");
+        let chunks = MarkdownChunker.chunk(&md, &small_cfg()).unwrap();
         assert!(chunks.len() > 1, "oversized chunk must split into windows");
+        let cfg = small_cfg();
         for c in &chunks {
-            assert!(c.content.len() <= cfg.window_bytes);
+            // Every chunk must either fit within the token budget, OR be a single
+            // line that exceeds the budget on its own (unavoidable — can't split
+            // finer than one line).
+            let single_line = c.content.trim_end().lines().count() == 1;
+            assert!(
+                c.token_count <= cfg.max_tokens || single_line,
+                "chunk token_count={} exceeds budget={} and is not a single line",
+                c.token_count,
+                cfg.max_tokens
+            );
+        }
+        // Verify the trait contract: markdown windowing sets fallback_used=false
+        // and symbol_path is empty.
+        for c in &chunks {
+            assert!(!c.fallback_used);
+            assert!(c.symbol_path.is_empty());
         }
     }
 
     #[test]
     fn windows_overlap() {
-        let text: String = (0..2000)
-            .map(|i| (b'a' + u8::try_from(i % 26).unwrap()) as char)
-            .collect();
-        let cfg = ChunkerConfig {
-            max_bytes: 500,
-            window_bytes: 400,
-            overlap_bytes: 100,
-        };
-        let chunks = chunk_markdown(&format!("# X\n\n{text}"), cfg);
-        assert!(chunks.len() >= 2);
-        // Adjacent windows must overlap by ~ overlap_bytes
-        if chunks.len() >= 2 {
-            // The body offset within the original (after `# X\n\n`) is 5.
-            let body_start = chunks[0].start_byte;
-            assert!(chunks[1].start_byte > body_start);
-            let gap = chunks[1].start_byte.saturating_sub(chunks[0].start_byte);
-            assert!(gap < cfg.window_bytes, "windows must overlap, gap={gap}");
-        }
+        // Long body of many lines to guarantee multiple windows.
+        let line = "the quick brown fox jumps over the lazy dog near the river bank\n";
+        let body: String = line.repeat(30);
+        let md = format!("# X\n\n{body}");
+        let chunks = MarkdownChunker.chunk(&md, &small_cfg()).unwrap();
+        assert!(chunks.len() >= 2, "expected multiple windows, got {}", chunks.len());
+        // Adjacent windows must overlap: chunks[1].start_byte < chunks[0].end_byte.
+        assert!(
+            chunks[1].start_byte < chunks[0].end_byte,
+            "chunks[1].start_byte={} should be < chunks[0].end_byte={} (overlap required)",
+            chunks[1].start_byte,
+            chunks[0].end_byte,
+        );
     }
 
     #[test]
     fn headingless_document_produces_chunks() {
         let md = "Just a plain paragraph with no headings.\n\nAnother one.";
-        let chunks = chunk_markdown(md, ChunkerConfig::default());
+        let chunks = MarkdownChunker.chunk(md, &default_cfg()).unwrap();
         assert_eq!(chunks.len(), 1, "small heading-less doc fits in one chunk");
         assert!(chunks[0].heading_path.is_empty());
     }
@@ -283,7 +313,7 @@ mod tests {
     #[test]
     fn chunk_indices_are_sequential() {
         let md = "# A\n\ntext\n\n# B\n\ntext\n\n# C\n\ntext\n";
-        let chunks = chunk_markdown(md, ChunkerConfig::default());
+        let chunks = MarkdownChunker.chunk(md, &default_cfg()).unwrap();
         for (i, c) in chunks.iter().enumerate() {
             assert_eq!(c.chunk_index, u32::try_from(i).unwrap());
         }

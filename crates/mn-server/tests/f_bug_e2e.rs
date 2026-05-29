@@ -194,6 +194,14 @@ async fn document_metadata_persists_to_postgres_through_full_ingest() {
         yes: true, // not strictly needed (source pre-seeded) but defensive
         source_base_url: Some("https://github.com/example/docs/blob/main".to_owned()),
         batch_size: 50,
+        code_chunk_tokens: 400,
+        code_chunk_lines: 60,
+        code_chunk_overlap: 20,
+        include: vec![],
+        exclude: vec![],
+        no_respect_gitignore: false,
+        disable_default_ignore_list: false,
+        max_file_size: 10 * 1024 * 1024,
     };
     let telemetry = TelemetryClient::Disabled;
 

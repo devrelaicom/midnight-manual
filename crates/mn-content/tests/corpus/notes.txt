@@ -1,0 +1,14 @@
+These are plain text notes for the corpus fixture.
+
+The notes.txt file has no known code extension, so it will be processed by
+the line-window chunker as plain text. This exercises the fallback path for
+files that are not recognized as any structured format.
+
+Line windowing splits the file into overlapping windows of a fixed number
+of lines. Each window becomes a chunk with empty symbol_path and empty
+heading_path.
+
+Additional notes:
+- The chunker assigns a best-effort token count to each chunk.
+- The document receives a language tag of "text" or similar.
+- No tree-sitter grammar is invoked for this file type.

@@ -88,8 +88,8 @@ pub struct NewChunk<'a> {
     pub embedding_model_id: Uuid,
     /// Markdown heading path.
     pub heading_path: &'a [String],
-    /// Code-symbol path.
-    pub symbol_path: &'a [String],
+    /// Code-symbol path (structured, persisted as JSONB).
+    pub symbol_path: &'a [mn_core::types::SymbolSegment],
     /// Start byte in source.
     pub start_byte: i32,
     /// End byte in source.
@@ -130,7 +130,7 @@ pub async fn insert(pool: &PgPool, c: NewChunk<'_>) -> Result<Uuid> {
     .bind(c.embedding.map(Vector::from))
     .bind(c.embedding_model_id)
     .bind(c.heading_path)
-    .bind(c.symbol_path)
+    .bind(sqlx::types::Json(c.symbol_path))
     .bind(c.start_byte)
     .bind(c.end_byte)
     .bind(c.token_count)
@@ -273,8 +273,8 @@ pub struct CarryForwardChunk {
     pub embedding_model_id: Uuid,
     /// Markdown heading path.
     pub heading_path: Vec<String>,
-    /// Code-symbol path.
-    pub symbol_path: Vec<String>,
+    /// Code-symbol path (structured).
+    pub symbol_path: Vec<mn_core::types::SymbolSegment>,
     /// 0-indexed chunk position.
     pub chunk_index: i32,
     /// Total chunks in the parent document.
@@ -428,7 +428,7 @@ struct ChunkWithContextRow {
     content_hash: String,
     embedding_model_id: Uuid,
     heading_path: Vec<String>,
-    symbol_path: Vec<String>,
+    symbol_path: sqlx::types::Json<Vec<mn_core::types::SymbolSegment>>,
     start_byte: i32,
     end_byte: i32,
     token_count: i32,
@@ -467,7 +467,7 @@ impl TryFrom<ChunkWithContextRow> for ChunkWithContext {
             content_hash: r.content_hash,
             embedding_model_id: r.embedding_model_id,
             heading_path: r.heading_path,
-            symbol_path: r.symbol_path,
+            symbol_path: r.symbol_path.0,
             start_byte: r.start_byte,
             end_byte: r.end_byte,
             token_count: r.token_count,
@@ -497,7 +497,7 @@ struct CarryForwardRow {
     embedding: Option<Vector>,
     embedding_model_id: Uuid,
     heading_path: Vec<String>,
-    symbol_path: Vec<String>,
+    symbol_path: sqlx::types::Json<Vec<mn_core::types::SymbolSegment>>,
     chunk_index: i32,
     total_chunks: i32,
     start_byte: i32,
@@ -518,7 +518,7 @@ impl TryFrom<CarryForwardRow> for CarryForwardChunk {
             embedding: r.embedding.map(|v| v.to_vec()),
             embedding_model_id: r.embedding_model_id,
             heading_path: r.heading_path,
-            symbol_path: r.symbol_path,
+            symbol_path: r.symbol_path.0,
             chunk_index: r.chunk_index,
             total_chunks: r.total_chunks,
             start_byte: r.start_byte,
@@ -541,7 +541,7 @@ struct ChunkRow {
     content_hash: String,
     embedding_model_id: Uuid,
     heading_path: Vec<String>,
-    symbol_path: Vec<String>,
+    symbol_path: sqlx::types::Json<Vec<mn_core::types::SymbolSegment>>,
     start_byte: i32,
     end_byte: i32,
     token_count: i32,
@@ -566,7 +566,7 @@ impl TryFrom<ChunkRow> for Chunk {
             content_hash: r.content_hash,
             embedding_model_id: r.embedding_model_id,
             heading_path: r.heading_path,
-            symbol_path: r.symbol_path,
+            symbol_path: r.symbol_path.0,
             start_byte: r.start_byte,
             end_byte: r.end_byte,
             token_count: r.token_count,
@@ -574,4 +574,17 @@ impl TryFrom<ChunkRow> for Chunk {
             created_at: r.created_at,
         })
     }
+}
+
+/// Read a chunk's structured symbol path. Test/diagnostic helper.
+///
+/// # Errors
+/// Propagates query errors.
+pub async fn symbol_path_of(pool: &PgPool, id: Uuid) -> Result<Vec<mn_core::types::SymbolSegment>> {
+    let row: (sqlx::types::Json<Vec<mn_core::types::SymbolSegment>>,) =
+        sqlx::query_as("SELECT symbol_path FROM chunk WHERE id = $1")
+            .bind(id)
+            .fetch_one(pool)
+            .await?;
+    Ok(row.0 .0)
 }

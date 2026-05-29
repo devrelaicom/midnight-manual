@@ -45,6 +45,7 @@ use uuid::Uuid;
 
 /// Args for `mnm ingest run`.
 #[derive(Debug, ClapArgs)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct Args {
     /// Path to the `hierarchy.yaml` manifest.
     pub manifest: PathBuf,
@@ -91,6 +92,46 @@ pub struct Args {
     /// 413 responses from the server.
     #[arg(long, default_value_t = 50)]
     pub batch_size: usize,
+
+    /// Semantic code-chunk budget in tokens.
+    #[arg(long, default_value_t = 400)]
+    pub code_chunk_tokens: u32,
+
+    /// Line-window fallback size (lines).
+    #[arg(long, default_value_t = 60)]
+    pub code_chunk_lines: u32,
+
+    /// Line-window fallback overlap (lines).
+    #[arg(long, default_value_t = 20)]
+    pub code_chunk_overlap: u32,
+
+    /// Whitelist glob (repeatable).
+    ///
+    /// Fed into file-list filtering when directory discovery is used (follow-up).
+    #[arg(long)]
+    pub include: Vec<String>,
+
+    /// Exclude glob (repeatable), additive over defaults + gitignore.
+    ///
+    /// Fed into file-list filtering when directory discovery is used (follow-up).
+    #[arg(long)]
+    pub exclude: Vec<String>,
+
+    /// Disable .gitignore/.ignore filtering.
+    ///
+    /// Fed into file-list filtering when directory discovery is used (follow-up).
+    #[arg(long)]
+    pub no_respect_gitignore: bool,
+
+    /// Disable the built-in default skip list (node_modules, target, …).
+    ///
+    /// Fed into file-list filtering when directory discovery is used (follow-up).
+    #[arg(long)]
+    pub disable_default_ignore_list: bool,
+
+    /// Skip files larger than this many bytes.
+    #[arg(long, default_value_t = 10 * 1024 * 1024)]
+    pub max_file_size: u64,
 }
 
 /// Dispatch.
@@ -224,16 +265,24 @@ async fn run_inner(
         .clone()
         .unwrap_or_else(|| super::infer_revision(&source_root));
 
+    let chunker_config = mn_content::chunk::ChunkerConfig {
+        max_tokens: args.code_chunk_tokens,
+        fallback_lines: args.code_chunk_lines,
+        fallback_overlap_lines: args.code_chunk_overlap,
+        max_file_bytes: args.max_file_size,
+    };
     let mut builder =
-        PlanBuilder::new(&args.source_slug, SourceKind::DocsSite, &revision, PriorState::default());
+        PlanBuilder::new(&args.source_slug, SourceKind::DocsSite, &revision, PriorState::default())
+            .with_chunker_config(chunker_config);
     for doc in &walked_docs {
         let ctx = WalkContext {
             path: doc.rel_path.clone(),
-            kind: DocumentKind::Markdown,
+            kind: doc.resolved.kind,
             content: &doc.content,
             split: &doc.split,
             resolved: &doc.resolved,
             source_modified_at: doc.source_modified_at,
+            package: detect_package_ref(&source_root, &doc.rel_path),
         };
         builder
             .add_walked_document(&ctx)
@@ -385,12 +434,13 @@ async fn run_inner(
                     content: c.content.clone(),
                     content_hash: c.content_hash.clone(),
                     heading_path: c.heading_path.clone(),
-                    symbol_path: Vec::new(),
+                    symbol_path: c.symbol_path.clone(),
                     start_byte: i32::try_from(c.start_byte).unwrap_or(i32::MAX),
                     end_byte: i32::try_from(c.end_byte).unwrap_or(i32::MAX),
                     token_count: i32::try_from(c.token_count).unwrap_or(i32::MAX),
                 })
                 .collect(),
+            package: d.package.clone(),
         })
         .collect();
 
@@ -669,6 +719,8 @@ struct DocumentUpload {
     char_count: i32,
     token_count: i32,
     chunks: Vec<ChunkUpload>,
+    /// Detected package membership (rust/npm) for this document, if any.
+    package: Option<mn_core::types::PackageRef>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -678,7 +730,7 @@ struct ChunkUpload {
     content: String,
     content_hash: String,
     heading_path: Vec<String>,
-    symbol_path: Vec<String>,
+    symbol_path: Vec<mn_core::types::SymbolSegment>,
     start_byte: i32,
     end_byte: i32,
     token_count: i32,
@@ -702,6 +754,22 @@ struct FinalizeResult {
     is_active: bool,
     #[serde(default)]
     demoted_revision: Option<i32>,
+}
+
+/// Detect package membership for a single file by walking up to the source root
+/// and looking for the nearest `Cargo.toml` or `package.json` manifest.
+///
+/// Returns `None` for files that are not enclosed by any known manifest.
+fn detect_package_ref(
+    source_root: &std::path::Path,
+    rel_path: &std::path::Path,
+) -> Option<mn_core::types::PackageRef> {
+    let abs = source_root.join(rel_path);
+    mn_content::package::detect(&abs, source_root).map(|p| mn_core::types::PackageRef {
+        kind: p.kind,
+        name: p.name,
+        manifest_path: Some(p.manifest_path.display().to_string()),
+    })
 }
 
 #[derive(Debug, Serialize)]
@@ -770,6 +838,48 @@ fn format_success(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_code_chunk_and_filter_flags() {
+        use clap::Parser as _;
+        // Args derives ClapArgs (not Parser); wrap in a minimal Parser for
+        // testing so try_parse_from is available.
+        #[derive(clap::Parser)]
+        struct Wrap {
+            #[command(flatten)]
+            inner: Args,
+        }
+        let w = Wrap::try_parse_from([
+            "ingest-run",
+            "--source-slug",
+            "s",
+            "--code-chunk-tokens",
+            "256",
+            "--code-chunk-lines",
+            "80",
+            "--code-chunk-overlap",
+            "15",
+            "--include",
+            "*.rs",
+            "--exclude",
+            "gen_*",
+            "--no-respect-gitignore",
+            "--disable-default-ignore-list",
+            "--max-file-size",
+            "1048576",
+            "m.yaml",
+        ])
+        .unwrap();
+        let args = w.inner;
+        assert_eq!(args.code_chunk_tokens, 256);
+        assert_eq!(args.code_chunk_lines, 80);
+        assert_eq!(args.code_chunk_overlap, 15);
+        assert_eq!(args.include, vec!["*.rs".to_string()]);
+        assert_eq!(args.exclude, vec!["gen_*".to_string()]);
+        assert!(args.no_respect_gitignore);
+        assert!(args.disable_default_ignore_list);
+        assert_eq!(args.max_file_size, 1_048_576);
+    }
 
     #[test]
     fn dry_run_human_output() {

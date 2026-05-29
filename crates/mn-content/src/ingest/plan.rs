@@ -11,9 +11,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::chunk::{Chunker, ChunkerConfig};
 use crate::content_hash::{chunk_hash, document_hash};
 use crate::frontmatter::FrontmatterSplit;
-use crate::markdown::{chunk_markdown, ChunkerConfig};
 
 /// One pre-existing document carried over from the prior active source version.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,6 +50,8 @@ pub struct PlannedChunk {
     /// Ancestor heading path from the Markdown chunker. Empty for code /
     /// plaintext or for pre-heading content.
     pub heading_path: Vec<String>,
+    /// Structured code-symbol path. Empty for markdown/plaintext.
+    pub symbol_path: Vec<mn_core::types::SymbolSegment>,
     /// 0-indexed position among the document's chunks.
     pub chunk_index: u32,
     /// Total chunks in the document, for `total_chunks` column.
@@ -96,6 +98,9 @@ pub struct PlannedDocument {
     /// Token count of the document body (computed once at chunk time and
     /// summed across chunks; landed in Task 12).
     pub token_count: u32,
+    /// Detected package membership for code documents (rust/npm). None otherwise.
+    #[serde(default)]
+    pub package: Option<mn_core::types::PackageRef>,
 }
 
 /// A document whose `content_hash` matched the prior active version. The
@@ -183,6 +188,8 @@ pub struct WalkContext<'a> {
     /// Filesystem modification timestamp at walk time (`None` if the OS
     /// could not supply `mtime`).
     pub source_modified_at: Option<time::OffsetDateTime>,
+    /// Pre-detected package membership (computed by the caller; the planner does no filesystem I/O).
+    pub package: Option<mn_core::types::PackageRef>,
 }
 
 /// Stateful builder for [`IngestPlan`]. One instance per ingest run.
@@ -259,15 +266,24 @@ impl PlanBuilder {
             }
         }
 
-        let chunks = match walked.kind {
-            DocumentKind::Markdown => chunk_markdown(&walked.split.body, self.chunker_config),
-            DocumentKind::Code | DocumentKind::Plaintext => {
-                // Phase 9a only ships the Markdown chunker through the
-                // orchestrator. Code chunking lands in a follow-up — for now
-                // route through the Markdown chunker's fallback windowing
-                // path, which is content-agnostic.
-                chunk_markdown(&walked.split.body, self.chunker_config)
+        let chunks: Vec<crate::chunk::Chunk> = match walked.kind {
+            DocumentKind::Markdown => crate::markdown::MarkdownChunker
+                .chunk(&walked.split.body, &self.chunker_config)
+                .unwrap_or_default(),
+            DocumentKind::Code => {
+                let ext = walked
+                    .path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("");
+                let lang = crate::code::language::Language::for_extension(ext);
+                crate::code::chunker_for_ext(lang, ext)
+                    .chunk(&walked.split.body, &self.chunker_config)
+                    .unwrap_or_default()
             }
+            DocumentKind::Plaintext => crate::code::line_window::LineWindowChunker
+                .chunk(&walked.split.body, &self.chunker_config)
+                .unwrap_or_default(),
         };
         let total = u32::try_from(chunks.len()).unwrap_or(u32::MAX);
         let planned_chunks: Vec<PlannedChunk> = chunks
@@ -278,6 +294,7 @@ impl PlanBuilder {
                 PlannedChunk {
                     content: c.content,
                     heading_path: c.heading_path,
+                    symbol_path: c.symbol_path,
                     chunk_index: c.chunk_index,
                     total_chunks: total,
                     start_byte: c.start_byte,
@@ -306,6 +323,7 @@ impl PlanBuilder {
             source_modified_at: walked.source_modified_at,
             language: crate::language::from_path(&walked.resolved.rel_path).map(str::to_owned),
             token_count: doc_tokens,
+            package: walked.package.clone(),
         });
         Ok(())
     }
@@ -432,6 +450,7 @@ mod tests {
             split: &split,
             resolved: &leaf,
             source_modified_at: None,
+            package: None,
         };
         builder
             .add_walked_document(&ctx)
@@ -613,6 +632,7 @@ mod tests {
             split: &split,
             resolved: &leaf,
             source_modified_at: None,
+            package: None,
         };
         let err = b.add_walked_document(&ctx).unwrap_err();
         assert!(matches!(err, IngestError::DuplicatePath(_)));
@@ -701,6 +721,7 @@ mod tests {
             split: &split,
             resolved: &leaf,
             source_modified_at: None,
+            package: None,
         };
         b.add_walked_document(&ctx).unwrap();
         let plan = b.finalize();
@@ -719,6 +740,59 @@ mod tests {
         let chunk_sum: u32 = doc.chunks.iter().map(|c| c.token_count).sum();
         assert!(doc.token_count > 0);
         assert_eq!(doc.token_count, chunk_sum);
+    }
+
+    #[test]
+    fn planned_chunk_has_symbol_path_field() {
+        // Build a minimal markdown PlannedDocument using the existing test helpers,
+        // get its first planned chunk, and assert symbol_path is an empty Vec.
+        let mut b = empty_builder();
+        feed(&mut b, "intro.md", "# Hello\n\nWelcome to the docs.");
+        let plan = b.finalize();
+        let pc = &plan.new_documents[0].chunks[0];
+        assert!(pc.symbol_path.is_empty());
+    }
+
+    #[cfg(feature = "core-grammars")]
+    #[test]
+    fn code_documents_get_symbol_paths() {
+        use crate::manifest::resolve::ResolvedLeaf;
+        use mn_core::types::DocumentKind;
+
+        let code = "impl Foo {\n    fn bar(&self) { let x = 1; }\n}\n";
+        let split = split_frontmatter(code);
+        let leaf = ResolvedLeaf {
+            rel_path: PathBuf::from("src/lib.rs"),
+            kind: DocumentKind::Code,
+            name: None,
+            published_url: None,
+            source_url: None,
+            provenance_override: Provenance::default(),
+        };
+        let ctx = WalkContext {
+            path: PathBuf::from("src/lib.rs"),
+            kind: DocumentKind::Code,
+            content: code,
+            split: &split,
+            resolved: &leaf,
+            source_modified_at: None,
+            package: None,
+        };
+        let mut b = empty_builder();
+        b.add_walked_document(&ctx).expect("add_walked_document");
+        let plan = b.finalize();
+
+        let chunks = &plan.new_documents[0].chunks;
+        assert!(
+            chunks
+                .iter()
+                .any(|c| c.symbol_path.iter().any(|s| s.kind == "impl" && s.name == "Foo")),
+            "expected a chunk with symbol_path containing {{kind:\"impl\", name:\"Foo\"}}, got: {chunks:?}"
+        );
+        assert!(
+            chunks.iter().all(|c| c.heading_path.is_empty()),
+            "code chunks should have empty heading_path"
+        );
     }
 }
 
@@ -800,6 +874,7 @@ mod proptests {
                     split: &split,
                     resolved: &leaf,
                     source_modified_at: None,
+                    package: None,
                 };
                 builder
                     .add_walked_document(&ctx)

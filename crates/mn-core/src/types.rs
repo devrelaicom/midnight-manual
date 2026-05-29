@@ -202,6 +202,18 @@ pub enum PackageKind {
     Other,
 }
 
+/// A detected package membership as carried through the ingest pipeline
+/// (plan → upload). Lighter than [`Package`] (no DB id / `source_version_id`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PackageRef {
+    /// Ecosystem: `"rust"` or `"npm"`.
+    pub kind: String,
+    /// Package name.
+    pub name: String,
+    /// Manifest path relative to the source root, if known.
+    pub manifest_path: Option<String>,
+}
+
 /// Detected package membership for a document/chunk (FR-049, FR-050).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Package {
@@ -232,6 +244,16 @@ pub enum DocumentKind {
     Code,
     /// Plaintext (e.g. README, .txt).
     Plaintext,
+}
+
+/// One segment of a code chunk's symbol path — e.g. `{kind:"impl", name:"Foo"}`.
+/// Persisted as JSONB in `chunk.symbol_path`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SymbolSegment {
+    /// Syntactic kind: "impl", "fn", "class", "interface", "key", "element", …
+    pub kind: String,
+    /// Identifier or label for this segment.
+    pub name: String,
 }
 
 /// A single ingested document (a Markdown page or source-code file).
@@ -314,8 +336,9 @@ pub struct Chunk {
     #[serde(default)]
     pub heading_path: Vec<String>,
     /// Code-symbol path leading to this chunk (mod/impl/fn for Rust, etc.).
+    /// Structured segments persisted as JSONB in the database.
     #[serde(default)]
-    pub symbol_path: Vec<String>,
+    pub symbol_path: Vec<SymbolSegment>,
     /// Start byte offset in the source document.
     pub start_byte: i32,
     /// End byte offset in the source document.
@@ -358,6 +381,18 @@ mod tests {
             serde_json::to_value(ChunkStatus::EmbedFailed).unwrap(),
             serde_json::Value::String("embed_failed".into())
         );
+    }
+
+    #[test]
+    fn symbol_segment_json_roundtrip() {
+        let seg = SymbolSegment {
+            kind: "impl".to_string(),
+            name: "Foo".to_string(),
+        };
+        let json = serde_json::to_string(&seg).unwrap();
+        assert_eq!(json, r#"{"kind":"impl","name":"Foo"}"#);
+        let back: SymbolSegment = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, seg);
     }
 
     #[test]

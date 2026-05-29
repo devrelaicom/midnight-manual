@@ -33,7 +33,7 @@ use mn_core::error::{Error as CoreError, ErrorCode};
 use mn_core::model_id::EmbeddingModelId;
 use mn_core::provenance::Provenance;
 use mn_core::types::{ChunkStatus, DocumentKind, NodeKind, SourceVersionStatus};
-use mn_store::entities::{chunk, document, embedding_model, node, source, source_version};
+use mn_store::entities::{chunk, document, embedding_model, node, package, source, source_version};
 use mn_store::StoreError;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -113,6 +113,9 @@ pub struct DocumentUpload {
     pub token_count: i32,
     /// Chunks for this document.
     pub chunks: Vec<ChunkUpload>,
+    /// Detected package membership (rust/npm) for this document, if any.
+    #[serde(default)]
+    pub package: Option<mn_core::types::PackageRef>,
 }
 
 /// One chunk to upload.
@@ -129,9 +132,9 @@ pub struct ChunkUpload {
     /// Heading path (Markdown).
     #[serde(default)]
     pub heading_path: Vec<String>,
-    /// Symbol path (code).
+    /// Symbol path (code, structured segments).
     #[serde(default)]
-    pub symbol_path: Vec<String>,
+    pub symbol_path: Vec<mn_core::types::SymbolSegment>,
     /// Start byte in source.
     #[serde(default)]
     pub start_byte: i32,
@@ -612,6 +615,20 @@ async fn insert_new_document(
     // their chunks' concatenated text — for v1 we trust the client's hash
     // (the manifest validator + CLI compute it deterministically). Future
     // hardening: rehash server-side against a canonicalised body.
+    let package_id = if let Some(pkg) = &doc.package {
+        let kind = match pkg.kind.as_str() {
+            "rust" => mn_core::types::PackageKind::Rust,
+            "npm" => mn_core::types::PackageKind::Npm,
+            "compact" => mn_core::types::PackageKind::Compact,
+            _ => mn_core::types::PackageKind::Other,
+        };
+        Some(
+            package::upsert(pool, sv_id, kind, &pkg.name, None, pkg.manifest_path.as_deref())
+                .await?,
+        )
+    } else {
+        None
+    };
     let doc_node = node::insert(pool, sv_id, Some(root), NodeKind::Document, &doc.path, 0).await?;
     let new_doc_id = document::insert(
         pool,
@@ -627,7 +644,7 @@ async fn insert_new_document(
             source_modified_at: doc.source_modified_at,
             frontmatter: doc.frontmatter.clone(),
             provenance: &doc.provenance,
-            package_id: None,
+            package_id,
             char_count: doc.char_count,
             token_count: doc.token_count,
         },
