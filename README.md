@@ -31,6 +31,7 @@
 
 - [Quick start](#quick-start)
 - [The MCP server](#the-mcp-server)
+- [Advanced search skills](#advanced-search-skills)
 - [The CLI](#the-cli)
 - [Local models](#local-models)
 - [The smart chunker](#the-smart-chunker)
@@ -179,11 +180,76 @@ A search result is a chunk. These tools let your assistant pull exactly as much 
 
 ---
 
+![Advanced search skills](docs/assets/readme/skills.png)
+
+## Advanced search skills
+
+The MCP server gives your assistant the *power tools* — hybrid retrieval, reranking, trust scoring, chunk navigation. The **Advanced Search Skill** teaches it the *technique*: how to combine those tools like a seasoned researcher instead of firing one naive query and hoping. It's a persistent, auto-loaded [Agent Skill](https://agentskills.io) (`SKILL.md`) — once installed, your agent reaches for the right retrieval pattern on its own, no prompting required.
+
+### Install it in one line
+
+From inside your AI harness, run the bootstrap prompt:
+
+```text
+/mnm:add-advanced-search-skill
+```
+
+The agent checks whether the skill is already present and, if not, installs it through the MCP server, then tells you to reload skills. No manual file copying.
+
+> The exact slash spelling depends on your client — some namespace MCP prompts (e.g. `/mcp__midnight-manual__add_advanced_search_skill`). Your client's prompt menu will list it.
+
+### What the skill teaches
+
+| Technique | How it works | Why it helps |
+| --- | --- | --- |
+| **HyDE** (pseudo-answer) | The agent drafts a 1–2 sentence hypothetical answer and searches with it alongside the question; both embeddings fuse via RRF. | Lifts recall when the question is short or uses different words than the docs. |
+| **Multi-query** | 2–3 paraphrases varying vocabulary and breadth, fused in a single `search` call. | Beats synonym mismatch between your phrasing and the corpus's. |
+| **Step-back** | Pairs the specific question with a more abstract framing. | Rescues over-specific questions and raw error messages. |
+| **Lexical anchoring** | Sends exact identifiers / error codes verbatim so the full-text half of hybrid search nails exact matches. | Catches the precise symbol, flag, or error the vector half would blur. |
+| **Symbol-aware code search** | Scopes by `package` / `language`, then navigates hits by their structured `symbol_path`. | Lands on the *named* circuit, contract, or function — not an arbitrary window. |
+| **Retrieve-read-retrieve** | Broad first pass → read hits with `get_chunk_next` / `get_chunk_parents` → refine with newly-learned terms → search again. | Converges on precise answers the way a human researcher iterates. |
+| **Trust-weighted selection** | Ranks and prunes on each result's `trust_score` and `confidence_factors` (attribution, verification, freshness, version-match). | Authoritative, version-matched sources rise; stale or deprecated ones sink. |
+| **Cross-source comparison** | Pulls from multiple sources and surfaces disagreement instead of silently picking one. | Compensates for the deliberate absence of automatic contradiction detection. |
+
+Worked examples for every pattern live in [`docs/cookbook/query-enhancement.md`](docs/cookbook/query-enhancement.md).
+
+### Manual & scripted install
+
+Prefer to drive it yourself? The CLI installs the skill into every harness it detects:
+
+```bash
+mnm skills add                              # auto-detect installed harnesses
+mnm skills add --harness claude-code,codex  # target a specific set
+mnm skills add --scope project              # this repo only (default: user)
+```
+
+- `--harness` takes a comma-separated list: `claude-code`, `codex`, `opencode`, `cursor`.
+- `--scope` is `user` (all your projects) or `project` (committed to the repo), mirroring how each harness scopes skills/rules.
+
+Agents can install it too: the MCP server exposes an **`install_search_skill`** tool that performs the add and returns the installation status, which harnesses it wrote to, the exact paths, and the per-harness "reload your skills" step to relay back to you.
+
+### Supported harnesses
+
+The skill ships in each harness's native format — the same portable `SKILL.md` everywhere it's supported, and an adapted rule where it isn't:
+
+| Harness | Format | Installs to |
+| --- | --- | --- |
+| **Claude Code** | `SKILL.md` (Agent Skill) | `~/.claude/skills/` · `.claude/skills/` |
+| **Codex CLI** | `SKILL.md` (open Agent Skills standard) | `~/.agents/skills/` · `<repo>/.agents/skills/` |
+| **OpenCode** | `SKILL.md` (native) | `~/.config/opencode/skills/` · `.opencode/skills/` |
+| **Cursor** | Project Rule (`.mdc`) | `.cursor/rules/` |
+
+**Coming soon:** Gemini CLI · Windsurf · Zed · Cline · Continue.
+
+> After installing, reload skills in your client (restart the session, or run its skills-reload command) so the new guidance is picked up — `mnm skills add` and the MCP tool both print the exact step for each harness they touched.
+
+---
+
 ![The CLI](docs/assets/readme/cli.png)
 
 ## The CLI
 
-`midnight-manual` / `mnm` is a noun-first command tree: pick a noun, then a verb. Everything is available offline-first against the hosted corpus, with `--json` on every command for scripting.
+`midnight-manual` / `mnm` is a noun-first command tree: pick a noun, then a verb. No account or API key is required — embedding and reranking run **locally on your machine**; only the search request itself reaches the hosted corpus. Add `--json` to any command for scripting.
 
 ```text
 mnm search   "<query>"                 ad-hoc hybrid search
