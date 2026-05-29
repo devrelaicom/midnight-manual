@@ -32,6 +32,7 @@
 - [Quick start](#quick-start)
 - [The MCP server](#the-mcp-server)
 - [Advanced search skills](#advanced-search-skills)
+- [Rate limits and uplift](#rate-limits-and-uplift)
 - [The CLI](#the-cli)
 - [Local models](#local-models)
 - [The smart chunker](#the-smart-chunker)
@@ -242,6 +243,55 @@ The skill ships in each harness's native format — the same portable `SKILL.md`
 **Coming soon:** Gemini CLI · Windsurf · Zed · Cline · Continue.
 
 > After installing, reload skills in your client (restart the session, or run its skills-reload command) so the new guidance is picked up — `mnm skills add` and the MCP tool both print the exact step for each harness they touched.
+
+---
+
+![Rate limits and uplift](docs/assets/readme/rate-limits.png)
+
+## Rate limits and uplift
+
+The hosted corpus is open and anonymous — no key to search — so it's rate-limited to keep it fast and fair for everyone. Limits are enforced by a per-request **token bucket**: each tier gets a refill rate in requests/second, and the bucket holds one second's worth of burst. Every response carries `x-ratelimit-limit`, `x-ratelimit-remaining`, and `x-ratelimit-reset`; exceeding your budget returns `429 Too Many Requests` with a `Retry-After`.
+
+### Tiers & current limits
+
+Your tier is resolved per request in this order — **CIDR override → admin → read-uplift → anonymous** — and you're charged against the matching bucket:
+
+| Tier | How you get it | Limit | Keyed by |
+| --- | --- | --- | --- |
+| **Anonymous** | default — no token | **10 req/s** | client IP |
+| **Read-uplift** | `mnm auth github` (GitHub SSO) | **60 req/s** | your user |
+| **Admin** | maintainer Ed25519 token | **1000 req/s** | your user |
+| **CIDR override** | admin-granted, per network block | **custom** | the CIDR |
+
+> Multi-query searches cost `max(1, distinct queries)` tokens (D25) — a 3-query HyDE fan-out spends 3 — so the [Advanced Search Skill](#advanced-search-skills) is mindful of how many formulations it sends.
+
+### The uplift mechanism
+
+Anything beyond casual use should grab the free read-uplift — a **6× lift** (10 → 60 req/s) at no cost:
+
+```bash
+mnm auth github      # opens GitHub OAuth; mints a 30-day read-uplift token
+mnm auth status      # show the active token and its expiry
+```
+
+The token (a 30-day JWT, configurable `[1, 90]` days) is stored in your local auth file and sent automatically by the CLI and MCP server. It **only raises your rate limit** — a read-uplift token can never write to the corpus (the tier guard runs before the role check), so it's safe to mint freely.
+
+### Boosting limits for hackathons & events
+
+Running a workshop or hackathon where a room full of people share an IP or NAT range? An admin can grant a **per-CIDR override** that lifts everyone behind that network block for a fixed window — no per-attendee signup:
+
+```bash
+# Lift an entire venue's network to 200 req/s for the weekend
+mnm ratelimits add --cidr 203.0.113.0/24 --limit 200 --ttl 72h
+
+mnm ratelimits list                 # see active overrides + expiry
+mnm ratelimits extend <id> --ttl 24h  # give it more time
+mnm ratelimits remove <id>          # revoke early
+```
+
+Overrides are time-boxed (they expire on their `--ttl`) and the server refreshes its override cache every ~30s, so grants and revocations take effect promptly. This is the recommended path for events — far simpler than minting tokens for every participant.
+
+> Self-hosting? Every limit is tunable via env (`MIDNIGHT_MANUAL_RATE_LIMIT_ANONYMOUS_RPS`, `…_UPLIFT_RPS`, `…_ADMIN_RPS`), and the whole subsystem can be toggled with `MIDNIGHT_MANUAL_RATE_LIMIT_ENABLED`.
 
 ---
 
