@@ -131,6 +131,20 @@ Today's behaviour, now opt-in.
 - **CLI unit:** embedding-enabled ⇒ `ChunkUpload.embedding` is `Some(768)` and the batch
   carries `embedding_model`; `--enable-server-embedding` ⇒ both absent.
 - **Body-limit test:** an over-limit body ⇒ 413.
+- **CLI wire shape:** an embedded `UploadDocumentsRequest` serializes a 768-dim vector per
+  chunk plus the batch `embedding_model`; a text-only chunk omits `embedding`.
+
+### Known coverage gaps (follow-up, not blocking this fix)
+
+- **Full CLI embed→upload E2E (positive path).** The `run_inner` glue that calls `embed_batch`
+  and sets `embedding_model` on the request is only covered piecewise (`attach_embeddings`
+  unit + the serialization test + the server-side `embedded_upload_stores_ready_chunk`
+  integration test). A hermetic end-to-end wiremock test that captures the PUT body would
+  require an embedder-injection seam on the CLI (mirroring the server's `EmbedFn`), since the
+  default path loads the real ~450 MB model. Tracked as a follow-up.
+- **Carry-forward of a real (non-null) embedding.** `carry_forward_one` copies prior
+  `embedding` + `status`; with CLI-embedding now the default, an integration test that a
+  `Ready` chunk's vector survives carry-forward into the next revision would close the loop.
 
 ## Rollout notes
 

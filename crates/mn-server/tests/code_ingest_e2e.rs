@@ -180,6 +180,9 @@ async fn code_ingest_smoke_persists_symbol_paths_and_packages() {
         yes: true,
         source_base_url: None,
         batch_size: 50,
+        // Text-only upload (server-side embedding path); keeps this live-server
+        // e2e from loading the ONNX model in-process.
+        enable_server_embedding: true,
         code_chunk_tokens: 400,
         code_chunk_lines: 60,
         code_chunk_overlap: 20,

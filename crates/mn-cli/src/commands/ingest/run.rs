@@ -1178,4 +1178,47 @@ mod tests {
         let s = serde_json::to_string(&c).unwrap();
         assert!(!s.contains("embedding"), "None embedding must be omitted: {s}");
     }
+
+    #[test]
+    fn embedded_request_serializes_vectors_and_model() {
+        // When the CLI embeds locally, the upload body must carry the 768-dim
+        // vector on every chunk plus the batch-level `embedding_model`.
+        let body = UploadDocumentsRequest {
+            documents: vec![DocumentUpload {
+                path: "a".into(),
+                kind: DocumentKind::Markdown,
+                content_hash: "h".into(),
+                source_url: None,
+                published_url: None,
+                language: None,
+                source_modified_at: None,
+                frontmatter: None,
+                provenance: Provenance::default(),
+                char_count: 0,
+                token_count: 0,
+                package: None,
+                chunks: vec![ChunkUpload {
+                    chunk_index: 0,
+                    total_chunks: 1,
+                    content: "x".into(),
+                    content_hash: "c".into(),
+                    heading_path: vec![],
+                    symbol_path: vec![],
+                    start_byte: 0,
+                    end_byte: 1,
+                    token_count: 0,
+                    embedding: Some(vec![0.5_f32; 768]),
+                }],
+            }],
+            batch_index: 0,
+            batch_count: 1,
+            embedding_model: Some("bge-base-en-v1.5@1".to_owned()),
+        };
+        let v: serde_json::Value = serde_json::to_value(&body).unwrap();
+        assert_eq!(v["embedding_model"], "bge-base-en-v1.5@1");
+        let emb = v["documents"][0]["chunks"][0]["embedding"]
+            .as_array()
+            .expect("embedding present on the wire");
+        assert_eq!(emb.len(), 768);
+    }
 }

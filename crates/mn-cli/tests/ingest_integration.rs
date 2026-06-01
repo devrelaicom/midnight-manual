@@ -145,7 +145,9 @@ async fn happy_path_posts_three_step_flow() {
         no_respect_gitignore: false,
         disable_default_ignore_list: false,
         max_file_size: 10 * 1024 * 1024,
-        enable_server_embedding: false,
+        // Flow/error tests assert request shape, not embeddings — keep them
+        // hermetic (server-side embedding path = no local ONNX model load).
+        enable_server_embedding: true,
     };
     let telemetry = TelemetryClient::Disabled;
 
@@ -197,7 +199,9 @@ async fn dry_run_does_not_hit_the_server() {
         no_respect_gitignore: false,
         disable_default_ignore_list: false,
         max_file_size: 10 * 1024 * 1024,
-        enable_server_embedding: false,
+        // Flow/error tests assert request shape, not embeddings — keep them
+        // hermetic (server-side embedding path = no local ONNX model load).
+        enable_server_embedding: true,
     };
     let telemetry = TelemetryClient::Disabled;
 
@@ -240,7 +244,9 @@ async fn missing_admin_token_errors_with_clear_message() {
         no_respect_gitignore: false,
         disable_default_ignore_list: false,
         max_file_size: 10 * 1024 * 1024,
-        enable_server_embedding: false,
+        // Flow/error tests assert request shape, not embeddings — keep them
+        // hermetic (server-side embedding path = no local ONNX model load).
+        enable_server_embedding: true,
     };
     let telemetry = TelemetryClient::Disabled;
 
@@ -325,7 +331,9 @@ async fn aborts_run_when_upload_fails() {
         no_respect_gitignore: false,
         disable_default_ignore_list: false,
         max_file_size: 10 * 1024 * 1024,
-        enable_server_embedding: false,
+        // Flow/error tests assert request shape, not embeddings — keep them
+        // hermetic (server-side embedding path = no local ONNX model load).
+        enable_server_embedding: true,
     };
     let telemetry = TelemetryClient::Disabled;
 
@@ -432,7 +440,9 @@ async fn published_url_inheritance_survives_to_upload_body() {
         no_respect_gitignore: false,
         disable_default_ignore_list: false,
         max_file_size: 10 * 1024 * 1024,
-        enable_server_embedding: false,
+        // Flow/error tests assert request shape, not embeddings — keep them
+        // hermetic (server-side embedding path = no local ONNX model load).
+        enable_server_embedding: true,
     };
     let telemetry = mn_telemetry::TelemetryClient::Disabled;
 
@@ -517,7 +527,9 @@ async fn manifest_missing_file_errors_before_any_http() {
         no_respect_gitignore: false,
         disable_default_ignore_list: false,
         max_file_size: 10 * 1024 * 1024,
-        enable_server_embedding: false,
+        // Flow/error tests assert request shape, not embeddings — keep them
+        // hermetic (server-side embedding path = no local ONNX model load).
+        enable_server_embedding: true,
     };
     let telemetry = TelemetryClient::Disabled;
 

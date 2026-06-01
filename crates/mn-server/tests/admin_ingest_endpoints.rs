@@ -698,7 +698,9 @@ async fn cross_source_run_id_404s() {
 fn embedded_document_payload(path: &str, content: &str, dim: usize) -> Value {
     let content_hash = format!("h:{path}:{}", hash_of(content));
     let chunk_hash = format!("c:{path}:{}", hash_of(content));
-    let embedding: Vec<f32> = (0..dim).map(|i| (i as f32) * 0.001).collect();
+    // Values are irrelevant to the assertions (the server stores them verbatim
+    // and only checks length); a constant vector keeps this cast-free.
+    let embedding: Vec<f32> = vec![0.001_f32; dim];
     json!({
         "path": path, "kind": "markdown", "content_hash": content_hash,
         "char_count": content.len(), "token_count": 0, "provenance": {},
