@@ -641,7 +641,7 @@ fn attach_embeddings(docs: &mut [DocumentUpload], vectors: Vec<Vec<f32>>) -> Res
     }
     let mut it = vectors.into_iter();
     for d in docs.iter_mut() {
-        for c in d.chunks.iter_mut() {
+        for c in &mut d.chunks {
             c.embedding = it.next();
         }
     }
