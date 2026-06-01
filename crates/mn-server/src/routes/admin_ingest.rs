@@ -362,6 +362,77 @@ async fn upload_documents(
         }
     }
 
+    // If any chunk in this batch carries a precomputed embedding, the batch
+    // MUST declare the model it used, and it MUST match the run's model and
+    // the 768-dim contract. Text-only batches skip this and follow the
+    // server-side embed path.
+    let has_embeddings = req
+        .documents
+        .iter()
+        .any(|d| d.chunks.iter().any(|c| c.embedding.is_some()));
+    if has_embeddings {
+        let Some(provided) = req.embedding_model.as_deref() else {
+            return error::into_response(
+                CoreError::builder(ErrorCode::EmbeddingModelMismatch)
+                    .message("upload supplies embeddings but no embedding_model")
+                    .remediation("send the wire id (name@revision) the CLI embedded with")
+                    .build(),
+                rid,
+            );
+        };
+        let run_model = match embedding_model::get_by_id(&state.pool, sv.embedding_model_id).await {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!(request_id = rid, op = "upload_documents", error = %e, "run model lookup failed");
+                return error::service_unavailable("run model lookup failed", rid);
+            }
+        };
+        let expected = format!("{}@{}", run_model.name, run_model.revision);
+        let provided_norm = match EmbeddingModelId::from_str(provided) {
+            Ok(m) => format!("{}@{}", m.name, m.revision),
+            Err(e) => {
+                return error::into_response(
+                    CoreError::builder(ErrorCode::InvalidRequest)
+                        .message(format!("embedding_model parse failed: {e}"))
+                        .remediation("supply name@revision (e.g. bge-base-en-v1.5@1)")
+                        .build(),
+                    rid,
+                );
+            }
+        };
+        if provided_norm != expected {
+            return error::into_response(
+                CoreError::builder(ErrorCode::EmbeddingModelMismatch)
+                    .message(format!(
+                        "upload embeddings declare model `{provided_norm}` but run uses `{expected}`"
+                    ))
+                    .remediation("re-run ingest with --embedding-model matching the corpus, or --enable-server-embedding")
+                    .build(),
+                rid,
+            );
+        }
+        for d in &req.documents {
+            for c in &d.chunks {
+                if let Some(v) = &c.embedding {
+                    if v.len() != mn_embedding::BGE_BASE_DIM {
+                        return error::into_response(
+                            CoreError::builder(ErrorCode::InvalidRequest)
+                                .message(format!(
+                                    "chunk {}#{} embedding dim {} != {}",
+                                    d.path,
+                                    c.chunk_index,
+                                    v.len(),
+                                    mn_embedding::BGE_BASE_DIM
+                                ))
+                                .build(),
+                            rid,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     // Build a path → (prior_doc_id, prior_hash) map for carry-forward.
     let prior_by_path: std::collections::HashMap<String, (Uuid, String)> =
         match prior_active_documents(&state.pool, src.id).await {
@@ -669,6 +740,10 @@ async fn insert_new_document(
             chunk_upload.chunk_index,
         )
         .await?;
+        let (embedding, status) = chunk_upload.embedding.as_ref().map_or(
+            (None, ChunkStatus::EmbedFailed),
+            |v| (Some(v.clone()), ChunkStatus::Ready),
+        );
         chunk::insert(
             pool,
             chunk::NewChunk {
@@ -679,14 +754,14 @@ async fn insert_new_document(
                 total_chunks: chunk_upload.total_chunks,
                 content: &chunk_upload.content,
                 content_hash: &chunk_upload.content_hash,
-                embedding: None,
+                embedding,
                 embedding_model_id,
                 heading_path: &chunk_upload.heading_path,
                 symbol_path: &chunk_upload.symbol_path,
                 start_byte: chunk_upload.start_byte,
                 end_byte: chunk_upload.end_byte,
                 token_count: chunk_upload.token_count,
-                status: ChunkStatus::EmbedFailed,
+                status,
             },
         )
         .await?;

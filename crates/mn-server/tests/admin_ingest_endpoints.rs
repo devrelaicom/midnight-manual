@@ -694,3 +694,116 @@ async fn cross_source_run_id_404s() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
 }
+
+fn embedded_document_payload(path: &str, content: &str, dim: usize) -> Value {
+    let content_hash = format!("h:{path}:{}", hash_of(content));
+    let chunk_hash = format!("c:{path}:{}", hash_of(content));
+    let embedding: Vec<f32> = (0..dim).map(|i| (i as f32) * 0.001).collect();
+    json!({
+        "path": path, "kind": "markdown", "content_hash": content_hash,
+        "char_count": content.len(), "token_count": 0, "provenance": {},
+        "chunks": [{
+            "chunk_index": 0, "total_chunks": 1, "content": content,
+            "content_hash": chunk_hash, "heading_path": [], "symbol_path": [],
+            "start_byte": 0, "end_byte": content.len(), "token_count": 0,
+            "embedding": embedding,
+        }],
+    })
+}
+
+async fn start_run_with_model(app: axum::Router, slug: &str, token: &str) -> String {
+    let (status, body) = json_call(
+        app, "POST", &format!("/v1/admin/sources/{slug}/ingest-runs"), Some(token),
+        Some(json!({"ingest_cli_version": "test", "embedding_model": "bge-base-en-v1.5@1"})),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "start run: {body}");
+    body["ingest_run_id"].as_str().unwrap().to_owned()
+}
+
+#[tokio::test]
+async fn embedded_upload_stores_ready_chunk() {
+    let h = common::boot().await;
+    let kp = Keypair::generate();
+    let cfg = cfg_with_auth(user_store_for("aaron", &kp), vec![7u8; 32]);
+    let app = app::build(h.pool.clone(), cfg).expect("build app");
+    let token = mint_admin_token(app.clone(), "aaron", &kp).await;
+    let (slug, _) = seed_source(&h.pool).await;
+    let run = start_run_with_model(app.clone(), &slug, &token).await;
+
+    let (status, body) = json_call(
+        app, "PUT", &format!("/v1/admin/sources/{slug}/ingest-runs/{run}/documents"),
+        Some(&token),
+        Some(json!({
+            "embedding_model": "bge-base-en-v1.5@1",
+            "documents": [embedded_document_payload("a.md", "hello world", 768)],
+        })),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "upload: {body}");
+
+    let statuses: Vec<String> = sqlx::query_scalar(
+        "SELECT status FROM chunk WHERE source_version_id = $1",
+    )
+    .bind(Uuid::parse_str(&run).unwrap())
+    .fetch_all(&h.pool).await.unwrap();
+    assert_eq!(statuses, vec!["ready".to_string()], "chunk should be ready, got {statuses:?}");
+}
+
+#[tokio::test]
+async fn embedded_upload_without_model_is_409() {
+    let h = common::boot().await;
+    let kp = Keypair::generate();
+    let cfg = cfg_with_auth(user_store_for("aaron", &kp), vec![7u8; 32]);
+    let app = app::build(h.pool.clone(), cfg).expect("build app");
+    let token = mint_admin_token(app.clone(), "aaron", &kp).await;
+    let (slug, _) = seed_source(&h.pool).await;
+    let run = start_run_with_model(app.clone(), &slug, &token).await;
+
+    let (status, _body) = json_call(
+        app, "PUT", &format!("/v1/admin/sources/{slug}/ingest-runs/{run}/documents"),
+        Some(&token),
+        Some(json!({ "documents": [embedded_document_payload("a.md", "x", 768)] })),
+    ).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn embedded_upload_wrong_model_is_409() {
+    let h = common::boot().await;
+    let kp = Keypair::generate();
+    let cfg = cfg_with_auth(user_store_for("aaron", &kp), vec![7u8; 32]);
+    let app = app::build(h.pool.clone(), cfg).expect("build app");
+    let token = mint_admin_token(app.clone(), "aaron", &kp).await;
+    let (slug, _) = seed_source(&h.pool).await;
+    let run = start_run_with_model(app.clone(), &slug, &token).await;
+
+    let (status, _body) = json_call(
+        app, "PUT", &format!("/v1/admin/sources/{slug}/ingest-runs/{run}/documents"),
+        Some(&token),
+        Some(json!({
+            "embedding_model": "bge-base-en-v1.5@2",
+            "documents": [embedded_document_payload("a.md", "x", 768)],
+        })),
+    ).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn embedded_upload_wrong_dim_is_400() {
+    let h = common::boot().await;
+    let kp = Keypair::generate();
+    let cfg = cfg_with_auth(user_store_for("aaron", &kp), vec![7u8; 32]);
+    let app = app::build(h.pool.clone(), cfg).expect("build app");
+    let token = mint_admin_token(app.clone(), "aaron", &kp).await;
+    let (slug, _) = seed_source(&h.pool).await;
+    let run = start_run_with_model(app.clone(), &slug, &token).await;
+
+    let (status, _body) = json_call(
+        app, "PUT", &format!("/v1/admin/sources/{slug}/ingest-runs/{run}/documents"),
+        Some(&token),
+        Some(json!({
+            "embedding_model": "bge-base-en-v1.5@1",
+            "documents": [embedded_document_payload("a.md", "x", 3)],
+        })),
+    ).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
