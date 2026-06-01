@@ -82,8 +82,9 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Background: embedder worker (Phase 11a / FR-038). Disabled in env when
-    // the deployment has no GPU/CPU budget for ONNX; otherwise loads the
-    // local model and starts polling for `embed_failed` chunks.
+    // the deployment has no GPU/CPU budget for ONNX; otherwise polls for
+    // `embed_failed` chunks and lazily loads the local model on the first
+    // non-empty batch (so an idle server never holds the ~450 MB model).
     let _embedder_handle = if cfg.embedder_enabled {
         let cache_env = mn_embedding::cache::StdEnv;
         let cache_dir = mn_embedding::cache::resolve(&cache_env).context(

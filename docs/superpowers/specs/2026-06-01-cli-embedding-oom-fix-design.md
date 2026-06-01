@@ -1,7 +1,7 @@
 # CLI-side embedding by default + server OOM guardrails
 
 - **Date:** 2026-06-01
-- **Status:** Approved (design)
+- **Status:** Implemented (fmt + clippy + unit tests green locally; the `--features integration` tests compile but were not run in the dev env — no Postgres — and must pass in CI before merge).
 - **Branch:** `fix/server-oom-ingest` (off `main` — deliberately independent of the manifest-ingestion branch)
 - **Related incident:** Production `midnight-manual` OOM/crash-loop during a bulk ingest of `midnight-ledger` (2026-06-01).
 
