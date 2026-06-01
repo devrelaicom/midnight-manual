@@ -283,9 +283,19 @@ After the manifests landed, two operational needs surfaced that §3 deferred:
   (`slug  repo(owner/name)  branch  kind`, one row per manifest). §3 chose "no
   machine registry"; this file is the reconciliation: the manifests stay
   path+provenance only, while the repo/branch/kind that `mnm sources create`
-  needs live in one parseable place. Consumed by the smoke workflow below and
-  intended for a future bulk-ingest driver. The human `README.md` index remains;
-  the smoke test asserts `sources.tsv` and the `*.yaml` set stay in 1:1 sync.
+  needs live in one parseable place. Consumed by the smoke workflow below and by
+  the bulk-ingest driver `scripts/ingest-midnight.sh`. The human `README.md`
+  index remains; the smoke test asserts `sources.tsv` and the `*.yaml` set stay
+  in 1:1 sync.
+
+- **`scripts/ingest-midnight.sh`** — manual bulk-ingest driver. Builds `mnm`
+  from source (or `--mnm-binary`), preflights (`/readyz` + `auth.toml` exists),
+  refreshes the admin token via `mnm login` (`--user-id`, or the single
+  `[admin]` user from `auth.toml` after a Y/n confirm), then loops `sources.tsv`:
+  clone → `sources create` → `ingest run --json`, with a coloured spinner and a
+  per-repo `✓ … • N files • M chunks • Ts` / `x … failed • <reason>` line.
+  Honors `--max-manifests`; never aborts on a per-manifest error (only preflight
+  / login failures exit early).
 
 - **`.github/workflows/manifest-smoke.yml`** — a scheduled daily smoke test
   (`0 4 * * *` UTC, matching `embedder-smoke.yml`; also `workflow_dispatch`).
