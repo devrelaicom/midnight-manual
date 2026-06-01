@@ -1,0 +1,24 @@
+manifest_version: 1
+root:
+  name: eddalabs-midnight-starter-template
+  path: .
+  exclude:
+    - "**/node_modules/**"
+    - "**/dist/**"
+    - "**/build/**"
+    - "**/target/**"
+    - "**/managed/**"
+    - "**/.git/**"
+    - "**/.github/**"
+    - "**/.next/**"
+    - "**/out/**"
+    - "**/coverage/**"
+    - "**/__snapshots__/**"
+    - "**/.turbo/**"
+    - "**/CODE_OF_CONDUCT.md"
+    - "**/CONTRIBUTING.md"
+    - "**/SECURITY.md"
+  provenance:
+    attribution: partner
+    verified: false
+    tags: [trust:medium]
