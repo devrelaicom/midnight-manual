@@ -189,6 +189,8 @@ pub enum McpToolName {
     PullModels,
     /// `status` tool.
     Status,
+    /// `install_search_skill` tool.
+    InstallSearchSkill,
 }
 
 /// Closed enum of CLI subcommand names. Adding a new noun-first subcommand
@@ -224,6 +226,8 @@ pub enum CliCommandName {
     Chunks,
     /// `mnm documents` (any sub).
     Documents,
+    /// `mnm skills` (any sub).
+    Skills,
 }
 
 /// The top-level event envelope written to `telemetry_event_raw.fields` (plus

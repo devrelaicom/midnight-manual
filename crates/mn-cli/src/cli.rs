@@ -100,6 +100,8 @@ pub enum Command {
     Chunks(commands::chunks::Args),
     /// Inspect documents: show, full, chunks.
     Documents(commands::documents::Args),
+    /// Install the advanced-search skill into your AI harness(es).
+    Skills(commands::skills::Args),
 }
 
 /// Subcommand names that are admin-only and therefore hidden from `--help`
@@ -187,6 +189,7 @@ pub async fn run() -> Result<()> {
             )
             .await
         }
+        Command::Skills(args) => commands::skills::run(args, cli.json),
     };
 
     let duration_ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
@@ -233,6 +236,7 @@ const fn cli_command_name(cmd: &Command) -> CliCommandName {
         Command::Manifest(_) => CliCommandName::Manifest,
         Command::Chunks(_) => CliCommandName::Chunks,
         Command::Documents(_) => CliCommandName::Documents,
+        Command::Skills(_) => CliCommandName::Skills,
     }
 }
 

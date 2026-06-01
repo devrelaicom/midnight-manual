@@ -1,6 +1,6 @@
 [package]
 name = "mn-mcp"
-description = "MCP JSON-RPC server over stdio with seven retrieval tools."
+description = "MCP JSON-RPC server over stdio: thirteen tools plus the add_advanced_search_skill prompt."
 
 version       = { workspace = true }
 edition       = { workspace = true }
@@ -20,6 +20,7 @@ integration = []
 mn-core       = { path = "../mn-core" }
 mn-embedding  = { path = "../mn-embedding" }
 mn-retrieval  = { path = "../mn-retrieval" }
+mn-skills     = { path = "../mn-skills" }
 mn-telemetry  = { path = "../mn-telemetry" }
 serde         = { workspace = true }
 serde_json    = { workspace = true }

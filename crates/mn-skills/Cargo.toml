@@ -1,0 +1,25 @@
+[package]
+name = "mn-skills"
+description = "Embedded advanced-search SKILL.md plus harness detection and idempotent install logic shared by the CLI and MCP server."
+
+version       = { workspace = true }
+edition       = { workspace = true }
+rust-version  = { workspace = true }
+license       = { workspace = true }
+authors       = { workspace = true }
+repository    = { workspace = true }
+homepage      = { workspace = true }
+
+[lints]
+workspace = true
+
+[dependencies]
+# serde derives land on the report types in a later task; thiserror backs the
+# crate error type in a later task. Declared here as the crate's final deps.
+serde      = { workspace = true }
+thiserror  = { workspace = true }
+
+[dev-dependencies]
+tempfile    = { workspace = true }
+serde_yaml  = { workspace = true }
+serde_json  = { workspace = true }
