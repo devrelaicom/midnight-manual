@@ -1,0 +1,25 @@
+manifest_version: 1
+root:
+  name: midnight-ledger
+  path: .
+  include: ["*.md"]
+  exclude:
+    - "**/CODE_OF_CONDUCT.md"
+    - "**/CONTRIBUTING.md"
+    - "**/SECURITY.md"
+    - "spec/**"
+    - "docs/**"
+    - "integration-tests/**"
+  provenance:
+    attribution: foundation
+    verified: true
+    verified_by: midnight-foundation
+    tags: [trust:high]
+  children:
+    - name: spec
+      path: spec/
+      provenance: { content_type: reference }
+    - name: docs
+      path: docs/
+    - name: integration-tests
+      path: integration-tests/
