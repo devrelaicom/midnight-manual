@@ -17,7 +17,7 @@
 //!    source_version.
 //!
 //! 6. `PUT  /v1/admin/sources/:slug/ingest-runs/:id/documents` — upload
-//!    documents in batches of `--batch-size` (default 50) each.
+//!    documents in batches of `--batch-size` (default 25) each.
 //!
 //! 7. `POST /v1/admin/sources/:slug/ingest-runs/:id/finalize` — promote
 //!    the run to `active`.
@@ -88,10 +88,17 @@ pub struct Args {
     #[arg(long = "source-base-url")]
     pub source_base_url: Option<String>,
 
-    /// Number of documents per upload batch (default: 50). Reduce if you hit
-    /// 413 responses from the server.
-    #[arg(long, default_value_t = 50)]
+    /// Number of documents per upload batch (default: 25). Reduce if you hit
+    /// 413 responses from the server (local embedding inflates each batch).
+    #[arg(long, default_value_t = 25)]
     pub batch_size: usize,
+
+    /// Embed on the server instead of locally. Off by default: the CLI embeds
+    /// chunks with its local model and uploads the vectors, so the server
+    /// never has to load the model. Use this when the local model is
+    /// unavailable or you want the server to embed.
+    #[arg(long)]
+    pub enable_server_embedding: bool,
 
     /// Semantic code-chunk budget in tokens.
     #[arg(long, default_value_t = 400)]
@@ -438,6 +445,7 @@ async fn run_inner(
                     start_byte: i32::try_from(c.start_byte).unwrap_or(i32::MAX),
                     end_byte: i32::try_from(c.end_byte).unwrap_or(i32::MAX),
                     token_count: i32::try_from(c.token_count).unwrap_or(i32::MAX),
+                    embedding: None,
                 })
                 .collect(),
             package: d.package.clone(),
@@ -465,6 +473,7 @@ async fn run_inner(
             documents: chunk.to_vec(),
             batch_index: i,
             batch_count,
+            embedding_model: None,
         };
         let result: Result<UploadDocumentsResponse> =
             put_json(&client, &upload_url, &token, &body).await;
@@ -703,6 +712,8 @@ struct UploadDocumentsRequest {
     documents: Vec<DocumentUpload>,
     batch_index: usize,
     batch_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    embedding_model: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -734,6 +745,8 @@ struct ChunkUpload {
     start_byte: i32,
     end_byte: i32,
     token_count: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    embedding: Option<Vec<f32>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -921,5 +934,44 @@ mod tests {
         let redacted = redact_token_like(body);
         assert!(!redacted.contains("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
         assert!(redacted.contains("[redacted]"));
+    }
+
+    #[test]
+    fn default_batch_size_is_25_and_server_embedding_defaults_off() {
+        use clap::Parser as _;
+        #[derive(clap::Parser)]
+        struct Wrap {
+            #[command(flatten)]
+            inner: Args,
+        }
+        let w = Wrap::try_parse_from(["ingest-run", "--source-slug", "s", "m.yaml"]).unwrap();
+        assert_eq!(w.inner.batch_size, 25);
+        assert!(!w.inner.enable_server_embedding);
+    }
+
+    #[test]
+    fn enable_server_embedding_flag_parses() {
+        use clap::Parser as _;
+        #[derive(clap::Parser)]
+        struct Wrap {
+            #[command(flatten)]
+            inner: Args,
+        }
+        let w = Wrap::try_parse_from(
+            ["ingest-run", "--source-slug", "s", "--enable-server-embedding", "m.yaml"],
+        )
+        .unwrap();
+        assert!(w.inner.enable_server_embedding);
+    }
+
+    #[test]
+    fn chunk_upload_skips_embedding_when_none() {
+        let c = ChunkUpload {
+            chunk_index: 0, total_chunks: 1, content: "x".into(), content_hash: "c".into(),
+            heading_path: vec![], symbol_path: vec![], start_byte: 0, end_byte: 1, token_count: 0,
+            embedding: None,
+        };
+        let s = serde_json::to_string(&c).unwrap();
+        assert!(!s.contains("embedding"), "None embedding must be omitted: {s}");
     }
 }
