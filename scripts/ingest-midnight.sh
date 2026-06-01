@@ -89,6 +89,56 @@ commafy() {
   }'
 }
 
+# Clear the screen and print the MNM wordmark in a colourful gradient. No-op
+# unless stdout is an interactive terminal (TTY=1 also implies NO_COLOR unset),
+# so piped / --json runs are unaffected.
+banner() {
+  [ "$TTY" = 1 ] || return 0
+  clear 2>/dev/null || printf '\033[H\033[2J'
+  local art
+  art="$(cat <<'ART'
+__/\\\\____________/\\\\__/\\\\\_____/\\\__/\\\\____________/\\\\_
+ _\/\\\\\\________/\\\\\\_\/\\\\\\___\/\\\_\/\\\\\\________/\\\\\\_
+  _\/\\\//\\\____/\\\//\\\_\/\\\/\\\__\/\\\_\/\\\//\\\____/\\\//\\\_
+   _\/\\\\///\\\/\\\/_\/\\\_\/\\\//\\\_\/\\\_\/\\\\///\\\/\\\/_\/\\\_
+    _\/\\\__\///\\\/___\/\\\_\/\\\\//\\\\/\\\_\/\\\__\///\\\/___\/\\\_
+     _\/\\\____\///_____\/\\\_\/\\\_\//\\\/\\\_\/\\\____\///_____\/\\\_
+      _\/\\\_____________\/\\\_\/\\\__\//\\\\\\_\/\\\_____________\/\\\_
+       _\/\\\_____________\/\\\_\/\\\___\//\\\\\_\/\\\_____________\/\\\_
+        _\///______________\///__\///_____\/////__\///______________\///__
+ART
+)"
+  case "${COLORTERM:-}" in
+    truecolor | 24bit)
+      # Smooth diagonal rainbow (lolcat-style) via 24-bit truecolour.
+      printf '%s\n' "$art" | awk '
+        function clamp(x) { return x < 0 ? 0 : (x > 255 ? 255 : int(x)) }
+        BEGIN { f = 0.08 }
+        {
+          line = $0; out = "";
+          for (i = 1; i <= length(line); i++) {
+            ch = substr(line, i, 1);
+            t = f * (i + NR * 3);
+            r = clamp(sin(t)           * 127 + 128);
+            g = clamp(sin(t + 2.09439) * 127 + 128);
+            b = clamp(sin(t + 4.18879) * 127 + 128);
+            out = out sprintf("\033[38;2;%d;%d;%dm%s", r, g, b, ch);
+          }
+          print out "\033[0m";
+        }'
+      ;;
+    *)
+      # 256-colour per-line rainbow fallback (widely supported).
+      local palette=(196 202 226 46 50 51 33 99 201) i=0 line
+      while IFS= read -r line; do
+        printf '\033[38;5;%sm%s\033[0m\n' "${palette[i % ${#palette[@]}]}" "$line"
+        i=$((i + 1))
+      done <<< "$art"
+      ;;
+  esac
+  printf '\n'
+}
+
 # Derive a human status from the streamed JSONL events file (no jq dependency).
 # Scans recent events oldest→newest and keeps the *latest* recognised phase, so
 # the slow per-batch local embedding shows as "embedding N/M" instead of
@@ -188,15 +238,20 @@ fi
 if [ -n "$MNM_BIN" ]; then
   MNM="$MNM_BIN"
   [ -x "$MNM" ] || { echo "error: --mnm-binary '$MNM' is not an executable" >&2; exit 1; }
-  printf 'using: %s\n' "$MNM"
+  built_line="using: $MNM"
 else
   printf '%sbuilding mnm (cargo build --release -p mn-cli --bin mnm)…%s\n' "$DIM" "$NC"
   if ! cargo build --release -p mn-cli --bin mnm; then
     echo "error: cargo build failed" >&2; exit 1
   fi
   MNM="./target/release/mnm"
-  printf 'built: %s\n' "$MNM"
+  built_line="built: $MNM"
 fi
+
+# Wipe the noisy build/prompt output and show the wordmark before status lines.
+banner
+
+printf '%s\n' "$built_line"
 VER="$("$MNM" --version 2>/dev/null | awk '{print $NF}')"
 printf 'version: %s\n' "${VER:-unknown}"
 
