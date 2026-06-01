@@ -18,7 +18,9 @@ async fn oversize_body_is_rejected_with_413() {
     let oversized = vec![b'x'; mn_server::app::MAX_BODY_BYTES + 1];
     let req = Request::builder()
         .method("PUT")
-        .uri("/v1/admin/sources/whatever/ingest-runs/00000000-0000-0000-0000-000000000000/documents")
+        .uri(
+            "/v1/admin/sources/whatever/ingest-runs/00000000-0000-0000-0000-000000000000/documents",
+        )
         .header("content-type", "application/json")
         .body(Body::from(oversized))
         .unwrap();

@@ -595,7 +595,12 @@ fn translate_start_error(e: anyhow::Error, requested: &str) -> anyhow::Error {
 /// Translate a batch-upload HTTP error into a helpful message, **preserving**
 /// the underlying error (which carries the server's `{status}: {body}`, naming
 /// the failing field). The CLI prints with `{:#}`, so the whole chain shows.
-fn translate_upload_error(e: anyhow::Error, batch: usize, of: usize, run_id: Uuid) -> anyhow::Error {
+fn translate_upload_error(
+    e: anyhow::Error,
+    batch: usize,
+    of: usize,
+    run_id: Uuid,
+) -> anyhow::Error {
     let msg = e.to_string();
     if msg.contains("413") {
         return e.context(format!(
@@ -675,8 +680,9 @@ fn validate_local_embedding_model(model_wire: &str) -> Result<()> {
 /// Errors if the model cache dir cannot be resolved or the model fails to load.
 async fn load_local_embedder() -> Result<mn_embedding::Embedder> {
     let env = mn_embedding::cache::StdEnv;
-    let cache_dir = mn_embedding::cache::resolve(&env)
-        .context("could not resolve model cache dir (set MIDNIGHT_MANUAL_MODEL_CACHE_DIR or HOME)")?;
+    let cache_dir = mn_embedding::cache::resolve(&env).context(
+        "could not resolve model cache dir (set MIDNIGHT_MANUAL_MODEL_CACHE_DIR or HOME)",
+    )?;
     mn_embedding::embedder::global(cache_dir).await.map_err(|e| {
         anyhow!("could not load local embedder ({e}). Run `mnm models pull`, or pass --enable-server-embedding.")
     })
@@ -695,7 +701,10 @@ async fn embed_batch(emb: &mn_embedding::Embedder, docs: &mut [DocumentUpload]) 
     if texts.is_empty() {
         return Ok(());
     }
-    let vectors = emb.embed_blocking(texts, None).await.context("local embedding")?;
+    let vectors = emb
+        .embed_blocking(texts, None)
+        .await
+        .context("local embedding")?;
     attach_embeddings(docs, vectors)
 }
 
@@ -1028,18 +1037,34 @@ mod tests {
     fn attach_embeddings_distributes_in_order() {
         let mut docs = vec![
             DocumentUpload {
-                path: "a".into(), kind: DocumentKind::Markdown, content_hash: "h".into(),
-                source_url: None, published_url: None, language: None, source_modified_at: None,
-                frontmatter: None, provenance: Provenance::default(), char_count: 0, token_count: 0,
+                path: "a".into(),
+                kind: DocumentKind::Markdown,
+                content_hash: "h".into(),
+                source_url: None,
+                published_url: None,
+                language: None,
+                source_modified_at: None,
+                frontmatter: None,
+                provenance: Provenance::default(),
+                char_count: 0,
+                token_count: 0,
                 package: None,
-                chunks: vec![ mk_chunk(0), mk_chunk(1) ],
+                chunks: vec![mk_chunk(0), mk_chunk(1)],
             },
             DocumentUpload {
-                path: "b".into(), kind: DocumentKind::Markdown, content_hash: "h".into(),
-                source_url: None, published_url: None, language: None, source_modified_at: None,
-                frontmatter: None, provenance: Provenance::default(), char_count: 0, token_count: 0,
+                path: "b".into(),
+                kind: DocumentKind::Markdown,
+                content_hash: "h".into(),
+                source_url: None,
+                published_url: None,
+                language: None,
+                source_modified_at: None,
+                frontmatter: None,
+                provenance: Provenance::default(),
+                char_count: 0,
+                token_count: 0,
                 package: None,
-                chunks: vec![ mk_chunk(0) ],
+                chunks: vec![mk_chunk(0)],
             },
         ];
         let vectors = vec![vec![1.0_f32], vec![2.0], vec![3.0]];
@@ -1052,10 +1077,19 @@ mod tests {
     #[test]
     fn attach_embeddings_rejects_count_mismatch() {
         let mut docs = vec![DocumentUpload {
-            path: "a".into(), kind: DocumentKind::Markdown, content_hash: "h".into(),
-            source_url: None, published_url: None, language: None, source_modified_at: None,
-            frontmatter: None, provenance: Provenance::default(), char_count: 0, token_count: 0,
-            package: None, chunks: vec![mk_chunk(0)],
+            path: "a".into(),
+            kind: DocumentKind::Markdown,
+            content_hash: "h".into(),
+            source_url: None,
+            published_url: None,
+            language: None,
+            source_modified_at: None,
+            frontmatter: None,
+            provenance: Provenance::default(),
+            char_count: 0,
+            token_count: 0,
+            package: None,
+            chunks: vec![mk_chunk(0)],
         }];
         assert!(attach_embeddings(&mut docs, vec![]).is_err());
     }
@@ -1069,8 +1103,15 @@ mod tests {
 
     fn mk_chunk(idx: i32) -> ChunkUpload {
         ChunkUpload {
-            chunk_index: idx, total_chunks: 2, content: format!("c{idx}"), content_hash: "c".into(),
-            heading_path: vec![], symbol_path: vec![], start_byte: 0, end_byte: 0, token_count: 0,
+            chunk_index: idx,
+            total_chunks: 2,
+            content: format!("c{idx}"),
+            content_hash: "c".into(),
+            heading_path: vec![],
+            symbol_path: vec![],
+            start_byte: 0,
+            end_byte: 0,
+            token_count: 0,
             embedding: None,
         }
     }
@@ -1109,9 +1150,13 @@ mod tests {
             #[command(flatten)]
             inner: Args,
         }
-        let w = Wrap::try_parse_from(
-            ["ingest-run", "--source-slug", "s", "--enable-server-embedding", "m.yaml"],
-        )
+        let w = Wrap::try_parse_from([
+            "ingest-run",
+            "--source-slug",
+            "s",
+            "--enable-server-embedding",
+            "m.yaml",
+        ])
         .unwrap();
         assert!(w.inner.enable_server_embedding);
     }
@@ -1119,8 +1164,15 @@ mod tests {
     #[test]
     fn chunk_upload_skips_embedding_when_none() {
         let c = ChunkUpload {
-            chunk_index: 0, total_chunks: 1, content: "x".into(), content_hash: "c".into(),
-            heading_path: vec![], symbol_path: vec![], start_byte: 0, end_byte: 1, token_count: 0,
+            chunk_index: 0,
+            total_chunks: 1,
+            content: "x".into(),
+            content_hash: "c".into(),
+            heading_path: vec![],
+            symbol_path: vec![],
+            start_byte: 0,
+            end_byte: 1,
+            token_count: 0,
             embedding: None,
         };
         let s = serde_json::to_string(&c).unwrap();

@@ -740,10 +740,10 @@ async fn insert_new_document(
             chunk_upload.chunk_index,
         )
         .await?;
-        let (embedding, status) = chunk_upload.embedding.as_ref().map_or(
-            (None, ChunkStatus::EmbedFailed),
-            |v| (Some(v.clone()), ChunkStatus::Ready),
-        );
+        let (embedding, status) = chunk_upload
+            .embedding
+            .as_ref()
+            .map_or((None, ChunkStatus::EmbedFailed), |v| (Some(v.clone()), ChunkStatus::Ready));
         chunk::insert(
             pool,
             chunk::NewChunk {

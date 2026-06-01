@@ -172,7 +172,10 @@ impl LazyEmbedder {
     /// Wrap an arbitrary loader (used by tests to inject a fake).
     #[must_use]
     pub fn new(loader: EmbedLoader) -> Self {
-        Self { loader, inner: tokio::sync::OnceCell::new() }
+        Self {
+            loader,
+            inner: tokio::sync::OnceCell::new(),
+        }
     }
 
     /// Production constructor: loads the process-wide local ONNX embedder from
@@ -262,7 +265,10 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
 
         // Second embed reuses the cached inner — no second load.
-        let _ = lazy.embed(vec!["b".to_owned(), "c".to_owned()]).await.unwrap();
+        let _ = lazy
+            .embed(vec!["b".to_owned(), "c".to_owned()])
+            .await
+            .unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }

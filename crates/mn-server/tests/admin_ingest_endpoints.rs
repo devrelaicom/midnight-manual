@@ -713,9 +713,13 @@ fn embedded_document_payload(path: &str, content: &str, dim: usize) -> Value {
 
 async fn start_run_with_model(app: axum::Router, slug: &str, token: &str) -> String {
     let (status, body) = json_call(
-        app, "POST", &format!("/v1/admin/sources/{slug}/ingest-runs"), Some(token),
+        app,
+        "POST",
+        &format!("/v1/admin/sources/{slug}/ingest-runs"),
+        Some(token),
         Some(json!({"ingest_cli_version": "test", "embedding_model": "bge-base-en-v1.5@1"})),
-    ).await;
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "start run: {body}");
     body["ingest_run_id"].as_str().unwrap().to_owned()
 }
@@ -731,20 +735,24 @@ async fn embedded_upload_stores_ready_chunk() {
     let run = start_run_with_model(app.clone(), &slug, &token).await;
 
     let (status, body) = json_call(
-        app, "PUT", &format!("/v1/admin/sources/{slug}/ingest-runs/{run}/documents"),
+        app,
+        "PUT",
+        &format!("/v1/admin/sources/{slug}/ingest-runs/{run}/documents"),
         Some(&token),
         Some(json!({
             "embedding_model": "bge-base-en-v1.5@1",
             "documents": [embedded_document_payload("a.md", "hello world", 768)],
         })),
-    ).await;
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "upload: {body}");
 
-    let statuses: Vec<String> = sqlx::query_scalar(
-        "SELECT status FROM chunk WHERE source_version_id = $1",
-    )
-    .bind(Uuid::parse_str(&run).unwrap())
-    .fetch_all(&h.pool).await.unwrap();
+    let statuses: Vec<String> =
+        sqlx::query_scalar("SELECT status FROM chunk WHERE source_version_id = $1")
+            .bind(Uuid::parse_str(&run).unwrap())
+            .fetch_all(&h.pool)
+            .await
+            .unwrap();
     assert_eq!(statuses, vec!["ready".to_string()], "chunk should be ready, got {statuses:?}");
 }
 
@@ -759,10 +767,13 @@ async fn embedded_upload_without_model_is_409() {
     let run = start_run_with_model(app.clone(), &slug, &token).await;
 
     let (status, _body) = json_call(
-        app, "PUT", &format!("/v1/admin/sources/{slug}/ingest-runs/{run}/documents"),
+        app,
+        "PUT",
+        &format!("/v1/admin/sources/{slug}/ingest-runs/{run}/documents"),
         Some(&token),
         Some(json!({ "documents": [embedded_document_payload("a.md", "x", 768)] })),
-    ).await;
+    )
+    .await;
     assert_eq!(status, StatusCode::CONFLICT);
 }
 
@@ -777,13 +788,16 @@ async fn embedded_upload_wrong_model_is_409() {
     let run = start_run_with_model(app.clone(), &slug, &token).await;
 
     let (status, _body) = json_call(
-        app, "PUT", &format!("/v1/admin/sources/{slug}/ingest-runs/{run}/documents"),
+        app,
+        "PUT",
+        &format!("/v1/admin/sources/{slug}/ingest-runs/{run}/documents"),
         Some(&token),
         Some(json!({
             "embedding_model": "bge-base-en-v1.5@2",
             "documents": [embedded_document_payload("a.md", "x", 768)],
         })),
-    ).await;
+    )
+    .await;
     assert_eq!(status, StatusCode::CONFLICT);
 }
 
@@ -798,12 +812,15 @@ async fn embedded_upload_wrong_dim_is_400() {
     let run = start_run_with_model(app.clone(), &slug, &token).await;
 
     let (status, _body) = json_call(
-        app, "PUT", &format!("/v1/admin/sources/{slug}/ingest-runs/{run}/documents"),
+        app,
+        "PUT",
+        &format!("/v1/admin/sources/{slug}/ingest-runs/{run}/documents"),
         Some(&token),
         Some(json!({
             "embedding_model": "bge-base-en-v1.5@1",
             "documents": [embedded_document_payload("a.md", "x", 3)],
         })),
-    ).await;
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
