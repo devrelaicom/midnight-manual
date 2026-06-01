@@ -274,3 +274,25 @@ For each generated manifest:
 - Per-content `language_targets` once a reliable per-repo Compact version signal
   exists.
 - Re-evaluate `midnight-zk` if protocol/cryptography-depth coverage is wanted.
+
+## 12. Addendum — operational mapping + CI smoke test (2026-06-01)
+
+After the manifests landed, two operational needs surfaced that §3 deferred:
+
+- **`manifests/midnight/sources.tsv`** — a machine-readable mapping
+  (`slug  repo(owner/name)  branch  kind`, one row per manifest). §3 chose "no
+  machine registry"; this file is the reconciliation: the manifests stay
+  path+provenance only, while the repo/branch/kind that `mnm sources create`
+  needs live in one parseable place. Consumed by the smoke workflow below and
+  intended for a future bulk-ingest driver. The human `README.md` index remains;
+  the smoke test asserts `sources.tsv` and the `*.yaml` set stay in 1:1 sync.
+
+- **`.github/workflows/manifest-smoke.yml`** — a scheduled daily smoke test
+  (`0 4 * * *` UTC, matching `embedder-smoke.yml`; also `workflow_dispatch`).
+  Two jobs: (1) `repo-reachability` — every repo in `sources.tsv` is checked via
+  `gh api repos/<owner>/<repo>` for existence (no 404) and `archived: false`,
+  with retry/backoff so transient blips don't flake the run red; (2)
+  `manifest-regression` — builds `mnm` from source and validates a random sample
+  of manifests against fresh shallow clones (`manifest check` + `ingest plan`,
+  asserting > 0 files walked) to catch upstream directory-structure drift. A
+  failure just turns the run red (no issue is opened).
