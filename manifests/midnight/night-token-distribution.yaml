@@ -1,0 +1,14 @@
+manifest_version: 1
+root:
+  name: night-token-distribution
+  path: .
+  include: ["**/*.md"]
+  exclude:
+    - "**/CODE_OF_CONDUCT.md"
+    - "**/CONTRIBUTING.md"
+    - "**/SECURITY.md"
+  provenance:
+    attribution: foundation
+    verified: true
+    verified_by: midnight-foundation
+    tags: [trust:high]
