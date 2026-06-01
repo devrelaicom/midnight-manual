@@ -108,15 +108,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --features integration --no-fail-fast
 
-  conventional-commits:
-    name: conventional commits
-    runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: wagoid/commitlint-github-action@v6
+  # Commit-message linting runs locally via the committed `commit-msg` hook
+  # (`.githooks/commit-msg`, enabled with `git config core.hooksPath .githooks`)
+  # rather than as a CI gate.
 
   audit:
     name: cargo-audit

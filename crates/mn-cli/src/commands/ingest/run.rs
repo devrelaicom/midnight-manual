@@ -17,7 +17,7 @@
 //!    source_version.
 //!
 //! 6. `PUT  /v1/admin/sources/:slug/ingest-runs/:id/documents` — upload
-//!    documents in batches of `--batch-size` (default 50) each.
+//!    documents in batches of `--batch-size` (default 25) each.
 //!
 //! 7. `POST /v1/admin/sources/:slug/ingest-runs/:id/finalize` — promote
 //!    the run to `active`.
@@ -88,10 +88,17 @@ pub struct Args {
     #[arg(long = "source-base-url")]
     pub source_base_url: Option<String>,
 
-    /// Number of documents per upload batch (default: 50). Reduce if you hit
-    /// 413 responses from the server.
-    #[arg(long, default_value_t = 50)]
+    /// Number of documents per upload batch (default: 25). Reduce if you hit
+    /// 413 responses from the server (local embedding inflates each batch).
+    #[arg(long, default_value_t = 25)]
     pub batch_size: usize,
+
+    /// Embed on the server instead of locally. Off by default: the CLI embeds
+    /// chunks with its local model and uploads the vectors, so the server
+    /// never has to load the model. Use this when the local model is
+    /// unavailable or you want the server to embed.
+    #[arg(long)]
+    pub enable_server_embedding: bool,
 
     /// Semantic code-chunk budget in tokens.
     #[arg(long, default_value_t = 400)]
@@ -379,6 +386,19 @@ async fn run_inner(
         );
     }
 
+    // Load the local embedder up front (unless the server will embed). Doing
+    // this before we create a server-side run means a missing model fails
+    // fast without leaving an orphaned `building` source_version.
+    let embedder = if args.enable_server_embedding {
+        None
+    } else {
+        validate_local_embedding_model(&args.embedding_model)?;
+        reporter.phase("load_embedder", serde_json::json!({"model": args.embedding_model}));
+        let emb = load_local_embedder().await?;
+        reporter.phase_done("load_embedder", serde_json::json!({"model": args.embedding_model}));
+        Some(emb)
+    };
+
     // ── Phase: start ingest run ──────────────────────────────────────────────
     reporter.phase("start_run", serde_json::json!({"slug": args.source_slug}));
 
@@ -438,6 +458,7 @@ async fn run_inner(
                     start_byte: i32::try_from(c.start_byte).unwrap_or(i32::MAX),
                     end_byte: i32::try_from(c.end_byte).unwrap_or(i32::MAX),
                     token_count: i32::try_from(c.token_count).unwrap_or(i32::MAX),
+                    embedding: None,
                 })
                 .collect(),
             package: d.package.clone(),
@@ -459,12 +480,21 @@ async fn run_inner(
     let mut accepted = 0usize;
     let mut carried = 0usize;
 
-    for (i, chunk) in docs.chunks(batch_size).enumerate() {
+    for (i, batch) in docs.chunks(batch_size).enumerate() {
         reporter.batch(i + 1, batch_count, "uploading documents");
+        let mut batch_docs = batch.to_vec();
+        if let Some(emb) = &embedder {
+            if let Err(e) = embed_batch(emb, &mut batch_docs).await {
+                abort_run(&client, server_url, &args.source_slug, start.ingest_run_id, &token)
+                    .await;
+                return Err(e.context(format!("embed batch {}/{batch_count}", i + 1)));
+            }
+        }
         let body = UploadDocumentsRequest {
-            documents: chunk.to_vec(),
+            documents: batch_docs,
             batch_index: i,
             batch_count,
+            embedding_model: embedder.as_ref().map(|_| args.embedding_model.clone()),
         };
         let result: Result<UploadDocumentsResponse> =
             put_json(&client, &upload_url, &token, &body).await;
@@ -476,7 +506,7 @@ async fn run_inner(
             Err(e) => {
                 abort_run(&client, server_url, &args.source_slug, start.ingest_run_id, &token)
                     .await;
-                return Err(translate_upload_error(&e, i + 1, batch_count, start.ingest_run_id)
+                return Err(translate_upload_error(e, i + 1, batch_count, start.ingest_run_id)
                     .context("upload documents"));
             }
         }
@@ -562,24 +592,26 @@ fn translate_start_error(e: anyhow::Error, requested: &str) -> anyhow::Error {
     e
 }
 
-/// Translate a batch-upload HTTP error into a helpful message.
+/// Translate a batch-upload HTTP error into a helpful message, **preserving**
+/// the underlying error (which carries the server's `{status}: {body}`, naming
+/// the failing field). The CLI prints with `{:#}`, so the whole chain shows.
 fn translate_upload_error(
-    e: &anyhow::Error,
+    e: anyhow::Error,
     batch: usize,
     of: usize,
     run_id: Uuid,
 ) -> anyhow::Error {
     let msg = e.to_string();
     if msg.contains("413") {
-        return anyhow!(
-            "batch {batch} exceeded server payload limit; aborted run {run_id}. \
-             Re-run with --batch-size 25 (or lower) — current default is 50 docs/batch"
-        );
+        return e.context(format!(
+            "batch {batch} exceeded the server payload limit; aborted run {run_id}. \
+             Re-run with --batch-size 15 (or lower) — current default is 25 docs/batch"
+        ));
     }
-    anyhow!(
-        "upload failed at batch {batch}/{of} (network or server error); aborted run {run_id} — \
-         re-run `mnm ingest run` to retry"
-    )
+    e.context(format!(
+        "upload failed at batch {batch}/{of}; aborted run {run_id}. \
+         The server's response is shown above; re-run `mnm ingest run` to retry"
+    ))
 }
 
 async fn abort_run(
@@ -600,6 +632,80 @@ fn url_encode(s: &str) -> String {
     // Slugs are lowercase alnum + hyphen by convention; nothing to encode in
     // practice. Replace any forward slash defensively.
     s.replace('/', "%2F")
+}
+
+/// Distribute one embedding vector per chunk, in document-then-chunk order.
+///
+/// # Errors
+///
+/// Errors if `vectors.len()` does not equal the total chunk count.
+fn attach_embeddings(docs: &mut [DocumentUpload], vectors: Vec<Vec<f32>>) -> Result<()> {
+    let total: usize = docs.iter().map(|d| d.chunks.len()).sum();
+    if vectors.len() != total {
+        return Err(anyhow!("embedder returned {} vectors for {total} chunks", vectors.len()));
+    }
+    let mut it = vectors.into_iter();
+    for d in docs.iter_mut() {
+        for c in &mut d.chunks {
+            c.embedding = it.next();
+        }
+    }
+    Ok(())
+}
+
+/// Local embedding can only produce `bge-base-en-v1.5` vectors. Reject any
+/// other `--embedding-model` with a pointer to `--enable-server-embedding`.
+///
+/// # Errors
+///
+/// Errors if the wire id fails to parse or names a different model.
+fn validate_local_embedding_model(model_wire: &str) -> Result<()> {
+    use std::str::FromStr as _;
+    let id = mn_core::model_id::EmbeddingModelId::from_str(model_wire)
+        .map_err(|e| anyhow!("invalid --embedding-model `{model_wire}`: {e}"))?;
+    if id.name != mn_embedding::embedder::MODEL_NAME {
+        return Err(anyhow!(
+            "local embedding only supports `{}@…`; got `{model_wire}`. \
+             Pass --enable-server-embedding to ingest with a server-side model.",
+            mn_embedding::embedder::MODEL_NAME
+        ));
+    }
+    Ok(())
+}
+
+/// Load the process-wide local embedder, mapping failures to actionable advice.
+///
+/// # Errors
+///
+/// Errors if the model cache dir cannot be resolved or the model fails to load.
+async fn load_local_embedder() -> Result<mn_embedding::Embedder> {
+    let env = mn_embedding::cache::StdEnv;
+    let cache_dir = mn_embedding::cache::resolve(&env).context(
+        "could not resolve model cache dir (set MIDNIGHT_MANUAL_MODEL_CACHE_DIR or HOME)",
+    )?;
+    mn_embedding::embedder::global(cache_dir).await.map_err(|e| {
+        anyhow!("could not load local embedder ({e}). Run `mnm models pull`, or pass --enable-server-embedding.")
+    })
+}
+
+/// Embed every chunk of `docs` in place using the local embedder.
+///
+/// # Errors
+///
+/// Errors if the embedder call fails or returns the wrong vector count.
+async fn embed_batch(emb: &mn_embedding::Embedder, docs: &mut [DocumentUpload]) -> Result<()> {
+    let texts: Vec<String> = docs
+        .iter()
+        .flat_map(|d| d.chunks.iter().map(|c| c.content.clone()))
+        .collect();
+    if texts.is_empty() {
+        return Ok(());
+    }
+    let vectors = emb
+        .embed_blocking(texts, None)
+        .await
+        .context("local embedding")?;
+    attach_embeddings(docs, vectors)
 }
 
 async fn post_json<I: Serialize + Sync, O: for<'de> Deserialize<'de>>(
@@ -703,6 +809,8 @@ struct UploadDocumentsRequest {
     documents: Vec<DocumentUpload>,
     batch_index: usize,
     batch_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    embedding_model: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -734,6 +842,8 @@ struct ChunkUpload {
     start_byte: i32,
     end_byte: i32,
     token_count: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    embedding: Option<Vec<f32>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -921,5 +1031,194 @@ mod tests {
         let redacted = redact_token_like(body);
         assert!(!redacted.contains("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
         assert!(redacted.contains("[redacted]"));
+    }
+
+    #[test]
+    fn attach_embeddings_distributes_in_order() {
+        let mut docs = vec![
+            DocumentUpload {
+                path: "a".into(),
+                kind: DocumentKind::Markdown,
+                content_hash: "h".into(),
+                source_url: None,
+                published_url: None,
+                language: None,
+                source_modified_at: None,
+                frontmatter: None,
+                provenance: Provenance::default(),
+                char_count: 0,
+                token_count: 0,
+                package: None,
+                chunks: vec![mk_chunk(0), mk_chunk(1)],
+            },
+            DocumentUpload {
+                path: "b".into(),
+                kind: DocumentKind::Markdown,
+                content_hash: "h".into(),
+                source_url: None,
+                published_url: None,
+                language: None,
+                source_modified_at: None,
+                frontmatter: None,
+                provenance: Provenance::default(),
+                char_count: 0,
+                token_count: 0,
+                package: None,
+                chunks: vec![mk_chunk(0)],
+            },
+        ];
+        let vectors = vec![vec![1.0_f32], vec![2.0], vec![3.0]];
+        attach_embeddings(&mut docs, vectors).unwrap();
+        assert_eq!(docs[0].chunks[0].embedding, Some(vec![1.0]));
+        assert_eq!(docs[0].chunks[1].embedding, Some(vec![2.0]));
+        assert_eq!(docs[1].chunks[0].embedding, Some(vec![3.0]));
+    }
+
+    #[test]
+    fn attach_embeddings_rejects_count_mismatch() {
+        let mut docs = vec![DocumentUpload {
+            path: "a".into(),
+            kind: DocumentKind::Markdown,
+            content_hash: "h".into(),
+            source_url: None,
+            published_url: None,
+            language: None,
+            source_modified_at: None,
+            frontmatter: None,
+            provenance: Provenance::default(),
+            char_count: 0,
+            token_count: 0,
+            package: None,
+            chunks: vec![mk_chunk(0)],
+        }];
+        assert!(attach_embeddings(&mut docs, vec![]).is_err());
+    }
+
+    #[test]
+    fn local_model_must_be_bge_base() {
+        assert!(validate_local_embedding_model("bge-base-en-v1.5@1").is_ok());
+        let err = validate_local_embedding_model("some-other-model@1").unwrap_err();
+        assert!(err.to_string().contains("--enable-server-embedding"), "{err}");
+    }
+
+    fn mk_chunk(idx: i32) -> ChunkUpload {
+        ChunkUpload {
+            chunk_index: idx,
+            total_chunks: 2,
+            content: format!("c{idx}"),
+            content_hash: "c".into(),
+            heading_path: vec![],
+            symbol_path: vec![],
+            start_byte: 0,
+            end_byte: 0,
+            token_count: 0,
+            embedding: None,
+        }
+    }
+
+    #[test]
+    fn upload_error_preserves_server_body() {
+        let original = anyhow!(
+            "422 Unprocessable Entity from http://x/documents: \
+             {{\"error\":{{\"code\":\"invalid_request\",\"message\":\"unknown field embeding\"}}}}"
+        );
+        let translated = translate_upload_error(original, 8, 11, Uuid::nil());
+        let shown = format!("{translated:#}");
+        assert!(shown.contains("422"), "must keep server status: {shown}");
+        assert!(shown.contains("invalid_request"), "must keep server body: {shown}");
+        assert!(shown.contains("batch 8/11"), "must add batch context: {shown}");
+    }
+
+    #[test]
+    fn default_batch_size_is_25_and_server_embedding_defaults_off() {
+        use clap::Parser as _;
+        #[derive(clap::Parser)]
+        struct Wrap {
+            #[command(flatten)]
+            inner: Args,
+        }
+        let w = Wrap::try_parse_from(["ingest-run", "--source-slug", "s", "m.yaml"]).unwrap();
+        assert_eq!(w.inner.batch_size, 25);
+        assert!(!w.inner.enable_server_embedding);
+    }
+
+    #[test]
+    fn enable_server_embedding_flag_parses() {
+        use clap::Parser as _;
+        #[derive(clap::Parser)]
+        struct Wrap {
+            #[command(flatten)]
+            inner: Args,
+        }
+        let w = Wrap::try_parse_from([
+            "ingest-run",
+            "--source-slug",
+            "s",
+            "--enable-server-embedding",
+            "m.yaml",
+        ])
+        .unwrap();
+        assert!(w.inner.enable_server_embedding);
+    }
+
+    #[test]
+    fn chunk_upload_skips_embedding_when_none() {
+        let c = ChunkUpload {
+            chunk_index: 0,
+            total_chunks: 1,
+            content: "x".into(),
+            content_hash: "c".into(),
+            heading_path: vec![],
+            symbol_path: vec![],
+            start_byte: 0,
+            end_byte: 1,
+            token_count: 0,
+            embedding: None,
+        };
+        let s = serde_json::to_string(&c).unwrap();
+        assert!(!s.contains("embedding"), "None embedding must be omitted: {s}");
+    }
+
+    #[test]
+    fn embedded_request_serializes_vectors_and_model() {
+        // When the CLI embeds locally, the upload body must carry the 768-dim
+        // vector on every chunk plus the batch-level `embedding_model`.
+        let body = UploadDocumentsRequest {
+            documents: vec![DocumentUpload {
+                path: "a".into(),
+                kind: DocumentKind::Markdown,
+                content_hash: "h".into(),
+                source_url: None,
+                published_url: None,
+                language: None,
+                source_modified_at: None,
+                frontmatter: None,
+                provenance: Provenance::default(),
+                char_count: 0,
+                token_count: 0,
+                package: None,
+                chunks: vec![ChunkUpload {
+                    chunk_index: 0,
+                    total_chunks: 1,
+                    content: "x".into(),
+                    content_hash: "c".into(),
+                    heading_path: vec![],
+                    symbol_path: vec![],
+                    start_byte: 0,
+                    end_byte: 1,
+                    token_count: 0,
+                    embedding: Some(vec![0.5_f32; 768]),
+                }],
+            }],
+            batch_index: 0,
+            batch_count: 1,
+            embedding_model: Some("bge-base-en-v1.5@1".to_owned()),
+        };
+        let v: serde_json::Value = serde_json::to_value(&body).unwrap();
+        assert_eq!(v["embedding_model"], "bge-base-en-v1.5@1");
+        let emb = v["documents"][0]["chunks"][0]["embedding"]
+            .as_array()
+            .expect("embedding present on the wire");
+        assert_eq!(emb.len(), 768);
     }
 }

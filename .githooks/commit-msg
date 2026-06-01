@@ -1,0 +1,52 @@
+#!/bin/sh
+# Conventional-commits check — local replacement for the old CI
+# `wagoid/commitlint-github-action` job. Enable once per clone with:
+#
+#     git config core.hooksPath .githooks
+#
+# Validates the commit header against `type(scope)!: subject` where `type`
+# is one of the Conventional Commits types and the header is <= 100 chars.
+# Merge / revert / fixup / squash commits are skipped.
+
+set -eu
+
+msg_file="$1"
+header="$(sed -n '1p' "$msg_file")"
+
+# Skip auto-generated / non-conventional commits.
+case "$header" in
+    "Merge "* | "Revert "* | "fixup! "* | "squash! "* | "amend! "*)
+        exit 0
+        ;;
+esac
+
+# Ignore comment-only / empty headers (e.g. `git commit` aborted body edits).
+case "$header" in
+    "#"* | "")
+        exit 0
+        ;;
+esac
+
+types='build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test'
+
+# POSIX ERE: type, optional (scope), optional !, ": ", non-empty subject.
+if ! printf '%s' "$header" | grep -Eq "^(${types})(\([a-z0-9._/-]+\))?(!)?: .+"; then
+    echo "✗ commit message does not follow Conventional Commits." >&2
+    echo >&2
+    echo "  header: $header" >&2
+    echo >&2
+    echo "  expected: <type>(<optional scope>): <subject>" >&2
+    echo "  types:    ${types}" >&2
+    echo "  example:  fix(server): lazy-load embedder model" >&2
+    exit 1
+fi
+
+# Enforce a 100-char header ceiling (config-conventional default).
+len="$(printf '%s' "$header" | wc -c | tr -d ' ')"
+if [ "$len" -gt 100 ]; then
+    echo "✗ commit header is ${len} chars; keep it <= 100." >&2
+    echo "  header: $header" >&2
+    exit 1
+fi
+
+exit 0
