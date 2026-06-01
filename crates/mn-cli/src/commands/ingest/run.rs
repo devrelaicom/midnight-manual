@@ -481,15 +481,18 @@ async fn run_inner(
     let mut carried = 0usize;
 
     for (i, batch) in docs.chunks(batch_size).enumerate() {
-        reporter.batch(i + 1, batch_count, "uploading documents");
         let mut batch_docs = batch.to_vec();
         if let Some(emb) = &embedder {
+            // Local embedding is the slow per-batch step; surface it as its own
+            // phase so progress consumers don't appear to hang on "uploading".
+            reporter.batch(i + 1, batch_count, "embedding documents");
             if let Err(e) = embed_batch(emb, &mut batch_docs).await {
                 abort_run(&client, server_url, &args.source_slug, start.ingest_run_id, &token)
                     .await;
                 return Err(e.context(format!("embed batch {}/{batch_count}", i + 1)));
             }
         }
+        reporter.batch(i + 1, batch_count, "uploading documents");
         let body = UploadDocumentsRequest {
             documents: batch_docs,
             batch_index: i,

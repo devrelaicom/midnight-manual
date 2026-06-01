@@ -90,25 +90,34 @@ commafy() {
 }
 
 # Derive a human status from the streamed JSONL events file (no jq dependency).
+# Scans recent events oldest→newest and keeps the *latest* recognised phase, so
+# the slow per-batch local embedding shows as "embedding N/M" instead of
+# appearing to hang on "uploading". (The CLI embeds each batch locally before
+# uploading it, emitting an "embedding documents" event then an "uploading
+# documents" event per batch.)
 derive_status() {
-  local last; last="$(tail -n 40 "$1" 2>/dev/null)"
-  case "$last" in
-    *'"phase":"finalize"'*) printf 'finalizing'; return ;;
-  esac
-  local up; up="$(printf '%s\n' "$last" | grep '"phase":"uploading documents"' | tail -1)"
-  if [ -n "$up" ]; then
-    local c o
-    c="$(printf '%s' "$up" | grep -oE '"current":[0-9]+' | grep -oE '[0-9]+')"
-    o="$(printf '%s' "$up" | grep -oE '"of":[0-9]+' | grep -oE '[0-9]+')"
-    printf 'uploading %s/%s' "${c:-?}" "${o:-?}"; return
-  fi
-  if printf '%s\n' "$last" | grep -q '"phase":"upload_documents"'; then printf 'uploading'; return; fi
-  if printf '%s\n' "$last" | grep -qE '"phase":"chunk".*"chunks"'; then printf 'preparing upload'; return; fi
-  if printf '%s\n' "$last" | grep -q '"phase":"chunk"'; then printf 'chunking'; return; fi
-  if printf '%s\n' "$last" | grep -q 'source_creating'; then printf 'creating source'; return; fi
-  if printf '%s\n' "$last" | grep -qE '"phase":"walk".*"files"'; then printf 'chunking'; return; fi
-  if printf '%s\n' "$last" | grep -q '"phase":"walk"'; then printf 'walking source'; return; fi
-  printf 'starting'
+  local _st='starting' line c o
+  while IFS= read -r line; do
+    case "$line" in
+      *'"phase":"finalize"'*) _st='finalizing' ;;
+      *'"phase":"embedding documents"'*)
+        c="$(printf '%s' "$line" | grep -oE '"current":[0-9]+' | grep -oE '[0-9]+')"
+        o="$(printf '%s' "$line" | grep -oE '"of":[0-9]+' | grep -oE '[0-9]+')"
+        _st="embedding ${c:-?}/${o:-?}" ;;
+      *'"phase":"uploading documents"'*)
+        c="$(printf '%s' "$line" | grep -oE '"current":[0-9]+' | grep -oE '[0-9]+')"
+        o="$(printf '%s' "$line" | grep -oE '"of":[0-9]+' | grep -oE '[0-9]+')"
+        _st="uploading ${c:-?}/${o:-?}" ;;
+      *'"phase":"load_embedder"'*) _st='loading model' ;;
+      *'"phase":"upload_documents"'*) _st='uploading' ;;
+      *'"phase":"chunk"'*'"chunks"'*) _st='preparing upload' ;;
+      *'"phase":"chunk"'*) _st='chunking' ;;
+      *source_creating*) _st='creating source' ;;
+      *'"phase":"walk"'*'"files"'*) _st='chunking' ;;
+      *'"phase":"walk"'*) _st='walking source' ;;
+    esac
+  done < <(tail -n 40 "$1" 2>/dev/null)
+  printf '%s' "$_st"
 }
 
 # Extract the single [admin] user_id from an auth.toml (no TOML parser needed).
