@@ -152,31 +152,61 @@ pub fn spawn(
     })
 }
 
-/// Real production embed function — wraps the local ONNX embedder.
-pub struct LocalEmbedder {
-    inner: mn_embedding::Embedder,
+/// Boxed async loader that produces the real embed function on first use.
+type EmbedLoader = Box<
+    dyn Fn() -> Pin<Box<dyn Future<Output = Result<Arc<dyn EmbedFn>, String>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// Lazily-initialized [`EmbedFn`]. Holds a loader and a `OnceCell`; the loader
+/// runs at most once, on the first `embed` call. Construction is cheap and
+/// infallible, so the server boots without loading the ~450 MB ONNX model —
+/// it only loads if the worker actually finds an `embed_failed` backlog.
+pub struct LazyEmbedder {
+    loader: EmbedLoader,
+    inner: tokio::sync::OnceCell<Arc<dyn EmbedFn>>,
 }
 
-impl LocalEmbedder {
-    /// Construct from a model cache directory. Loads the ONNX bundle,
-    /// downloading the ~100 MB model on first call if not cached.
-    ///
-    /// # Errors
-    ///
-    /// Returns the underlying loader error if the cache dir is not writable
-    /// or the model download fails.
-    pub async fn load(cache_dir: std::path::PathBuf) -> Result<Self, String> {
-        let inner = mn_embedding::embedder::global(cache_dir)
-            .await
-            .map_err(|e| e.to_string())?;
-        Ok(Self { inner })
+impl LazyEmbedder {
+    /// Wrap an arbitrary loader (used by tests to inject a fake).
+    #[must_use]
+    pub fn new(loader: EmbedLoader) -> Self {
+        Self { loader, inner: tokio::sync::OnceCell::new() }
+    }
+
+    /// Production constructor: loads the process-wide local ONNX embedder from
+    /// `cache_dir` on first use.
+    #[must_use]
+    pub fn local(cache_dir: std::path::PathBuf) -> Self {
+        Self::new(Box::new(move || {
+            let cache_dir = cache_dir.clone();
+            Box::pin(async move {
+                let embedder = mn_embedding::embedder::global(cache_dir)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok(Arc::new(EmbedderFn(embedder)) as Arc<dyn EmbedFn>)
+            })
+        }))
     }
 }
 
-impl EmbedFn for LocalEmbedder {
+impl EmbedFn for LazyEmbedder {
     fn embed(&self, texts: Vec<String>) -> EmbedFuture<'_> {
         Box::pin(async move {
-            self.inner
+            let inner = self.inner.get_or_try_init(|| (self.loader)()).await?;
+            inner.embed(texts).await
+        })
+    }
+}
+
+/// Adapts a concrete [`mn_embedding::Embedder`] to the [`EmbedFn`] trait.
+struct EmbedderFn(mn_embedding::Embedder);
+
+impl EmbedFn for EmbedderFn {
+    fn embed(&self, texts: Vec<String>) -> EmbedFuture<'_> {
+        Box::pin(async move {
+            self.0
                 .embed_blocking(texts, None)
                 .await
                 .map_err(|e| e.to_string())
@@ -187,6 +217,7 @@ impl EmbedFn for LocalEmbedder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct ConstantEmbedder {
         dim: usize,
@@ -208,5 +239,30 @@ mod tests {
             .unwrap();
         assert_eq!(v.len(), 3);
         assert_eq!(v[0].len(), 4);
+    }
+
+    #[tokio::test]
+    async fn lazy_embedder_does_not_load_until_first_embed() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls2 = calls.clone();
+        let lazy = LazyEmbedder::new(Box::new(move || {
+            let calls = calls2.clone();
+            Box::pin(async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(Arc::new(ConstantEmbedder { dim: 4 }) as Arc<dyn EmbedFn>)
+            })
+        }));
+
+        // Construction must not invoke the loader.
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        // First embed loads once.
+        let v = lazy.embed(vec!["a".to_owned()]).await.unwrap();
+        assert_eq!(v.len(), 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        // Second embed reuses the cached inner — no second load.
+        let _ = lazy.embed(vec!["b".to_owned(), "c".to_owned()]).await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }

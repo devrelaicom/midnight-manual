@@ -91,12 +91,12 @@ async fn main() -> anyhow::Result<()> {
         )?;
         std::fs::create_dir_all(&cache_dir)
             .with_context(|| format!("create model cache dir at {}", cache_dir.display()))?;
-        let local = jobs::embedder::LocalEmbedder::load(cache_dir)
-            .await
-            .map_err(|e| anyhow::anyhow!("load local embedder: {e}"))?;
+        // Lazy: the model is NOT loaded here. The worker loads it on its first
+        // non-empty batch, so an idle server never holds the ~450 MB model.
+        let lazy = jobs::embedder::LazyEmbedder::local(cache_dir);
         Some(jobs::embedder::spawn(
             pool.clone(),
-            Arc::new(local),
+            Arc::new(lazy),
             active.id,
             Duration::from_millis(cfg.embedder_interval_ms),
             cfg.embedder_batch_size,
