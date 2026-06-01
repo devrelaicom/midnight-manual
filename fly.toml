@@ -34,7 +34,7 @@ method   = "GET"
 
 [[vm]]
 size = "shared-cpu-1x"
-memory = "1gb"
+memory = "2gb"
 
 # Secrets (set via `fly secrets set …`) — referenced for documentation only:
 #   DATABASE_URL
