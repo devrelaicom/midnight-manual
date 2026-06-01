@@ -1,29 +1,14 @@
 manifest_version: 1
 root:
   name: midnight-architecture
+  path: .
+  include: ["**/*.md"]
+  exclude:
+    - "**/CODE_OF_CONDUCT.md"
+    - "**/CONTRIBUTING.md"
+    - "**/SECURITY.md"
   provenance:
     attribution: foundation
     verified: true
     verified_by: midnight-foundation
     tags: [trust:high]
-  children:
-    - name: adrs
-      path: adrs/
-    - name: overview
-      path: overview/
-    - name: specification
-      path: specification/
-    - name: consensus
-      path: consensus/
-    - name: components
-      path: components/
-    - name: user-flows
-      path: user-flows/
-    - name: proposals
-      path: proposals/
-    - name: languages
-      path: languages/
-    - name: product
-      path: product/
-    - name: glacier-drop
-      path: glacier-drop/
