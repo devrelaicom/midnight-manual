@@ -144,6 +144,10 @@ pub struct ChunkUpload {
     /// Token count.
     #[serde(default)]
     pub token_count: i32,
+    /// Precomputed embedding vector, when the CLI embedded locally. `None`
+    /// means the server-side embedder worker must fill it (`embed_failed`).
+    #[serde(default)]
+    pub embedding: Option<Vec<f32>>,
 }
 
 /// Body of `PUT .../documents`.
@@ -157,6 +161,11 @@ pub struct UploadDocumentsRequest {
     /// Optional total batch count for the ingest run.
     #[serde(default)]
     pub batch_count: Option<usize>,
+    /// Wire id (`name@revision`) of the model that produced any supplied
+    /// `ChunkUpload.embedding` vectors. Required when embeddings are present;
+    /// must match the run's model. `None` for text-only (server-embedded) runs.
+    #[serde(default)]
+    pub embedding_model: Option<String>,
 }
 
 /// Response from `PUT .../documents`.
@@ -750,4 +759,45 @@ async fn carry_forward_one(
         .await?;
     }
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn upload_request_deserializes_embedding_and_model() {
+        let body = serde_json::json!({
+            "embedding_model": "bge-base-en-v1.5@1",
+            "documents": [{
+                "path": "a.md",
+                "kind": "markdown",
+                "content_hash": "h",
+                "provenance": {},
+                "chunks": [{
+                    "chunk_index": 0,
+                    "total_chunks": 1,
+                    "content": "hello",
+                    "content_hash": "c",
+                    "embedding": [0.1_f32, 0.2, 0.3]
+                }]
+            }]
+        });
+        let req: UploadDocumentsRequest = serde_json::from_value(body).unwrap();
+        assert_eq!(req.embedding_model.as_deref(), Some("bge-base-en-v1.5@1"));
+        assert_eq!(req.documents[0].chunks[0].embedding.as_ref().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn upload_request_defaults_embedding_fields_to_none() {
+        let body = serde_json::json!({
+            "documents": [{
+                "path": "a.md", "kind": "markdown", "content_hash": "h", "provenance": {},
+                "chunks": [{ "chunk_index": 0, "total_chunks": 1, "content": "x", "content_hash": "c" }]
+            }]
+        });
+        let req: UploadDocumentsRequest = serde_json::from_value(body).unwrap();
+        assert!(req.embedding_model.is_none());
+        assert!(req.documents[0].chunks[0].embedding.is_none());
+    }
 }
