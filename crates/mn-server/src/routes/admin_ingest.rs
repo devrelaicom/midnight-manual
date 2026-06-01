@@ -362,24 +362,15 @@ async fn upload_documents(
         }
     }
 
-    // If any chunk in this batch carries a precomputed embedding, the batch
-    // MUST declare the model it used, and it MUST match the run's model and
-    // the 768-dim contract. Text-only batches skip this and follow the
-    // server-side embed path.
+    // If any chunk in this batch carries a precomputed embedding, validate the
+    // declared model + 768-dim contract via `check_embedded_batch` (pure +
+    // unit-tested). Only the run-model lookup needs the DB; we gate on
+    // `has_embeddings` so text-only batches skip the lookup entirely.
     let has_embeddings = req
         .documents
         .iter()
         .any(|d| d.chunks.iter().any(|c| c.embedding.is_some()));
     if has_embeddings {
-        let Some(provided) = req.embedding_model.as_deref() else {
-            return error::into_response(
-                CoreError::builder(ErrorCode::EmbeddingModelMismatch)
-                    .message("upload supplies embeddings but no embedding_model")
-                    .remediation("send the wire id (name@revision) the CLI embedded with")
-                    .build(),
-                rid,
-            );
-        };
         let run_model = match embedding_model::get_by_id(&state.pool, sv.embedding_model_id).await {
             Ok(m) => m,
             Err(e) => {
@@ -388,48 +379,10 @@ async fn upload_documents(
             }
         };
         let expected = format!("{}@{}", run_model.name, run_model.revision);
-        let provided_norm = match EmbeddingModelId::from_str(provided) {
-            Ok(m) => format!("{}@{}", m.name, m.revision),
-            Err(e) => {
-                return error::into_response(
-                    CoreError::builder(ErrorCode::InvalidRequest)
-                        .message(format!("embedding_model parse failed: {e}"))
-                        .remediation("supply name@revision (e.g. bge-base-en-v1.5@1)")
-                        .build(),
-                    rid,
-                );
-            }
-        };
-        if provided_norm != expected {
-            return error::into_response(
-                CoreError::builder(ErrorCode::EmbeddingModelMismatch)
-                    .message(format!(
-                        "upload embeddings declare model `{provided_norm}` but run uses `{expected}`"
-                    ))
-                    .remediation("re-run ingest with --embedding-model matching the corpus, or --enable-server-embedding")
-                    .build(),
-                rid,
-            );
-        }
-        for d in &req.documents {
-            for c in &d.chunks {
-                if let Some(v) = &c.embedding {
-                    if v.len() != mn_embedding::BGE_BASE_DIM {
-                        return error::into_response(
-                            CoreError::builder(ErrorCode::InvalidRequest)
-                                .message(format!(
-                                    "chunk {}#{} embedding dim {} != {}",
-                                    d.path,
-                                    c.chunk_index,
-                                    v.len(),
-                                    mn_embedding::BGE_BASE_DIM
-                                ))
-                                .build(),
-                            rid,
-                        );
-                    }
-                }
-            }
+        if let Err(e) =
+            check_embedded_batch(&req.documents, req.embedding_model.as_deref(), &expected)
+        {
+            return error::into_response(e, rid);
         }
     }
 
@@ -684,6 +637,76 @@ async fn prior_active_documents(
     }
 }
 
+/// Validate a batch that carries precomputed embeddings: it must declare the
+/// model it used (matching the run's `expected` `name@revision`), and every
+/// supplied vector must be 768-dim. Text-only batches (no embeddings) pass.
+///
+/// Pure and DB-free so every error path — including the dimension rejection,
+/// whose error MUST carry a `.remediation()` or [`CoreError::build`] panics —
+/// is unit-testable without Postgres.
+///
+/// # Errors
+///
+/// Returns a built [`CoreError`] (`EmbeddingModelMismatch` or `InvalidRequest`)
+/// describing the first violation found.
+fn check_embedded_batch(
+    documents: &[DocumentUpload],
+    declared_model: Option<&str>,
+    expected: &str,
+) -> Result<(), CoreError> {
+    let has_embeddings = documents
+        .iter()
+        .any(|d| d.chunks.iter().any(|c| c.embedding.is_some()));
+    if !has_embeddings {
+        return Ok(());
+    }
+    let Some(provided) = declared_model else {
+        return Err(CoreError::builder(ErrorCode::EmbeddingModelMismatch)
+            .message("upload supplies embeddings but no embedding_model")
+            .remediation("send the wire id (name@revision) the CLI embedded with")
+            .build());
+    };
+    let provided_norm = EmbeddingModelId::from_str(provided)
+        .map(|m| format!("{}@{}", m.name, m.revision))
+        .map_err(|e| {
+            CoreError::builder(ErrorCode::InvalidRequest)
+                .message(format!("embedding_model parse failed: {e}"))
+                .remediation("supply name@revision (e.g. bge-base-en-v1.5@1)")
+                .build()
+        })?;
+    if provided_norm != expected {
+        return Err(CoreError::builder(ErrorCode::EmbeddingModelMismatch)
+            .message(format!(
+                "upload embeddings declare model `{provided_norm}` but run uses `{expected}`"
+            ))
+            .remediation(
+                "re-run ingest with --embedding-model matching the corpus, or --enable-server-embedding",
+            )
+            .build());
+    }
+    for d in documents {
+        for c in &d.chunks {
+            if let Some(v) = &c.embedding {
+                if v.len() != mn_embedding::BGE_BASE_DIM {
+                    return Err(CoreError::builder(ErrorCode::InvalidRequest)
+                        .message(format!(
+                            "chunk {}#{} embedding dim {} != {}",
+                            d.path,
+                            c.chunk_index,
+                            v.len(),
+                            mn_embedding::BGE_BASE_DIM
+                        ))
+                        .remediation(
+                            "re-embed with bge-base-en-v1.5 (768-dim), or pass --enable-server-embedding",
+                        )
+                        .build());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn insert_new_document(
     pool: &sqlx::PgPool,
     sv_id: Uuid,
@@ -874,5 +897,78 @@ mod tests {
         let req: UploadDocumentsRequest = serde_json::from_value(body).unwrap();
         assert!(req.embedding_model.is_none());
         assert!(req.documents[0].chunks[0].embedding.is_none());
+    }
+
+    const EXPECTED_MODEL: &str = "bge-base-en-v1.5@1";
+
+    fn chunk_with_dim(idx: i32, dim: Option<usize>) -> ChunkUpload {
+        ChunkUpload {
+            chunk_index: idx,
+            total_chunks: 1,
+            content: "x".to_owned(),
+            content_hash: "c".to_owned(),
+            heading_path: vec![],
+            symbol_path: vec![],
+            start_byte: 0,
+            end_byte: 0,
+            token_count: 0,
+            embedding: dim.map(|d| vec![0.0_f32; d]),
+        }
+    }
+
+    fn doc_with(chunks: Vec<ChunkUpload>) -> DocumentUpload {
+        DocumentUpload {
+            path: "a.md".to_owned(),
+            kind: DocumentKind::Markdown,
+            content_hash: "h".to_owned(),
+            source_url: None,
+            published_url: None,
+            language: None,
+            source_modified_at: None,
+            frontmatter: None,
+            provenance: Provenance::default(),
+            char_count: 0,
+            token_count: 0,
+            chunks,
+            package: None,
+        }
+    }
+
+    #[test]
+    fn check_text_only_batch_is_ok() {
+        let docs = vec![doc_with(vec![chunk_with_dim(0, None)])];
+        assert!(check_embedded_batch(&docs, None, EXPECTED_MODEL).is_ok());
+    }
+
+    #[test]
+    fn check_valid_embedded_batch_is_ok() {
+        let docs = vec![doc_with(vec![chunk_with_dim(0, Some(768))])];
+        assert!(check_embedded_batch(&docs, Some(EXPECTED_MODEL), EXPECTED_MODEL).is_ok());
+    }
+
+    #[test]
+    fn check_embeddings_without_model_is_mismatch() {
+        let docs = vec![doc_with(vec![chunk_with_dim(0, Some(768))])];
+        let err = check_embedded_batch(&docs, None, EXPECTED_MODEL).unwrap_err();
+        assert_eq!(err.code, ErrorCode::EmbeddingModelMismatch);
+    }
+
+    #[test]
+    fn check_wrong_model_is_mismatch() {
+        let docs = vec![doc_with(vec![chunk_with_dim(0, Some(768))])];
+        let err =
+            check_embedded_batch(&docs, Some("bge-base-en-v1.5@2"), EXPECTED_MODEL).unwrap_err();
+        assert_eq!(err.code, ErrorCode::EmbeddingModelMismatch);
+    }
+
+    #[test]
+    fn check_wrong_dim_is_invalid_request_and_does_not_panic() {
+        // Regression guard: this error path previously omitted `.remediation()`,
+        // which panics in `CoreError::build()`. `unwrap_err()` would re-panic if
+        // that regressed — it must return a well-formed error instead.
+        let docs = vec![doc_with(vec![chunk_with_dim(0, Some(3))])];
+        let err = check_embedded_batch(&docs, Some(EXPECTED_MODEL), EXPECTED_MODEL).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidRequest);
+        assert!(!err.remediation.is_empty());
     }
 }
