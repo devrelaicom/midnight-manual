@@ -37,9 +37,10 @@ pub struct ServerConfig {
     /// anonymous read mode.
     pub bearer_token: Option<String>,
     /// `{name}@{revision}` model identifier the cloud expects clients to
-    /// declare on every search. For the v1 corpus this is
-    /// `"bge-base-en-v1.5@1"` (seeded by migration 0006). Configurable here
-    /// so tests can pin a different value.
+    /// declare on every search. NOTE: since the Voyage cutover, `run_search`
+    /// resolves the corpus wire id live via `CloudClient::fetch_active_model`
+    /// (`GET /v1/models/active`) and no longer reads this field; it is retained
+    /// for config back-compat and other potential consumers.
     pub client_embedding_model: String,
     /// Resolved telemetry sink URL. Defaults to `{cloud_url}/v1/telemetry/events`.
     pub telemetry_url: String,

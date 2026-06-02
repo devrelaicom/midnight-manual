@@ -125,6 +125,44 @@ impl CloudClient {
         Ok(Self { base, bearer, http })
     }
 
+    /// Return the bearer token configured on this client, if any.
+    ///
+    /// Used by `run_search` when it needs to forward the same bearer for the
+    /// server-proxy embedding path (`EmbedSource::Server`).
+    #[must_use]
+    pub fn bearer(&self) -> Option<&str> {
+        self.bearer.as_deref()
+    }
+
+    /// `GET /v1/models/active` — returns the corpus's active embedding model
+    /// as a `{name}@{revision}` wire id string (e.g. `"voyage-code-3@1"`).
+    ///
+    /// The response is expected to have at least `name` (string) and `revision`
+    /// (integer) fields; all other fields are ignored.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CloudError::Transport`] on a connection failure,
+    /// [`CloudError::NotFound`] on a 404, [`CloudError::Status`] for any other
+    /// non-2xx response, or [`CloudError::Decode`] for a body that fails to
+    /// parse or is missing the `name`/`revision` fields.
+    pub async fn fetch_active_model(&self) -> Result<String, CloudError> {
+        let v = self.get_json("/v1/models/active").await?;
+        let name = v
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                CloudError::Decode("/v1/models/active response missing `name` field".to_owned())
+            })?;
+        let revision = v
+            .get("revision")
+            .and_then(serde_json::Value::as_i64)
+            .ok_or_else(|| {
+                CloudError::Decode("/v1/models/active response missing `revision` field".to_owned())
+            })?;
+        Ok(format!("{name}@{revision}"))
+    }
+
     /// `POST /v1/search`.
     pub async fn search(&self, req: &SearchRequest) -> Result<serde_json::Value, CloudError> {
         let url = self

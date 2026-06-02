@@ -4,8 +4,8 @@
 //!
 //! - `status` / `pull_models` — local-only; talk to the embedder/reranker
 //!   model cache. No cloud round-trip.
-//! - `search` — embed locally, post to the cloud `/v1/search`, optionally
-//!   rerank with the local cross-encoder.
+//! - `search` — embed via VoyageAI (BYOK or server-proxy), post to the cloud
+//!   `/v1/search`, optionally rerank with the local cross-encoder.
 //! - All other tools (`get_chunk` / `get_chunk_next` / `get_chunk_prev` /
 //!   `get_chunk_neighbors` / `get_chunk_parents` / `get_document` /
 //!   `get_document_full` / `get_document_chunks` / `list_sources`) —
@@ -21,7 +21,7 @@ use std::time::Instant;
 
 use mn_core::scoring::normalize_rerank;
 use mn_core::scoring_policy::ScoringPolicy;
-use mn_embedding::{embedder, reranker};
+use mn_embedding::{client as embed_client, embedder, reranker, voyage};
 use serde::Serialize;
 use serde_json::json;
 use uuid::Uuid;
@@ -495,21 +495,56 @@ pub async fn run_search(
 ) -> Result<serde_json::Value, SearchError> {
     let parsed = parse_search_args(args).map_err(SearchError::InvalidInput)?;
 
-    // Embed all queries against the local model.
-    let embedder = embedder::global(cfg.cache_dir.clone())
+    // Resolve the Voyage API key from env / config (MCP has no CLI flag).
+    let cfg_env = mn_core::config::StdEnv;
+    let (core_cfg, _) = mn_core::config::Config::discover(None, &cfg_env).unwrap_or_default();
+    let voyage_key = mn_core::config::resolve_voyage_api_key(None, &core_cfg.models, &cfg_env);
+
+    // Embed all queries via VoyageAI — either BYOK (direct) or through the
+    // cloud server's /v1/embeddings proxy. The local fastembed embedder is no
+    // longer used on this path; LOADED_MARKERS.mark_embedder() is intentionally
+    // omitted here (the marker is only meaningful when the local ONNX model has
+    // been loaded by pull_models).
+    let embedded = if let Some(key) = voyage_key.as_deref() {
+        let v = voyage::VoyageEmbedder::new(
+            key,
+            &core_cfg.models.embedding,
+            core_cfg.models.voyage_output_dimension,
+            &core_cfg.models.voyage_output_dtype,
+        );
+        embed_client::embed(
+            parsed.queries.clone(),
+            voyage::InputType::Query,
+            embed_client::EmbedSource::Byok(&v),
+        )
         .await
-        .map_err(|e| SearchError::Cloud(format!("embedder init failed: {e}")))?;
-    LOADED_MARKERS.mark_embedder();
-    let vectors = embedder
-        .embed_blocking(parsed.queries.clone(), None)
+    } else {
+        embed_client::embed(
+            parsed.queries.clone(),
+            voyage::InputType::Query,
+            embed_client::EmbedSource::Server {
+                base_url: &cfg.cloud_url,
+                bearer: cloud.bearer(),
+            },
+        )
         .await
-        .map_err(|e| SearchError::Cloud(format!("embed failed: {e}")))?;
+    }
+    .map_err(|e| SearchError::Cloud(format!("embed failed: {e}")))?;
+
+    let vectors = embedded.vectors;
     let pairs: Vec<QueryPair> = parsed
         .queries
         .iter()
         .zip(vectors.into_iter())
         .map(|(text, vector)| QueryPair { text: text.clone(), vector })
         .collect();
+
+    // Fetch the corpus's active model wire id so the search request is labelled
+    // with the canonical {name}@{revision} the server expects.
+    let client_embedding_model = cloud
+        .fetch_active_model()
+        .await
+        .map_err(|e| SearchError::Cloud(e.to_string()))?;
 
     // Send to cloud. If rerank is on, ask for a fixed top-K so the reranker
     // has a useful candidate pool independent of the caller's limit.
@@ -520,7 +555,7 @@ pub async fn run_search(
     };
     let req = SearchRequest {
         queries: pairs,
-        client_embedding_model: cfg.client_embedding_model.clone(),
+        client_embedding_model: client_embedding_model.clone(),
         limit: cloud_limit,
         filters: parsed.filters.clone(),
         // When reranking, fetch the candidate pool in RRF/relevance order so the
@@ -570,7 +605,7 @@ pub async fn run_search(
         obj.insert("results".to_owned(), serde_json::Value::Array(final_results));
         obj.insert(
             "corpus_embedding_model".to_owned(),
-            serde_json::Value::String(cfg.client_embedding_model.clone()),
+            serde_json::Value::String(client_embedding_model),
         );
     }
     Ok(envelope)
