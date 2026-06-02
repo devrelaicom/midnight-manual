@@ -263,7 +263,7 @@ impl RateLimiter {
 }
 
 /// True when `ip` falls within `net/prefix` (and the families match).
-fn ip_in(net: IpAddr, prefix: u8, ip: IpAddr) -> bool {
+pub(crate) fn ip_in(net: IpAddr, prefix: u8, ip: IpAddr) -> bool {
     match (net, ip) {
         (IpAddr::V4(n), IpAddr::V4(a)) => {
             bits_match(u128::from(u32::from(n)), u128::from(u32::from(a)), prefix, 32)

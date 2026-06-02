@@ -4,7 +4,7 @@
 //! task adds DB-backed overrides + a restart snapshot.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock};
 
 /// Effective per-window token ceilings for a subject.
 #[derive(Debug, Clone, Copy)]
@@ -123,12 +123,10 @@ pub struct TokenUsageLimiter {
     // TODO(Task 4.8): a snapshot/reaper job evicts idle subjects. Until then a
     // subject key persists once seen (its buckets are pruned, the key is not).
     usage: Mutex<HashMap<TokenSubject, SubjectUsage>>,
-    #[allow(dead_code)] // read by resolve() in Task 4.5
     anon: Limits,
-    #[allow(dead_code)] // read by resolve() in Task 4.5
     uplift: Limits,
-    #[allow(dead_code)] // read by resolve() in Task 4.5
     admin: Limits,
+    overrides: RwLock<Vec<crate::tokenlimit_override::Parsed>>,
 }
 
 impl TokenUsageLimiter {
@@ -141,6 +139,7 @@ impl TokenUsageLimiter {
             anon,
             uplift,
             admin,
+            overrides: RwLock::new(Vec::new()),
         }
     }
 
@@ -225,6 +224,99 @@ impl TokenUsageLimiter {
                 reset_at_secs: day_reset,
             },
         }
+    }
+}
+
+/// Which tier resolved for a request (for telemetry / response labelling).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenTier {
+    /// Unauthenticated request, limited by client IP.
+    Anonymous,
+    /// GitHub-SSO read-uplift JWT.
+    ReadUplift,
+    /// Admin / writer JWT minted via Ed25519 challenge-response.
+    Admin,
+}
+
+impl TokenUsageLimiter {
+    /// Resolve the subject, tier, and effective limits for a request.
+    ///
+    /// An override beats the tier default, but the two override kinds apply on
+    /// *different* paths and never cross (design §7.3): an authenticated request
+    /// consults only the exact user-id override — a CIDR override NEVER applies
+    /// to a JWT holder, so a user's tier default is their ceiling regardless of
+    /// network location. An anonymous request consults only the longest-prefix
+    /// CIDR override. (This is a deliberate asymmetry vs `ratelimit::resolve`,
+    /// which consults CIDR before auth — do not "align" them.)
+    pub fn resolve(
+        &self,
+        client_ip: &str,
+        auth: Option<&crate::middleware::bearer::AuthContext>,
+    ) -> (TokenSubject, TokenTier, Limits) {
+        if let Some(ctx) = auth {
+            let (subject, tier, base) = match ctx.tier {
+                mn_auth::Tier::Admin => {
+                    (TokenSubject::User(ctx.sub.clone()), TokenTier::Admin, self.admin)
+                }
+                mn_auth::Tier::ReadUplift => {
+                    (TokenSubject::User(ctx.sub.clone()), TokenTier::ReadUplift, self.uplift)
+                }
+            };
+            // Read the guard, extract the result, then drop it before returning.
+            let user_override = {
+                let ov = self.overrides.read().expect("ov lock");
+                crate::tokenlimit_override::match_user(&ov, &ctx.sub)
+            };
+            let limits = user_override.map_or(base, |(h, d)| Limits { hourly: h, daily: d });
+            return (subject, tier, limits);
+        }
+        if let Ok(ip) = client_ip.parse() {
+            // Read the guard, extract the result, then drop it before the branch.
+            let cidr_override = {
+                let ov = self.overrides.read().expect("ov lock");
+                crate::tokenlimit_override::match_cidr(&ov, ip)
+            };
+            if let Some((h, d)) = cidr_override {
+                return (
+                    TokenSubject::Ip(client_ip.to_owned()),
+                    TokenTier::Anonymous,
+                    Limits { hourly: h, daily: d },
+                );
+            }
+        }
+        (TokenSubject::Ip(client_ip.to_owned()), TokenTier::Anonymous, self.anon)
+    }
+
+    /// Reload the override cache from the DB (active rows only).
+    ///
+    /// # Errors
+    /// Propagates any store error from `list_active`.
+    pub async fn refresh_overrides_now(
+        &self,
+        pool: &sqlx::PgPool,
+    ) -> Result<usize, mn_store::error::StoreError> {
+        let rows = mn_store::entities::token_limit_override::list_active(pool).await?;
+        let parsed: Vec<_> = rows
+            .into_iter()
+            .filter_map(|row| {
+                let id = row.id;
+                crate::tokenlimit_override::parse_row(row).or_else(|| {
+                    // A silently-dropped override would quietly change spend
+                    // limits — surface it (mirrors ratelimit's refresh).
+                    tracing::warn!(override_id = %id, "skipping unparseable token_limit_override row");
+                    None
+                })
+            })
+            .collect();
+        let n = parsed.len();
+        *self.overrides.write().expect("ov lock") = parsed;
+        Ok(n)
+    }
+
+    /// Replace the in-memory override cache. Only available in test builds.
+    #[cfg(test)]
+    pub fn set_overrides_for_test(&self, v: Vec<crate::tokenlimit_override::Parsed>) {
+        *self.overrides.write().expect("ov lock") = v;
     }
 }
 
@@ -339,5 +431,109 @@ mod tests {
         l.charge(&subj(), 1, now);
         // saturating_add: 1 + u64::MAX saturates to u64::MAX > hourly, so reject.
         assert!(l.check(&subj(), lim(), u64::MAX, now).is_err());
+    }
+
+    fn test_admin_ctx(sub: &str) -> crate::middleware::bearer::AuthContext {
+        crate::middleware::bearer::AuthContext {
+            sub: sub.to_owned(),
+            role: mn_auth::Role::Admin,
+            tier: mn_auth::Tier::Admin,
+            jti: String::new(),
+        }
+    }
+
+    #[test]
+    fn resolve_picks_tier_limits_and_user_override() {
+        let l = TokenUsageLimiter::new(
+            Limits { hourly: 2000, daily: 20000 },
+            Limits { hourly: 4000, daily: 40000 },
+            Limits {
+                hourly: 500_000,
+                daily: 100_000_000,
+            },
+        );
+        // anonymous IP -> anon limits
+        let (s, _t, lim) = l.resolve("203.0.113.9", None);
+        assert!(matches!(s, TokenSubject::Ip(_)));
+        assert_eq!(lim.hourly, 2000);
+        // a user override beats the tier default
+        l.set_overrides_for_test(vec![crate::tokenlimit_override::Parsed::user(
+            "alice", 9999, 99999,
+        )]);
+        let auth = test_admin_ctx("alice");
+        let (_s, _t, lim) = l.resolve("203.0.113.9", Some(&auth));
+        assert_eq!(lim.hourly, 9999);
+    }
+
+    #[test]
+    fn resolve_anonymous_cidr_override_beats_anon_default() {
+        use std::net::IpAddr;
+        use time::OffsetDateTime;
+
+        let l = TokenUsageLimiter::new(
+            Limits { hourly: 2000, daily: 20000 },
+            Limits { hourly: 4000, daily: 40000 },
+            Limits {
+                hourly: 500_000,
+                daily: 100_000_000,
+            },
+        );
+        // Build a Parsed::Cidr directly covering 203.0.113.0/24.
+        let cidr = crate::tokenlimit_override::Parsed::Cidr {
+            net: "203.0.113.0".parse::<IpAddr>().unwrap(),
+            prefix: 24,
+            raw: "203.0.113.0/24".to_owned(),
+            hourly: 7777,
+            daily: 77777,
+            created_at: OffsetDateTime::from_unix_timestamp(1).unwrap(),
+        };
+        l.set_overrides_for_test(vec![cidr]);
+        // An IP inside the block resolves to the override limits, not anon default.
+        let (s, t, lim) = l.resolve("203.0.113.5", None);
+        assert!(matches!(s, TokenSubject::Ip(_)));
+        assert_eq!(t, TokenTier::Anonymous);
+        assert_eq!(lim.hourly, 7777);
+        assert_eq!(lim.daily, 77777);
+        // An IP outside the block falls through to anon defaults.
+        let (_s, _t, lim_out) = l.resolve("203.0.114.1", None);
+        assert_eq!(lim_out.hourly, 2000);
+    }
+
+    #[test]
+    fn resolve_authenticated_user_ignores_cidr_override() {
+        use std::net::IpAddr;
+        use time::OffsetDateTime;
+
+        // A JWT holder whose IP falls in a CIDR override must get their tier
+        // default, NOT the CIDR limit (design §7.3: CIDR overrides never apply
+        // to authenticated subjects).
+        let l = TokenUsageLimiter::new(
+            Limits { hourly: 2000, daily: 20000 },
+            Limits { hourly: 4000, daily: 40000 },
+            Limits {
+                hourly: 500_000,
+                daily: 100_000_000,
+            },
+        );
+        let cidr = crate::tokenlimit_override::Parsed::Cidr {
+            net: "203.0.113.0".parse::<IpAddr>().unwrap(),
+            prefix: 24,
+            raw: "203.0.113.0/24".to_owned(),
+            hourly: 500, // far below the uplift tier default
+            daily: 5000,
+            created_at: OffsetDateTime::from_unix_timestamp(1).unwrap(),
+        };
+        l.set_overrides_for_test(vec![cidr]);
+        let auth = crate::middleware::bearer::AuthContext {
+            sub: "bob".to_owned(),
+            role: mn_auth::Role::Admin,
+            tier: mn_auth::Tier::ReadUplift,
+            jti: String::new(),
+        };
+        // Bob is authenticated (read-uplift) and his IP is in the CIDR block,
+        // but he has no user override -> he gets the uplift default (4000), not 500.
+        let (_s, t, lim) = l.resolve("203.0.113.7", Some(&auth));
+        assert_eq!(t, TokenTier::ReadUplift);
+        assert_eq!(lim.hourly, 4000);
     }
 }
