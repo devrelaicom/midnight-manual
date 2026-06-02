@@ -46,7 +46,8 @@ pub fn router() -> Router<AppState> {
 /// Request body for `POST /v1/embeddings`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct EmbeddingsRequest {
-    /// Texts to embed. Must be non-empty and at most [`MAX_INPUTS`] entries.
+    /// Texts to embed. Must be non-empty and at most 1000 entries (the
+    /// `MAX_INPUTS` batch cap).
     #[serde(default)]
     pub input: Vec<String>,
     /// Whether the inputs are `"query"` (default) or `"document"` texts. Voyage
