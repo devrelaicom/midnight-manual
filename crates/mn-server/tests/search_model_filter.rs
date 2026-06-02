@@ -1,7 +1,7 @@
 //! Integration test for the corpus-model candidate filter on `POST /v1/search`.
 //!
-//! Proves that chunks belonging to a source_version encoded with a *different*
-//! embedding model are excluded from results, even when that source_version is
+//! Proves that chunks belonging to a `source_version` encoded with a *different*
+//! embedding model are excluded from results, even when that `source_version` is
 //! active and the chunk would otherwise match the query. The corpus model is
 //! pinned explicitly (via `build_with_limiter`) and search filters candidates
 //! by `sv.embedding_model_id`.

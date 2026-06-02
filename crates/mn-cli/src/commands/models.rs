@@ -34,6 +34,9 @@ pub enum ModelsCmd {
     Pull(PullArgs),
     /// Show the corpus's currently active embedding model.
     Active(ActiveArgs),
+    /// List sources that are still on an older embedding model (i.e. have not
+    /// yet been re-ingested against the corpus's current active model).
+    Status(StatusArgs),
 }
 
 /// Args for `mnm models pull`.
@@ -48,6 +51,13 @@ pub struct PullArgs {
 /// Args for `mnm models active`.
 #[derive(Debug, ClapArgs)]
 pub struct ActiveArgs;
+
+/// Args for `mnm models status`.
+///
+/// No positional arguments — the active model wire id is fetched automatically
+/// from `GET /v1/models/active`.
+#[derive(Debug, ClapArgs)]
+pub struct StatusArgs;
 
 /// Dispatch.
 ///
@@ -65,6 +75,7 @@ pub async fn run(
     match args.cmd {
         ModelsCmd::Pull(p) => run_pull(p, telemetry, cli_version, json).await,
         ModelsCmd::Active(_) => run_active(server_flag, json).await,
+        ModelsCmd::Status(_) => run_status(server_flag, json).await,
     }
 }
 
@@ -111,6 +122,70 @@ async fn run_active(server_flag: Option<&str>, json: bool) -> Result<()> {
     let parsed = fetch_active(&server_url).await?;
     println!("{}", format_active_output(&parsed, json));
     Ok(())
+}
+
+async fn run_status(server_flag: Option<&str>, json: bool) -> Result<()> {
+    let server_url = crate::shared::resolve_server_url(server_flag);
+    // Determine the active wire id from the corpus.
+    let active = fetch_active(&server_url).await?;
+    let wire = format!("{}@{}", active.name, active.revision);
+    // Require an admin token — this endpoint is admin-gated.
+    let bearer = crate::commands::ratelimits::require_admin_token_from(&mn_core::config::StdEnv)?;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .context("build HTTP client")?;
+    let value = status_request(&client, &server_url, &wire, &bearer).await?;
+    let sources = value["sources"]
+        .as_array()
+        .ok_or_else(|| anyhow!("unexpected response shape: missing `sources` array"))?;
+    println!("{}", format_status_output(sources, &wire, json));
+    Ok(())
+}
+
+/// `GET /v1/admin/sources?not_model=<wire>` — returns the server's
+/// `{"sources":[...]}` envelope.  Exposed `pub` for integration tests.
+///
+/// # Errors
+///
+/// Returns `anyhow::Error` on transport failure or non-2xx responses.
+pub async fn status_request(
+    client: &reqwest::Client,
+    server_url: &str,
+    wire: &str,
+    bearer: &str,
+) -> Result<serde_json::Value> {
+    let url = format!("{server_url}/v1/admin/sources?not_model={wire}");
+    let resp = client
+        .get(&url)
+        .bearer_auth(bearer)
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?;
+    crate::commands::ratelimits::decode_response(resp, "sources not on model").await
+}
+
+fn format_status_output(sources: &[serde_json::Value], wire: &str, json: bool) -> String {
+    if json {
+        let body = serde_json::json!({
+            "action": "models.status",
+            "active_model": wire,
+            "sources_pending_reingest": sources,
+        });
+        return serde_json::to_string(&body).unwrap_or_default();
+    }
+    if sources.is_empty() {
+        return format!("all sources are on {wire}");
+    }
+    let mut out = String::new();
+    writeln!(out, "sources not yet on {wire}:").ok();
+    for s in sources {
+        let slug = s["slug"].as_str().unwrap_or("?");
+        let url = s["origin_url"].as_str().unwrap_or("(no url)");
+        writeln!(out, "  {slug:<30}  {url}").ok();
+    }
+    // Trim the trailing newline so println! adds exactly one.
+    out.trim_end_matches('\n').to_owned()
 }
 
 /// GET `/v1/models/active` and decode the response. Exposed for integration

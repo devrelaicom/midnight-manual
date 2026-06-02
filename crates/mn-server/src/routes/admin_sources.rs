@@ -13,14 +13,16 @@
 //!    (the public `GET /v1/sources` filters retired rows for anonymous
 //!    callers).
 
-use axum::extract::{Extension, Path, State};
+use axum::extract::{Extension, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{patch, post};
 use axum::{Json, Router};
 use mn_core::error::{Error as CoreError, ErrorCode};
+use mn_core::model_id::EmbeddingModelId;
 use mn_core::types::SourceKind;
-use mn_store::entities::source::{self, SourcePatch};
+use mn_store::entities::source::SourcePatch;
+use mn_store::entities::{embedding_model, source};
 use mn_store::StoreError;
 use serde::Deserialize;
 
@@ -35,6 +37,32 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/v1/admin/sources", post(create_source).get(list_sources))
         .route("/v1/admin/sources/:slug", patch(update_source).delete(retire_source))
+}
+
+/// Query parameters for `GET /v1/admin/sources`.
+#[derive(Debug, Deserialize)]
+pub struct ListSourcesQuery {
+    /// When present, restrict the result to sources whose active version is
+    /// NOT on this model. Wire format: `{name}@{revision}` (e.g.
+    /// `voyage-code-3@1`).
+    #[serde(default)]
+    pub not_model: Option<String>,
+}
+
+/// Response shape for the `not_model` filtered list.
+#[derive(Debug, serde::Serialize)]
+pub struct SourcesNotOnModelResponse {
+    /// Sources whose active version is not on the requested model.
+    pub sources: Vec<SourceSummary>,
+}
+
+/// Compact source summary returned by the `not_model` filter.
+#[derive(Debug, serde::Serialize)]
+pub struct SourceSummary {
+    /// URL-safe slug.
+    pub slug: String,
+    /// Canonical origin URL, if set.
+    pub origin_url: Option<String>,
 }
 
 /// Body of `POST /v1/admin/sources`.
@@ -236,6 +264,7 @@ async fn retire_source(
 
 async fn list_sources(
     State(state): State<AppState>,
+    Query(q): Query<ListSourcesQuery>,
     Extension(req_id): Extension<RequestId>,
     auth: Option<Extension<AuthContext>>,
 ) -> Response {
@@ -243,6 +272,77 @@ async fn list_sources(
     if let Some(resp) = admin_reject(rid, auth.as_ref()) {
         return resp;
     }
+
+    if let Some(wire) = q.not_model {
+        // Parse the wire id (e.g. "voyage-code-3@1") using EmbeddingModelId's
+        // FromStr implementation so we get consistent validation.
+        let model_id_parsed: EmbeddingModelId = match wire.parse() {
+            Ok(id) => id,
+            Err(e) => {
+                return error::into_response(
+                    CoreError::builder(ErrorCode::InvalidRequest)
+                        .message(format!("invalid not_model `{wire}`: {e}"))
+                        .remediation("use the wire format `name@revision`, e.g. `voyage-code-3@1`")
+                        .build(),
+                    rid,
+                );
+            }
+        };
+        // The revision is stored as i32 in the DB; EmbeddingModelId uses u32.
+        // Overflow is practically impossible (revision would have to exceed 2^31)
+        // but we guard it explicitly to avoid a silent cast.
+        let Ok(revision) = i32::try_from(model_id_parsed.revision) else {
+            return error::into_response(
+                CoreError::builder(ErrorCode::InvalidRequest)
+                    .message(format!(
+                        "revision {} is out of range for a stored model",
+                        model_id_parsed.revision
+                    ))
+                    .remediation("revision must fit in a 32-bit signed integer")
+                    .build(),
+                rid,
+            );
+        };
+        let model = match embedding_model::get_by_name_revision(
+            &state.pool,
+            &model_id_parsed.name,
+            revision,
+        )
+        .await
+        {
+            Ok(m) => m,
+            Err(StoreError::NotFound) => {
+                return error::into_response(
+                    CoreError::builder(ErrorCode::NotFound)
+                        .message(format!("unknown model `{wire}`"))
+                        .remediation("register the model first or check the wire id")
+                        .build(),
+                    rid,
+                );
+            }
+            Err(e) => {
+                tracing::warn!(request_id = rid, op = "list_admin_sources_not_model", error = %e, "model lookup failed");
+                return error::service_unavailable("model lookup failed", rid);
+            }
+        };
+        return match source::list_active_not_on_model(&state.pool, model.id).await {
+            Ok(rows) => {
+                let summaries: Vec<SourceSummary> = rows
+                    .into_iter()
+                    .map(|s| SourceSummary {
+                        slug: s.slug,
+                        origin_url: s.origin_url,
+                    })
+                    .collect();
+                Json(SourcesNotOnModelResponse { sources: summaries }).into_response()
+            }
+            Err(e) => {
+                tracing::warn!(request_id = rid, op = "list_admin_sources_not_model", error = %e, "query failed");
+                error::service_unavailable("source list failed", rid)
+            }
+        };
+    }
+
     match source::list_all(&state.pool).await {
         Ok(rows) => Json(rows).into_response(),
         Err(e) => {
