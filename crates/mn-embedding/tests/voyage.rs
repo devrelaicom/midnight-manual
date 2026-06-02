@@ -53,3 +53,22 @@ async fn errors_on_embedding_count_mismatch() {
         .unwrap_err();
     assert!(matches!(err, mn_embedding::voyage::VoyageError::Decode(_)));
 }
+
+#[tokio::test]
+async fn maps_non_2xx_to_status_error() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(ResponseTemplate::new(429).set_body_string("rate limited"))
+        .mount(&server)
+        .await;
+    let emb = VoyageEmbedder::new("k", "voyage-code-3", 1024, "float").with_base_url(&server.uri());
+    let err = emb
+        .embed(vec!["x".into()], InputType::Document)
+        .await
+        .unwrap_err();
+    match err {
+        mn_embedding::voyage::VoyageError::Status { status, .. } => assert_eq!(status, 429),
+        other => panic!("expected Status, got {other:?}"),
+    }
+}
