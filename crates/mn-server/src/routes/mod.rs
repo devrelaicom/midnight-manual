@@ -8,6 +8,7 @@ pub mod admin_versions;
 pub mod auth;
 pub mod chunks;
 pub mod documents;
+pub mod embeddings;
 pub mod github;
 pub mod health;
 pub mod metrics;

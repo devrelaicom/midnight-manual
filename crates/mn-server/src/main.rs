@@ -62,9 +62,27 @@ async fn main() -> anyhow::Result<()> {
         })));
 
     let rate_limiter = mn_server::ratelimit::RateLimiter::from_config(&cfg);
-    let app =
-        app::build_with_limiter(pool.clone(), cfg.clone(), rate_limiter.clone(), corpus_model)
-            .context("build app")?;
+    // Token-usage limiter (tiered embedding-token ceilings). Kept in a binding
+    // so Task 4.8's snapshot/reaper job can share this exact instance.
+    let token_limiter = mn_server::tokenlimit::TokenUsageLimiter::from_config(&cfg);
+    // Server-side Voyage embedder for POST /v1/embeddings (None when no key).
+    let voyage = cfg.voyage_api_key.as_ref().map(|k| {
+        std::sync::Arc::new(mn_embedding::voyage::VoyageEmbedder::new(
+            k,
+            &cfg.voyage_model,
+            cfg.voyage_output_dimension,
+            &cfg.voyage_output_dtype,
+        ))
+    });
+    let app = app::build_with_limiter(
+        pool.clone(),
+        cfg.clone(),
+        rate_limiter.clone(),
+        corpus_model,
+        token_limiter.clone(),
+        voyage,
+    )
+    .context("build app")?;
     let addr: SocketAddr = format!("0.0.0.0:{}", cfg.port)
         .parse()
         .context("parse listen address")?;

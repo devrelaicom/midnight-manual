@@ -41,6 +41,16 @@ pub struct AppState {
     /// `None` until resolved — production resolves at boot; some tests leave it
     /// unresolved and search's existing `None`-handling covers that.
     pub corpus_model: crate::corpus_model::Shared,
+    /// Server-side Voyage embedder for `POST /v1/embeddings`. `None` when
+    /// `VOYAGE_API_KEY` is unset — the endpoint then 503s rather than failing
+    /// boot, so a deployment that only proxies client-side vectors still serves.
+    pub voyage: Option<std::sync::Arc<mn_embedding::voyage::VoyageEmbedder>>,
+    /// In-process embedding-token accounting (tiered hourly/daily ceilings).
+    /// Always present — token accounting has no disable switch.
+    pub token_limiter: std::sync::Arc<crate::tokenlimit::TokenUsageLimiter>,
+    /// On-disk model-cache directory, used by the embeddings handler's
+    /// best-effort token pre-count (to locate a tokenizer when one is present).
+    pub cache_dir: std::path::PathBuf,
 }
 
 /// Resolved auth subsystem state — set once at boot when both the user
@@ -157,7 +167,24 @@ fn build_github_oauth(cfg: &ServerConfig) -> Option<GithubOAuthState> {
 pub fn build(pool: PgPool, cfg: ServerConfig) -> Result<Router, AuthStateError> {
     let limiter = crate::ratelimit::RateLimiter::from_config(&cfg);
     let corpus_model = std::sync::Arc::new(std::sync::RwLock::new(None));
-    build_with_limiter(pool, cfg, limiter, corpus_model)
+    let token_limiter = crate::tokenlimit::TokenUsageLimiter::from_config(&cfg);
+    let voyage = voyage_from_config(&cfg);
+    build_with_limiter(pool, cfg, limiter, corpus_model, token_limiter, voyage)
+}
+
+/// Construct the server-side Voyage embedder from config, or `None` when
+/// `VOYAGE_API_KEY` is unset (BYOK / server-side embedding not configured).
+fn voyage_from_config(
+    cfg: &ServerConfig,
+) -> Option<std::sync::Arc<mn_embedding::voyage::VoyageEmbedder>> {
+    cfg.voyage_api_key.as_ref().map(|k| {
+        std::sync::Arc::new(mn_embedding::voyage::VoyageEmbedder::new(
+            k,
+            &cfg.voyage_model,
+            cfg.voyage_output_dimension,
+            &cfg.voyage_output_dtype,
+        ))
+    })
 }
 
 /// Build the app with the corpus model auto-resolved from the DB. Convenience
@@ -172,7 +199,9 @@ pub async fn build_resolved(pool: PgPool, cfg: ServerConfig) -> Result<Router, A
     let cm = crate::corpus_model::resolve(&pool).await.ok();
     let corpus_model = std::sync::Arc::new(std::sync::RwLock::new(cm));
     let limiter = crate::ratelimit::RateLimiter::from_config(&cfg);
-    build_with_limiter(pool, cfg, limiter, corpus_model)
+    let token_limiter = crate::tokenlimit::TokenUsageLimiter::from_config(&cfg);
+    let voyage = voyage_from_config(&cfg);
+    build_with_limiter(pool, cfg, limiter, corpus_model, token_limiter, voyage)
 }
 
 /// Build the app with an explicit rate limiter and corpus-model handle, so
@@ -189,9 +218,15 @@ pub fn build_with_limiter(
     cfg: ServerConfig,
     rate_limiter: Option<Arc<crate::ratelimit::RateLimiter>>,
     corpus_model: crate::corpus_model::Shared,
+    token_limiter: Arc<crate::tokenlimit::TokenUsageLimiter>,
+    voyage: Option<Arc<mn_embedding::voyage::VoyageEmbedder>>,
 ) -> Result<Router, AuthStateError> {
     let auth = AuthState::from_config(&cfg)?.map(Arc::new);
     let scoring_policy = Arc::new(cfg.scoring_policy.clone());
+    // Resolve the model-cache dir the same way the embedder worker does; fall
+    // back to a tempdir in a sandbox with no HOME/XDG so boot never fails on it.
+    let cache_dir = mn_embedding::cache::resolve(&mn_embedding::cache::StdEnv)
+        .unwrap_or_else(std::env::temp_dir);
     let state = AppState {
         pool,
         cfg: Arc::new(cfg),
@@ -199,6 +234,9 @@ pub fn build_with_limiter(
         rate_limiter,
         scoring_policy,
         corpus_model,
+        voyage,
+        token_limiter,
+        cache_dir,
     };
 
     Ok(Router::new()
@@ -206,6 +244,7 @@ pub fn build_with_limiter(
         .merge(crate::routes::sources::router())
         .merge(crate::routes::models::router())
         .merge(crate::routes::search::router())
+        .merge(crate::routes::embeddings::router())
         .merge(crate::routes::chunks::router())
         .merge(crate::routes::documents::router())
         .merge(crate::routes::auth::router())

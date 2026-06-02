@@ -130,6 +130,28 @@ pub struct TokenUsageLimiter {
 }
 
 impl TokenUsageLimiter {
+    /// Construct an `Arc`-wrapped limiter from server config, mirroring
+    /// [`RateLimiter::from_config`](crate::ratelimit::RateLimiter::from_config).
+    /// Unlike the rate limiter, token accounting is always on (there is no
+    /// disable switch), so this returns the limiter unconditionally.
+    #[must_use]
+    pub fn from_config(cfg: &crate::config::ServerConfig) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self::new(
+            Limits {
+                hourly: cfg.token_limit_anon_hourly,
+                daily: cfg.token_limit_anon_daily,
+            },
+            Limits {
+                hourly: cfg.token_limit_uplift_hourly,
+                daily: cfg.token_limit_uplift_daily,
+            },
+            Limits {
+                hourly: cfg.token_limit_admin_hourly,
+                daily: cfg.token_limit_admin_daily,
+            },
+        ))
+    }
+
     /// Construct a limiter with the three tier default ceilings.
     /// The tier limits are used by the subject resolver added in Task 4.5.
     #[must_use]
