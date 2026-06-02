@@ -16,6 +16,7 @@ pub mod search;
 pub mod skills;
 pub mod sources;
 pub mod telemetry;
+pub mod tokenlimits;
 pub mod users;
 pub mod version;
 pub mod versions;

@@ -183,7 +183,11 @@ pub fn parse_ttl(raw: &str) -> Result<Duration> {
 }
 
 /// Resolve a TTL string to an RFC 3339 `expires_at` timestamp (`now + ttl`).
-fn expiry_from_ttl(ttl: &str) -> Result<String> {
+///
+/// # Errors
+///
+/// Returns an error when `ttl` is not a valid single-unit duration.
+pub(crate) fn expiry_from_ttl(ttl: &str) -> Result<String> {
     let dur = parse_ttl(ttl)?;
     let when = OffsetDateTime::now_utc() + dur;
     when.format(&Rfc3339).context("format expires_at")
@@ -352,7 +356,10 @@ pub fn require_admin_token_from(env: &impl mn_core::config::ConfigEnv) -> Result
 
 // ---- emit ----
 
-async fn decode_response(resp: reqwest::Response, op: &str) -> Result<serde_json::Value> {
+pub(crate) async fn decode_response(
+    resp: reqwest::Response,
+    op: &str,
+) -> Result<serde_json::Value> {
     let status = resp.status();
     let body = resp.text().await.unwrap_or_default();
     if !status.is_success() {

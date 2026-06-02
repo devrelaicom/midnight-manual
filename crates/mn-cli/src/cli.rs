@@ -94,6 +94,8 @@ pub enum Command {
     Ingest(commands::ingest::Args),
     /// Per-CIDR rate-limit override CRUD (admin; hidden by default).
     Ratelimits(commands::ratelimits::Args),
+    /// Per-CIDR / per-user embedding token-limit override CRUD (admin; hidden by default).
+    Tokenlimits(commands::tokenlimits::Args),
     /// Manifest authoring + validation (local only).
     Manifest(commands::manifest::Args),
     /// Inspect chunks: show, next, prev, neighbors.
@@ -106,7 +108,14 @@ pub enum Command {
 
 /// Subcommand names that are admin-only and therefore hidden from `--help`
 /// unless `MIDNIGHT_MANUAL_SHOW_ADMIN_CMDS=1` is set (FR-066).
-const ADMIN_SUBCOMMANDS: &[&str] = &["keys", "login", "users", "ingest", "ratelimits"];
+const ADMIN_SUBCOMMANDS: &[&str] = &[
+    "keys",
+    "login",
+    "users",
+    "ingest",
+    "ratelimits",
+    "tokenlimits",
+];
 
 /// Parse argv and dispatch.
 ///
@@ -174,6 +183,9 @@ pub async fn run() -> Result<()> {
         Command::Ratelimits(args) => {
             commands::ratelimits::run(args, cli.server.as_deref(), cli.json).await
         }
+        Command::Tokenlimits(args) => {
+            commands::tokenlimits::run(args, cli.server.as_deref(), cli.json).await
+        }
         Command::Manifest(args) => commands::manifest::run(args).await,
         Command::Chunks(args) => {
             commands::chunks::run(args, cli.server.as_deref(), &telemetry, crate::VERSION, cli.json)
@@ -233,6 +245,7 @@ const fn cli_command_name(cmd: &Command) -> CliCommandName {
         Command::Telemetry(_) => CliCommandName::Telemetry,
         Command::Ingest(_) => CliCommandName::Ingest,
         Command::Ratelimits(_) => CliCommandName::Ratelimits,
+        Command::Tokenlimits(_) => CliCommandName::Tokenlimits,
         Command::Manifest(_) => CliCommandName::Manifest,
         Command::Chunks(_) => CliCommandName::Chunks,
         Command::Documents(_) => CliCommandName::Documents,
