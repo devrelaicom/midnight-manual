@@ -512,13 +512,19 @@ async fn finalize_run(
     }
 
     match source_version::finalize(&state.pool, run_id).await {
-        Ok((promoted, demoted)) => Json(FinalizeResult {
-            source_version_id: run_id,
-            revision: promoted,
-            is_active: true,
-            demoted_revision: demoted,
-        })
-        .into_response(),
+        Ok((promoted, demoted)) => {
+            // A finalize may promote a source_version onto a different embedding
+            // model; re-resolve the corpus model so search reflects it without a
+            // restart (Task 3.4).
+            crate::corpus_model::refresh(&state.pool, &state.corpus_model).await;
+            Json(FinalizeResult {
+                source_version_id: run_id,
+                revision: promoted,
+                is_active: true,
+                demoted_revision: demoted,
+            })
+            .into_response()
+        }
         Err(StoreError::CheckViolation(msg)) => error::into_response(
             CoreError::builder(ErrorCode::InvalidRequest)
                 .message(msg)
