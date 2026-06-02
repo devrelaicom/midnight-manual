@@ -112,8 +112,10 @@ pub struct ServerConfig {
     /// [`ScoringPolicy::default`] is used when the env var is unset. An invalid
     /// file fails startup (Constitution VI / VIII).
     pub scoring_policy: ScoringPolicy,
-    /// `VOYAGE_API_KEY` — VoyageAI API key. When `None`, the server falls back
-    /// to the local fastembed embedder.
+    /// `VOYAGE_API_KEY` — VoyageAI API key for server-side embedding. When
+    /// `None`, `POST /v1/embeddings` returns 503; there is no local embedder
+    /// fallback (the fastembed corpus embedder was retired when the corpus
+    /// moved to VoyageAI).
     pub voyage_api_key: Option<String>,
     /// `MIDNIGHT_MANUAL_VOYAGE_MODEL` — VoyageAI embedding model name.
     /// Defaults to `"voyage-code-3"`.
