@@ -185,24 +185,32 @@ async fn embeddings(
         }
     }
 
-    // 5. Resolve the token subject + effective limits for this caller.
+    // 5. Resolve the token subject, tier, and effective limits for this caller.
     let client_ip =
         crate::middleware::rate_limit::client_ip(&headers, &state.cfg.rate_limit_client_ip_header);
     let auth_ctx = auth.as_ref().map(|Extension(c)| c.clone());
-    let (subject, _tier, limits) = state.token_limiter.resolve(&client_ip, auth_ctx.as_ref());
+    let (subject, tier, limits) = state.token_limiter.resolve(&client_ip, auth_ctx.as_ref());
 
-    // 6. Single timestamp for the whole request so check/charge/snapshot agree.
+    // 6. Single timestamp for the whole request so reserve/settle/snapshot agree.
     let now = OffsetDateTime::now_utc().unix_timestamp();
 
-    // 7. Best-effort pre-count: reject before calling Voyage if the estimate
-    //    already blows the budget. A 0 estimate (no tokenizer available) falls
-    //    through to the post-charge accounting — by design (remaining > 0 path).
-    let estimate = count_tokens_best_effort(&req.input, &state.cache_dir).unwrap_or(0) as u64;
-    if let Err(rej) = state.token_limiter.check(&subject, limits, estimate, now) {
-        return token_limit_429(&rej, now, rid);
-    }
+    // 7. Reserve an estimate up front (atomic against concurrent requests + the
+    //    global cap), so a burst of large requests from one subject — or across
+    //    rotated subjects — can't all pass and overshoot before they're charged.
+    //    Exact pre-count via the Voyage tokenizer when available, else a
+    //    char-based estimate (~4 bytes/token) so the gate still bites.
+    let estimate = count_tokens_best_effort(&req.input, &state.cache_dir)
+        .map_or_else(|| char_estimate(&req.input), |n| n as u64);
+    let reservation = match state
+        .token_limiter
+        .reserve(&subject, tier, limits, estimate, now)
+    {
+        Ok(id) => id,
+        Err(rej) => return token_limit_429(&rej, now, rid),
+    };
 
-    // 8. Call Voyage. Anything other than success maps to 502 (upstream fault).
+    // 8. Call Voyage. Anything other than success releases the reservation and
+    //    maps to 502 (upstream fault).
     let input_type = if req.input_type == "document" {
         InputType::Document
     } else {
@@ -211,13 +219,17 @@ async fn embeddings(
     let out = match voyage.embed(req.input.clone(), input_type).await {
         Ok(o) => o,
         Err(e) => {
+            state.token_limiter.release(&subject, tier, reservation);
             tracing::warn!(request_id = rid, error = %e, "voyage embedding failed");
             return error::bad_gateway(format!("voyage embedding failed: {e}"), rid);
         }
     };
 
-    // 9. Charge the actual tokens consumed, then snapshot the post-charge budget.
-    state.token_limiter.charge(&subject, out.total_tokens, now);
+    // 9. Settle the reservation with the ACTUAL tokens consumed, then snapshot
+    //    the post-charge budget.
+    state
+        .token_limiter
+        .settle(&subject, tier, reservation, out.total_tokens, now);
     let info = state.token_limiter.snapshot_for(&subject, limits, now);
 
     // 10. Respond. Report the corpus model wire id (not Voyage's raw model name)
@@ -252,6 +264,7 @@ fn token_limit_429(rej: &Reject, now: i64, rid: &str) -> Response {
     let window = match rej.window {
         Window::Hour => "hour",
         Window::Day => "day",
+        Window::Global => "global",
     };
     // Seconds until the window resets, floored at 0 (never negative on the wire).
     let retry_after = rej.reset_at_secs.saturating_sub(now).max(0);
@@ -280,13 +293,12 @@ fn set_str(headers: &mut HeaderMap, name: &HeaderName, value: &str) {
     }
 }
 
-/// Best-effort token pre-count for the inputs.
+/// Best-effort EXACT token pre-count for the inputs.
 ///
 /// When a voyage tokenizer is available under the model cache, sum its token
-/// counts for an exact pre-check. No such tokenizer ships today (and
-/// `tokenizers` is not a direct dependency of this crate), so this always
-/// returns `None` for now — the design accepts the `estimate = 0` fallback,
-/// which lets the request through to be charged on Voyage's reported count.
+/// counts for an exact reservation. No such tokenizer ships today (and
+/// `tokenizers` is not a direct dependency of this crate), so this returns
+/// `None`; the caller falls back to [`char_estimate`].
 // Intentionally not `const`: the real implementation will read a tokenizer file
 // off disk (non-const I/O). The stub returns `None` until that lands, so the
 // const-fn lint would push us toward a signature we'd have to revert.
@@ -295,4 +307,16 @@ fn count_tokens_best_effort(_inputs: &[String], _cache_dir: &Path) -> Option<usi
     // TODO(token pre-count): load the voyage tokenizer (tokenizer.json under the
     // model cache) and sum token counts when one is available.
     None
+}
+
+/// Rough token estimate from input byte length (~4 bytes/token, min 1 per
+/// input) when no tokenizer is available. Used to size the up-front reservation
+/// so concurrent requests gate against a non-zero figure; the durable charge is
+/// always reconciled to Voyage's reported count, so an imprecise estimate only
+/// affects in-flight concurrency gating, never the final balance.
+fn char_estimate(inputs: &[String]) -> u64 {
+    inputs
+        .iter()
+        .map(|s| (s.len() as u64).div_ceil(4).max(1))
+        .sum()
 }

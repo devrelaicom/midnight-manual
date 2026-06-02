@@ -157,6 +157,13 @@ pub struct ServerConfig {
     /// usage counters are flushed to the store. Defaults to 300 s (5 min);
     /// clamped to `[1, ∞)`.
     pub token_snapshot_secs: u64,
+    /// `MIDNIGHT_MANUAL_TOKEN_LIMIT_GLOBAL` — site-wide token ceiling over
+    /// `token_limit_global_window_secs`, an anti-Sybil backstop applied to
+    /// non-admin tiers. Defaults to 10_000_000. `u64::MAX` disables it.
+    pub token_limit_global: u64,
+    /// `MIDNIGHT_MANUAL_TOKEN_LIMIT_GLOBAL_WINDOW_SECS` — rolling window for the
+    /// global cap. Defaults to 10_800 s (3 h).
+    pub token_limit_global_window_secs: u64,
 }
 
 impl Default for ServerConfig {
@@ -206,6 +213,8 @@ impl Default for ServerConfig {
             token_limit_admin_hourly: 500_000,
             token_limit_admin_daily: 100_000_000,
             token_snapshot_secs: 300,
+            token_limit_global: 10_000_000,
+            token_limit_global_window_secs: 10_800,
         }
     }
 }
@@ -338,6 +347,12 @@ impl ServerConfig {
             .ok()
             .and_then(|s| s.parse().ok())
             .map_or(300, |v: u64| v.max(1));
+        let token_limit_global = tl("MIDNIGHT_MANUAL_TOKEN_LIMIT_GLOBAL", 10_000_000);
+        let token_limit_global_window_secs =
+            env::var("MIDNIGHT_MANUAL_TOKEN_LIMIT_GLOBAL_WINDOW_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .map_or(10_800, |v: u64| v.max(60));
         Ok(Self {
             database_url,
             port,
@@ -380,6 +395,8 @@ impl ServerConfig {
             token_limit_admin_hourly,
             token_limit_admin_daily,
             token_snapshot_secs,
+            token_limit_global,
+            token_limit_global_window_secs,
         })
     }
 }
@@ -459,6 +476,8 @@ mod tests {
         assert_eq!(c.token_limit_admin_hourly, 500_000);
         assert_eq!(c.token_limit_admin_daily, 100_000_000);
         assert_eq!(c.token_snapshot_secs, 300);
+        assert_eq!(c.token_limit_global, 10_000_000);
+        assert_eq!(c.token_limit_global_window_secs, 10_800);
         assert_eq!(c.voyage_model, "voyage-code-3");
         assert_eq!(c.voyage_output_dimension, 1024);
         assert_eq!(c.voyage_output_dtype, "float");

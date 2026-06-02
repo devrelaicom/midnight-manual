@@ -53,11 +53,19 @@ impl TokenSubject {
 /// Which rolling window a rejection or window-info refers to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Window {
-    /// Rolling 60-minute (hourly) window.
+    /// Rolling 60-minute (hourly) per-subject window.
     Hour,
-    /// Rolling 24-hour (daily) window.
+    /// Rolling 24-hour (daily) per-subject window.
     Day,
+    /// Site-wide rolling cap (anti-Sybil backstop; admin-exempt).
+    Global,
 }
+
+/// Stale-reservation TTL. A reservation is released/settled within one Voyage
+/// call (<=30s timeout); anything older than this leaked (e.g. a panic between
+/// `reserve` and `settle`) and is pruned so it can't permanently inflate the
+/// in-flight total.
+const RESERVATION_TTL_SECS: i64 = 60;
 
 /// Per-window limit/remaining/reset snapshot.
 #[derive(Debug, Clone, Copy)]
@@ -95,6 +103,10 @@ pub struct Reject {
 struct SubjectUsage {
     minutes: BTreeMap<i64, u64>, // unix-minute -> tokens
     hours: BTreeMap<i64, u64>,   // unix-hour   -> tokens
+    /// In-flight reservations: id -> (estimated tokens, created_at secs).
+    /// Counted against both windows until `settle`/`release` resolves them, so
+    /// concurrent requests can't all pass `reserve` and overshoot the ceiling.
+    reservations: BTreeMap<u64, (u64, i64)>,
     last_seen_secs: i64,
 }
 
@@ -104,6 +116,13 @@ impl SubjectUsage {
         let hr_floor = now / 3600 - 23; // keep last 24 hours
         self.minutes.retain(|&m, _| m >= min_floor);
         self.hours.retain(|&hh, _| hh >= hr_floor);
+        let res_floor = now - RESERVATION_TTL_SECS;
+        self.reservations.retain(|_, &mut (_, t)| t >= res_floor);
+    }
+
+    /// Sum of live in-flight reservations (call after `prune`).
+    fn reserved(&self) -> u64 {
+        self.reservations.values().map(|(amt, _)| *amt).sum()
     }
 
     fn hour_used(&self, now: i64) -> u64 {
@@ -133,26 +152,74 @@ impl SubjectUsage {
     }
 }
 
-/// In-memory rolling-window token limiter. Tier limits are stored for the
-/// subject/tier resolver added in Task 4.5.
+/// Site-wide usage for the anti-Sybil global cap: a rolling per-minute window
+/// plus in-flight reservations, summed across ALL non-admin subjects.
+#[derive(Default)]
+struct GlobalUsage {
+    minutes: BTreeMap<i64, u64>,
+    reservations: BTreeMap<u64, (u64, i64)>,
+}
+
+impl GlobalUsage {
+    fn prune(&mut self, now: i64, window_min: i64) {
+        let floor = now / 60 - (window_min - 1);
+        self.minutes.retain(|&m, _| m >= floor);
+        let res_floor = now - RESERVATION_TTL_SECS;
+        self.reservations.retain(|_, &mut (_, t)| t >= res_floor);
+    }
+
+    fn used(&self, now: i64, window_min: i64) -> u64 {
+        let floor = now / 60 - (window_min - 1);
+        self.minutes.range(floor..).map(|(_, v)| *v).sum()
+    }
+
+    fn reserved(&self) -> u64 {
+        self.reservations.values().map(|(amt, _)| *amt).sum()
+    }
+
+    fn reset(&self, now: i64, window_min: i64) -> i64 {
+        let floor = now / 60 - (window_min - 1);
+        self.minutes
+            .range(floor..)
+            .next()
+            .map_or(now, |(&m, _)| (m + window_min) * 60)
+    }
+}
+
+/// In-memory rolling-window token limiter.
 ///
 /// # Concurrency
 ///
-/// `check` and `charge` are intentionally NOT atomic across calls. Two requests
-/// that both pass `check` concurrently can collectively exceed a window ceiling
-/// by at most `N * estimate` (N = concurrency). This is an accepted trade-off —
-/// token accounting is soft-limited, not hard-enforced — so do not "fix" it by
-/// holding the lock across both calls (that would serialize every embedding
-/// request). `snapshot_for` over-charged subjects report `remaining == 0`
-/// (saturating), never a wrapped value.
+/// Prefer [`reserve`](Self::reserve) + [`settle`](Self::settle) on the request
+/// path: `reserve` atomically counts an estimate against the budget (including
+/// other in-flight reservations) so concurrent requests from one subject can't
+/// all pass and overshoot; `settle` reconciles the reservation to the actual
+/// token count once the upstream responds (or [`release`](Self::release) frees
+/// it on failure). The legacy [`check`](Self::check)/[`charge`](Self::charge)
+/// pair is NOT atomic across calls and is retained only for unit coverage of
+/// the bucket math.
+///
+/// A site-wide [`Window::Global`] cap (admin-exempt) backstops Sybil abuse
+/// (proxy / GitHub-account rotation). It is in-memory per process: with
+/// horizontal scaling the effective cap is `instances * global_limit`; a truly
+/// cross-instance cap would need a shared counter (DB/Redis) on the hot path.
 pub struct TokenUsageLimiter {
     // Subject keys persist between requests; the periodic snapshot job
     // (`snapshot_to_db`) evicts a key once it has been idle for >24h, so the
     // map cannot grow without bound.
     usage: Mutex<HashMap<TokenSubject, SubjectUsage>>,
+    /// Site-wide usage for the global cap. Lock ordering: always lock `usage`
+    /// BEFORE `global` (nothing locks `global` first).
+    global: Mutex<GlobalUsage>,
     anon: Limits,
     uplift: Limits,
     admin: Limits,
+    /// Site-wide token ceiling over `global_window_min`. `u64::MAX` disables it.
+    global_limit: u64,
+    /// Global-cap rolling window length, in minutes.
+    global_window_min: i64,
+    /// Monotonic id source for reservations.
+    next_reservation_id: std::sync::atomic::AtomicU64,
     overrides: RwLock<Vec<crate::tokenlimit_override::Parsed>>,
 }
 
@@ -163,7 +230,7 @@ impl TokenUsageLimiter {
     /// disable switch), so this returns the limiter unconditionally.
     #[must_use]
     pub fn from_config(cfg: &crate::config::ServerConfig) -> std::sync::Arc<Self> {
-        std::sync::Arc::new(Self::new(
+        std::sync::Arc::new(Self::new_with_global(
             Limits {
                 hourly: cfg.token_limit_anon_hourly,
                 daily: cfg.token_limit_anon_daily,
@@ -176,19 +243,160 @@ impl TokenUsageLimiter {
                 hourly: cfg.token_limit_admin_hourly,
                 daily: cfg.token_limit_admin_daily,
             },
+            cfg.token_limit_global,
+            cfg.token_limit_global_window_secs,
         ))
     }
 
-    /// Construct a limiter with the three tier default ceilings.
-    /// The tier limits are used by the subject resolver added in Task 4.5.
+    /// Construct a limiter with the three tier default ceilings and the global
+    /// cap DISABLED (`u64::MAX`). Used by unit tests and any caller that doesn't
+    /// need the site-wide backstop.
     #[must_use]
     pub fn new(anon: Limits, uplift: Limits, admin: Limits) -> Self {
+        Self::new_with_global(anon, uplift, admin, u64::MAX, 10_800)
+    }
+
+    /// Construct a limiter with tier ceilings plus a site-wide global cap of
+    /// `global_limit` tokens over `global_window_secs`. `u64::MAX` disables the
+    /// global cap.
+    #[must_use]
+    pub fn new_with_global(
+        anon: Limits,
+        uplift: Limits,
+        admin: Limits,
+        global_limit: u64,
+        global_window_secs: u64,
+    ) -> Self {
+        let global_window_min = i64::try_from(global_window_secs / 60).unwrap_or(180).max(1);
         Self {
             usage: Mutex::new(HashMap::new()),
+            global: Mutex::new(GlobalUsage::default()),
             anon,
             uplift,
             admin,
+            global_limit,
+            global_window_min,
+            next_reservation_id: std::sync::atomic::AtomicU64::new(1),
             overrides: RwLock::new(Vec::new()),
+        }
+    }
+
+    /// Whether the global cap applies to `tier` (admin is exempt — it requires
+    /// an Ed25519 challenge, so it is not Sybil-able, and legitimate ingest /
+    /// migration needs volume).
+    const fn global_applies(&self, tier: TokenTier) -> bool {
+        self.global_limit != u64::MAX && !matches!(tier, TokenTier::Admin)
+    }
+
+    /// Atomically reserve `estimate` tokens for an in-flight request against the
+    /// subject's windows and (for non-admin tiers) the global cap. Concurrent
+    /// requests see each other's reservations, so they can't all pass and
+    /// overshoot. Returns a reservation id to pass to [`settle`](Self::settle)
+    /// or [`release`](Self::release).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Reject`] (with [`Window::Hour`], [`Window::Day`], or
+    /// [`Window::Global`]) when the reservation would breach a ceiling.
+    // The `usage` guard is deliberately held across the nested `global` lock and
+    // the inserts so the subject + global reservation are atomic; tightening the
+    // drop (as the lint suggests) would reopen the concurrency race.
+    #[allow(clippy::significant_drop_tightening)]
+    pub fn reserve(
+        &self,
+        subject: &TokenSubject,
+        tier: TokenTier,
+        limits: Limits,
+        estimate: u64,
+        now: i64,
+    ) -> Result<u64, Reject> {
+        let id = self
+            .next_reservation_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut map = self.usage.lock().expect("usage lock");
+        let u = map.entry(subject.clone()).or_default();
+        u.prune(now);
+        let reserved = u.reserved();
+        if u.hour_used(now)
+            .saturating_add(reserved)
+            .saturating_add(estimate)
+            > limits.hourly
+        {
+            return Err(Reject {
+                window: Window::Hour,
+                limit: limits.hourly,
+                reset_at_secs: u.hour_reset(now),
+            });
+        }
+        if u.day_used(now)
+            .saturating_add(reserved)
+            .saturating_add(estimate)
+            > limits.daily
+        {
+            return Err(Reject {
+                window: Window::Day,
+                limit: limits.daily,
+                reset_at_secs: u.day_reset(now),
+            });
+        }
+        if self.global_applies(tier) {
+            // Lock ordering: usage (held) -> global.
+            let mut g = self.global.lock().expect("global lock");
+            g.prune(now, self.global_window_min);
+            let projected = g
+                .used(now, self.global_window_min)
+                .saturating_add(g.reserved())
+                .saturating_add(estimate);
+            if projected > self.global_limit {
+                return Err(Reject {
+                    window: Window::Global,
+                    limit: self.global_limit,
+                    reset_at_secs: g.reset(now, self.global_window_min),
+                });
+            }
+            g.reservations.insert(id, (estimate, now));
+        }
+        u.reservations.insert(id, (estimate, now));
+        u.last_seen_secs = now;
+        Ok(id)
+    }
+
+    /// Resolve reservation `id` by charging the ACTUAL token count to the
+    /// durable buckets (subject + global for non-admin). Call after a successful
+    /// upstream embedding response.
+    #[allow(clippy::significant_drop_tightening)] // usage + global held together intentionally
+    pub fn settle(&self, subject: &TokenSubject, tier: TokenTier, id: u64, actual: u64, now: i64) {
+        let mut map = self.usage.lock().expect("usage lock");
+        let u = map.entry(subject.clone()).or_default();
+        u.prune(now);
+        u.reservations.remove(&id);
+        let minute = u.minutes.entry(now / 60).or_default();
+        *minute = minute.saturating_add(actual);
+        let hour = u.hours.entry(now / 3600).or_default();
+        *hour = hour.saturating_add(actual);
+        u.last_seen_secs = now;
+        if self.global_applies(tier) {
+            let mut g = self.global.lock().expect("global lock");
+            g.reservations.remove(&id);
+            let gm = g.minutes.entry(now / 60).or_default();
+            *gm = gm.saturating_add(actual);
+        }
+    }
+
+    /// Drop reservation `id` without charging (upstream failed). Frees the
+    /// in-flight estimate for both the subject and the global cap.
+    #[allow(clippy::significant_drop_tightening)] // usage + global held together intentionally
+    pub fn release(&self, subject: &TokenSubject, tier: TokenTier, id: u64) {
+        let mut map = self.usage.lock().expect("usage lock");
+        if let Some(u) = map.get_mut(subject) {
+            u.reservations.remove(&id);
+        }
+        if self.global_applies(tier) {
+            self.global
+                .lock()
+                .expect("global lock")
+                .reservations
+                .remove(&id);
         }
     }
 
@@ -716,5 +924,100 @@ mod tests {
         let (_s, t, lim) = l.resolve("203.0.113.7", Some(&auth));
         assert_eq!(t, TokenTier::ReadUplift);
         assert_eq!(lim.hourly, 4000);
+    }
+
+    // ---- reservations (concurrency safety) ----
+
+    #[test]
+    fn reserve_blocks_concurrent_overshoot() {
+        let l = TokenUsageLimiter::new(d(), d(), d()); // hourly 100
+        let now = 1_000_000_000;
+        // First in-flight reservation of 60 succeeds.
+        let _id1 = l
+            .reserve(&subj(), TokenTier::Anonymous, lim(), 60, now)
+            .expect("first reserve fits");
+        // A concurrent second reservation of 60 must be REJECTED: 60 reserved +
+        // 60 = 120 > 100, even though nothing has been charged yet.
+        let rej = l.reserve(&subj(), TokenTier::Anonymous, lim(), 60, now);
+        assert!(matches!(rej, Err(Reject { window: Window::Hour, .. })));
+    }
+
+    #[test]
+    fn settle_reconciles_reservation_to_actual() {
+        let l = TokenUsageLimiter::new(d(), d(), d());
+        let now = 1_000_000_000;
+        let id = l
+            .reserve(&subj(), TokenTier::Anonymous, lim(), 60, now)
+            .unwrap();
+        // The request actually used only 10 tokens.
+        l.settle(&subj(), TokenTier::Anonymous, id, 10, now);
+        // Only the actual 10 are charged; the 60 reservation is gone.
+        assert_eq!(l.snapshot_for(&subj(), lim(), now).hour.remaining, 90);
+        // And a fresh 60-token request now fits (10 used + 60 <= 100).
+        assert!(l
+            .reserve(&subj(), TokenTier::Anonymous, lim(), 60, now)
+            .is_ok());
+    }
+
+    #[test]
+    fn release_frees_the_reservation() {
+        let l = TokenUsageLimiter::new(d(), d(), d());
+        let now = 1_000_000_000;
+        let id = l
+            .reserve(&subj(), TokenTier::Anonymous, lim(), 80, now)
+            .unwrap();
+        l.release(&subj(), TokenTier::Anonymous, id);
+        // Reservation released (upstream failed) -> full headroom again.
+        assert!(l
+            .reserve(&subj(), TokenTier::Anonymous, lim(), 100, now)
+            .is_ok());
+    }
+
+    // ---- global cap (anti-Sybil) ----
+
+    fn big() -> Limits {
+        Limits {
+            hourly: 1_000_000,
+            daily: 1_000_000,
+        }
+    }
+
+    #[test]
+    fn global_cap_rejects_rotated_subjects_but_not_admin() {
+        // Per-subject ceilings are huge; only the global cap (100 tokens / 1h)
+        // should bind. Each "subject" stands in for a rotated proxy/account.
+        let l = TokenUsageLimiter::new_with_global(big(), big(), big(), 100, 3600);
+        let now = 1_000_000_000;
+        let s1 = TokenSubject::Ip("198.51.100.1".into());
+        let s2 = TokenSubject::Ip("198.51.100.2".into());
+
+        // First anon subject reserves 60 globally.
+        let _id1 = l
+            .reserve(&s1, TokenTier::Anonymous, big(), 60, now)
+            .unwrap();
+        // A DIFFERENT anon subject reserving 60 trips the GLOBAL cap (60 + 60 >
+        // 100), even though its own per-subject budget is fine.
+        let rej = l.reserve(&s2, TokenTier::Anonymous, big(), 60, now);
+        assert!(matches!(rej, Err(Reject { window: Window::Global, .. })));
+
+        // Admin is exempt from the global cap (not Sybil-able; needs volume).
+        let admin = TokenSubject::User("ingest-admin".into());
+        assert!(l.reserve(&admin, TokenTier::Admin, big(), 60, now).is_ok());
+    }
+
+    #[test]
+    fn global_settle_charges_the_global_window() {
+        let l = TokenUsageLimiter::new_with_global(big(), big(), big(), 100, 3600);
+        let now = 1_000_000_000;
+        let s1 = TokenSubject::Ip("198.51.100.1".into());
+        let id = l
+            .reserve(&s1, TokenTier::Anonymous, big(), 60, now)
+            .unwrap();
+        // Actual usage 90 charged to the global window.
+        l.settle(&s1, TokenTier::Anonymous, id, 90, now);
+        // A second subject's 20-token request now trips the global cap (90 + 20).
+        let s2 = TokenSubject::Ip("198.51.100.2".into());
+        let rej = l.reserve(&s2, TokenTier::Anonymous, big(), 20, now);
+        assert!(matches!(rej, Err(Reject { window: Window::Global, .. })));
     }
 }
