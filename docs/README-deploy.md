@@ -241,7 +241,70 @@ flyctl secrets set \
 If any one of these four is missing the `/v1/auth/github/*` endpoints return
 503 cleanly (`app.rs` build-time gate), so a half-configured deploy is safe.
 
-## 7. (Optional) Custom scoring policy
+## 7. Configure Voyage embedding + token limits
+
+The corpus is embedded with VoyageAI's `voyage-code-3`. Clients that hold their
+own Voyage key (BYOK) embed directly against their own account and never touch
+this server's key. Clients that don't POST raw query text to `POST
+/v1/embeddings`, which the server embeds under **this server's** Voyage platform
+account. So **non-BYOK user query text is processed under the key you set
+here** — treat it accordingly.
+
+### Enable Voyage zero-retention
+
+Before pointing real traffic at the proxy, enable **zero-retention** on the
+Voyage account whose key this server uses — training disabled, no data
+retention. Because non-BYOK callers' query text flows through this account,
+zero-retention is what keeps that text from being retained or used for model
+training upstream. This is an operator action in the Voyage dashboard, not a
+server setting.
+
+### Set the Voyage key (secret)
+
+`VOYAGE_API_KEY` is what enables server-side embedding. Without it, `POST
+/v1/embeddings` returns **503** (`server embedding is not configured`) — the
+rest of the server still boots and serves reads, so a deploy without it is safe,
+just unable to embed for non-BYOK clients.
+
+```bash
+flyctl secrets set VOYAGE_API_KEY=<voyage-platform-key> \
+    --stage --app midnight-manual
+```
+
+### Embedding + token-limit knobs (plain env, set in `fly.toml`)
+
+These are tuning knobs with safe defaults — set them only to override. They are
+**not** secrets, so put them in `fly.toml`'s `[env]` block rather than
+`flyctl secrets set`. (`VOYAGE_API_KEY` above is the one secret.)
+
+| Variable | Purpose | Default |
+| --- | --- | --- |
+| `VOYAGE_API_KEY` | **Secret.** Voyage platform key for server-side embedding. Unset → `/v1/embeddings` 503s. | _(unset)_ |
+| `MIDNIGHT_MANUAL_VOYAGE_MODEL` | Voyage embedding model name. | `voyage-code-3` |
+| `MIDNIGHT_MANUAL_VOYAGE_DIM` | Output dimension. | `1024` |
+| `MIDNIGHT_MANUAL_VOYAGE_DTYPE` | Output dtype. | `float` |
+| `MIDNIGHT_MANUAL_TOKEN_LIMIT_ANON_HOURLY` | Hourly token budget, anonymous tier. | `2000` |
+| `MIDNIGHT_MANUAL_TOKEN_LIMIT_ANON_DAILY` | Daily token budget, anonymous tier. | `20000` |
+| `MIDNIGHT_MANUAL_TOKEN_LIMIT_UPLIFT_HOURLY` | Hourly token budget, read-uplift (GitHub SSO) tier. | `4000` |
+| `MIDNIGHT_MANUAL_TOKEN_LIMIT_UPLIFT_DAILY` | Daily token budget, read-uplift tier. | `40000` |
+| `MIDNIGHT_MANUAL_TOKEN_LIMIT_ADMIN_HOURLY` | Hourly token budget, admin tier. | `500000` |
+| `MIDNIGHT_MANUAL_TOKEN_LIMIT_ADMIN_DAILY` | Daily token budget, admin tier. | `100000000` |
+| `MIDNIGHT_MANUAL_TOKEN_LIMIT_GLOBAL` | Site-wide token ceiling over the global window (anti-Sybil backstop on non-admin tiers). `u64::MAX` disables it. | `10000000` |
+| `MIDNIGHT_MANUAL_TOKEN_LIMIT_GLOBAL_WINDOW_SECS` | Rolling window for the global ceiling. | `10800` (3 h) |
+| `MIDNIGHT_MANUAL_TOKEN_SNAPSHOT_SECS` | Interval at which token-usage counters flush to the store. | `300` (5 min) |
+| `MIDNIGHT_MANUAL_RERANKER` | Default reranker id (clients usually override per request). | `bge-reranker-base` |
+
+`POST /v1/embeddings` logs only token counts and the caller's anonymised subject
+key (hashed IP / SSO user id) — never the submitted query text. A 429
+over-budget response carries only window/limit/reset metadata. That invariant is
+enforced by a CI privacy canary.
+
+> The client-side embedder and reranker resolve their own Voyage key and an
+> optional `MIDNIGHT_MANUAL_VOYAGE_BASE_URL` override on the CLI/MCP side. The
+> server does **not** read `MIDNIGHT_MANUAL_VOYAGE_BASE_URL`; it always talks to
+> the default Voyage endpoint.
+
+## 8. (Optional) Custom scoring policy
 
 The compiled-in confidence policy (US6/D24) is the recommended default. If you
 want to tune weights, ship a TOML file via secret:
@@ -254,11 +317,11 @@ flyctl secrets set MIDNIGHT_MANUAL_SCORING_POLICY="$(cat scoring-policy.toml)" \
 The server fails startup on a malformed policy (Constitution VIII fail-fast),
 so test it locally first with `cargo test -p mn-core scoring_policy`.
 
-## 8. First deploy
+## 9. First deploy
 
 Two paths:
 
-### 7a. Direct (skip release-please for the first cut)
+### 9a. Direct (skip release-please for the first cut)
 
 ```bash
 flyctl deploy --app midnight-manual
@@ -274,7 +337,7 @@ flyctl logs --app midnight-manual
 Expected sequence: "resolved active embedding model" → "starting
 midnight-manual-server" → migrations applied → listener bound on `:8080`.
 
-### 7b. Via the release pipeline (recommended for repeatable deploys)
+### 9b. Via the release pipeline (recommended for repeatable deploys)
 
 Push to `main` triggers `release-please` to open a release PR. Merge it; the
 release workflow tags the commit, builds the multi-arch image, pushes to GHCR
@@ -289,7 +352,7 @@ flyctl tokens create deploy --app midnight-manual | \
     gh secret set FLY_API_TOKEN --repo <owner>/midnight-manual
 ```
 
-## 9. Smoke test
+## 10. Smoke test
 
 Once the machine is up, verify the basics. If the cert from step 2 hasn't
 issued yet, swap in `https://midnight-manual.fly.dev` for the smoke run — both
@@ -314,7 +377,7 @@ curl -fs -X POST "$HOST/v1/search" \
 # → 0
 ```
 
-## 10. Ingest a corpus
+## 11. Ingest a corpus
 
 The corpus is initially empty. The new ingest tools live in two
 top-level command groups:
@@ -326,7 +389,7 @@ top-level command groups:
 - `mnm ingest {plan,run}` — talks to the server. `plan` is a
   dry-run; `run` does the real ingest.
 
-### 10a. Smoke-test with the sample corpus
+### 11a. Smoke-test with the sample corpus
 
 ```bash
 mnm manifest check corpus/sample/hierarchy.yaml
@@ -338,7 +401,7 @@ mnm ingest run corpus/sample/hierarchy.yaml \
 Watch the progress lines stream by; on success you'll see
 `finalized revision 1 (first version); +N new`.
 
-### 10b. Ingest a real Midnight-docs repo
+### 11b. Ingest a real Midnight-docs repo
 
 If the docs repo is one you own, commit the manifest alongside the
 content; otherwise generate it locally and keep it next to your
@@ -366,7 +429,7 @@ defaults to `https://midnight-manual.midnightntwrk.expert`. Set
 `MIDNIGHT_MANUAL_SERVER` (or the `[server].url` config field) to
 point at a different deployment.
 
-## 11. (Optional) Alerting
+## 12. (Optional) Alerting
 
 The server emits Prometheus metrics on `GET /metrics`. Point Grafana or your
 metrics collector at it; useful starting alerts:

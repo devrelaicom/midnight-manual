@@ -40,6 +40,7 @@
 - [Admin & operations](#admin--operations)
 - [The cloud server](#the-cloud-server)
 - [Telemetry & privacy](#telemetry--privacy)
+- [Embeddings & third-party processing](#embeddings--third-party-processing)
 - [Configuration](#configuration)
 - [Deep dives](#deep-dives)
 - [Project links](#project-links)
@@ -599,6 +600,62 @@ When disabled, no connection is ever opened to the telemetry endpoint and any qu
 ### The canary
 
 A CI test feeds query stand-ins, fake tokens, fake paths, and fake env values through every code path that touches user content, then greps every captured log and telemetry row for the canary set. **Any match fails the build.** The infrastructure lives in [`crates/mn-telemetry/src/canary.rs`](crates/mn-telemetry/src/canary.rs).
+
+---
+
+## Embeddings & third-party processing
+
+Telemetry is the easy half of the privacy story — it carries no content at all. Embedding is the harder half, because a search query *is* content, and turning it into a vector means a model has to read it. Here's exactly where your text goes.
+
+### The corpus is public
+
+The indexed corpus is built from **public Midnight repositories** — the docs site and open-source code. Nothing private is in it, and nothing you search reveals anything to other users. What follows is only about where *your query text* travels on its way to a vector.
+
+### Where query text goes — two embedding paths
+
+Query embedding uses VoyageAI's **`voyage-code-3`** model (1024-dimensional). Reranking, when you ask for it, runs locally. Which path your query text takes depends on whether you supply your own Voyage key:
+
+| Path | When it applies | What text reaches Voyage |
+| --- | --- | --- |
+| **BYOK** (bring your own key) | a Voyage key is set | Your client embeds directly against **your own** Voyage account — query (and, when ingesting, document) text is sent to Voyage under *your* account. |
+| **Server-proxy** | no Voyage key | Your client POSTs raw query text to the hosted server's `/v1/embeddings`, which calls Voyage under the **operator's** platform account. Your query text reaches Voyage under their account, not yours. |
+
+Either way the query text reaches Voyage; the only question is *whose* Voyage account processes it. There is no path that embeds entirely on your machine — the embedder is remote by design.
+
+The server records only **token counts** and an anonymised **subject key** (a hashed IP, or your SSO user id) for budget accounting — it **never** logs or persists the submitted query text. That invariant is enforced by a CI canary alongside the telemetry one.
+
+### BYOK setup
+
+Set a Voyage key any one of these ways and your client embeds directly, skipping the server proxy:
+
+```bash
+export VOYAGE_API_KEY=…                 # environment
+mnm search "…" --voyage-api-key …       # per-invocation flag
+```
+
+```toml
+[models]
+voyage_api_key = "…"                    # config file (lowest precedence)
+```
+
+Precedence is the usual **flag › env › config**.
+
+### Reranking stays on your machine — with one exception
+
+By default the reranker is the local `bge-reranker-base` cross-encoder; it and every other local option run entirely on your machine, so candidate text never leaves. The **Voyage reranker options are the exception** — they send the query *and* the candidate passages to Voyage, the same way the embedder does. Choose a reranker with `--reranker`, `MIDNIGHT_MANUAL_RERANKER`, or `models.reranker`:
+
+| Reranker id | Runs | Notes |
+| --- | --- | --- |
+| **`bge-reranker-base`** | local | **default** — native `fastembed` cross-encoder |
+| `bge-reranker-v2-m3` | local | native `fastembed` |
+| `jina-reranker-v1-turbo-en` | local | native `fastembed` |
+| `ms-marco-minilm-l2` / `-l6` / `-l12` | local | auto-fetched ONNX |
+| `mxbai-rerank-base-v1` | local | auto-fetched ONNX |
+| `mxbai-rerank-base-v2` | local | auto-fetched ONNX (experimental) |
+| `custom` | local | your own model dir (`--reranker-path` / `models.reranker_path`) with `model.onnx` + tokenizer files |
+| `voyage-rerank-2.5` / `-2.5-lite` / `-2` | **Voyage API** | **sends query + candidate text to Voyage** (needs a Voyage key) |
+
+> `jina-reranker-v2-base-multilingual` is **intentionally excluded** — its licence is `cc-by-nc-4.0` (non-commercial).
 
 ---
 
