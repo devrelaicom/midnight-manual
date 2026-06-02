@@ -18,7 +18,7 @@ pub mod reranker_catalog;
 pub mod voyage;
 
 pub use error::{EmbeddingError, Result};
-pub use reranker::{RerankResult, Reranker, MODEL_NAME as RERANKER_MODEL_NAME};
+pub use reranker::{LoadedReranker, RerankResult, Reranker, MODEL_NAME as RERANKER_MODEL_NAME};
 
 /// Crate version stamped at build time.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
