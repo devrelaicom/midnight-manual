@@ -1,0 +1,21 @@
+manifest_version: 1
+root:
+  name: midnight-skill
+  path: .
+  include: ["SKILL.md"]
+  provenance:
+    attribution: community
+    verified: false
+    tags: [trust:low]
+    verification_notes: >-
+      Individual maintainer (ADAvault); unaudited; some "gotchas" sourced from
+      Discord/anecdote; examples need professional audit before mainnet use.
+  children:
+    - name: reference
+      path: reference/
+      provenance:
+        content_type: reference
+    - name: examples
+      path: examples/
+      provenance:
+        content_type: example

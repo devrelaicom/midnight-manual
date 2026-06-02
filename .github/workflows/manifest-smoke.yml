@@ -1,0 +1,134 @@
+name: Manifest smoke
+
+# Daily regression smoke test for the default Midnight ingestion set
+# (manifests/midnight/). Two independent jobs:
+#
+#   1. repo-reachability — every source repo listed in
+#      manifests/midnight/sources.tsv still exists (no 404) and is NOT
+#      archived. Also asserts sources.tsv and the manifest files agree.
+#
+#   2. manifest-regression — build `mnm` from source and validate a random
+#      sample of manifests against fresh shallow clones, confirming each
+#      still resolves to > 0 files (catches upstream directory-structure
+#      drift in the pinned `path:` nodes).
+#
+# Runs daily at 04:00 UTC (matching embedder-smoke.yml) and on demand via the
+# "Run workflow" button (workflow_dispatch). A failure simply turns the run
+# red (normal GitHub failed-workflow notifications); no issue is opened.
+
+on:
+  schedule:
+    - cron: "0 4 * * *"   # 04:00 UTC daily
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  SOURCES: manifests/midnight/sources.tsv
+
+jobs:
+  repo-reachability:
+    name: source repos reachable + not archived
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: sources.tsv <-> manifests consistency
+        run: |
+          set -uo pipefail
+          slugs=$(awk 'NF>=4 && $1 !~ /^#/ {print $1}' "$SOURCES" | sort)
+          yamls=$(find manifests/midnight -maxdepth 1 -name '*.yaml' -exec basename {} .yaml \; | sort)
+          if ! diff <(printf '%s\n' "$slugs") <(printf '%s\n' "$yamls") >/dev/null; then
+            echo "FAIL: sources.tsv slugs and manifest files disagree (< sources.tsv, > *.yaml):"
+            diff <(printf '%s\n' "$slugs") <(printf '%s\n' "$yamls") || true
+            exit 1
+          fi
+          echo "OK: $(printf '%s\n' "$slugs" | grep -c .) sources match $(printf '%s\n' "$yamls" | grep -c .) manifest files"
+
+      - name: check each repo (404 / archived)
+        run: |
+          set -uo pipefail
+          fail=0
+          while read -r slug repo branch kind; do
+            [ -z "${slug:-}" ] && continue
+            case "$slug" in \#*) continue ;; esac
+            # Retry with backoff so a transient blip / secondary rate-limit
+            # doesn't masquerade as a real 404 and flake the daily run red.
+            ok=0; json=""
+            for attempt in 1 2 3; do
+              if json=$(gh api "repos/$repo" 2>/dev/null); then ok=1; break; fi
+              sleep $((attempt * 2))
+            done
+            if [ "$ok" -ne 1 ]; then
+              echo "UNREACHABLE (404 after 3 attempts): $slug -> $repo"; fail=1; continue
+            fi
+            archived=$(printf '%s' "$json" | jq -r '.archived')
+            if [ "$archived" = "true" ]; then
+              echo "ARCHIVED: $slug -> $repo"; fail=1; continue
+            fi
+            echo "ok: $slug -> $repo (archived=$archived)"
+            sleep 0.2
+          done < <(awk 'NF>=4 && $1 !~ /^#/ {print $1, $2, $3, $4}' "$SOURCES")
+          echo "---"
+          if [ "$fail" -ne 0 ]; then
+            echo "one or more source repos are unreachable or archived"; exit 1
+          fi
+          echo "all source repos reachable and active"
+
+  manifest-regression:
+    name: build mnm + validate random manifests
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.91.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+
+      - name: Build mnm
+        run: cargo build -p mn-cli --bin mnm
+
+      - name: Validate a random sample of manifests
+        env:
+          SAMPLE: "8"
+        run: |
+          set -uo pipefail
+          mnm=target/debug/mnm
+          fail=0
+          mapfile -t rows < <(awk 'NF>=4 && $1 !~ /^#/ {print $1"\t"$2"\t"$3}' "$SOURCES" | shuf | head -n "$SAMPLE")
+          echo "sampled ${#rows[@]} of $(awk 'NF>=4 && $1 !~ /^#/' "$SOURCES" | wc -l) manifests"
+          for row in "${rows[@]}"; do
+            slug=$(printf '%s' "$row" | cut -f1)
+            repo=$(printf '%s' "$row" | cut -f2)
+            branch=$(printf '%s' "$row" | cut -f3)
+            man="manifests/midnight/$slug.yaml"
+            clone="/tmp/clones/$slug"
+            echo "::group::$slug ($repo@$branch)"
+            if ! git clone --depth=1 -b "$branch" "https://github.com/$repo" "$clone" 2>/dev/null; then
+              echo "FAIL: clone failed for $repo@$branch"; fail=1; echo "::endgroup::"; continue
+            fi
+            if ! "$mnm" manifest check "$man" --base "$clone"; then
+              echo "FAIL: manifest check rejected $slug"; fail=1; echo "::endgroup::"; continue
+            fi
+            if ! out=$("$mnm" ingest plan "$man" --source-slug "$slug" --base "$clone" 2>&1); then
+              printf '%s\n' "$out"; echo "FAIL: ingest plan errored for $slug"; fail=1; echo "::endgroup::"; continue
+            fi
+            printf '%s\n' "$out" | grep -iE "walked|chunk" || true
+            n=$(printf '%s' "$out" | grep -oiE "walked[[:space:]]+[0-9]+" | grep -oE "[0-9]+" | head -1 || true)
+            if [ "${n:-0}" -le 0 ]; then
+              echo "FAIL: $slug walked 0 files (upstream layout may have changed)"; fail=1
+            fi
+            echo "::endgroup::"
+          done
+          echo "---"
+          if [ "$fail" -ne 0 ]; then
+            echo "manifest regression detected"; exit 1
+          fi
+          echo "random manifest sample validated"

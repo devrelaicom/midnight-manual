@@ -1,0 +1,52 @@
+# Operational source list for the manifests/midnight/ ingestion set.
+# Consumed by .github/workflows/manifest-smoke.yml (daily reachability +
+# regression smoke test) and intended for any bulk-ingest driver script.
+# The manifests themselves stay path+provenance only; repo/branch/kind live here.
+#
+# Columns (whitespace-separated): slug  repo(owner/name)  branch  kind
+# The manifest file for each row is manifests/midnight/<slug>.yaml and the
+# origin URL is https://github.com/<repo>.
+midnight-ledger	midnightntwrk/midnight-ledger	main	mixed
+midnight-node	midnightntwrk/midnight-node	main	mixed
+midnight-indexer	midnightntwrk/midnight-indexer	main	mixed
+midnight-js	midnightntwrk/midnight-js	main	code_repo
+midnight-wallet	midnightntwrk/midnight-wallet	main	code_repo
+midnight-sdk	midnightntwrk/midnight-sdk	main	code_repo
+midnight-dapp-connector-api	midnightntwrk/midnight-dapp-connector-api	main	code_repo
+midnight-local-dev	midnightntwrk/midnight-local-dev	main	code_repo
+midnight-docs	midnightntwrk/midnight-docs	main	docs_site
+midnight-improvement-proposals	midnightntwrk/midnight-improvement-proposals	main	docs_site
+midnight-architecture	midnightntwrk/midnight-architecture	main	docs_site
+midnight-awesome-dapps	midnightntwrk/midnight-awesome-dapps	main	docs_site
+example-counter	midnightntwrk/example-counter	main	mixed
+example-bboard	midnightntwrk/example-bboard	main	mixed
+example-battleship	midnightntwrk/example-battleship	main	mixed
+example-hello-world	midnightntwrk/example-hello-world	main	mixed
+example-zkloan	midnightntwrk/example-zkloan	main	mixed
+example-kitties	midnightntwrk/example-kitties	main	mixed
+example-private-party	midnightntwrk/example-private-party	main	mixed
+example-nft-contracts	midnightntwrk/example-nft-contracts	main	mixed
+midnight-wallet-dapp	midnightntwrk/midnight-wallet-dapp	main	mixed
+midnight-leaderboard	midnightntwrk/midnight-leaderboard	main	mixed
+midnight-tip-jar	midnightntwrk/midnight-tip-jar	main	mixed
+midnight-dust-generator	midnightntwrk/midnight-dust-generator	main	mixed
+compact	midnightntwrk/compact	main	docs_site
+create-mn-app	midnightntwrk/create-mn-app	main	mixed
+setup-compact-action	midnightntwrk/setup-compact-action	main	docs_site
+midnight-node-docker	midnightntwrk/midnight-node-docker	main	mixed
+contributor-hub	midnightntwrk/contributor-hub	main	docs_site
+servicedesk	midnightntwrk/servicedesk	main	docs_site
+midnight-reserve-contracts	midnightntwrk/midnight-reserve-contracts	main	mixed
+night-token-distribution	midnightntwrk/night-token-distribution	main	mixed
+openzeppelin-compact-contracts	OpenZeppelin/compact-contracts	main	mixed
+openzeppelin-compact-tools	OpenZeppelin/compact-tools	main	code_repo
+openzeppelin-midnight-apps	OpenZeppelin/midnight-apps	main	mixed
+eddalabs-midnight-starter-template	eddalabs/midnight-starter-template	main	mixed
+bricktowers-midnight-rwa	bricktowers/midnight-rwa	main	mixed
+bricktowers-midnight-identity	bricktowers/midnight-identity	main	mixed
+bricktowers-midnight-seabattle	bricktowers/midnight-seabattle	main	mixed
+midnames-core	midnames/core	main	mixed
+joacolinares-kyc-midnight	joacolinares/kyc-midnight	main	mixed
+olanetsoft-learn-compact	Olanetsoft/learn-compact	main	docs_site
+olanetsoft-compact-by-example	Olanetsoft/compact-by-example	main	docs_site
+adavault-midnight-skill	ADAvault/midnight-skill	main	docs_site

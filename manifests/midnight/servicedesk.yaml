@@ -1,0 +1,18 @@
+manifest_version: 1
+root:
+  name: servicedesk
+  path: .
+  exclude:
+    - "_data/**"
+    - "_layouts/**"
+    - "_config.yml"
+    - "index.html"
+    - "APPLY.md"
+    - "**/CODE_OF_CONDUCT.md"
+    - "**/CONTRIBUTING.md"
+    - "**/SECURITY.md"
+  provenance:
+    attribution: foundation
+    verified: true
+    verified_by: midnight-foundation
+    tags: [trust:high]

@@ -1,0 +1,16 @@
+manifest_version: 1
+root:
+  name: learn-compact
+  provenance:
+    attribution: community
+    verified: false
+    tags: [trust:medium]
+  children:
+    - name: book
+      path: book/src/
+      provenance:
+        content_type: tutorial
+    - name: exercises
+      path: exercises/
+    - name: examples
+      path: examples/

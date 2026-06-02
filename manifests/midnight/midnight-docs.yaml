@@ -1,0 +1,19 @@
+manifest_version: 1
+root:
+  name: midnight-docs
+  provenance:
+    attribution: foundation
+    verified: true
+    verified_by: midnight-foundation
+    tags: [trust:high]
+  children:
+    - name: docs
+      path: docs/
+    - name: blog
+      path: blog/
+    - name: academy
+      path: academy/
+    - name: api-reference
+      path: api-reference/
+    - name: sdks
+      path: sdks/

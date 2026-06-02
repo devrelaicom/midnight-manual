@@ -1,0 +1,12 @@
+manifest_version: 1
+root:
+  name: compact
+  provenance:
+    attribution: foundation
+    verified: true
+    verified_by: midnight-foundation
+    tags: [trust:high]
+  children:
+    - name: prerelease
+      path: prerelease/
+      include: ["**/*.md"]
