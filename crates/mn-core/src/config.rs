@@ -192,6 +192,35 @@ fn xdg_config_path(env: &impl ConfigEnv) -> Option<PathBuf> {
     None
 }
 
+/// Resolve the Voyage API key with precedence flag > `VOYAGE_API_KEY` env > config.
+///
+/// An empty string at a level is treated as absent and falls through to the
+/// next source. If all sources are absent or empty, returns `None`.
+pub fn resolve_voyage_api_key(
+    flag: Option<&str>,
+    cfg: &ModelsConfig,
+    env: &impl ConfigEnv,
+) -> Option<String> {
+    flag.map(str::to_owned)
+        .filter(|s| !s.is_empty())
+        .or_else(|| env.var("VOYAGE_API_KEY").filter(|s| !s.is_empty()))
+        .or_else(|| cfg.voyage_api_key.clone().filter(|s| !s.is_empty()))
+}
+
+/// Resolve the reranker id with precedence flag > `MIDNIGHT_MANUAL_RERANKER` env > config.
+///
+/// An empty flag or env value falls through to the next source, ending at the
+/// configured reranker id (defaulting to `bge-reranker-base` when unset).
+pub fn resolve_reranker(flag: Option<&str>, cfg: &ModelsConfig, env: &impl ConfigEnv) -> String {
+    flag.map(str::to_owned)
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            env.var("MIDNIGHT_MANUAL_RERANKER")
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or_else(|| cfg.reranker.clone())
+}
+
 /// All the ways config discovery can fail.
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -321,5 +350,51 @@ voyage_output_dtype = "float"
         assert!(m.voyage_api_key.is_none()); // Option default
         assert!(m.reranker_path.is_none()); // Option default
         assert!(m.cache_dir.is_none()); // Option default
+    }
+
+    #[test]
+    fn resolve_voyage_key_prefers_flag_then_env_then_config() {
+        let cfg = ModelsConfig {
+            voyage_api_key: Some("from-config".into()),
+            ..Default::default()
+        };
+        let env = FakeEnv::default().set("VOYAGE_API_KEY", "from-env");
+
+        assert_eq!(
+            resolve_voyage_api_key(Some("from-flag"), &cfg, &env).as_deref(),
+            Some("from-flag")
+        );
+        assert_eq!(resolve_voyage_api_key(None, &cfg, &env).as_deref(), Some("from-env"));
+
+        let empty = FakeEnv::default();
+        assert_eq!(resolve_voyage_api_key(None, &cfg, &empty).as_deref(), Some("from-config"));
+
+        // An empty value at a level is absent and falls through to the next source.
+        assert_eq!(resolve_voyage_api_key(Some(""), &cfg, &env).as_deref(), Some("from-env"));
+        let env_empty = FakeEnv::default().set("VOYAGE_API_KEY", "");
+        assert_eq!(resolve_voyage_api_key(None, &cfg, &env_empty).as_deref(), Some("from-config"));
+        // All sources absent or empty → None.
+        let cfg_none = ModelsConfig::default();
+        assert_eq!(resolve_voyage_api_key(Some(""), &cfg_none, &env_empty), None);
+    }
+
+    #[test]
+    fn resolve_reranker_prefers_flag_then_env_then_config() {
+        let cfg = ModelsConfig {
+            reranker: "from-config-reranker".into(),
+            ..Default::default()
+        };
+        let env = FakeEnv::default().set("MIDNIGHT_MANUAL_RERANKER", "from-env-reranker");
+
+        assert_eq!(resolve_reranker(Some("from-flag-reranker"), &cfg, &env), "from-flag-reranker");
+        assert_eq!(resolve_reranker(None, &cfg, &env), "from-env-reranker");
+
+        let empty = FakeEnv::default();
+        assert_eq!(resolve_reranker(None, &cfg, &empty), "from-config-reranker");
+
+        // An empty flag/env value falls through to the next source.
+        assert_eq!(resolve_reranker(Some(""), &cfg, &env), "from-env-reranker");
+        let env_empty = FakeEnv::default().set("MIDNIGHT_MANUAL_RERANKER", "");
+        assert_eq!(resolve_reranker(Some(""), &cfg, &env_empty), "from-config-reranker");
     }
 }
