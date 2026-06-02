@@ -12,6 +12,7 @@ pub mod cache;
 pub mod embedder;
 pub mod error;
 pub mod reranker;
+pub mod voyage;
 
 pub use embedder::{Embedder, BGE_BASE_DIM, MODEL_NAME as EMBEDDER_MODEL_NAME};
 pub use error::{EmbeddingError, Result};
