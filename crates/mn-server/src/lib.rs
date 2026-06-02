@@ -23,6 +23,7 @@ pub mod jobs;
 pub mod middleware;
 pub mod ratelimit;
 pub mod routes;
+pub mod tokenlimit;
 
 /// Crate version stamped at build time.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
