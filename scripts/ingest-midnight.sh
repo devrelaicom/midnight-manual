@@ -22,7 +22,10 @@
 #                         mnm — it uses its own configured/built-in default
 #                         (shown as "server: <url>" before ingestion starts).
 #   --mnm-binary <path>   Use this prebuilt mnm and skip the cargo build.
-#   --max-manifests <n>   Process only the first <n> manifests; skip the rest.
+#   --max-manifests <n>   Ingest at most <n> manifests (applied after --offset).
+#   --offset <n>          Skip the first <n> manifests before starting. Combine
+#                         with --max-manifests to ingest a window — e.g.
+#                         --offset 4 --max-manifests 2 ingests the 5th and 6th.
 #   --sources <path>      Source list (default: manifests/midnight/sources.tsv).
 #   --manifests-dir <dir> Manifest dir (default: manifests/midnight).
 #   -h, --help            Show this help.
@@ -34,11 +37,12 @@ SERVER=""   # empty = don't pass --server; mnm uses its configured/built-in defa
 USER_ID=""
 MNM_BIN=""
 MAX_MANIFESTS=""
+OFFSET=0
 SOURCES="manifests/midnight/sources.tsv"
 MANIFESTS_DIR="manifests/midnight"
 CLONE_BASE="/tmp/mn-ingest"
 
-usage() { sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { awk 'NR==1 {next} /^#/ {sub(/^# ?/, ""); print; next} {exit}' "$0"; }
 
 # ── args ────────────────────────────────────────────────────────────────────
 while [ $# -gt 0 ]; do
@@ -47,6 +51,7 @@ while [ $# -gt 0 ]; do
     --server)         SERVER="${2:-}"; shift 2 ;;
     --mnm-binary)     MNM_BIN="${2:-}"; shift 2 ;;
     --max-manifests)  MAX_MANIFESTS="${2:-}"; shift 2 ;;
+    --offset)         OFFSET="${2:-}"; shift 2 ;;
     --sources)        SOURCES="${2:-}"; shift 2 ;;
     --manifests-dir)  MANIFESTS_DIR="${2:-}"; shift 2 ;;
     -h|--help)        usage; exit 0 ;;
@@ -59,6 +64,9 @@ if [ -n "$SERVER" ]; then SERVER_ARGS=(--server "$SERVER"); else SERVER_ARGS=();
 
 if [ -n "$MAX_MANIFESTS" ] && ! [[ "$MAX_MANIFESTS" =~ ^[0-9]+$ ]]; then
   echo "error: --max-manifests must be a non-negative integer" >&2; exit 2
+fi
+if ! [[ "$OFFSET" =~ ^[0-9]+$ ]]; then
+  echo "error: --offset must be a non-negative integer" >&2; exit 2
 fi
 if [ ! -f "$SOURCES" ]; then
   echo "error: source list not found: $SOURCES" >&2; exit 2
@@ -282,17 +290,24 @@ while IFS=$'\t' read -r slug repo branch kind; do
   rows+=("$slug"$'\t'"$repo"$'\t'"$branch"$'\t'"$kind")
 done < <(awk 'NF>=4 && $1 !~ /^#/ {print $1"\t"$2"\t"$3"\t"$4}' "$SOURCES")
 total=${#rows[@]}
-limit=$total
-if [ -n "$MAX_MANIFESTS" ] && [ "$MAX_MANIFESTS" -lt "$total" ]; then limit=$MAX_MANIFESTS; fi
+# Window = manifests with 1-based index in (off, win_last]: --offset skips the
+# first N, then --max-manifests caps how many of the remainder we ingest.
+off=$OFFSET
+[ "$off" -gt "$total" ] && off=$total
+win_remaining=$(( total - off ))
+win_count=$win_remaining
+if [ -n "$MAX_MANIFESTS" ] && [ "$MAX_MANIFESTS" -lt "$win_remaining" ]; then win_count=$MAX_MANIFESTS; fi
+win_last=$(( off + win_count ))
 
-INGESTED=0; FAILED=0; SKIPPED=$(( total - limit ))
+INGESTED=0; FAILED=0; SKIPPED=$(( total - win_count ))
 mkdir -p "$CLONE_BASE"
 
 # ── 5. ingest each manifest ───────────────────────────────────────────────────
 idx=0
 for row in "${rows[@]}"; do
   idx=$((idx+1))
-  if [ "$idx" -gt "$limit" ]; then break; fi
+  if [ "$idx" -le "$off" ]; then continue; fi      # --offset: skip the first N
+  if [ "$idx" -gt "$win_last" ]; then break; fi     # window full (--max-manifests)
 
   slug="$(printf '%s' "$row" | cut -f1)"
   repo="$(printf '%s' "$row" | cut -f2)"
@@ -354,7 +369,13 @@ done
 
 # ── 6. summary ────────────────────────────────────────────────────────────────
 if [ "$SKIPPED" -gt 0 ]; then
-  printf '%s%s skipped %d manifest(s) (--max-manifests=%s)%s\n' "$DIM" "$SKIP" "$SKIPPED" "$MAX_MANIFESTS" "$NC"
+  if [ "$win_count" -gt 0 ]; then
+    printf '%s%s skipped %d manifest(s) — ingested %d–%d of %d (offset=%d, max=%s)%s\n' \
+      "$DIM" "$SKIP" "$SKIPPED" "$(( off + 1 ))" "$win_last" "$total" "$OFFSET" "${MAX_MANIFESTS:-all}" "$NC"
+  else
+    printf '%s%s skipped all %d manifest(s) (offset=%d, nothing to ingest)%s\n' \
+      "$DIM" "$SKIP" "$total" "$OFFSET" "$NC"
+  fi
 fi
 printf '\n%s%d ingested%s · %s%d failed%s · %s%d skipped%s\n' \
   "$GREEN" "$INGESTED" "$NC" "$RED" "$FAILED" "$NC" "$DIM" "$SKIPPED" "$NC"
