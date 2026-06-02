@@ -11,12 +11,12 @@
 //! point of keeping them here.
 //!
 //! The full Voyage rerank request/response mapping is covered against a
-//! `wiremock` mock in `tests/voyage_rerank.rs` (Task 9.1). `LoadedReranker::load`
-//! builds the `VoyageReranker` internally with the hard-coded production base
-//! URL, so there is no seam to inject a mock URL through `load`; rather than
-//! widen the public API for a test, we assert the `Voyage` arm's *construction*
-//! contract here (variant + key handling) and lean on `voyage_rerank.rs` for the
-//! wire mapping.
+//! `wiremock` mock in `tests/voyage_rerank.rs` (Task 9.1). As of Task 9.4
+//! `LoadedReranker::load` takes an optional `voyage_base_url` override, so the
+//! Voyage arm *can* be pointed at a mock; the
+//! [`voyage_spec_with_base_url_override_reranks_via_mock`] test below exercises
+//! that seam end-to-end. The construction-contract tests (variant + key
+//! handling) still pass `None` for the override.
 
 #![allow(clippy::doc_markdown)]
 
@@ -24,6 +24,8 @@ use fastembed::RerankerModel;
 use mn_embedding::error::EmbeddingError;
 use mn_embedding::reranker::LoadedReranker;
 use mn_embedding::reranker_catalog::RerankerSpec;
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 /// A throwaway, guaranteed-empty cache directory for tests that must not touch
 /// the shared model cache.
@@ -38,6 +40,7 @@ async fn voyage_spec_with_key_loads_to_voyage_variant() {
         RerankerSpec::Voyage("rerank-2.5-lite".to_owned()),
         dir.path().to_path_buf(),
         Some("test-key"),
+        None,
     )
     .await
     .expect("voyage spec with a key must load");
@@ -53,6 +56,7 @@ async fn voyage_spec_without_key_errors_mentioning_env_var() {
     let err = LoadedReranker::load(
         RerankerSpec::Voyage("rerank-2.5-lite".to_owned()),
         dir.path().to_path_buf(),
+        None,
         None,
     )
     .await
@@ -76,6 +80,7 @@ async fn custom_path_with_missing_files_errors() {
         RerankerSpec::CustomPath(model_dir.path().to_path_buf()),
         cache.path().to_path_buf(),
         None,
+        None,
     )
     .await
     .expect_err("a custom path with no model files must fail");
@@ -91,6 +96,7 @@ async fn custom_path_that_does_not_exist_errors() {
     let err = LoadedReranker::load(
         RerankerSpec::CustomPath("/nonexistent/reranker/dir".into()),
         cache.path().to_path_buf(),
+        None,
         None,
     )
     .await
@@ -108,6 +114,7 @@ async fn native_spec_loads_and_reranks() {
     let loaded = LoadedReranker::load(
         RerankerSpec::Native(RerankerModel::BGERerankerBase),
         dir.path().to_path_buf(),
+        None,
         None,
     )
     .await
@@ -140,6 +147,7 @@ async fn user_onnx_spec_loads_and_reranks() {
         },
         dir.path().to_path_buf(),
         None,
+        None,
     )
     .await
     .expect("user-defined onnx reranker must load");
@@ -156,4 +164,57 @@ async fn user_onnx_spec_loads_and_reranks() {
         .await
         .expect("rerank");
     assert_eq!(results.len(), 2);
+}
+
+/// Task 9.4 PART C: the `voyage_base_url` override threads through `load` into
+/// the `VoyageReranker`, so a Voyage reranker can be pointed at a wiremock
+/// `/v1/rerank`. This makes the Voyage *load + rerank* path testable without
+/// touching `api.voyageai.com` (and without any env mutation).
+#[tokio::test]
+async fn voyage_spec_with_base_url_override_reranks_via_mock() {
+    let server = MockServer::start().await;
+    // The mock returns the second document as more relevant (higher score),
+    // out of input order, to prove `index` is honoured by the caller.
+    Mock::given(method("POST"))
+        .and(path("/v1/rerank"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "object": "list",
+            "data": [
+                { "relevance_score": 0.95_f32, "index": 1 },
+                { "relevance_score": 0.10_f32, "index": 0 },
+            ],
+            "model": "rerank-2.5-lite",
+            "usage": { "total_tokens": 12 },
+        })))
+        .mount(&server)
+        .await;
+
+    let dir = tmp_cache();
+    let loaded = LoadedReranker::load(
+        RerankerSpec::Voyage("rerank-2.5-lite".to_owned()),
+        dir.path().to_path_buf(),
+        Some("test-key"),
+        Some(&server.uri()),
+    )
+    .await
+    .expect("voyage spec with a base-url override must load");
+    assert!(matches!(loaded, LoadedReranker::Voyage(_)));
+
+    let results = loaded
+        .rerank(
+            "how do I compile a Compact contract".to_owned(),
+            vec![
+                "the weather in San Francisco is foggy today".to_owned(),
+                "run `compactc src.compact` to compile a Compact contract".to_owned(),
+            ],
+        )
+        .await
+        .expect("rerank via the mocked Voyage endpoint");
+
+    assert_eq!(results.len(), 2);
+    let top = results
+        .iter()
+        .max_by(|a, b| a.score.total_cmp(&b.score))
+        .expect("non-empty results");
+    assert_eq!(top.index, 1, "the relevant doc (index 1) must score highest");
 }

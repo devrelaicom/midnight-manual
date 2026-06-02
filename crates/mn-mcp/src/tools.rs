@@ -22,9 +22,10 @@ use std::time::Instant;
 
 use mn_core::scoring::normalize_rerank;
 use mn_core::scoring_policy::ScoringPolicy;
-use mn_embedding::{client as embed_client, reranker, voyage};
+use mn_embedding::{client as embed_client, reranker, reranker_catalog, voyage, LoadedReranker};
 use serde::Serialize;
 use serde_json::json;
+use tokio::sync::OnceCell;
 use uuid::Uuid;
 
 use crate::cloud_client::{CloudClient, CloudError, QueryPair, SearchRequest};
@@ -357,8 +358,11 @@ fn reranker_loaded() -> bool {
 mod markers {
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    /// Process-wide marker tracking whether the reranker has been loaded
-    /// (by `pull_models` or the first reranking `search`).
+    /// Process-wide marker tracking whether *a* reranker has been loaded — the
+    /// local `bge` cross-encoder (`pull_models`) or whichever reranker the
+    /// configured catalog id selects on the first reranking `search` (local
+    /// fastembed or remote Voyage). It is a coarse "rerank capability is warm"
+    /// signal for `status`, not a model identity.
     pub struct LoadedMarkers {
         reranker: AtomicBool,
     }
@@ -383,6 +387,64 @@ mod markers {
 use markers::LoadedMarkers;
 
 pub(crate) static LOADED_MARKERS: LoadedMarkers = LoadedMarkers::new();
+
+/// Process-wide cache for the configured reranker. The reranker can be heavy
+/// (a native ONNX cross-encoder downloading ~270 MB) so we load it once per
+/// process and reuse it across every reranking `search` — mirroring the prior
+/// `reranker::global` behaviour, but for whichever catalog id the config
+/// selects. [`LoadedReranker`] is not `Clone`, so we cache it behind an `Arc`.
+///
+/// CAVEAT: the reranker config is read once, on the first reranking search of
+/// the process. A later config change (or a different `MIDNIGHT_MANUAL_RERANKER`
+/// env) does NOT take effect until the process restarts — the same single-read
+/// semantics the old `bge` singleton had.
+static LOADED_RERANKER: OnceCell<Arc<LoadedReranker>> = OnceCell::const_new();
+
+/// Resolve + load the configured reranker, caching it process-wide on first
+/// call. Subsequent calls return the cached [`Arc`] regardless of the arguments
+/// (the reranker config is read once, on the first reranking search of the
+/// process — the same single-read semantics the old `bge` singleton had). On a
+/// successful first load this also flips the `status`/`pull_models`
+/// "reranker loaded" marker.
+///
+/// `reranker_id` is the catalog id (resolved by the caller via
+/// [`mn_core::config::resolve_reranker`]); `reranker_path` backs the `custom`
+/// id; `voyage_key` is required for Voyage ids; `voyage_base_url` optionally
+/// redirects the Voyage endpoint (self-host / proxy / test mock) and is the
+/// env-free seam from PART C. `cache_dir` is the on-disk fastembed model cache.
+///
+/// Exposed (rather than private) so the reranker selection-and-load contract is
+/// unit-testable without driving the whole `search` tool through the
+/// environment-reading config layer.
+///
+/// # Errors
+///
+/// Returns [`SearchError::Cloud`] if the id is not in the catalog, `custom`
+/// lacks a path, or the model fails to load (download / ONNX / missing Voyage
+/// key).
+pub async fn load_configured_reranker(
+    reranker_id: &str,
+    reranker_path: Option<&Path>,
+    voyage_key: Option<&str>,
+    voyage_base_url: Option<&str>,
+    cache_dir: &Path,
+) -> Result<Arc<LoadedReranker>, SearchError> {
+    let loaded = LOADED_RERANKER
+        .get_or_try_init(|| async {
+            let spec = reranker_catalog::resolve(reranker_id, reranker_path)
+                .map_err(|e| SearchError::Cloud(format!("reranker `{reranker_id}`: {e}")))?;
+            let loaded =
+                LoadedReranker::load(spec, cache_dir.to_path_buf(), voyage_key, voyage_base_url)
+                    .await
+                    .map_err(|e| {
+                        SearchError::Cloud(format!("reranker `{reranker_id}` load failed: {e}"))
+                    })?;
+            Ok::<_, SearchError>(Arc::new(loaded))
+        })
+        .await?;
+    LOADED_MARKERS.mark_reranker();
+    Ok(Arc::clone(loaded))
+}
 
 // ---------------------------------------------------------------------------
 // pull_models (local)
@@ -411,6 +473,10 @@ pub async fn run_pull_models(cache_dir: PathBuf) -> Result<PullModelsOutput, Str
     let t0 = Instant::now();
     let reranker_was_loaded = LOADED_MARKERS.load_relaxed_reranker();
 
+    // NOTE (Task 9.4): `pull_models` still pre-fetches the local `bge` reranker
+    // via the singleton. Pre-pulling the *configured* catalog reranker (e.g. a
+    // Voyage id, which has nothing to download) is intentionally out of scope
+    // here; `search` loads whatever the config selects lazily on first use.
     reranker::global(cache_dir)
         .await
         .map_err(|e| format!("reranker init failed: {e}"))?;
@@ -473,43 +539,20 @@ pub async fn run_search(
 ) -> Result<serde_json::Value, SearchError> {
     let parsed = parse_search_args(args).map_err(SearchError::InvalidInput)?;
 
-    // Resolve the Voyage API key from env / config (MCP has no CLI flag).
+    // Resolve the Voyage API key + the reranker selection from env / config
+    // (MCP has no CLI flag, so every `flag` is `None`). The base-url override is
+    // read through the same `ConfigEnv` abstraction as the other
+    // `MIDNIGHT_MANUAL_*` vars — no `std::env` in library code.
     let cfg_env = mn_core::config::StdEnv;
     let (core_cfg, _) = mn_core::config::Config::discover(None, &cfg_env).unwrap_or_default();
     let voyage_key = mn_core::config::resolve_voyage_api_key(None, &core_cfg.models, &cfg_env);
+    let rerank_sel = resolve_reranker_selection(&core_cfg.models, &cfg_env);
 
     // Embed all queries via VoyageAI — either BYOK (direct) or through the
     // cloud server's /v1/embeddings proxy. There is no local embedder; the only
     // local model is the reranker (loaded lazily in `rerank_results`).
-    let embedded = if let Some(key) = voyage_key.as_deref() {
-        let v = voyage::VoyageEmbedder::new(
-            key,
-            &core_cfg.models.embedding,
-            core_cfg.models.voyage_output_dimension,
-            &core_cfg.models.voyage_output_dtype,
-        );
-        embed_client::embed(
-            parsed.queries.clone(),
-            voyage::InputType::Query,
-            embed_client::EmbedSource::Byok(&v),
-        )
-        .await
-    } else {
-        embed_client::embed(
-            parsed.queries.clone(),
-            voyage::InputType::Query,
-            embed_client::EmbedSource::Server {
-                base_url: &cfg.cloud_url,
-                bearer: cloud.bearer(),
-                // Search never opts out of the global cap (read path, not ingest).
-                no_global_limit: false,
-            },
-        )
-        .await
-    }
-    .map_err(|e| SearchError::Cloud(format!("embed failed: {e}")))?;
-
-    let vectors = embedded.vectors;
+    let vectors =
+        embed_queries(&parsed.queries, &core_cfg.models, voyage_key.as_deref(), cfg, cloud).await?;
     let pairs: Vec<QueryPair> = parsed
         .queries
         .iter()
@@ -572,7 +615,19 @@ pub async fn run_search(
         .unwrap_or_default();
 
     let final_results = if parsed.rerank && !results.is_empty() {
-        rerank_results(&parsed.queries, results, &cfg.cache_dir, parsed.limit).await?
+        rerank_results(
+            &parsed.queries,
+            results,
+            RerankConfig {
+                reranker_id: &rerank_sel.reranker_id,
+                reranker_path: rerank_sel.reranker_path.as_deref(),
+                voyage_key: voyage_key.as_deref(),
+                voyage_base_url: rerank_sel.voyage_base_url.as_deref(),
+                cache_dir: &cfg.cache_dir,
+            },
+            parsed.limit,
+        )
+        .await?
     } else {
         let mut r = results;
         r.truncate(parsed.limit as usize);
@@ -587,6 +642,51 @@ pub async fn run_search(
         );
     }
     Ok(envelope)
+}
+
+/// Embed `queries` via VoyageAI, returning one vector per query in order.
+/// Uses BYOK (the caller's `voyage_key`, direct to Voyage) when a key is
+/// present, else the cloud server's `/v1/embeddings` proxy. There is no local
+/// embedder; the only local model is the reranker.
+///
+/// # Errors
+///
+/// Returns [`SearchError::Cloud`] on any embedding failure.
+async fn embed_queries(
+    queries: &[String],
+    models: &mn_core::config::ModelsConfig,
+    voyage_key: Option<&str>,
+    cfg: &ServerConfig,
+    cloud: &Arc<CloudClient>,
+) -> Result<Vec<Vec<f32>>, SearchError> {
+    let embedded = if let Some(key) = voyage_key {
+        let v = voyage::VoyageEmbedder::new(
+            key,
+            &models.embedding,
+            models.voyage_output_dimension,
+            &models.voyage_output_dtype,
+        );
+        embed_client::embed(
+            queries.to_vec(),
+            voyage::InputType::Query,
+            embed_client::EmbedSource::Byok(&v),
+        )
+        .await
+    } else {
+        embed_client::embed(
+            queries.to_vec(),
+            voyage::InputType::Query,
+            embed_client::EmbedSource::Server {
+                base_url: &cfg.cloud_url,
+                bearer: cloud.bearer(),
+                // Search never opts out of the global cap (read path, not ingest).
+                no_global_limit: false,
+            },
+        )
+        .await
+    }
+    .map_err(|e| SearchError::Cloud(format!("embed failed: {e}")))?;
+    Ok(embedded.vectors)
 }
 
 struct ParsedSearchArgs {
@@ -663,16 +763,70 @@ fn parse_search_args(v: &serde_json::Value) -> Result<ParsedSearchArgs, String> 
     })
 }
 
+/// The owned reranker selection resolved from config + env, held by
+/// `run_search` and borrowed into [`RerankConfig`] at the rerank call site.
+struct ResolvedReranker {
+    /// Catalog id (flag > env > config; MCP passes `flag = None`).
+    reranker_id: String,
+    /// Backing dir for the `custom` catalog id; `None` otherwise.
+    reranker_path: Option<PathBuf>,
+    /// Optional Voyage base-url override (self-host / proxy / test mock).
+    voyage_base_url: Option<String>,
+}
+
+/// Resolve the reranker catalog id, its `custom` path, and the optional Voyage
+/// base-url override from config + env. MCP has no CLI flag, so the id
+/// precedence is `MIDNIGHT_MANUAL_RERANKER` env > config. The base-url override
+/// reads `MIDNIGHT_MANUAL_VOYAGE_BASE_URL` through the same [`ConfigEnv`] seam
+/// as every other `MIDNIGHT_MANUAL_*` var — no `std::env` in library code.
+///
+/// [`ConfigEnv`]: mn_core::config::ConfigEnv
+fn resolve_reranker_selection(
+    models: &mn_core::config::ModelsConfig,
+    env: &impl mn_core::config::ConfigEnv,
+) -> ResolvedReranker {
+    ResolvedReranker {
+        reranker_id: mn_core::config::resolve_reranker(None, models, env),
+        reranker_path: models.reranker_path.clone(),
+        voyage_base_url: env
+            .var("MIDNIGHT_MANUAL_VOYAGE_BASE_URL")
+            .filter(|s| !s.is_empty()),
+    }
+}
+
+/// The reranker selection threaded from `run_search` into [`rerank_results`].
+/// Grouped into a struct so [`rerank_results`] stays under the argument-count
+/// lint while still carrying everything [`load_configured_reranker`] needs.
+struct RerankConfig<'a> {
+    /// Catalog id (resolved via [`mn_core::config::resolve_reranker`]).
+    reranker_id: &'a str,
+    /// Backing dir for the `custom` catalog id; `None` otherwise.
+    reranker_path: Option<&'a Path>,
+    /// Voyage API key (required for Voyage catalog ids).
+    voyage_key: Option<&'a str>,
+    /// Optional Voyage base-url override (self-host / proxy / test mock).
+    voyage_base_url: Option<&'a str>,
+    /// On-disk fastembed model cache.
+    cache_dir: &'a Path,
+}
+
 async fn rerank_results(
     queries: &[String],
     results: Vec<serde_json::Value>,
-    cache_dir: &Path,
+    cfg: RerankConfig<'_>,
     limit: u32,
 ) -> Result<Vec<serde_json::Value>, SearchError> {
-    let reranker = reranker::global(cache_dir.to_path_buf())
-        .await
-        .map_err(|e| SearchError::Cloud(format!("reranker init failed: {e}")))?;
-    LOADED_MARKERS.mark_reranker();
+    // Load (or reuse the process-wide cache of) whichever reranker the config
+    // selects — local fastembed (native / onnx / custom) or remote Voyage —
+    // instead of the hardcoded `bge` singleton.
+    let reranker = load_configured_reranker(
+        cfg.reranker_id,
+        cfg.reranker_path,
+        cfg.voyage_key,
+        cfg.voyage_base_url,
+        cfg.cache_dir,
+    )
+    .await?;
 
     // Use the first query as the rerank pivot. Multi-query / HyDE typically
     // wants the most "user-facing" question to anchor the rerank.
@@ -687,7 +841,7 @@ async fn rerank_results(
         })
         .collect();
     let scores = reranker
-        .rerank_blocking(pivot, docs, None)
+        .rerank(pivot, docs)
         .await
         .map_err(|e| SearchError::Cloud(format!("rerank failed: {e}")))?;
 

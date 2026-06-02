@@ -303,6 +303,14 @@ impl LoadedReranker {
     /// [`RerankerSpec::Voyage`] specs and ignored otherwise. `cache_dir` is the
     /// on-disk model cache for the fastembed-backed variants.
     ///
+    /// `voyage_base_url` overrides the Voyage API base URL for the
+    /// [`RerankerSpec::Voyage`] arm (and is ignored for every other variant).
+    /// Pass `Some(url)` to point a Voyage reranker at a self-hosted proxy or a
+    /// test mock; pass `None` to use the production endpoint. The override is
+    /// supplied by the caller's config layer (e.g. `MIDNIGHT_MANUAL_VOYAGE_BASE_URL`
+    /// resolved through the CLI/MCP `ConfigEnv`) — this crate never reads the
+    /// environment itself.
+    ///
     /// The blocking model load (download + ONNX session build) runs on a
     /// `spawn_blocking` thread so the async executor is never blocked.
     ///
@@ -314,6 +322,7 @@ impl LoadedReranker {
         spec: RerankerSpec,
         cache_dir: PathBuf,
         voyage_key: Option<&str>,
+        voyage_base_url: Option<&str>,
     ) -> Result<Self> {
         match spec {
             RerankerSpec::Native(model) => {
@@ -337,7 +346,12 @@ impl LoadedReranker {
                     model: model.clone(),
                     message: "Voyage reranker requires VOYAGE_API_KEY".to_owned(),
                 })?;
-                Ok(Self::Voyage(VoyageReranker::new(key, &model)))
+                let client = VoyageReranker::new(key, &model);
+                let client = match voyage_base_url {
+                    Some(url) => client.with_base_url(url),
+                    None => client,
+                };
+                Ok(Self::Voyage(client))
             }
         }
     }
