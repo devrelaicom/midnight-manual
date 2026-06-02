@@ -192,8 +192,16 @@ pub async fn run() -> Result<()> {
         Command::Login(args) => commands::login::run(args, cli.server.as_deref(), cli.json).await,
         Command::Users(args) => commands::users::run(args, cli.json),
         Command::Ingest(args) => {
-            commands::ingest::run(args, cli.server.as_deref(), &telemetry, crate::VERSION, cli.json)
-                .await
+            commands::ingest::run(
+                args,
+                cli.server.as_deref(),
+                cli.config.as_deref(),
+                cli.voyage_api_key.as_deref(),
+                &telemetry,
+                crate::VERSION,
+                cli.json,
+            )
+            .await
         }
         Command::Ratelimits(args) => {
             commands::ratelimits::run(args, cli.server.as_deref(), cli.json).await

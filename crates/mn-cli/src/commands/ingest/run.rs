@@ -17,7 +17,10 @@
 //!    source_version.
 //!
 //! 6. `PUT  /v1/admin/sources/:slug/ingest-runs/:id/documents` — upload
-//!    documents in batches of `--batch-size` (default 25) each.
+//!    documents in batches of `--batch-size` (default 25) each. Every chunk is
+//!    embedded by the CLI via VoyageAI (`input_type=document`) before upload —
+//!    either BYOK (Voyage direct, when a key resolves) or through the server's
+//!    `/v1/embeddings` proxy — so the server never loads an embedding model.
 //!
 //! 7. `POST /v1/admin/sources/:slug/ingest-runs/:id/finalize` — promote
 //!    the run to `active`.
@@ -37,11 +40,25 @@ use mn_content::manifest::Manifest;
 use mn_core::auth_file::AuthFile;
 use mn_core::provenance::Provenance;
 use mn_core::types::{DocumentKind, SourceKind};
+use mn_embedding::client::{embed, EmbedSource};
+use mn_embedding::voyage::{InputType, VoyageEmbedder};
 use mn_telemetry::events::{Component, EventPayload, Outcome};
 use mn_telemetry::{Event, TelemetryClient};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use uuid::Uuid;
+
+/// Sentinel embedding-model wire id used when `--embedding-model` is not
+/// explicitly overridden. At runtime the CLI resolves the true corpus wire id
+/// from `GET /v1/models/active`; this constant is only the `clap` default so
+/// `args.embedding_model` has a value for the explicit-override comparison.
+pub const DEFAULT_EMBEDDING_MODEL: &str = "auto";
+
+/// Voyage caps a single embeddings request at 1000 input texts (it also caps a
+/// request at ~120K tokens, but the 1000-text ceiling is the simple, sufficient
+/// guard for chunk-sized inputs). We sub-batch the per-upload-batch chunk texts
+/// into windows of at most this many before each `client::embed` call.
+const VOYAGE_MAX_TEXTS_PER_REQUEST: usize = 1000;
 
 /// Args for `mnm ingest run`.
 #[derive(Debug, ClapArgs)]
@@ -61,9 +78,12 @@ pub struct Args {
     #[arg(long)]
     pub revision: Option<String>,
 
-    /// Embedding-model wire id (`name@revision`). Defaults to
-    /// `bge-base-en-v1.5@1` to match the corpus's current model.
-    #[arg(long, default_value = "bge-base-en-v1.5@1")]
+    /// Override the embedding-model wire id (`name@revision`) recorded with the
+    /// run and stamped on every uploaded chunk. When omitted (or set to
+    /// `"auto"`), the CLI fetches the corpus's active model from
+    /// `GET /v1/models/active` and uses that wire id. Only set this explicitly
+    /// when you need to pin a specific `name@revision`.
+    #[arg(long, default_value = DEFAULT_EMBEDDING_MODEL)]
     pub embedding_model: String,
 
     /// Optional ingest note, recorded on the source_version row.
@@ -89,16 +109,9 @@ pub struct Args {
     pub source_base_url: Option<String>,
 
     /// Number of documents per upload batch (default: 25). Reduce if you hit
-    /// 413 responses from the server (local embedding inflates each batch).
+    /// 413 responses from the server (each chunk carries a 1024-dim vector).
     #[arg(long, default_value_t = 25)]
     pub batch_size: usize,
-
-    /// Embed on the server instead of locally. Off by default: the CLI embeds
-    /// chunks with its local model and uploads the vectors, so the server
-    /// never has to load the model. Use this when the local model is
-    /// unavailable or you want the server to embed.
-    #[arg(long)]
-    pub enable_server_embedding: bool,
 
     /// Semantic code-chunk budget in tokens.
     #[arg(long, default_value_t = 400)]
@@ -148,9 +161,12 @@ pub struct Args {
 /// Returns `anyhow::Error` if the manifest cannot be read, the source tree
 /// walk fails, the auth.toml cannot be loaded, or any of the HTTP round-trips
 /// fail.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     args: Args,
     server_flag: Option<&str>,
+    config_path: Option<&Path>,
+    voyage_api_key: Option<&str>,
     telemetry: &TelemetryClient,
     cli_version: &str,
     json: bool,
@@ -159,7 +175,17 @@ pub async fn run(
     let env = mn_core::config::StdEnv;
     let auth_path = mn_core::paths::auth_file_path(&env)
         .ok_or_else(|| anyhow!("could not resolve auth.toml path (set XDG_CONFIG_HOME or HOME)"))?;
-    run_with_paths(args, &server_url, &auth_path, telemetry, cli_version, json).await
+    run_with_paths(
+        args,
+        &server_url,
+        &auth_path,
+        config_path,
+        voyage_api_key,
+        telemetry,
+        cli_version,
+        json,
+    )
+    .await
 }
 
 /// Path-explicit driver, exposed for integration tests.
@@ -167,16 +193,19 @@ pub async fn run(
 /// # Errors
 ///
 /// Returns the same errors as [`run`].
+#[allow(clippy::too_many_arguments)]
 pub async fn run_with_paths(
     args: Args,
     server_url: &str,
     auth_path: &Path,
+    config_path: Option<&Path>,
+    voyage_api_key: Option<&str>,
     telemetry: &TelemetryClient,
     cli_version: &str,
     json: bool,
 ) -> Result<()> {
     let started = Instant::now();
-    let outcome = run_inner(&args, server_url, auth_path, json).await;
+    let outcome = run_inner(&args, server_url, auth_path, config_path, voyage_api_key, json).await;
 
     let duration_ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
     let (added, carried, deleted, batch_count, failed_batch_index, telemetry_outcome) =
@@ -223,6 +252,8 @@ async fn run_inner(
     args: &Args,
     server_url: &str,
     auth_path: &Path,
+    config_path: Option<&Path>,
+    voyage_api_key: Option<&str>,
     json: bool,
 ) -> Result<RunStats> {
     let mut reporter = crate::progress::pick(json);
@@ -386,17 +417,42 @@ async fn run_inner(
         );
     }
 
-    // Load the local embedder up front (unless the server will embed). Doing
-    // this before we create a server-side run means a missing model fails
-    // fast without leaving an orphaned `building` source_version.
-    let embedder = if args.enable_server_embedding {
-        None
+    // Resolve the embedding context (BYOK Voyage vs server-proxy) and the
+    // bearer up front. Doing this before we create a server-side run means a
+    // missing key / unreachable model resolves fast without leaving an orphaned
+    // `building` source_version. We build the BYOK `VoyageEmbedder` once here so
+    // every batch reuses the same client; the corpus is always embedded
+    // CLI-side now (the old local-fastembed and server-side-embed branches are
+    // gone), so the server never has to load an embedding model.
+    let bearer = resolve_admin_bearer_str(&token);
+    let env = mn_core::config::StdEnv;
+    let (cfg, _) = mn_core::config::Config::discover(config_path, &env).unwrap_or_default();
+    let voyage_key = mn_core::config::resolve_voyage_api_key(voyage_api_key, &cfg.models, &env);
+    let byok_embedder = voyage_key.as_deref().map(|key| {
+        VoyageEmbedder::new(
+            key,
+            &cfg.models.embedding,
+            cfg.models.voyage_output_dimension,
+            &cfg.models.voyage_output_dtype,
+        )
+    });
+    reporter.phase(
+        "embedder_resolved",
+        serde_json::json!({"mode": if byok_embedder.is_some() { "byok" } else { "server" }}),
+    );
+
+    // Resolve the corpus wire id. When the sentinel "auto" is present, fetch the
+    // active model from the server so the wire id always matches the active
+    // corpus model; an explicit --embedding-model override is honoured directly
+    // (and skips the round-trip). This labels both the start-run request and the
+    // per-batch upload bodies.
+    let embedding_model = if args.embedding_model == DEFAULT_EMBEDDING_MODEL {
+        let active = crate::commands::models::fetch_active(server_url)
+            .await
+            .context("resolve active corpus model")?;
+        format!("{}@{}", active.name, active.revision)
     } else {
-        validate_local_embedding_model(&args.embedding_model)?;
-        reporter.phase("load_embedder", serde_json::json!({"model": args.embedding_model}));
-        let emb = load_local_embedder().await?;
-        reporter.phase_done("load_embedder", serde_json::json!({"model": args.embedding_model}));
-        Some(emb)
+        args.embedding_model.clone()
     };
 
     // ── Phase: start ingest run ──────────────────────────────────────────────
@@ -411,12 +467,12 @@ async fn run_inner(
         &token,
         &StartIngestRunRequest {
             ingest_cli_version: env!("CARGO_PKG_VERSION").to_owned(),
-            embedding_model: args.embedding_model.clone(),
+            embedding_model: embedding_model.clone(),
             note: args.note.clone(),
         },
     )
     .await
-    .map_err(|e| translate_start_error(e, &args.embedding_model))
+    .map_err(|e| translate_start_error(e, &embedding_model))
     .context("start ingest run")?;
 
     reporter
@@ -480,24 +536,31 @@ async fn run_inner(
     let mut accepted = 0usize;
     let mut carried = 0usize;
 
+    // Build the embed context once: BYOK when a Voyage key resolved, else proxy
+    // through the server's /v1/embeddings (which holds the platform key).
+    let embed_ctx = byok_embedder.as_ref().map_or(
+        EmbedCtx::Server {
+            base_url: server_url,
+            bearer: bearer.as_deref(),
+        },
+        EmbedCtx::Byok,
+    );
+
     for (i, batch) in docs.chunks(batch_size).enumerate() {
         let mut batch_docs = batch.to_vec();
-        if let Some(emb) = &embedder {
-            // Local embedding is the slow per-batch step; surface it as its own
-            // phase so progress consumers don't appear to hang on "uploading".
-            reporter.batch(i + 1, batch_count, "embedding documents");
-            if let Err(e) = embed_batch(emb, &mut batch_docs).await {
-                abort_run(&client, server_url, &args.source_slug, start.ingest_run_id, &token)
-                    .await;
-                return Err(e.context(format!("embed batch {}/{batch_count}", i + 1)));
-            }
+        // Embedding is the slow per-batch step; surface it as its own phase so
+        // progress consumers don't appear to hang on "uploading".
+        reporter.batch(i + 1, batch_count, "embedding documents");
+        if let Err(e) = embed_batch(&embed_ctx, &mut batch_docs).await {
+            abort_run(&client, server_url, &args.source_slug, start.ingest_run_id, &token).await;
+            return Err(e.context(format!("embed batch {}/{batch_count}", i + 1)));
         }
         reporter.batch(i + 1, batch_count, "uploading documents");
         let body = UploadDocumentsRequest {
             documents: batch_docs,
             batch_index: i,
             batch_count,
-            embedding_model: embedder.as_ref().map(|_| args.embedding_model.clone()),
+            embedding_model: Some(embedding_model.clone()),
         };
         let result: Result<UploadDocumentsResponse> =
             put_json(&client, &upload_url, &token, &body).await;
@@ -656,47 +719,53 @@ fn attach_embeddings(docs: &mut [DocumentUpload], vectors: Vec<Vec<f32>>) -> Res
     Ok(())
 }
 
-/// Local embedding can only produce `bge-base-en-v1.5` vectors. Reject any
-/// other `--embedding-model` with a pointer to `--enable-server-embedding`.
-///
-/// # Errors
-///
-/// Errors if the wire id fails to parse or names a different model.
-fn validate_local_embedding_model(model_wire: &str) -> Result<()> {
-    use std::str::FromStr as _;
-    let id = mn_core::model_id::EmbeddingModelId::from_str(model_wire)
-        .map_err(|e| anyhow!("invalid --embedding-model `{model_wire}`: {e}"))?;
-    if id.name != mn_embedding::embedder::MODEL_NAME {
-        return Err(anyhow!(
-            "local embedding only supports `{}@…`; got `{model_wire}`. \
-             Pass --enable-server-embedding to ingest with a server-side model.",
-            mn_embedding::embedder::MODEL_NAME
-        ));
+/// Resolve a non-empty admin bearer string for use on the server-proxy embed
+/// path. The admin token has already been validated (presence + expiry) before
+/// the run starts; this just hands it back as the `EmbedSource::Server` bearer.
+fn resolve_admin_bearer_str(token: &str) -> Option<String> {
+    if token.is_empty() {
+        None
+    } else {
+        Some(token.to_owned())
     }
-    Ok(())
 }
 
-/// Load the process-wide local embedder, mapping failures to actionable advice.
+/// Where the per-batch Voyage embedding call goes. Holds the borrows needed to
+/// (re)construct an [`EmbedSource`] per sub-batch — `EmbedSource` is consumed by
+/// value by [`embed`], so we rebuild it for each window rather than move it.
+enum EmbedCtx<'a> {
+    /// BYOK: call Voyage directly with the supplied embedder.
+    Byok(&'a VoyageEmbedder),
+    /// Server-proxy via `/v1/embeddings`.
+    Server {
+        base_url: &'a str,
+        bearer: Option<&'a str>,
+    },
+}
+
+impl EmbedCtx<'_> {
+    const fn source(&self) -> EmbedSource<'_> {
+        match self {
+            Self::Byok(v) => EmbedSource::Byok(v),
+            Self::Server { base_url, bearer } => EmbedSource::Server { base_url, bearer: *bearer },
+        }
+    }
+}
+
+/// Embed every chunk of `docs` in place via VoyageAI (`input_type=document`),
+/// using `ctx` (BYOK direct, or the server `/v1/embeddings` proxy).
+///
+/// The collected chunk texts are sub-batched into windows of at most
+/// [`VOYAGE_MAX_TEXTS_PER_REQUEST`] (Voyage rejects requests over 1000 inputs;
+/// a ~120K-token-per-request cap also exists, but the text-count ceiling is the
+/// simple, sufficient guard for chunk-sized inputs). Vectors are concatenated
+/// in input order before being distributed back across the docs' chunks.
 ///
 /// # Errors
 ///
-/// Errors if the model cache dir cannot be resolved or the model fails to load.
-async fn load_local_embedder() -> Result<mn_embedding::Embedder> {
-    let env = mn_embedding::cache::StdEnv;
-    let cache_dir = mn_embedding::cache::resolve(&env).context(
-        "could not resolve model cache dir (set MIDNIGHT_MANUAL_MODEL_CACHE_DIR or HOME)",
-    )?;
-    mn_embedding::embedder::global(cache_dir).await.map_err(|e| {
-        anyhow!("could not load local embedder ({e}). Run `mnm models pull`, or pass --enable-server-embedding.")
-    })
-}
-
-/// Embed every chunk of `docs` in place using the local embedder.
-///
-/// # Errors
-///
-/// Errors if the embedder call fails or returns the wrong vector count.
-async fn embed_batch(emb: &mn_embedding::Embedder, docs: &mut [DocumentUpload]) -> Result<()> {
+/// Errors if any Voyage call fails or the returned vector count does not match
+/// the chunk count.
+async fn embed_batch(ctx: &EmbedCtx<'_>, docs: &mut [DocumentUpload]) -> Result<()> {
     let texts: Vec<String> = docs
         .iter()
         .flat_map(|d| d.chunks.iter().map(|c| c.content.clone()))
@@ -704,10 +773,15 @@ async fn embed_batch(emb: &mn_embedding::Embedder, docs: &mut [DocumentUpload]) 
     if texts.is_empty() {
         return Ok(());
     }
-    let vectors = emb
-        .embed_blocking(texts, None)
-        .await
-        .context("local embedding")?;
+
+    let mut vectors: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
+    for sub in texts.chunks(VOYAGE_MAX_TEXTS_PER_REQUEST) {
+        let embedded = embed(sub.to_vec(), InputType::Document, ctx.source())
+            .await
+            .map_err(|e| anyhow!("embed chunks via Voyage: {e}"))?;
+        vectors.extend(embedded.vectors);
+    }
+
     attach_embeddings(docs, vectors)
 }
 
@@ -1097,13 +1171,6 @@ mod tests {
         assert!(attach_embeddings(&mut docs, vec![]).is_err());
     }
 
-    #[test]
-    fn local_model_must_be_bge_base() {
-        assert!(validate_local_embedding_model("bge-base-en-v1.5@1").is_ok());
-        let err = validate_local_embedding_model("some-other-model@1").unwrap_err();
-        assert!(err.to_string().contains("--enable-server-embedding"), "{err}");
-    }
-
     fn mk_chunk(idx: i32) -> ChunkUpload {
         ChunkUpload {
             chunk_index: idx,
@@ -1133,7 +1200,7 @@ mod tests {
     }
 
     #[test]
-    fn default_batch_size_is_25_and_server_embedding_defaults_off() {
+    fn default_batch_size_is_25_and_embedding_model_defaults_to_auto() {
         use clap::Parser as _;
         #[derive(clap::Parser)]
         struct Wrap {
@@ -1142,11 +1209,13 @@ mod tests {
         }
         let w = Wrap::try_parse_from(["ingest-run", "--source-slug", "s", "m.yaml"]).unwrap();
         assert_eq!(w.inner.batch_size, 25);
-        assert!(!w.inner.enable_server_embedding);
+        // The corpus wire id is resolved from /v1/models/active at runtime; the
+        // clap default is the "auto" sentinel, not a hardcoded model name.
+        assert_eq!(w.inner.embedding_model, DEFAULT_EMBEDDING_MODEL);
     }
 
     #[test]
-    fn enable_server_embedding_flag_parses() {
+    fn embedding_model_override_parses() {
         use clap::Parser as _;
         #[derive(clap::Parser)]
         struct Wrap {
@@ -1157,11 +1226,12 @@ mod tests {
             "ingest-run",
             "--source-slug",
             "s",
-            "--enable-server-embedding",
+            "--embedding-model",
+            "voyage-code-3@2",
             "m.yaml",
         ])
         .unwrap();
-        assert!(w.inner.enable_server_embedding);
+        assert_eq!(w.inner.embedding_model, "voyage-code-3@2");
     }
 
     #[test]
@@ -1184,8 +1254,9 @@ mod tests {
 
     #[test]
     fn embedded_request_serializes_vectors_and_model() {
-        // When the CLI embeds locally, the upload body must carry the 768-dim
-        // vector on every chunk plus the batch-level `embedding_model`.
+        // The CLI embeds every chunk via Voyage and the upload body must carry
+        // the 1024-dim vector on each chunk plus the batch-level
+        // `embedding_model` (the resolved corpus wire id).
         let body = UploadDocumentsRequest {
             documents: vec![DocumentUpload {
                 path: "a".into(),
@@ -1210,18 +1281,18 @@ mod tests {
                     start_byte: 0,
                     end_byte: 1,
                     token_count: 0,
-                    embedding: Some(vec![0.5_f32; 768]),
+                    embedding: Some(vec![0.5_f32; 1024]),
                 }],
             }],
             batch_index: 0,
             batch_count: 1,
-            embedding_model: Some("bge-base-en-v1.5@1".to_owned()),
+            embedding_model: Some("voyage-code-3@1".to_owned()),
         };
         let v: serde_json::Value = serde_json::to_value(&body).unwrap();
-        assert_eq!(v["embedding_model"], "bge-base-en-v1.5@1");
+        assert_eq!(v["embedding_model"], "voyage-code-3@1");
         let emb = v["documents"][0]["chunks"][0]["embedding"]
             .as_array()
             .expect("embedding present on the wire");
-        assert_eq!(emb.len(), 768);
+        assert_eq!(emb.len(), 1024);
     }
 }

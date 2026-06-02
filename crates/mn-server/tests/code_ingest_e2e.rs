@@ -172,16 +172,14 @@ async fn code_ingest_smoke_persists_symbol_paths_and_packages() {
         manifest: manifest_path,
         source_slug: source_slug.clone(),
         revision: Some("rev-code-e2e".to_owned()),
-        embedding_model: "bge-base-en-v1.5@1".to_owned(),
+        // "auto" → resolve the corpus wire id from the live server.
+        embedding_model: mn_cli::commands::ingest::run::DEFAULT_EMBEDDING_MODEL.to_owned(),
         note: Some("code ingest e2e smoke".to_owned()),
         source_root: Some(workdir.path().to_path_buf()),
         dry_run: false,
         yes: true,
         source_base_url: None,
         batch_size: 50,
-        // Text-only upload (server-side embedding path); keeps this live-server
-        // e2e from loading the ONNX model in-process.
-        enable_server_embedding: true,
         code_chunk_tokens: 400,
         code_chunk_lines: 60,
         code_chunk_overlap: 20,
@@ -193,7 +191,10 @@ async fn code_ingest_smoke_persists_symbol_paths_and_packages() {
     };
     let telemetry = TelemetryClient::Disabled;
 
-    run_with_paths(args, &server_url, &auth_path, &telemetry, "0.1.0-e2e", true)
+    // Server-proxy embedding mode: no BYOK key (config discovery bypassed,
+    // no --voyage-api-key) so the CLI embeds via the live server's
+    // /v1/embeddings, which holds the platform Voyage key.
+    run_with_paths(args, &server_url, &auth_path, None, None, &telemetry, "0.1.0-e2e", true)
         .await
         .expect("ingest run completes against live mn-server");
 
