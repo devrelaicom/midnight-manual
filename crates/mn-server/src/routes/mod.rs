@@ -4,6 +4,7 @@ pub mod admin_ingest;
 pub mod admin_ratelimits;
 pub mod admin_sources;
 pub mod admin_status;
+pub mod admin_tokenlimits;
 pub mod admin_versions;
 pub mod auth;
 pub mod chunks;

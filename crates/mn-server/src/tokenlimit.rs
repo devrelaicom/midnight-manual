@@ -6,6 +6,10 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Mutex, RwLock};
 
+/// One persisted snapshot bucket: `(subject_kind, subject, hour_epoch, tokens)`.
+/// Matches the positional column order of `token_usage_snapshot`.
+type SnapshotRow = (String, String, i64, i64);
+
 /// Effective per-window token ceilings for a subject.
 #[derive(Debug, Clone, Copy)]
 pub struct Limits {
@@ -22,6 +26,28 @@ pub enum TokenSubject {
     Ip(String),
     /// Authenticated request identified by JWT `sub`.
     User(String),
+}
+
+impl TokenSubject {
+    /// The `subject_kind` discriminant persisted in `token_usage_snapshot`
+    /// (matches the table's `CHECK (subject_kind IN ('ip','user'))`).
+    ///
+    /// Note: this is intentionally `'ip'`, NOT the `'cidr'` discriminant used by
+    /// `token_limit_override` — the snapshot keys on resolved client IPs while
+    /// overrides key on CIDR blocks. Do not "align" the two.
+    const fn kind(&self) -> &'static str {
+        match self {
+            Self::Ip(_) => "ip",
+            Self::User(_) => "user",
+        }
+    }
+
+    /// The subject payload (IP string or user id) persisted as `subject`.
+    fn value(&self) -> &str {
+        match self {
+            Self::Ip(v) | Self::User(v) => v,
+        }
+    }
 }
 
 /// Which rolling window a rejection or window-info refers to.
@@ -120,8 +146,9 @@ impl SubjectUsage {
 /// request). `snapshot_for` over-charged subjects report `remaining == 0`
 /// (saturating), never a wrapped value.
 pub struct TokenUsageLimiter {
-    // TODO(Task 4.8): a snapshot/reaper job evicts idle subjects. Until then a
-    // subject key persists once seen (its buckets are pruned, the key is not).
+    // Subject keys persist between requests; the periodic snapshot job
+    // (`snapshot_to_db`) evicts a key once it has been idle for >24h, so the
+    // map cannot grow without bound.
     usage: Mutex<HashMap<TokenSubject, SubjectUsage>>,
     anon: Limits,
     uplift: Limits,
@@ -246,6 +273,138 @@ impl TokenUsageLimiter {
                 reset_at_secs: day_reset,
             },
         }
+    }
+
+    /// Persist each subject's in-window per-hour buckets to
+    /// `token_usage_snapshot` for restart durability, evict long-idle subjects
+    /// from memory, and prune snapshot rows older than the day window.
+    /// Best-effort (called by the periodic snapshot job).
+    ///
+    /// # Concurrency
+    ///
+    /// The `usage` mutex guard is **never** held across an `.await`: the
+    /// in-memory state is copied into owned `Vec`s under the lock, the guard is
+    /// dropped, the async DB I/O runs lock-free, and eviction re-locks briefly
+    /// at the end. This keeps `clippy::await_holding_lock` satisfied and avoids
+    /// stalling the embedding hot path during a snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Propagates sqlx errors from the upsert / prune statements.
+    pub async fn snapshot_to_db(&self, pool: &sqlx::PgPool, now: i64) -> Result<(), sqlx::Error> {
+        // 1) Copy the in-memory state into owned tuples; flag idle subjects.
+        let hr_floor = now / 3600 - 23; // keep the last 24 hours of buckets
+        let idle_before = now - 86_400; // a subject untouched for >24h is evictable
+        let mut rows: Vec<SnapshotRow> = Vec::new();
+        let mut evict: Vec<TokenSubject> = Vec::new();
+        {
+            let map = self.usage.lock().expect("usage lock");
+            for (subject, u) in map.iter() {
+                for (&hour, &tokens) in u.hours.range(hr_floor..) {
+                    rows.push((
+                        subject.kind().to_owned(),
+                        subject.value().to_owned(),
+                        hour,
+                        i64::try_from(tokens).unwrap_or(i64::MAX),
+                    ));
+                }
+                if u.last_seen_secs < idle_before {
+                    evict.push(subject.clone());
+                }
+            }
+            drop(map); // explicit: no lock held across the awaits below
+        }
+
+        // 2) Upsert each bucket (no guard held).
+        for (kind, value, hour, tokens) in rows {
+            sqlx::query(
+                "INSERT INTO token_usage_snapshot (subject_kind, subject, hour_epoch, tokens) \
+                 VALUES ($1, $2, $3, $4) \
+                 ON CONFLICT (subject_kind, subject, hour_epoch) \
+                 DO UPDATE SET tokens = EXCLUDED.tokens, updated_at = now()",
+            )
+            .bind(kind)
+            .bind(value)
+            .bind(hour)
+            .bind(tokens)
+            .execute(pool)
+            .await?;
+        }
+
+        // 3) Prune snapshot rows older than the day window. The `-25` floor is
+        //    `load_from_db`'s `-23` read floor plus ~2h of slack for clock skew
+        //    between the writer and a restarting reader — keep the two in step.
+        sqlx::query("DELETE FROM token_usage_snapshot WHERE hour_epoch < $1")
+            .bind(now / 3600 - 25)
+            .execute(pool)
+            .await?;
+
+        // 4) Evict idle subjects from memory (re-lock briefly). Re-check freshness
+        //    under the re-acquired lock: a `charge` may have landed between the
+        //    snapshot-read and here, in which case the subject is no longer idle
+        //    and must NOT be dropped (else its just-charged tokens are lost).
+        if !evict.is_empty() {
+            let mut map = self.usage.lock().expect("usage lock");
+            for s in evict {
+                let still_idle = map.get(&s).is_some_and(|u| u.last_seen_secs < idle_before);
+                if still_idle {
+                    map.remove(&s);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Seed per-subject hour buckets from the snapshot at boot, so token
+    /// accounting survives a restart within the rolling day window.
+    ///
+    /// Only the per-hour (daily-window) buckets are persisted; per-minute
+    /// (hourly-window) buckets are deliberately not durable — a restart resets
+    /// the tighter hourly window to empty, which is the safe direction (it can
+    /// only let a subject through, never wrongly reject).
+    ///
+    /// # Concurrency
+    ///
+    /// The DB read runs first (no lock held); the mutex is only taken to merge
+    /// the loaded buckets into memory, never across an `.await`.
+    ///
+    /// # Errors
+    ///
+    /// Propagates sqlx errors from the snapshot read.
+    pub async fn load_from_db(&self, pool: &sqlx::PgPool, now: i64) -> Result<(), sqlx::Error> {
+        let hr_floor = now / 3600 - 23;
+        let rows: Vec<SnapshotRow> = sqlx::query_as(
+            "SELECT subject_kind, subject, hour_epoch, tokens FROM token_usage_snapshot \
+             WHERE hour_epoch >= $1",
+        )
+        .bind(hr_floor)
+        .fetch_all(pool)
+        .await?;
+
+        // Take the lock only to merge the loaded buckets (never across the
+        // await above), then drop it immediately.
+        let mut map = self.usage.lock().expect("usage lock");
+        for (kind, value, hour, tokens) in rows {
+            let subject = match kind.as_str() {
+                "user" => TokenSubject::User(value),
+                "ip" => TokenSubject::Ip(value),
+                other => {
+                    // The DB CHECK constrains this to ip/user; a surprising value
+                    // means schema drift — surface it rather than silently coerce.
+                    tracing::warn!(
+                        kind = other,
+                        "unrecognised subject_kind in snapshot; treating as ip"
+                    );
+                    TokenSubject::Ip(value)
+                }
+            };
+            let u = map.entry(subject).or_default();
+            let bucket = u.hours.entry(hour).or_default();
+            *bucket = bucket.saturating_add(u64::try_from(tokens).unwrap_or(0));
+            u.last_seen_secs = u.last_seen_secs.max(now);
+        }
+        drop(map);
+        Ok(())
     }
 }
 

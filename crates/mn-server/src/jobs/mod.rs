@@ -8,3 +8,4 @@
 pub mod embedder;
 pub mod source_retention;
 pub mod telemetry_sweep;
+pub mod token_usage_snapshot;

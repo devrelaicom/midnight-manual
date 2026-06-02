@@ -167,6 +167,44 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // Background: token-usage durability + token-limit override refresh
+    // (Task 4.8). Unlike rate limiting, token accounting has no disable switch,
+    // so this always runs.
+    //
+    // 1. Seed in-memory per-hour buckets from the snapshot so accounting
+    //    survives a restart within the rolling day window.
+    let boot_now = time::OffsetDateTime::now_utc().unix_timestamp();
+    if let Err(e) = token_limiter.load_from_db(&pool, boot_now).await {
+        tracing::warn!(error = %e, "token usage snapshot load failed");
+    }
+    // 2. Load the override cache once before serving (so the first request sees
+    //    operator-configured ceilings).
+    if let Err(e) = token_limiter.refresh_overrides_now(&pool).await {
+        tracing::warn!(error = %e, "initial token-limit override load failed");
+    }
+    // 3. Periodic override refresh (same cadence as the rate-limit refresh).
+    {
+        let refresh_pool = pool.clone();
+        let refresh_secs = cfg.rate_limit_override_refresh_secs;
+        let refresh_limiter = token_limiter.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(refresh_secs.max(1)));
+            tick.tick().await; // consume the immediate first tick
+            loop {
+                tick.tick().await;
+                if let Err(e) = refresh_limiter.refresh_overrides_now(&refresh_pool).await {
+                    tracing::warn!(error = %e, "token-limit override refresh failed");
+                }
+            }
+        });
+    }
+    // 4. Periodic usage snapshot + idle-subject eviction + stale-row prune.
+    let _token_snapshot_handle = jobs::token_usage_snapshot::spawn(
+        pool.clone(),
+        token_limiter.clone(),
+        cfg.token_snapshot_secs,
+    );
+
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .context("bind listener")?;

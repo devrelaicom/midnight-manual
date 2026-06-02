@@ -252,6 +252,7 @@ pub fn build_with_limiter(
         .merge(crate::routes::admin_ratelimits::router())
         .merge(crate::routes::admin_sources::router())
         .merge(crate::routes::admin_status::router())
+        .merge(crate::routes::admin_tokenlimits::router())
         .merge(crate::routes::admin_versions::router())
         .merge(crate::routes::versions::router())
         .merge(crate::routes::github::router())
