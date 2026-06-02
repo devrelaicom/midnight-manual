@@ -14,6 +14,7 @@ pub mod cache;
 pub mod client;
 pub mod error;
 pub mod reranker;
+pub mod reranker_catalog;
 pub mod voyage;
 
 pub use error::{EmbeddingError, Result};
