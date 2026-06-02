@@ -25,7 +25,7 @@ use crate::app::AppState;
 use crate::error;
 use crate::middleware::bearer::AuthContext;
 use crate::middleware::request_id::RequestId;
-use crate::tokenlimit::{Reject, Window, WindowInfo};
+use crate::tokenlimit::{Reject, TokenTier, Window, WindowInfo};
 
 /// Hard cap on inputs per request. Voyage itself caps a batch at 1 000 texts;
 /// we refuse beyond that with 413 so the client batches rather than the upstream
@@ -58,6 +58,12 @@ pub struct EmbeddingsRequest {
     /// corpus's active model wire id, else the request is rejected (409).
     #[serde(default)]
     pub model: Option<String>,
+    /// Admin-only opt-out from the site-wide token cap; ignored unless the
+    /// caller is admin-tier. The server checks the admin role, not just the
+    /// flag, so a non-admin setting it has no effect (the request is still
+    /// counted against the global cap).
+    #[serde(default)]
+    pub no_global_limit: bool,
 }
 
 fn default_input_type() -> String {
@@ -191,6 +197,12 @@ async fn embeddings(
     let auth_ctx = auth.as_ref().map(|Extension(c)| c.clone());
     let (subject, tier, limits) = state.token_limiter.resolve(&client_ip, auth_ctx.as_ref());
 
+    // The site-wide global cap counts EVERY tier by default. The only escape is
+    // an explicit per-request opt-out (`no_global_limit`), honoured ONLY for
+    // admin-tier callers — a non-admin setting the flag stays counted (the
+    // server checks the admin role, not just the flag).
+    let bypass_global = req.no_global_limit && matches!(tier, TokenTier::Admin);
+
     // 6. Single timestamp for the whole request so reserve/settle/snapshot agree.
     let now = OffsetDateTime::now_utc().unix_timestamp();
 
@@ -201,13 +213,14 @@ async fn embeddings(
     //    char-based estimate (~4 bytes/token) so the gate still bites.
     let estimate = count_tokens_best_effort(&req.input, &state.cache_dir)
         .map_or_else(|| char_estimate(&req.input), |n| n as u64);
-    let reservation = match state
-        .token_limiter
-        .reserve(&subject, tier, limits, estimate, now)
-    {
-        Ok(id) => id,
-        Err(rej) => return token_limit_429(&rej, now, rid),
-    };
+    let reservation =
+        match state
+            .token_limiter
+            .reserve(&subject, limits, estimate, now, bypass_global)
+        {
+            Ok(id) => id,
+            Err(rej) => return token_limit_429(&rej, now, rid),
+        };
 
     // 8. Call Voyage. Anything other than success releases the reservation and
     //    maps to 502 (upstream fault).
@@ -219,7 +232,9 @@ async fn embeddings(
     let out = match voyage.embed(req.input.clone(), input_type).await {
         Ok(o) => o,
         Err(e) => {
-            state.token_limiter.release(&subject, tier, reservation);
+            state
+                .token_limiter
+                .release(&subject, reservation, bypass_global);
             tracing::warn!(request_id = rid, error = %e, "voyage embedding failed");
             return error::bad_gateway(format!("voyage embedding failed: {e}"), rid);
         }
@@ -229,7 +244,7 @@ async fn embeddings(
     //    the post-charge budget.
     state
         .token_limiter
-        .settle(&subject, tier, reservation, out.total_tokens, now);
+        .settle(&subject, reservation, out.total_tokens, now, bypass_global);
     let info = state.token_limiter.snapshot_for(&subject, limits, now);
 
     // 10. Respond. Report the corpus model wire id (not Voyage's raw model name)

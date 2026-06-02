@@ -57,7 +57,8 @@ pub enum Window {
     Hour,
     /// Rolling 24-hour (daily) per-subject window.
     Day,
-    /// Site-wide rolling cap (anti-Sybil backstop; admin-exempt).
+    /// Site-wide rolling cap (anti-Sybil backstop; counts all tiers, escapable
+    /// only via an explicit per-request admin-gated bypass).
     Global,
 }
 
@@ -153,7 +154,8 @@ impl SubjectUsage {
 }
 
 /// Site-wide usage for the anti-Sybil global cap: a rolling per-minute window
-/// plus in-flight reservations, summed across ALL non-admin subjects.
+/// plus in-flight reservations, summed across ALL subjects (every tier counts;
+/// only a per-request admin-gated bypass skips it).
 #[derive(Default)]
 struct GlobalUsage {
     minutes: BTreeMap<i64, u64>,
@@ -199,10 +201,15 @@ impl GlobalUsage {
 /// pair is NOT atomic across calls and is retained only for unit coverage of
 /// the bucket math.
 ///
-/// A site-wide [`Window::Global`] cap (admin-exempt) backstops Sybil abuse
-/// (proxy / GitHub-account rotation). It is in-memory per process: with
-/// horizontal scaling the effective cap is `instances * global_limit`; a truly
-/// cross-instance cap would need a shared counter (DB/Redis) on the hot path.
+/// A site-wide [`Window::Global`] cap backstops Sybil abuse (proxy /
+/// GitHub-account rotation) AND runaway/buggy spend. It now counts **all**
+/// tiers — including admin — so a mistaken or runaway admin ingest can't
+/// silently blow the site budget. The only escape is an explicit per-request
+/// `bypass_global` flag, which the call site (the `/v1/embeddings` handler)
+/// sets ONLY for admin-tier callers that opt out deliberately. It is in-memory
+/// per process: with horizontal scaling the effective cap is
+/// `instances * global_limit`; a truly cross-instance cap would need a shared
+/// counter (DB/Redis) on the hot path.
 pub struct TokenUsageLimiter {
     // Subject keys persist between requests; the periodic snapshot job
     // (`snapshot_to_db`) evicts a key once it has been idle for >24h, so the
@@ -281,18 +288,23 @@ impl TokenUsageLimiter {
         }
     }
 
-    /// Whether the global cap applies to `tier` (admin is exempt — it requires
-    /// an Ed25519 challenge, so it is not Sybil-able, and legitimate ingest /
-    /// migration needs volume).
-    const fn global_applies(&self, tier: TokenTier) -> bool {
-        self.global_limit != u64::MAX && !matches!(tier, TokenTier::Admin)
+    /// Whether the global cap applies to this request. It applies to **every**
+    /// tier whenever the cap is enabled; the only escape is an explicit
+    /// per-request `bypass_global`, which the caller (the `/v1/embeddings`
+    /// handler) grants ONLY to admin-tier callers that opt out deliberately.
+    const fn global_applies(&self, bypass_global: bool) -> bool {
+        self.global_limit != u64::MAX && !bypass_global
     }
 
     /// Atomically reserve `estimate` tokens for an in-flight request against the
-    /// subject's windows and (for non-admin tiers) the global cap. Concurrent
-    /// requests see each other's reservations, so they can't all pass and
-    /// overshoot. Returns a reservation id to pass to [`settle`](Self::settle)
+    /// subject's windows and (unless `bypass_global` is set) the global cap.
+    /// Concurrent requests see each other's reservations, so they can't all pass
+    /// and overshoot. Returns a reservation id to pass to [`settle`](Self::settle)
     /// or [`release`](Self::release).
+    ///
+    /// `bypass_global` skips the site-wide cap for this request only; the caller
+    /// gates it on admin tier (a non-admin caller never reaches `reserve` with
+    /// `bypass_global = true`).
     ///
     /// # Errors
     ///
@@ -305,10 +317,10 @@ impl TokenUsageLimiter {
     pub fn reserve(
         &self,
         subject: &TokenSubject,
-        tier: TokenTier,
         limits: Limits,
         estimate: u64,
         now: i64,
+        bypass_global: bool,
     ) -> Result<u64, Reject> {
         let id = self
             .next_reservation_id
@@ -339,7 +351,7 @@ impl TokenUsageLimiter {
                 reset_at_secs: u.day_reset(now),
             });
         }
-        if self.global_applies(tier) {
+        if self.global_applies(bypass_global) {
             // Lock ordering: usage (held) -> global.
             let mut g = self.global.lock().expect("global lock");
             g.prune(now, self.global_window_min);
@@ -362,10 +374,18 @@ impl TokenUsageLimiter {
     }
 
     /// Resolve reservation `id` by charging the ACTUAL token count to the
-    /// durable buckets (subject + global for non-admin). Call after a successful
-    /// upstream embedding response.
+    /// durable buckets (subject always; global unless `bypass_global`). Call
+    /// after a successful upstream embedding response. Pass the SAME
+    /// `bypass_global` used for the matching [`reserve`](Self::reserve).
     #[allow(clippy::significant_drop_tightening)] // usage + global held together intentionally
-    pub fn settle(&self, subject: &TokenSubject, tier: TokenTier, id: u64, actual: u64, now: i64) {
+    pub fn settle(
+        &self,
+        subject: &TokenSubject,
+        id: u64,
+        actual: u64,
+        now: i64,
+        bypass_global: bool,
+    ) {
         let mut map = self.usage.lock().expect("usage lock");
         let u = map.entry(subject.clone()).or_default();
         u.prune(now);
@@ -375,7 +395,7 @@ impl TokenUsageLimiter {
         let hour = u.hours.entry(now / 3600).or_default();
         *hour = hour.saturating_add(actual);
         u.last_seen_secs = now;
-        if self.global_applies(tier) {
+        if self.global_applies(bypass_global) {
             let mut g = self.global.lock().expect("global lock");
             g.reservations.remove(&id);
             let gm = g.minutes.entry(now / 60).or_default();
@@ -384,14 +404,16 @@ impl TokenUsageLimiter {
     }
 
     /// Drop reservation `id` without charging (upstream failed). Frees the
-    /// in-flight estimate for both the subject and the global cap.
+    /// in-flight estimate for the subject and (unless `bypass_global`) the
+    /// global cap. Pass the SAME `bypass_global` used for the matching
+    /// [`reserve`](Self::reserve).
     #[allow(clippy::significant_drop_tightening)] // usage + global held together intentionally
-    pub fn release(&self, subject: &TokenSubject, tier: TokenTier, id: u64) {
+    pub fn release(&self, subject: &TokenSubject, id: u64, bypass_global: bool) {
         let mut map = self.usage.lock().expect("usage lock");
         if let Some(u) = map.get_mut(subject) {
             u.reservations.remove(&id);
         }
-        if self.global_applies(tier) {
+        if self.global_applies(bypass_global) {
             self.global
                 .lock()
                 .expect("global lock")
@@ -934,11 +956,11 @@ mod tests {
         let now = 1_000_000_000;
         // First in-flight reservation of 60 succeeds.
         let _id1 = l
-            .reserve(&subj(), TokenTier::Anonymous, lim(), 60, now)
+            .reserve(&subj(), lim(), 60, now, false)
             .expect("first reserve fits");
         // A concurrent second reservation of 60 must be REJECTED: 60 reserved +
         // 60 = 120 > 100, even though nothing has been charged yet.
-        let rej = l.reserve(&subj(), TokenTier::Anonymous, lim(), 60, now);
+        let rej = l.reserve(&subj(), lim(), 60, now, false);
         assert!(matches!(rej, Err(Reject { window: Window::Hour, .. })));
     }
 
@@ -946,31 +968,23 @@ mod tests {
     fn settle_reconciles_reservation_to_actual() {
         let l = TokenUsageLimiter::new(d(), d(), d());
         let now = 1_000_000_000;
-        let id = l
-            .reserve(&subj(), TokenTier::Anonymous, lim(), 60, now)
-            .unwrap();
+        let id = l.reserve(&subj(), lim(), 60, now, false).unwrap();
         // The request actually used only 10 tokens.
-        l.settle(&subj(), TokenTier::Anonymous, id, 10, now);
+        l.settle(&subj(), id, 10, now, false);
         // Only the actual 10 are charged; the 60 reservation is gone.
         assert_eq!(l.snapshot_for(&subj(), lim(), now).hour.remaining, 90);
         // And a fresh 60-token request now fits (10 used + 60 <= 100).
-        assert!(l
-            .reserve(&subj(), TokenTier::Anonymous, lim(), 60, now)
-            .is_ok());
+        assert!(l.reserve(&subj(), lim(), 60, now, false).is_ok());
     }
 
     #[test]
     fn release_frees_the_reservation() {
         let l = TokenUsageLimiter::new(d(), d(), d());
         let now = 1_000_000_000;
-        let id = l
-            .reserve(&subj(), TokenTier::Anonymous, lim(), 80, now)
-            .unwrap();
-        l.release(&subj(), TokenTier::Anonymous, id);
+        let id = l.reserve(&subj(), lim(), 80, now, false).unwrap();
+        l.release(&subj(), id, false);
         // Reservation released (upstream failed) -> full headroom again.
-        assert!(l
-            .reserve(&subj(), TokenTier::Anonymous, lim(), 100, now)
-            .is_ok());
+        assert!(l.reserve(&subj(), lim(), 100, now, false).is_ok());
     }
 
     // ---- global cap (anti-Sybil) ----
@@ -983,41 +997,60 @@ mod tests {
     }
 
     #[test]
-    fn global_cap_rejects_rotated_subjects_but_not_admin() {
+    fn global_cap_counts_all_tiers_by_default() {
         // Per-subject ceilings are huge; only the global cap (100 tokens / 1h)
-        // should bind. Each "subject" stands in for a rotated proxy/account.
+        // should bind. Without an explicit bypass the cap now counts EVERY
+        // tier — the old admin exemption is gone.
         let l = TokenUsageLimiter::new_with_global(big(), big(), big(), 100, 3600);
         let now = 1_000_000_000;
         let s1 = TokenSubject::Ip("198.51.100.1".into());
         let s2 = TokenSubject::Ip("198.51.100.2".into());
 
-        // First anon subject reserves 60 globally.
-        let _id1 = l
-            .reserve(&s1, TokenTier::Anonymous, big(), 60, now)
-            .unwrap();
-        // A DIFFERENT anon subject reserving 60 trips the GLOBAL cap (60 + 60 >
-        // 100), even though its own per-subject budget is fine.
-        let rej = l.reserve(&s2, TokenTier::Anonymous, big(), 60, now);
+        // First subject reserves 60 globally (bypass off).
+        let _id1 = l.reserve(&s1, big(), 60, now, false).unwrap();
+        // A DIFFERENT subject reserving 60 trips the GLOBAL cap (60 + 60 > 100),
+        // even though its own per-subject budget is fine. This holds regardless
+        // of tier: the global cap no longer exempts admin.
+        let rej = l.reserve(&s2, big(), 60, now, false);
         assert!(matches!(rej, Err(Reject { window: Window::Global, .. })));
 
-        // Admin is exempt from the global cap (not Sybil-able; needs volume).
+        // An admin subject (modelled here by another non-bypassing reserve) is
+        // counted too — there is no implicit admin exemption.
         let admin = TokenSubject::User("ingest-admin".into());
-        assert!(l.reserve(&admin, TokenTier::Admin, big(), 60, now).is_ok());
+        let rej_admin = l.reserve(&admin, big(), 60, now, false);
+        assert!(matches!(rej_admin, Err(Reject { window: Window::Global, .. })));
     }
 
     #[test]
-    fn global_settle_charges_the_global_window() {
+    fn global_cap_bypass_skips_the_cap() {
+        // The only escape from the global cap is an explicit per-request bypass
+        // (admin-gated at the call site).
         let l = TokenUsageLimiter::new_with_global(big(), big(), big(), 100, 3600);
         let now = 1_000_000_000;
         let s1 = TokenSubject::Ip("198.51.100.1".into());
-        let id = l
-            .reserve(&s1, TokenTier::Anonymous, big(), 60, now)
-            .unwrap();
-        // Actual usage 90 charged to the global window.
-        l.settle(&s1, TokenTier::Anonymous, id, 90, now);
-        // A second subject's 20-token request now trips the global cap (90 + 20).
-        let s2 = TokenSubject::Ip("198.51.100.2".into());
-        let rej = l.reserve(&s2, TokenTier::Anonymous, big(), 20, now);
+        let s2 = TokenSubject::User("ingest-admin".into());
+
+        // First subject reserves 60 against the global window then settles it,
+        // so 60 is durably charged to the global minute bucket.
+        let id1 = l.reserve(&s1, big(), 60, now, false).unwrap();
+        l.settle(&s1, id1, 60, now, false);
+        // A second request that would otherwise trip the cap (60 + 60 > 100)
+        // succeeds WITH bypass — the global cap is skipped.
+        let id2 = l
+            .reserve(&s2, big(), 60, now, true)
+            .expect("bypass skips the global cap");
+        // A settle with bypass=true must NOT charge the global window: after it,
+        // a fresh non-bypass reserve still sees only the first 60. 60 + 40 = 100
+        // (== ceiling, strict `>` so OK); a 41-token reserve would trip.
+        l.settle(&s2, id2, 90, now, true);
+        let s3 = TokenSubject::Ip("198.51.100.3".into());
+        assert!(
+            l.reserve(&s3, big(), 40, now, false).is_ok(),
+            "bypass settle must not charge the global window"
+        );
+        // s3's own 40-token reservation is now in-flight (60 charged + 40
+        // reserved = 100), so a further 1-token non-bypass reserve trips the cap.
+        let rej = l.reserve(&s3, big(), 1, now, false);
         assert!(matches!(rej, Err(Reject { window: Window::Global, .. })));
     }
 }

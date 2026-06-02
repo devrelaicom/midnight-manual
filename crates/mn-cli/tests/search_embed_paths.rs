@@ -102,6 +102,7 @@ async fn server_mode_embed_returns_mocked_vectors() {
         EmbedSource::Server {
             base_url: &server.uri(),
             bearer: None,
+            no_global_limit: false,
         },
     )
     .await

@@ -152,6 +152,13 @@ pub struct Args {
     /// Skip files larger than this many bytes.
     #[arg(long, default_value_t = 10 * 1024 * 1024)]
     pub max_file_size: u64,
+
+    /// Admin-only: exempt THIS ingest's server-side embedding from the
+    /// site-wide token cap. Ignored for BYOK/local embedding. The server
+    /// enforces the admin-role check — a non-admin caller setting this is still
+    /// counted against the global cap.
+    #[arg(long)]
+    pub unsafe_no_global_limit: bool,
 }
 
 /// Dispatch.
@@ -537,11 +544,16 @@ async fn run_inner(
     let mut carried = 0usize;
 
     // Build the embed context once: BYOK when a Voyage key resolved, else proxy
-    // through the server's /v1/embeddings (which holds the platform key).
+    // through the server's /v1/embeddings (which holds the platform key). The
+    // admin-only `--unsafe-no-global-limit` opt-out only applies on the
+    // server-proxy path; the server still enforces the admin-role check, so a
+    // non-admin caller setting it has no effect. It is meaningless for BYOK
+    // (Voyage has no such cap), so the BYOK branch ignores it.
     let embed_ctx = byok_embedder.as_ref().map_or(
         EmbedCtx::Server {
             base_url: server_url,
             bearer: bearer.as_deref(),
+            no_global_limit: args.unsafe_no_global_limit,
         },
         EmbedCtx::Byok,
     );
@@ -740,6 +752,9 @@ enum EmbedCtx<'a> {
     Server {
         base_url: &'a str,
         bearer: Option<&'a str>,
+        /// Admin-only opt-out from the server's site-wide token cap (from
+        /// `--unsafe-no-global-limit`). Meaningless on the BYOK path.
+        no_global_limit: bool,
     },
 }
 
@@ -747,7 +762,15 @@ impl EmbedCtx<'_> {
     const fn source(&self) -> EmbedSource<'_> {
         match self {
             Self::Byok(v) => EmbedSource::Byok(v),
-            Self::Server { base_url, bearer } => EmbedSource::Server { base_url, bearer: *bearer },
+            Self::Server {
+                base_url,
+                bearer,
+                no_global_limit,
+            } => EmbedSource::Server {
+                base_url,
+                bearer: *bearer,
+                no_global_limit: *no_global_limit,
+            },
         }
     }
 }
@@ -1212,6 +1235,29 @@ mod tests {
         // The corpus wire id is resolved from /v1/models/active at runtime; the
         // clap default is the "auto" sentinel, not a hardcoded model name.
         assert_eq!(w.inner.embedding_model, DEFAULT_EMBEDDING_MODEL);
+    }
+
+    #[test]
+    fn unsafe_no_global_limit_flag_parses_and_defaults_false() {
+        use clap::Parser as _;
+        #[derive(clap::Parser)]
+        struct Wrap {
+            #[command(flatten)]
+            inner: Args,
+        }
+        // Absent → false (default; the global cap counts this ingest).
+        let off = Wrap::try_parse_from(["ingest-run", "--source-slug", "s", "m.yaml"]).unwrap();
+        assert!(!off.inner.unsafe_no_global_limit);
+        // Present → true (admin-only opt-out; server still checks the role).
+        let on = Wrap::try_parse_from([
+            "ingest-run",
+            "--source-slug",
+            "s",
+            "--unsafe-no-global-limit",
+            "m.yaml",
+        ])
+        .unwrap();
+        assert!(on.inner.unsafe_no_global_limit);
     }
 
     #[test]

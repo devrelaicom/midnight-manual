@@ -178,6 +178,8 @@ pub async fn run_with_paths(
             mn_embedding::client::EmbedSource::Server {
                 base_url: server_url,
                 bearer: bearer.as_deref(),
+                // Search never opts out of the global cap (read path, not ingest).
+                no_global_limit: false,
             },
         )
         .await

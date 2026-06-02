@@ -150,6 +150,7 @@ async fn embed_server_mode_posts_to_v1_embeddings() {
         EmbedSource::Server {
             base_url: &server.uri(),
             bearer: None,
+            no_global_limit: false,
         },
     )
     .await
@@ -183,6 +184,7 @@ async fn embed_server_mode_returns_vectors_in_order() {
         EmbedSource::Server {
             base_url: &server.uri(),
             bearer: None,
+            no_global_limit: false,
         },
     )
     .await
@@ -221,6 +223,7 @@ async fn embed_server_mode_forwards_bearer_token() {
         EmbedSource::Server {
             base_url: &server.uri(),
             bearer: Some("test-token-xyz"),
+            no_global_limit: false,
         },
     )
     .await

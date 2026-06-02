@@ -501,6 +501,8 @@ pub async fn run_search(
             embed_client::EmbedSource::Server {
                 base_url: &cfg.cloud_url,
                 bearer: cloud.bearer(),
+                // Search never opts out of the global cap (read path, not ingest).
+                no_global_limit: false,
             },
         )
         .await

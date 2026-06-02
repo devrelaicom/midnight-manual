@@ -23,6 +23,11 @@ pub enum EmbedSource<'a> {
         base_url: &'a str,
         /// Optional bearer token for tier-based limits.
         bearer: Option<&'a str>,
+        /// Admin-only opt-out from the server's site-wide token cap. The server
+        /// honours it ONLY for admin-tier callers; for everyone else it is a
+        /// no-op (the request is still counted). Send `false` for normal
+        /// requests.
+        no_global_limit: bool,
     },
 }
 
@@ -63,7 +68,11 @@ pub async fn embed(
                 total_tokens: out.total_tokens,
             })
         }
-        EmbedSource::Server { base_url, bearer } => {
+        EmbedSource::Server {
+            base_url,
+            bearer,
+            no_global_limit,
+        } => {
             let client = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
@@ -74,7 +83,11 @@ pub async fn embed(
             };
             let mut rb = client
                 .post(format!("{}/v1/embeddings", base_url.trim_end_matches('/')))
-                .json(&serde_json::json!({ "input": texts, "input_type": it }));
+                .json(&serde_json::json!({
+                    "input": texts,
+                    "input_type": it,
+                    "no_global_limit": no_global_limit,
+                }));
             if let Some(b) = bearer {
                 rb = rb.bearer_auth(b);
             }

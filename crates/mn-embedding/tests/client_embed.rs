@@ -5,7 +5,7 @@
 
 use mn_embedding::client::{embed, EmbedSource};
 use mn_embedding::voyage::{InputType, VoyageEmbedder};
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[tokio::test]
@@ -33,6 +33,8 @@ async fn server_mode_calls_v1_embeddings() {
     let srv = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/embeddings"))
+        // The body must carry the explicit `no_global_limit` flag (false here).
+        .and(body_partial_json(serde_json::json!({ "no_global_limit": false })))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "model": "voyage-code-3@1",
             "embeddings": [vec![0.5_f32; 4]],
@@ -50,6 +52,7 @@ async fn server_mode_calls_v1_embeddings() {
         EmbedSource::Server {
             base_url: &srv.uri(),
             bearer: None,
+            no_global_limit: false,
         },
     )
     .await
