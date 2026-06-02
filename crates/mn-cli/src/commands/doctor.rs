@@ -82,7 +82,7 @@ pub struct CorpusSourceStatus {
     pub total_chunks: i64,
     /// Chunks ready for search.
     pub ready_chunks: i64,
-    /// Chunks still pending embedder work.
+    /// Chunks missing an embedding (no vector — not ready for search).
     pub embed_failed_chunks: i64,
 }
 

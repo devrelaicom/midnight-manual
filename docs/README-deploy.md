@@ -389,6 +389,17 @@ top-level command groups:
 - `mnm ingest {plan,run}` — talks to the server. `plan` is a
   dry-run; `run` does the real ingest.
 
+> **Migration note — the `voyage-code-3` cutover requires a fresh re-ingest.**
+> The `0008` migration switches `chunk.embedding` to `vector(1024)` and NULLs
+> any existing vectors (the old 768-dim `bge` embeddings are not convertible).
+> On a **first deploy** the corpus is empty, so this is a no-op. But do **not**
+> run `0008` against a live, populated *old-model* corpus and expect search to
+> keep working — every source must be re-ingested on `voyage-code-3` before it
+> returns hits. Use `mnm models status` to list sources still on the old model
+> and `mnm models migrate --to voyage-code-3@1` to re-ingest them (search
+> filters out chunks whose model id ≠ the active corpus model, so partially
+> migrated corpora stay correct, just smaller, during the rollover).
+
 ### 11a. Smoke-test with the sample corpus
 
 ```bash

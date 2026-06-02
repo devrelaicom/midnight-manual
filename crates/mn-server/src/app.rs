@@ -223,8 +223,9 @@ pub fn build_with_limiter(
 ) -> Result<Router, AuthStateError> {
     let auth = AuthState::from_config(&cfg)?.map(Arc::new);
     let scoring_policy = Arc::new(cfg.scoring_policy.clone());
-    // Resolve the model-cache dir the same way the embedder worker does; fall
-    // back to a tempdir in a sandbox with no HOME/XDG so boot never fails on it.
+    // Resolve the model-cache dir (used for the optional token pre-count
+    // tokenizer); fall back to a tempdir in a sandbox with no HOME/XDG so boot
+    // never fails on it.
     let cache_dir = mn_embedding::cache::resolve(&mn_embedding::cache::StdEnv)
         .unwrap_or_else(std::env::temp_dir);
     let state = AppState {
