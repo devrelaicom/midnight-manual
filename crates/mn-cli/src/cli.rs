@@ -183,8 +183,16 @@ pub async fn run() -> Result<()> {
         Command::Config(args) => commands::config::run(args, cli.config.as_deref(), cli.json).await,
         Command::Mcp(args) => commands::mcp::run(args).await,
         Command::Models(args) => {
-            commands::models::run(args, cli.server.as_deref(), &telemetry, crate::VERSION, cli.json)
-                .await
+            commands::models::run(
+                args,
+                cli.server.as_deref(),
+                cli.config.as_deref(),
+                cli.voyage_api_key.as_deref(),
+                &telemetry,
+                crate::VERSION,
+                cli.json,
+            )
+            .await
         }
         Command::Auth(args) => commands::auth::run(args, cli.server.as_deref(), cli.json).await,
         Command::Telemetry(args) => commands::telemetry::run(&args, cli.json),

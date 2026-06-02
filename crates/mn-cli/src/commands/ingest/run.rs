@@ -195,7 +195,10 @@ pub async fn run(
     .await
 }
 
-/// Path-explicit driver, exposed for integration tests.
+/// Path-explicit driver, exposed for integration tests. Returns `Result<()>`
+/// for callers that only care about success/failure; see
+/// [`run_with_paths_stats`] when you need the per-run [`RunStats`] (e.g. the
+/// model-migration driver, which budgets at source boundaries).
 ///
 /// # Errors
 ///
@@ -211,6 +214,44 @@ pub async fn run_with_paths(
     cli_version: &str,
     json: bool,
 ) -> Result<()> {
+    run_with_paths_stats(
+        args,
+        server_url,
+        auth_path,
+        config_path,
+        voyage_api_key,
+        telemetry,
+        cli_version,
+        json,
+    )
+    .await
+    .map(|_| ())
+}
+
+/// Run a single-source ingest and return the per-run [`RunStats`] (document and
+/// token counts). Identical to [`run_with_paths`] except the stats are returned
+/// instead of discarded. Emits exactly one `IngestComplete` telemetry event, so
+/// [`run_with_paths`] delegates here rather than duplicating the emit.
+///
+/// The returned `RunStats.total_tokens` sums the VoyageAI usage reported across
+/// every embed call (BYOK *and* server-proxy both surface `usage.total_tokens`
+/// via [`mn_embedding::client::Embedded`]). The migration driver uses
+/// this to enforce a session token budget at source boundaries.
+///
+/// # Errors
+///
+/// Returns the same errors as [`run`].
+#[allow(clippy::too_many_arguments)]
+pub async fn run_with_paths_stats(
+    args: Args,
+    server_url: &str,
+    auth_path: &Path,
+    config_path: Option<&Path>,
+    voyage_api_key: Option<&str>,
+    telemetry: &TelemetryClient,
+    cli_version: &str,
+    json: bool,
+) -> Result<RunStats> {
     let started = Instant::now();
     let outcome = run_inner(&args, server_url, auth_path, config_path, voyage_api_key, json).await;
 
@@ -243,15 +284,21 @@ pub async fn run_with_paths(
         ))
         .await;
 
-    outcome.map(|_| ())
+    outcome
 }
 
-struct RunStats {
-    added: usize,
+/// Per-run ingest statistics. `added` and `total_tokens` are `pub` so the
+/// model-migration driver can budget at source boundaries.
+pub struct RunStats {
+    /// Documents newly added in this run (accepted minus carried).
+    pub added: usize,
     carried: usize,
     deleted: usize,
     batch_count: u32,
     failed_batch_index: Option<u32>,
+    /// Total VoyageAI tokens consumed embedding this run's chunks, summed across
+    /// every embed call (BYOK and server-proxy alike report usage).
+    pub total_tokens: u64,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -359,6 +406,7 @@ async fn run_inner(
             deleted: 0,
             batch_count: 0,
             failed_batch_index: None,
+            total_tokens: 0,
         });
     }
 
@@ -542,6 +590,9 @@ async fn run_inner(
 
     let mut accepted = 0usize;
     let mut carried = 0usize;
+    // Sum of VoyageAI tokens consumed across every embed call this run. Surfaced
+    // on RunStats so the model-migration driver can budget at source boundaries.
+    let mut total_tokens = 0u64;
 
     // Build the embed context once: BYOK when a Voyage key resolved, else proxy
     // through the server's /v1/embeddings (which holds the platform key). The
@@ -563,9 +614,13 @@ async fn run_inner(
         // Embedding is the slow per-batch step; surface it as its own phase so
         // progress consumers don't appear to hang on "uploading".
         reporter.batch(i + 1, batch_count, "embedding documents");
-        if let Err(e) = embed_batch(&embed_ctx, &mut batch_docs).await {
-            abort_run(&client, server_url, &args.source_slug, start.ingest_run_id, &token).await;
-            return Err(e.context(format!("embed batch {}/{batch_count}", i + 1)));
+        match embed_batch(&embed_ctx, &mut batch_docs).await {
+            Ok(tokens) => total_tokens = total_tokens.saturating_add(tokens),
+            Err(e) => {
+                abort_run(&client, server_url, &args.source_slug, start.ingest_run_id, &token)
+                    .await;
+                return Err(e.context(format!("embed batch {}/{batch_count}", i + 1)));
+            }
         }
         reporter.batch(i + 1, batch_count, "uploading documents");
         let body = UploadDocumentsRequest {
@@ -619,6 +674,7 @@ async fn run_inner(
         deleted: 0,
         batch_count: u32::try_from(batch_count).unwrap_or(u32::MAX),
         failed_batch_index: None,
+        total_tokens,
     };
     println!(
         "{}",
@@ -776,36 +832,42 @@ impl EmbedCtx<'_> {
 }
 
 /// Embed every chunk of `docs` in place via VoyageAI (`input_type=document`),
-/// using `ctx` (BYOK direct, or the server `/v1/embeddings` proxy).
+/// using `ctx` (BYOK direct, or the server `/v1/embeddings` proxy), and return
+/// the total VoyageAI tokens consumed across this batch's sub-requests.
 ///
 /// The collected chunk texts are sub-batched into windows of at most
 /// [`VOYAGE_MAX_TEXTS_PER_REQUEST`] (Voyage rejects requests over 1000 inputs;
 /// a ~120K-token-per-request cap also exists, but the text-count ceiling is the
 /// simple, sufficient guard for chunk-sized inputs). Vectors are concatenated
-/// in input order before being distributed back across the docs' chunks.
+/// in input order before being distributed back across the docs' chunks, and the
+/// per-request `usage.total_tokens` is summed (both BYOK and server-proxy report
+/// it via [`mn_embedding::client::Embedded`]).
 ///
 /// # Errors
 ///
 /// Errors if any Voyage call fails or the returned vector count does not match
 /// the chunk count.
-async fn embed_batch(ctx: &EmbedCtx<'_>, docs: &mut [DocumentUpload]) -> Result<()> {
+async fn embed_batch(ctx: &EmbedCtx<'_>, docs: &mut [DocumentUpload]) -> Result<u64> {
     let texts: Vec<String> = docs
         .iter()
         .flat_map(|d| d.chunks.iter().map(|c| c.content.clone()))
         .collect();
     if texts.is_empty() {
-        return Ok(());
+        return Ok(0);
     }
 
     let mut vectors: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
+    let mut tokens = 0u64;
     for sub in texts.chunks(VOYAGE_MAX_TEXTS_PER_REQUEST) {
         let embedded = embed(sub.to_vec(), InputType::Document, ctx.source())
             .await
             .map_err(|e| anyhow!("embed chunks via Voyage: {e}"))?;
+        tokens = tokens.saturating_add(embedded.total_tokens);
         vectors.extend(embedded.vectors);
     }
 
-    attach_embeddings(docs, vectors)
+    attach_embeddings(docs, vectors)?;
+    Ok(tokens)
 }
 
 async fn post_json<I: Serialize + Sync, O: for<'de> Deserialize<'de>>(

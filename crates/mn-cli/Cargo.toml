@@ -52,9 +52,9 @@ reqwest       = { workspace = true }
 time          = { workspace = true }
 base64        = { workspace = true }
 url           = { workspace = true }
+tempfile      = { workspace = true }
 
 [dev-dependencies]
-tempfile      = { workspace = true }
 wiremock      = { workspace = true }
 ed25519-dalek = { workspace = true }
 mn-telemetry  = { path = "../mn-telemetry" }
