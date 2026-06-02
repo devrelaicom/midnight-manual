@@ -14,6 +14,11 @@ use mn_server::{app, config::ServerConfig, jobs};
 use tokio::signal;
 use tracing_subscriber::EnvFilter;
 
+// `main` is the boot/wiring entrypoint: it threads config, DB, the resolved
+// corpus model, and several background tasks. Splitting it would scatter the
+// boot sequence across helpers for no readability gain, so the line lint is
+// allowed here (consistent with the server-scaffold lint allowances in lib.rs).
+#[allow(clippy::too_many_lines)]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Structured JSON logs from day one (FR-105). RUST_LOG override permitted.
@@ -46,11 +51,22 @@ async fn main() -> anyhow::Result<()> {
     let resolved_corpus_model = format!("{}@{}", active.name, active.revision);
     tracing::info!(corpus_model = %resolved_corpus_model, "resolved active embedding model");
     let mut cfg = cfg;
-    cfg.corpus_model = Some(resolved_corpus_model);
+    cfg.corpus_model = Some(resolved_corpus_model.clone());
+
+    // Re-resolvable corpus-model handle for AppState (Task 3.2). Reuse the
+    // already-resolved `active` row rather than issuing a second query.
+    let corpus_model =
+        std::sync::Arc::new(std::sync::RwLock::new(Some(mn_server::corpus_model::CorpusModel {
+            wire: resolved_corpus_model.clone(),
+            id: active.id,
+            dim: usize::try_from(active.dim)
+                .context("active embedding model dim out of range for usize")?,
+        })));
 
     let rate_limiter = mn_server::ratelimit::RateLimiter::from_config(&cfg);
-    let app = app::build_with_limiter(pool.clone(), cfg.clone(), rate_limiter.clone())
-        .context("build app")?;
+    let app =
+        app::build_with_limiter(pool.clone(), cfg.clone(), rate_limiter.clone(), corpus_model)
+            .context("build app")?;
     let addr: SocketAddr = format!("0.0.0.0:{}", cfg.port)
         .parse()
         .context("parse listen address")?;

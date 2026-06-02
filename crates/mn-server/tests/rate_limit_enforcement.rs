@@ -138,7 +138,13 @@ async fn success_carries_ratelimit_headers() {
     let h = common::boot().await;
     let cfg = enabled_cfg(100);
     let limiter = RateLimiter::from_config(&cfg);
-    let app = app::build_with_limiter(h.pool.clone(), cfg, limiter).expect("build");
+    let app = app::build_with_limiter(
+        h.pool.clone(),
+        cfg,
+        limiter,
+        std::sync::Arc::new(std::sync::RwLock::new(None)),
+    )
+    .expect("build");
     let (status, headers, _) = send(app, "GET", "/v1/sources", &unique_ip(), None).await;
     assert_eq!(status, StatusCode::OK);
     assert!(headers.contains_key("x-ratelimit-limit"), "limit header present");
@@ -152,7 +158,13 @@ async fn anonymous_over_budget_returns_429_with_retry_after() {
     let h = common::boot().await;
     let cfg = enabled_cfg(2);
     let limiter = RateLimiter::from_config(&cfg);
-    let app = app::build_with_limiter(h.pool.clone(), cfg, limiter).expect("build");
+    let app = app::build_with_limiter(
+        h.pool.clone(),
+        cfg,
+        limiter,
+        std::sync::Arc::new(std::sync::RwLock::new(None)),
+    )
+    .expect("build");
     let ip = unique_ip();
     let (s1, _, _) = send(app.clone(), "GET", "/v1/sources", &ip, None).await;
     let (s2, _, _) = send(app.clone(), "GET", "/v1/sources", &ip, None).await;
@@ -174,7 +186,13 @@ async fn health_is_exempt_from_limiting() {
     let h = common::boot().await;
     let cfg = enabled_cfg(1);
     let limiter = RateLimiter::from_config(&cfg);
-    let app = app::build_with_limiter(h.pool.clone(), cfg, limiter).expect("build");
+    let app = app::build_with_limiter(
+        h.pool.clone(),
+        cfg,
+        limiter,
+        std::sync::Arc::new(std::sync::RwLock::new(None)),
+    )
+    .expect("build");
     let ip = unique_ip();
     for _ in 0..5 {
         let (s, _, _) = send(app.clone(), "GET", "/healthz", &ip, None).await;
@@ -205,8 +223,13 @@ async fn cidr_override_raises_the_limit() {
         .await
         .expect("refresh");
 
-    let app =
-        app::build_with_limiter(h.pool.clone(), cfg, Some(Arc::clone(&limiter))).expect("build");
+    let app = app::build_with_limiter(
+        h.pool.clone(),
+        cfg,
+        Some(Arc::clone(&limiter)),
+        std::sync::Arc::new(std::sync::RwLock::new(None)),
+    )
+    .expect("build");
     // Anon floor of 1 would 429 the third request; the /24 override (50 rps)
     // keeps all three at 200 with the override's limit in the header.
     for _ in 0..3 {
@@ -225,7 +248,13 @@ async fn admin_token_gets_the_top_tier() {
     // mint IP; the asserted requests carry the admin token (a separate bucket).
     let cfg = enabled_auth_cfg(2, admin_user_store(&user, &kp));
     let limiter = RateLimiter::from_config(&cfg);
-    let app = app::build_with_limiter(h.pool.clone(), cfg, limiter).expect("build");
+    let app = app::build_with_limiter(
+        h.pool.clone(),
+        cfg,
+        limiter,
+        std::sync::Arc::new(std::sync::RwLock::new(None)),
+    )
+    .expect("build");
     let token = mint_token(app.clone(), &user, &kp, &unique_ip()).await;
     let ip = unique_ip();
     // With an admin token the tier is admin (1000 rps), independent of the IP

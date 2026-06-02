@@ -150,7 +150,13 @@ async fn over_cap_returns_400_and_refunds_the_base_token() {
     // anon floor of 1 token, cap of 2 queries.
     let cfg = rl_cfg(1, 2);
     let limiter = RateLimiter::from_config(&cfg);
-    let app = app::build_with_limiter(h.pool.clone(), cfg, limiter).expect("build");
+    let app = app::build_with_limiter(
+        h.pool.clone(),
+        cfg,
+        limiter,
+        std::sync::Arc::new(std::sync::RwLock::new(None)),
+    )
+    .expect("build");
     let ip = unique_ip();
 
     // 3 queries > cap 2 → 400 multi_query_limit_exceeded.
@@ -174,7 +180,13 @@ async fn duplicate_queries_do_not_inflate_cost() {
     seed(&h.pool).await;
     let cfg = rl_cfg(2, 10);
     let limiter = RateLimiter::from_config(&cfg);
-    let app = app::build_with_limiter(h.pool.clone(), cfg, limiter).expect("build");
+    let app = app::build_with_limiter(
+        h.pool.clone(),
+        cfg,
+        limiter,
+        std::sync::Arc::new(std::sync::RwLock::new(None)),
+    )
+    .expect("build");
     let ip = unique_ip();
 
     // 3 identical queries → dedup to 1 → cost 1 (base only), 200.
@@ -190,7 +202,13 @@ async fn distinct_queries_charge_n_tokens() {
     seed(&h.pool).await;
     let cfg = rl_cfg(5, 10);
     let limiter = RateLimiter::from_config(&cfg);
-    let app = app::build_with_limiter(h.pool.clone(), cfg, limiter).expect("build");
+    let app = app::build_with_limiter(
+        h.pool.clone(),
+        cfg,
+        limiter,
+        std::sync::Arc::new(std::sync::RwLock::new(None)),
+    )
+    .expect("build");
     let ip = unique_ip();
 
     // 3 distinct queries → cost 3 → remaining 5 - 3 = 2 (post-charge balance).
@@ -211,7 +229,13 @@ async fn insufficient_budget_returns_429() {
     // Capacity 2, but 3 distinct queries cost 3 → over budget.
     let cfg = rl_cfg(2, 10);
     let limiter = RateLimiter::from_config(&cfg);
-    let app = app::build_with_limiter(h.pool.clone(), cfg, limiter).expect("build");
+    let app = app::build_with_limiter(
+        h.pool.clone(),
+        cfg,
+        limiter,
+        std::sync::Arc::new(std::sync::RwLock::new(None)),
+    )
+    .expect("build");
     let ip = unique_ip();
 
     let (s, headers, b) = search(app, &ip, json!([q(0.1), q(0.5), q(0.9)])).await;

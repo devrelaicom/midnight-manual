@@ -37,6 +37,10 @@ pub struct AppState {
     /// Confidence-scoring policy resolved at boot (US6, D24). Shared read-only
     /// across requests.
     pub scoring_policy: Arc<mn_core::scoring_policy::ScoringPolicy>,
+    /// The corpus's active embedding model, re-resolvable without a restart.
+    /// `None` until resolved — production resolves at boot; some tests leave it
+    /// unresolved and search's existing `None`-handling covers that.
+    pub corpus_model: crate::corpus_model::Shared,
 }
 
 /// Resolved auth subsystem state — set once at boot when both the user
@@ -140,6 +144,10 @@ fn build_github_oauth(cfg: &ServerConfig) -> Option<GithubOAuthState> {
 
 /// Build the full axum app: routes + middleware + state.
 ///
+/// Constructs an unresolved (`None`) corpus model handle — callers that need a
+/// resolved model (production boot) use [`build_with_limiter`] directly. Search
+/// tolerates the unresolved state via its existing `None`-handling.
+///
 /// # Errors
 ///
 /// Returns [`AuthStateError`] if the auth env values are present but malformed
@@ -148,13 +156,15 @@ fn build_github_oauth(cfg: &ServerConfig) -> Option<GithubOAuthState> {
 /// absent the server boots with `auth = None`.
 pub fn build(pool: PgPool, cfg: ServerConfig) -> Result<Router, AuthStateError> {
     let limiter = crate::ratelimit::RateLimiter::from_config(&cfg);
-    build_with_limiter(pool, cfg, limiter)
+    let corpus_model = std::sync::Arc::new(std::sync::RwLock::new(None));
+    build_with_limiter(pool, cfg, limiter, corpus_model)
 }
 
-/// Build the app with an explicit rate limiter, so `main` can share the
-/// instance with its background tasks and integration tests can pre-seed
-/// overrides. [`build`] delegates here after constructing the limiter from
-/// config.
+/// Build the app with an explicit rate limiter and corpus-model handle, so
+/// `main` can share the limiter with its background tasks, pass a corpus model
+/// resolved at boot, and integration tests can pre-seed overrides. [`build`]
+/// delegates here after constructing the limiter from config and an unresolved
+/// (`None`) corpus model.
 ///
 /// # Errors
 ///
@@ -163,6 +173,7 @@ pub fn build_with_limiter(
     pool: PgPool,
     cfg: ServerConfig,
     rate_limiter: Option<Arc<crate::ratelimit::RateLimiter>>,
+    corpus_model: crate::corpus_model::Shared,
 ) -> Result<Router, AuthStateError> {
     let auth = AuthState::from_config(&cfg)?.map(Arc::new);
     let scoring_policy = Arc::new(cfg.scoring_policy.clone());
@@ -172,6 +183,7 @@ pub fn build_with_limiter(
         auth,
         rate_limiter,
         scoring_policy,
+        corpus_model,
     };
 
     Ok(Router::new()
