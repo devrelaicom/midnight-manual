@@ -27,7 +27,6 @@ use uuid::Uuid;
 
 fn enabled_cfg(anonymous_rps: u32) -> ServerConfig {
     ServerConfig {
-        corpus_model: Some("bge-base-en-v1.5@1".to_owned()),
         rate_limit_enabled: true,
         rate_limit_anonymous_rps: anonymous_rps,
         rate_limit_uplift_rps: 1000,

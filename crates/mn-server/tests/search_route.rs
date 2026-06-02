@@ -130,19 +130,19 @@ async fn seed(pool: &sqlx::PgPool) -> (Uuid, Uuid) {
 }
 
 fn cfg() -> ServerConfig {
-    ServerConfig {
-        // Tests bypass the boot-time resolver so we pin the corpus model
-        // explicitly. Matches the seeded `embedding_model` row in migration 0006.
-        corpus_model: Some("bge-base-en-v1.5@1".to_owned()),
-        ..Default::default()
-    }
+    // The corpus model is no longer pinned in config; `app::build_resolved`
+    // resolves it from the DB. Each test seeds an active bge-base-en-v1.5@1
+    // source_version before building, so resolution yields bge@1/768.
+    ServerConfig::default()
 }
 
 #[tokio::test]
 async fn search_returns_nearest_chunk_first() {
     let h = common::boot().await;
     let (a, _b) = seed(&h.pool).await;
-    let app = app::build(h.pool.clone(), cfg()).expect("build app");
+    let app = app::build_resolved(h.pool.clone(), cfg())
+        .await
+        .expect("build app");
 
     // Query vector very close to chunk_a's seed (0.10) — chunk_a should rank
     // first. `limit` is generous because parallel CI shares one schema: every
@@ -195,7 +195,9 @@ async fn search_returns_nearest_chunk_first() {
 async fn search_returns_409_on_model_mismatch() {
     let h = common::boot().await;
     let _ = seed(&h.pool).await;
-    let app = app::build(h.pool.clone(), cfg()).expect("build app");
+    let app = app::build_resolved(h.pool.clone(), cfg())
+        .await
+        .expect("build app");
 
     let body = serde_json::json!({
         "queries": [{ "text": "x", "vector": unit_vector(0.0) }],
@@ -225,7 +227,9 @@ async fn search_returns_409_on_model_mismatch() {
 async fn search_returns_400_on_wrong_dim() {
     let h = common::boot().await;
     let _ = seed(&h.pool).await;
-    let app = app::build(h.pool.clone(), cfg()).expect("build app");
+    let app = app::build_resolved(h.pool.clone(), cfg())
+        .await
+        .expect("build app");
 
     let body = serde_json::json!({
         "queries": [{ "text": "x", "vector": vec![0.0_f32; 128] }],
@@ -252,7 +256,9 @@ async fn search_returns_400_on_wrong_dim() {
 #[tokio::test]
 async fn search_returns_400_on_empty_queries() {
     let h = common::boot().await;
-    let app = app::build(h.pool.clone(), cfg()).expect("build app");
+    let app = app::build_resolved(h.pool.clone(), cfg())
+        .await
+        .expect("build app");
 
     let body = serde_json::json!({
         "queries": [],
@@ -276,7 +282,9 @@ async fn search_returns_400_on_empty_queries() {
 async fn search_respects_limit_cap() {
     let h = common::boot().await;
     let _ = seed(&h.pool).await;
-    let app = app::build(h.pool.clone(), cfg()).expect("build app");
+    let app = app::build_resolved(h.pool.clone(), cfg())
+        .await
+        .expect("build app");
 
     let body = serde_json::json!({
         "queries": [{ "text": "x", "vector": unit_vector(0.5) }],
@@ -658,7 +666,9 @@ async fn post_search(app: axum::Router, body: serde_json::Value) -> serde_json::
 async fn fts_only_chunk_appears_via_hybrid_union() {
     let h = common::boot().await;
     let (_embedded, fts_only) = seed_hybrid(&h.pool).await;
-    let app = app::build(h.pool.clone(), cfg()).expect("build app");
+    let app = app::build_resolved(h.pool.clone(), cfg())
+        .await
+        .expect("build app");
 
     // Text matches the FTS-only chunk; vector targets the embedded chunk. The
     // FTS-only chunk has a NULL embedding, so it can only appear via the FTS
@@ -696,7 +706,9 @@ async fn fts_only_chunk_appears_via_hybrid_union() {
 async fn matched_queries_reflects_contributing_queries() {
     let h = common::boot().await;
     let (embedded, fts_only) = seed_hybrid(&h.pool).await;
-    let app = app::build(h.pool.clone(), cfg()).expect("build app");
+    let app = app::build_resolved(h.pool.clone(), cfg())
+        .await
+        .expect("build app");
 
     // q0 FTS-matches the FTS-only chunk; both queries vector-match the embedded
     // chunk (their vectors bracket its 0.4242 seed). q1's text matches nothing.
@@ -752,7 +764,9 @@ async fn matched_queries_reflects_contributing_queries() {
 async fn results_carry_rrf_score_in_descending_order() {
     let h = common::boot().await;
     let _ = seed_hybrid(&h.pool).await;
-    let app = app::build(h.pool.clone(), cfg()).expect("build app");
+    let app = app::build_resolved(h.pool.clone(), cfg())
+        .await
+        .expect("build app");
 
     let v = post_search(
         app,
@@ -782,7 +796,9 @@ async fn convenience_form_is_accepted_end_to_end() {
     // accepts the shape end-to-end and returns the expected chunk.)
     let h = common::boot().await;
     let (_embedded, fts_only) = seed_hybrid(&h.pool).await;
-    let app = app::build(h.pool.clone(), cfg()).expect("build app");
+    let app = app::build_resolved(h.pool.clone(), cfg())
+        .await
+        .expect("build app");
 
     let v = post_search(
         app,
@@ -812,7 +828,9 @@ async fn results_carry_confidence_fields() {
     // confidence_factors breakdown whose relevance_source is "rrf" on the cloud.
     let h = common::boot().await;
     let (_high, _low, token) = seed_scored(&h.pool).await;
-    let app = app::build(h.pool.clone(), cfg()).expect("build app");
+    let app = app::build_resolved(h.pool.clone(), cfg())
+        .await
+        .expect("build app");
 
     let v = post_search(
         app,
@@ -847,7 +865,9 @@ async fn higher_trust_outranks_under_default_confidence_sort() {
     // confidence sort.
     let h = common::boot().await;
     let (high, low, token) = seed_scored(&h.pool).await;
-    let app = app::build(h.pool.clone(), cfg()).expect("build app");
+    let app = app::build_resolved(h.pool.clone(), cfg())
+        .await
+        .expect("build app");
 
     let v = post_search(
         app,
@@ -883,7 +903,9 @@ async fn version_match_boost_applies_with_filter() {
     // matching chunk's version_match_multiplier above neutral.
     let h = common::boot().await;
     let (high, _low, token) = seed_scored(&h.pool).await;
-    let app = app::build(h.pool.clone(), cfg()).expect("build app");
+    let app = app::build_resolved(h.pool.clone(), cfg())
+        .await
+        .expect("build app");
 
     let v = post_search(
         app,
@@ -914,7 +936,9 @@ async fn min_confidence_filters_before_limit() {
     // reports the count in filtered_by_confidence.
     let h = common::boot().await;
     let (_high, _low, token) = seed_scored(&h.pool).await;
-    let app = app::build(h.pool.clone(), cfg()).expect("build app");
+    let app = app::build_resolved(h.pool.clone(), cfg())
+        .await
+        .expect("build app");
 
     let v = post_search(
         app,
@@ -945,7 +969,9 @@ async fn include_scores_false_omits_scores() {
     // happens server-side.
     let h = common::boot().await;
     let (_high, _low, token) = seed_scored(&h.pool).await;
-    let app = app::build(h.pool.clone(), cfg()).expect("build app");
+    let app = app::build_resolved(h.pool.clone(), cfg())
+        .await
+        .expect("build app");
 
     let v = post_search(
         app,
@@ -982,7 +1008,9 @@ async fn run_filtered(
     token: &str,
     filters: serde_json::Value,
 ) -> serde_json::Value {
-    let app = app::build(pool.clone(), cfg()).expect("build app");
+    let app = app::build_resolved(pool.clone(), cfg())
+        .await
+        .expect("build app");
     post_search(
         app,
         serde_json::json!({
@@ -1109,7 +1137,9 @@ async fn semver_filters_language_target_and_sdk_dependency() {
 async fn search_returns_400_when_all_text_empty() {
     // Acceptance #7: every query with empty/whitespace text is rejected.
     let h = common::boot().await;
-    let app = app::build(h.pool.clone(), cfg()).expect("build app");
+    let app = app::build_resolved(h.pool.clone(), cfg())
+        .await
+        .expect("build app");
 
     let body = serde_json::json!({
         "queries": [

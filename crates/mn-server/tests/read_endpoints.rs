@@ -20,14 +20,7 @@ use uuid::Uuid;
 #[tokio::test]
 async fn healthz_returns_200() {
     let h = common::boot().await;
-    let app = app::build(
-        h.pool.clone(),
-        ServerConfig {
-            corpus_model: None,
-            ..Default::default()
-        },
-    )
-    .expect("build app");
+    let app = app::build(h.pool.clone(), ServerConfig::default()).expect("build app");
 
     let resp = app
         .oneshot(
@@ -44,14 +37,7 @@ async fn healthz_returns_200() {
 #[tokio::test]
 async fn readyz_returns_200_when_pgvector_present() {
     let h = common::boot().await;
-    let app = app::build(
-        h.pool.clone(),
-        ServerConfig {
-            corpus_model: None,
-            ..Default::default()
-        },
-    )
-    .expect("build app");
+    let app = app::build(h.pool.clone(), ServerConfig::default()).expect("build app");
 
     let resp = app
         .oneshot(
@@ -72,14 +58,7 @@ async fn active_model_returns_seeded_row() {
     embedding_model::upsert(&h.pool, "bge-base-en-v1.5", 1, 768, "baai")
         .await
         .unwrap();
-    let app = app::build(
-        h.pool.clone(),
-        ServerConfig {
-            corpus_model: None,
-            ..Default::default()
-        },
-    )
-    .expect("build app");
+    let app = app::build(h.pool.clone(), ServerConfig::default()).expect("build app");
 
     let resp = app
         .oneshot(
@@ -114,14 +93,7 @@ async fn sources_list_includes_inserted_row_and_show_round_trips() {
     .await
     .unwrap();
 
-    let app = app::build(
-        h.pool.clone(),
-        ServerConfig {
-            corpus_model: None,
-            ..Default::default()
-        },
-    )
-    .expect("build app");
+    let app = app::build(h.pool.clone(), ServerConfig::default()).expect("build app");
 
     // List
     let resp = app
@@ -167,14 +139,7 @@ async fn sources_list_includes_inserted_row_and_show_round_trips() {
 #[tokio::test]
 async fn unknown_source_returns_404() {
     let h = common::boot().await;
-    let app = app::build(
-        h.pool.clone(),
-        ServerConfig {
-            corpus_model: None,
-            ..Default::default()
-        },
-    )
-    .expect("build app");
+    let app = app::build(h.pool.clone(), ServerConfig::default()).expect("build app");
 
     let resp = app
         .oneshot(
@@ -195,14 +160,7 @@ async fn unknown_source_returns_404() {
 #[tokio::test]
 async fn x_request_id_is_echoed() {
     let h = common::boot().await;
-    let app = app::build(
-        h.pool.clone(),
-        ServerConfig {
-            corpus_model: None,
-            ..Default::default()
-        },
-    )
-    .expect("build app");
+    let app = app::build(h.pool.clone(), ServerConfig::default()).expect("build app");
 
     let resp = app
         .clone()

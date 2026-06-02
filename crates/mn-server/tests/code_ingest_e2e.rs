@@ -131,7 +131,6 @@ async fn code_ingest_smoke_persists_symbol_paths_and_packages() {
     let user_id = "aaron";
     let jwt_secret_bytes = vec![0xAB_u8; 32];
     let cfg = ServerConfig {
-        corpus_model: Some("bge-base-en-v1.5@1".to_owned()),
         user_store_body: Some(user_store_for(user_id, &kp)),
         jwt_secret: Some(jwt_secret_bytes.clone()),
         ..Default::default()

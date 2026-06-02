@@ -17,10 +17,6 @@ pub struct ServerConfig {
     pub port: u16,
     /// When `false`, skip the automatic migration runner at startup (D22).
     pub auto_migrate: bool,
-    /// When set, every search-or-chunk endpoint refuses unless the caller's
-    /// `client_embedding_model` matches this canonical model identifier.
-    /// Server resolves this from the active embedding_model row on boot.
-    pub corpus_model: Option<String>,
     /// `MIDNIGHT_MANUAL_USER_STORE` — the in-memory TOML body of the user
     /// store. When `None`, the auth endpoints (FR-056 challenge / verify)
     /// return 503 `service_unavailable` rather than refusing boot.
@@ -138,7 +134,6 @@ impl Default for ServerConfig {
             database_url: String::new(),
             port: 8080,
             auto_migrate: false,
-            corpus_model: None,
             user_store_body: None,
             jwt_secret: None,
             github_oauth_client_id: None,
@@ -273,7 +268,6 @@ impl ServerConfig {
             database_url,
             port,
             auto_migrate,
-            corpus_model: None,
             user_store_body,
             jwt_secret,
             github_oauth_client_id,

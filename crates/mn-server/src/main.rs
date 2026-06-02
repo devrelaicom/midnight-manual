@@ -50,14 +50,12 @@ async fn main() -> anyhow::Result<()> {
         .context("resolve active embedding model (did migration 0006 run?)")?;
     let resolved_corpus_model = format!("{}@{}", active.name, active.revision);
     tracing::info!(corpus_model = %resolved_corpus_model, "resolved active embedding model");
-    let mut cfg = cfg;
-    cfg.corpus_model = Some(resolved_corpus_model.clone());
 
     // Re-resolvable corpus-model handle for AppState (Task 3.2). Reuse the
     // already-resolved `active` row rather than issuing a second query.
     let corpus_model =
         std::sync::Arc::new(std::sync::RwLock::new(Some(mn_server::corpus_model::CorpusModel {
-            wire: resolved_corpus_model.clone(),
+            wire: resolved_corpus_model,
             id: active.id,
             dim: usize::try_from(active.dim)
                 .context("active embedding model dim out of range for usize")?,

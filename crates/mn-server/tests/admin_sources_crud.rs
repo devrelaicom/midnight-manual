@@ -19,7 +19,6 @@ use uuid::Uuid;
 
 fn cfg_with_auth(user_store_body: String, jwt_secret_bytes: Vec<u8>) -> ServerConfig {
     ServerConfig {
-        corpus_model: Some("bge-base-en-v1.5@1".to_owned()),
         user_store_body: Some(user_store_body),
         jwt_secret: Some(jwt_secret_bytes),
         ..Default::default()

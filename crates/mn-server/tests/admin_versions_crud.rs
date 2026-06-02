@@ -20,7 +20,6 @@ use uuid::Uuid;
 
 fn cfg_with_auth(user_store_body: String, jwt_secret_bytes: Vec<u8>) -> ServerConfig {
     ServerConfig {
-        corpus_model: Some("bge-base-en-v1.5@1".to_owned()),
         user_store_body: Some(user_store_body),
         jwt_secret: Some(jwt_secret_bytes),
         ..Default::default()
@@ -124,10 +123,7 @@ async fn seed_source_with_versions(
 #[tokio::test]
 async fn list_versions_returns_array_newest_first() {
     let h = common::boot().await;
-    let cfg = ServerConfig {
-        corpus_model: Some("bge-base-en-v1.5@1".to_owned()),
-        ..Default::default()
-    };
+    let cfg = ServerConfig::default();
     let app = app::build(h.pool.clone(), cfg).expect("build app");
     let (slug, _, _) = seed_source_with_versions(&h.pool, "list-public", 3).await;
 
@@ -145,10 +141,7 @@ async fn list_versions_returns_array_newest_first() {
 #[tokio::test]
 async fn list_versions_404_on_unknown_slug() {
     let h = common::boot().await;
-    let cfg = ServerConfig {
-        corpus_model: Some("bge-base-en-v1.5@1".to_owned()),
-        ..Default::default()
-    };
+    let cfg = ServerConfig::default();
     let app = app::build(h.pool.clone(), cfg).expect("build app");
 
     let (status, body) = call(app, "GET", "/v1/sources/no-such-source/versions", None, None).await;
@@ -158,10 +151,7 @@ async fn list_versions_404_on_unknown_slug() {
 #[tokio::test]
 async fn get_version_happy_path() {
     let h = common::boot().await;
-    let cfg = ServerConfig {
-        corpus_model: Some("bge-base-en-v1.5@1".to_owned()),
-        ..Default::default()
-    };
+    let cfg = ServerConfig::default();
     let app = app::build(h.pool.clone(), cfg).expect("build app");
     let (slug, _, _) = seed_source_with_versions(&h.pool, "get-public", 2).await;
 
@@ -175,10 +165,7 @@ async fn get_version_happy_path() {
 #[tokio::test]
 async fn get_version_404_on_unknown_revision() {
     let h = common::boot().await;
-    let cfg = ServerConfig {
-        corpus_model: Some("bge-base-en-v1.5@1".to_owned()),
-        ..Default::default()
-    };
+    let cfg = ServerConfig::default();
     let app = app::build(h.pool.clone(), cfg).expect("build app");
     let (slug, _, _) = seed_source_with_versions(&h.pool, "get-missing", 1).await;
 

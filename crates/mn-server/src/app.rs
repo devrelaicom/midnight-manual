@@ -160,6 +160,21 @@ pub fn build(pool: PgPool, cfg: ServerConfig) -> Result<Router, AuthStateError> 
     build_with_limiter(pool, cfg, limiter, corpus_model)
 }
 
+/// Build the app with the corpus model auto-resolved from the DB. Convenience
+/// for integration tests (and any caller that wants boot-time resolution
+/// without threading the handle manually). Resolution failure yields an
+/// unresolved (`None`) corpus model — search then 503s, matching prod's
+/// "no model" path.
+///
+/// # Errors
+/// Returns [`AuthStateError`] if the auth env values are present but malformed.
+pub async fn build_resolved(pool: PgPool, cfg: ServerConfig) -> Result<Router, AuthStateError> {
+    let cm = crate::corpus_model::resolve(&pool).await.ok();
+    let corpus_model = std::sync::Arc::new(std::sync::RwLock::new(cm));
+    let limiter = crate::ratelimit::RateLimiter::from_config(&cfg);
+    build_with_limiter(pool, cfg, limiter, corpus_model)
+}
+
 /// Build the app with an explicit rate limiter and corpus-model handle, so
 /// `main` can share the limiter with its background tasks, pass a corpus model
 /// resolved at boot, and integration tests can pre-seed overrides. [`build`]

@@ -21,7 +21,6 @@ use tower::ServiceExt;
 
 fn cfg_with_auth(user_store_body: String, jwt_secret_bytes: Vec<u8>) -> ServerConfig {
     ServerConfig {
-        corpus_model: Some("bge-base-en-v1.5@1".to_owned()),
         user_store_body: Some(user_store_body),
         jwt_secret: Some(jwt_secret_bytes),
         ..Default::default()
@@ -168,10 +167,7 @@ async fn verify_with_consumed_challenge_404s_on_replay() {
 #[tokio::test]
 async fn auth_endpoints_503_when_auth_unconfigured() {
     let h = common::boot().await;
-    let cfg = ServerConfig {
-        corpus_model: Some("bge-base-en-v1.5@1".to_owned()),
-        ..Default::default()
-    };
+    let cfg = ServerConfig::default();
     let app = app::build(h.pool.clone(), cfg).expect("build app");
 
     let (status, body) = post(app, "/v1/auth/challenge", json!({"user_id": "aaron"})).await;
@@ -244,10 +240,7 @@ async fn bearer_middleware_skips_when_auth_unconfigured() {
     // No user store / jwt secret in config: middleware is a passthrough,
     // and an Authorization header (even a bogus one) is ignored.
     let h = common::boot().await;
-    let cfg = ServerConfig {
-        corpus_model: Some("bge-base-en-v1.5@1".to_owned()),
-        ..Default::default()
-    };
+    let cfg = ServerConfig::default();
     let app = app::build(h.pool.clone(), cfg).expect("build app");
 
     let resp = app

@@ -17,10 +17,7 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 fn cfg() -> ServerConfig {
-    ServerConfig {
-        corpus_model: None,
-        ..Default::default()
-    }
+    ServerConfig::default()
 }
 
 #[tokio::test]

@@ -33,12 +33,19 @@ fn unit_vector(seed: f32) -> Vec<f32> {
 
 fn rl_cfg(anonymous_rps: u32, max_queries: u32) -> ServerConfig {
     ServerConfig {
-        corpus_model: Some("bge-base-en-v1.5@1".to_owned()),
         rate_limit_enabled: true,
         rate_limit_anonymous_rps: anonymous_rps,
         max_queries_per_request: max_queries,
         ..Default::default()
     }
+}
+
+/// Resolve the corpus model from the DB (the seeded bge-base-en-v1.5@1 active
+/// source_version) into the `Shared` handle `build_with_limiter` expects, so
+/// the search handler's model-mismatch + dim guards see bge@1/768.
+async fn resolved_cm(pool: &sqlx::PgPool) -> mn_server::corpus_model::Shared {
+    let cm = mn_server::corpus_model::resolve(pool).await.ok();
+    std::sync::Arc::new(std::sync::RwLock::new(cm))
 }
 
 fn unique_ip() -> String {
@@ -150,13 +157,8 @@ async fn over_cap_returns_400_and_refunds_the_base_token() {
     // anon floor of 1 token, cap of 2 queries.
     let cfg = rl_cfg(1, 2);
     let limiter = RateLimiter::from_config(&cfg);
-    let app = app::build_with_limiter(
-        h.pool.clone(),
-        cfg,
-        limiter,
-        std::sync::Arc::new(std::sync::RwLock::new(None)),
-    )
-    .expect("build");
+    let app = app::build_with_limiter(h.pool.clone(), cfg, limiter, resolved_cm(&h.pool).await)
+        .expect("build");
     let ip = unique_ip();
 
     // 3 queries > cap 2 → 400 multi_query_limit_exceeded.
@@ -180,13 +182,8 @@ async fn duplicate_queries_do_not_inflate_cost() {
     seed(&h.pool).await;
     let cfg = rl_cfg(2, 10);
     let limiter = RateLimiter::from_config(&cfg);
-    let app = app::build_with_limiter(
-        h.pool.clone(),
-        cfg,
-        limiter,
-        std::sync::Arc::new(std::sync::RwLock::new(None)),
-    )
-    .expect("build");
+    let app = app::build_with_limiter(h.pool.clone(), cfg, limiter, resolved_cm(&h.pool).await)
+        .expect("build");
     let ip = unique_ip();
 
     // 3 identical queries → dedup to 1 → cost 1 (base only), 200.
@@ -202,13 +199,8 @@ async fn distinct_queries_charge_n_tokens() {
     seed(&h.pool).await;
     let cfg = rl_cfg(5, 10);
     let limiter = RateLimiter::from_config(&cfg);
-    let app = app::build_with_limiter(
-        h.pool.clone(),
-        cfg,
-        limiter,
-        std::sync::Arc::new(std::sync::RwLock::new(None)),
-    )
-    .expect("build");
+    let app = app::build_with_limiter(h.pool.clone(), cfg, limiter, resolved_cm(&h.pool).await)
+        .expect("build");
     let ip = unique_ip();
 
     // 3 distinct queries → cost 3 → remaining 5 - 3 = 2 (post-charge balance).
@@ -229,13 +221,8 @@ async fn insufficient_budget_returns_429() {
     // Capacity 2, but 3 distinct queries cost 3 → over budget.
     let cfg = rl_cfg(2, 10);
     let limiter = RateLimiter::from_config(&cfg);
-    let app = app::build_with_limiter(
-        h.pool.clone(),
-        cfg,
-        limiter,
-        std::sync::Arc::new(std::sync::RwLock::new(None)),
-    )
-    .expect("build");
+    let app = app::build_with_limiter(h.pool.clone(), cfg, limiter, resolved_cm(&h.pool).await)
+        .expect("build");
     let ip = unique_ip();
 
     let (s, headers, b) = search(app, &ip, json!([q(0.1), q(0.5), q(0.9)])).await;
