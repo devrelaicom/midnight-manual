@@ -123,6 +123,40 @@ pub struct ServerConfig {
     /// [`ScoringPolicy::default`] is used when the env var is unset. An invalid
     /// file fails startup (Constitution VI / VIII).
     pub scoring_policy: ScoringPolicy,
+    /// `VOYAGE_API_KEY` — VoyageAI API key. When `None`, the server falls back
+    /// to the local fastembed embedder.
+    pub voyage_api_key: Option<String>,
+    /// `MIDNIGHT_MANUAL_VOYAGE_MODEL` — VoyageAI embedding model name.
+    /// Defaults to `"voyage-code-3"`.
+    pub voyage_model: String,
+    /// `MIDNIGHT_MANUAL_VOYAGE_DIM` — output dimension for VoyageAI embeddings.
+    /// Defaults to 1024.
+    pub voyage_output_dimension: u32,
+    /// `MIDNIGHT_MANUAL_VOYAGE_DTYPE` — output dtype for VoyageAI embeddings.
+    /// Defaults to `"float"`.
+    pub voyage_output_dtype: String,
+    /// `MIDNIGHT_MANUAL_TOKEN_LIMIT_ANON_HOURLY` — hourly token budget for
+    /// anonymous callers. Defaults to 2 000.
+    pub token_limit_anon_hourly: u64,
+    /// `MIDNIGHT_MANUAL_TOKEN_LIMIT_ANON_DAILY` — daily token budget for
+    /// anonymous callers. Defaults to 20 000.
+    pub token_limit_anon_daily: u64,
+    /// `MIDNIGHT_MANUAL_TOKEN_LIMIT_UPLIFT_HOURLY` — hourly token budget for
+    /// read-uplift (GitHub SSO) callers. Defaults to 4 000.
+    pub token_limit_uplift_hourly: u64,
+    /// `MIDNIGHT_MANUAL_TOKEN_LIMIT_UPLIFT_DAILY` — daily token budget for
+    /// read-uplift callers. Defaults to 40 000.
+    pub token_limit_uplift_daily: u64,
+    /// `MIDNIGHT_MANUAL_TOKEN_LIMIT_ADMIN_HOURLY` — hourly token budget for
+    /// admin-tier callers. Defaults to 500 000.
+    pub token_limit_admin_hourly: u64,
+    /// `MIDNIGHT_MANUAL_TOKEN_LIMIT_ADMIN_DAILY` — daily token budget for
+    /// admin-tier callers. Defaults to 100 000 000.
+    pub token_limit_admin_daily: u64,
+    /// `MIDNIGHT_MANUAL_TOKEN_SNAPSHOT_SECS` — interval at which the token-
+    /// usage counters are flushed to the store. Defaults to 300 s (5 min);
+    /// clamped to `[1, ∞)`.
+    pub token_snapshot_secs: u64,
 }
 
 impl Default for ServerConfig {
@@ -161,6 +195,17 @@ impl Default for ServerConfig {
             rate_limit_override_refresh_secs: 30,
             max_queries_per_request: 10,
             scoring_policy: ScoringPolicy::default(),
+            voyage_api_key: None,
+            voyage_model: "voyage-code-3".into(),
+            voyage_output_dimension: 1024,
+            voyage_output_dtype: "float".into(),
+            token_limit_anon_hourly: 2_000,
+            token_limit_anon_daily: 20_000,
+            token_limit_uplift_hourly: 4_000,
+            token_limit_uplift_daily: 40_000,
+            token_limit_admin_hourly: 500_000,
+            token_limit_admin_daily: 100_000_000,
+            token_snapshot_secs: 300,
         }
     }
 }
@@ -264,6 +309,35 @@ impl ServerConfig {
             .and_then(|s| s.parse::<u32>().ok())
             .map_or(10, |v| v.clamp(1, 50));
         let scoring_policy = load_scoring_policy()?;
+        let voyage_api_key = env::var("VOYAGE_API_KEY").ok().filter(|s| !s.is_empty());
+        let voyage_model = env::var("MIDNIGHT_MANUAL_VOYAGE_MODEL")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "voyage-code-3".into());
+        let voyage_output_dimension: u32 = env::var("MIDNIGHT_MANUAL_VOYAGE_DIM")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1024);
+        let voyage_output_dtype = env::var("MIDNIGHT_MANUAL_VOYAGE_DTYPE")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "float".into());
+        let tl = |name: &str, default: u64| -> u64 {
+            env::var(name)
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(default)
+        };
+        let token_limit_anon_hourly = tl("MIDNIGHT_MANUAL_TOKEN_LIMIT_ANON_HOURLY", 2_000);
+        let token_limit_anon_daily = tl("MIDNIGHT_MANUAL_TOKEN_LIMIT_ANON_DAILY", 20_000);
+        let token_limit_uplift_hourly = tl("MIDNIGHT_MANUAL_TOKEN_LIMIT_UPLIFT_HOURLY", 4_000);
+        let token_limit_uplift_daily = tl("MIDNIGHT_MANUAL_TOKEN_LIMIT_UPLIFT_DAILY", 40_000);
+        let token_limit_admin_hourly = tl("MIDNIGHT_MANUAL_TOKEN_LIMIT_ADMIN_HOURLY", 500_000);
+        let token_limit_admin_daily = tl("MIDNIGHT_MANUAL_TOKEN_LIMIT_ADMIN_DAILY", 100_000_000);
+        let token_snapshot_secs = env::var("MIDNIGHT_MANUAL_TOKEN_SNAPSHOT_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .map_or(300, |v: u64| v.max(1));
         Ok(Self {
             database_url,
             port,
@@ -295,6 +369,17 @@ impl ServerConfig {
             rate_limit_override_refresh_secs,
             max_queries_per_request,
             scoring_policy,
+            voyage_api_key,
+            voyage_model,
+            voyage_output_dimension,
+            voyage_output_dtype,
+            token_limit_anon_hourly,
+            token_limit_anon_daily,
+            token_limit_uplift_hourly,
+            token_limit_uplift_daily,
+            token_limit_admin_hourly,
+            token_limit_admin_daily,
+            token_snapshot_secs,
         })
     }
 }
@@ -362,6 +447,22 @@ mod tests {
         assert_eq!(c.rate_limit_client_ip_header, "fly-client-ip");
         assert_eq!(c.rate_limit_override_refresh_secs, 30);
         assert_eq!(c.max_queries_per_request, 10);
+    }
+
+    #[test]
+    fn token_limit_defaults() {
+        let c = ServerConfig::default();
+        assert_eq!(c.token_limit_anon_hourly, 2_000);
+        assert_eq!(c.token_limit_anon_daily, 20_000);
+        assert_eq!(c.token_limit_uplift_hourly, 4_000);
+        assert_eq!(c.token_limit_uplift_daily, 40_000);
+        assert_eq!(c.token_limit_admin_hourly, 500_000);
+        assert_eq!(c.token_limit_admin_daily, 100_000_000);
+        assert_eq!(c.token_snapshot_secs, 300);
+        assert_eq!(c.voyage_model, "voyage-code-3");
+        assert_eq!(c.voyage_output_dimension, 1024);
+        assert_eq!(c.voyage_output_dtype, "float");
+        assert!(c.voyage_api_key.is_none());
     }
 
     #[test]
