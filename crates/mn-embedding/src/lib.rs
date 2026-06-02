@@ -9,6 +9,7 @@
 #![allow(clippy::doc_markdown, clippy::useless_vec)]
 
 pub mod cache;
+pub mod client;
 pub mod embedder;
 pub mod error;
 pub mod reranker;
