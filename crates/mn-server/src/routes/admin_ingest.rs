@@ -15,11 +15,13 @@
 //!    `aborted`; subsequent writes against this id return 409 `run_aborted`
 //!    (FR-022).
 //!
-//! Every endpoint requires an admin-tier bearer (FR-058 + FR-117). New chunks
-//! land in `embed_failed` state and are excluded from search until an
-//! out-of-band embedder fills `chunk.embedding` and flips them to `ready`.
-//! Carried chunks inherit their prior `status` and `embedding`, preserving the
-//! work the embedder did on the prior version.
+//! Every endpoint requires an admin-tier bearer (FR-058 + FR-117). The CLI
+//! embeds chunks with VoyageAI before upload and sends ready vectors, so new
+//! chunks normally arrive `ready`. A chunk uploaded without an embedding lands
+//! in `embed_failed` and is excluded from search (there is no server-side
+//! embedder worker to backfill it; re-ingest the source to fix it). Carried
+//! chunks inherit their prior `status` and `embedding`, preserving the prior
+//! version's vectors.
 //!
 //! [`source_version`]: mn_store::entities::source_version
 
@@ -144,8 +146,10 @@ pub struct ChunkUpload {
     /// Token count.
     #[serde(default)]
     pub token_count: i32,
-    /// Precomputed embedding vector, when the CLI embedded locally. `None`
-    /// means the server-side embedder worker must fill it (`embed_failed`).
+    /// Precomputed embedding vector (the CLI embeds via VoyageAI before
+    /// upload). `None` means the chunk could not be embedded and lands in
+    /// `embed_failed`; it stays excluded from search until the source is
+    /// re-ingested (there is no server-side embedder worker to backfill it).
     #[serde(default)]
     pub embedding: Option<Vec<f32>>,
 }
@@ -163,7 +167,8 @@ pub struct UploadDocumentsRequest {
     pub batch_count: Option<usize>,
     /// Wire id (`name@revision`) of the model that produced any supplied
     /// `ChunkUpload.embedding` vectors. Required when embeddings are present;
-    /// must match the run's model. `None` for text-only (server-embedded) runs.
+    /// must match the run's model. `None` only for text-only batches (chunks
+    /// with no embedding, which then land in `embed_failed`).
     #[serde(default)]
     pub embedding_model: Option<String>,
 }
@@ -363,14 +368,36 @@ async fn upload_documents(
     }
 
     // If any chunk in this batch carries a precomputed embedding, validate the
-    // declared model + 768-dim contract via `check_embedded_batch` (pure +
+    // declared model + dimension contract via `check_embedded_batch` (pure +
     // unit-tested). Only the run-model lookup needs the DB; we gate on
     // `has_embeddings` so text-only batches skip the lookup entirely.
+    //
+    // The expected dimension is the corpus model's dim (resolved into AppState,
+    // re-resolved after each ingest finalize) — NOT a hardcoded literal. Voyage
+    // vectors are 1024-dim; a hardcoded 768 would 400 every valid upload. If the
+    // corpus model is unresolved we 503, matching how /v1/search behaves with no
+    // resolved model rather than guessing a dimension.
     let has_embeddings = req
         .documents
         .iter()
         .any(|d| d.chunks.iter().any(|c| c.embedding.is_some()));
     if has_embeddings {
+        let expected_dim = {
+            let snapshot = state
+                .corpus_model
+                .read()
+                .expect("corpus_model lock poisoned")
+                .clone();
+            match snapshot {
+                Some(cm) => cm.dim,
+                None => {
+                    return error::service_unavailable(
+                        "server has no resolved corpus_model; cannot validate embedding dimension",
+                        rid,
+                    );
+                }
+            }
+        };
         let run_model = match embedding_model::get_by_id(&state.pool, sv.embedding_model_id).await {
             Ok(m) => m,
             Err(e) => {
@@ -379,9 +406,12 @@ async fn upload_documents(
             }
         };
         let expected = format!("{}@{}", run_model.name, run_model.revision);
-        if let Err(e) =
-            check_embedded_batch(&req.documents, req.embedding_model.as_deref(), &expected)
-        {
+        if let Err(e) = check_embedded_batch(
+            &req.documents,
+            req.embedding_model.as_deref(),
+            &expected,
+            expected_dim,
+        ) {
             return error::into_response(e, rid);
         }
     }
@@ -645,7 +675,9 @@ async fn prior_active_documents(
 
 /// Validate a batch that carries precomputed embeddings: it must declare the
 /// model it used (matching the run's `expected` `name@revision`), and every
-/// supplied vector must be 768-dim. Text-only batches (no embeddings) pass.
+/// supplied vector must match `expected_dim` — the corpus model's dimension,
+/// threaded in by the caller from the resolved [`crate::corpus_model::CorpusModel`]
+/// (1024 for Voyage's `voyage-code-3`). Text-only batches (no embeddings) pass.
 ///
 /// Pure and DB-free so every error path — including the dimension rejection,
 /// whose error MUST carry a `.remediation()` or [`CoreError::build`] panics —
@@ -659,6 +691,7 @@ fn check_embedded_batch(
     documents: &[DocumentUpload],
     declared_model: Option<&str>,
     expected: &str,
+    expected_dim: usize,
 ) -> Result<(), CoreError> {
     let has_embeddings = documents
         .iter()
@@ -685,26 +718,23 @@ fn check_embedded_batch(
             .message(format!(
                 "upload embeddings declare model `{provided_norm}` but run uses `{expected}`"
             ))
-            .remediation(
-                "re-run ingest with --embedding-model matching the corpus, or --enable-server-embedding",
-            )
+            .remediation("re-run ingest with --embedding-model matching the corpus")
             .build());
     }
     for d in documents {
         for c in &d.chunks {
             if let Some(v) = &c.embedding {
-                if v.len() != mn_embedding::BGE_BASE_DIM {
+                if v.len() != expected_dim {
                     return Err(CoreError::builder(ErrorCode::InvalidRequest)
                         .message(format!(
-                            "chunk {}#{} embedding dim {} != {}",
+                            "chunk {}#{} embedding dim {} != {expected_dim}",
                             d.path,
                             c.chunk_index,
                             v.len(),
-                            mn_embedding::BGE_BASE_DIM
                         ))
-                        .remediation(
-                            "re-embed with bge-base-en-v1.5 (768-dim), or pass --enable-server-embedding",
-                        )
+                        .remediation(format!(
+                            "re-embed with the corpus model `{expected}` ({expected_dim}-dim)"
+                        ))
                         .build());
                 }
             }
@@ -905,7 +935,11 @@ mod tests {
         assert!(req.documents[0].chunks[0].embedding.is_none());
     }
 
-    const EXPECTED_MODEL: &str = "bge-base-en-v1.5@1";
+    const EXPECTED_MODEL: &str = "voyage-code-3@1";
+    /// Corpus dimension threaded in from the resolved `CorpusModel` — Voyage's
+    /// `voyage-code-3` is 1024-dim (the hardcoded 768 this fix removed would
+    /// have 400'd every valid upload).
+    const EXPECTED_DIM: usize = 1024;
 
     fn chunk_with_dim(idx: i32, dim: Option<usize>) -> ChunkUpload {
         ChunkUpload {
@@ -943,27 +977,31 @@ mod tests {
     #[test]
     fn check_text_only_batch_is_ok() {
         let docs = vec![doc_with(vec![chunk_with_dim(0, None)])];
-        assert!(check_embedded_batch(&docs, None, EXPECTED_MODEL).is_ok());
+        assert!(check_embedded_batch(&docs, None, EXPECTED_MODEL, EXPECTED_DIM).is_ok());
     }
 
     #[test]
     fn check_valid_embedded_batch_is_ok() {
-        let docs = vec![doc_with(vec![chunk_with_dim(0, Some(768))])];
-        assert!(check_embedded_batch(&docs, Some(EXPECTED_MODEL), EXPECTED_MODEL).is_ok());
+        // A correctly-sized Voyage (1024-dim) vector passes.
+        let docs = vec![doc_with(vec![chunk_with_dim(0, Some(EXPECTED_DIM))])];
+        assert!(
+            check_embedded_batch(&docs, Some(EXPECTED_MODEL), EXPECTED_MODEL, EXPECTED_DIM).is_ok()
+        );
     }
 
     #[test]
     fn check_embeddings_without_model_is_mismatch() {
-        let docs = vec![doc_with(vec![chunk_with_dim(0, Some(768))])];
-        let err = check_embedded_batch(&docs, None, EXPECTED_MODEL).unwrap_err();
+        let docs = vec![doc_with(vec![chunk_with_dim(0, Some(EXPECTED_DIM))])];
+        let err = check_embedded_batch(&docs, None, EXPECTED_MODEL, EXPECTED_DIM).unwrap_err();
         assert_eq!(err.code, ErrorCode::EmbeddingModelMismatch);
     }
 
     #[test]
     fn check_wrong_model_is_mismatch() {
-        let docs = vec![doc_with(vec![chunk_with_dim(0, Some(768))])];
+        let docs = vec![doc_with(vec![chunk_with_dim(0, Some(EXPECTED_DIM))])];
         let err =
-            check_embedded_batch(&docs, Some("bge-base-en-v1.5@2"), EXPECTED_MODEL).unwrap_err();
+            check_embedded_batch(&docs, Some("voyage-code-3@2"), EXPECTED_MODEL, EXPECTED_DIM)
+                .unwrap_err();
         assert_eq!(err.code, ErrorCode::EmbeddingModelMismatch);
     }
 
@@ -973,8 +1011,20 @@ mod tests {
         // which panics in `CoreError::build()`. `unwrap_err()` would re-panic if
         // that regressed — it must return a well-formed error instead.
         let docs = vec![doc_with(vec![chunk_with_dim(0, Some(3))])];
-        let err = check_embedded_batch(&docs, Some(EXPECTED_MODEL), EXPECTED_MODEL).unwrap_err();
+        let err = check_embedded_batch(&docs, Some(EXPECTED_MODEL), EXPECTED_MODEL, EXPECTED_DIM)
+            .unwrap_err();
         assert_eq!(err.code, ErrorCode::InvalidRequest);
         assert!(!err.remediation.is_empty());
+    }
+
+    #[test]
+    fn check_768_dim_is_rejected_when_corpus_is_1024() {
+        // Direct regression guard for the hardcoded-768 bug: a 768-dim vector
+        // must now be REJECTED against a 1024-dim corpus model (previously the
+        // hardcoded check accepted 768 and rejected the real 1024 Voyage dim).
+        let docs = vec![doc_with(vec![chunk_with_dim(0, Some(768))])];
+        let err = check_embedded_batch(&docs, Some(EXPECTED_MODEL), EXPECTED_MODEL, EXPECTED_DIM)
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidRequest);
     }
 }

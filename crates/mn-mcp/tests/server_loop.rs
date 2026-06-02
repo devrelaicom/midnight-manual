@@ -68,9 +68,8 @@ async fn tools_list_returns_two_phase_5b_tools() {
 #[tokio::test]
 async fn status_tool_works_without_model_load() {
     // The status tool MUST NOT trigger model load (US5 acceptance #9). It
-    // reports model_state without forcing the embedder/reranker singletons.
+    // reports model_state without forcing the reranker singleton.
     let out = mn_mcp::tools::run_status(None);
-    assert_eq!(out.embedder, "bge-base-en-v1.5");
     assert_eq!(out.reranker, "bge-reranker-base");
     // The shape is well-formed regardless of whether sibling tests have
     // loaded models.

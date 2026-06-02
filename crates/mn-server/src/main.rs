@@ -6,7 +6,6 @@
 //! on `0.0.0.0:8080` (or the port from `PORT`).
 
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context as _;
@@ -113,31 +112,11 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    // Background: embedder worker (Phase 11a / FR-038). Disabled in env when
-    // the deployment has no GPU/CPU budget for ONNX; otherwise polls for
-    // `embed_failed` chunks and lazily loads the local model on the first
-    // non-empty batch (so an idle server never holds the ~450 MB model).
-    let _embedder_handle = if cfg.embedder_enabled {
-        let cache_env = mn_embedding::cache::StdEnv;
-        let cache_dir = mn_embedding::cache::resolve(&cache_env).context(
-            "could not resolve model cache dir (MIDNIGHT_MANUAL_MODEL_CACHE_DIR or HOME)",
-        )?;
-        std::fs::create_dir_all(&cache_dir)
-            .with_context(|| format!("create model cache dir at {}", cache_dir.display()))?;
-        // Lazy: the model is NOT loaded here. The worker loads it on its first
-        // non-empty batch, so an idle server never holds the ~450 MB model.
-        let lazy = jobs::embedder::LazyEmbedder::local(cache_dir);
-        Some(jobs::embedder::spawn(
-            pool.clone(),
-            Arc::new(lazy),
-            active.id,
-            Duration::from_millis(cfg.embedder_interval_ms),
-            cfg.embedder_batch_size,
-        ))
-    } else {
-        tracing::info!("embedder worker disabled (MIDNIGHT_MANUAL_EMBEDDER_ENABLED=false)");
-        None
-    };
+    // The corpus is embedded with VoyageAI (client-side BYOK or the server's
+    // POST /v1/embeddings proxy) and the CLI always uploads ready vectors, so
+    // there is no longer a server-side embedder worker to backfill
+    // `embed_failed` chunks. `active` above is retained solely to construct the
+    // resolved `CorpusModel` (id/dim/wire) for AppState.
 
     // Background: rate-limit override refresh + bucket reaper (Phase 17).
     // Only spawned when rate limiting is enabled.

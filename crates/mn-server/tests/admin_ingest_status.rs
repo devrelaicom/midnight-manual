@@ -22,7 +22,6 @@ fn cfg_with_auth(user_store_body: String, jwt_secret_bytes: Vec<u8>) -> ServerCo
     ServerConfig {
         user_store_body: Some(user_store_body),
         jwt_secret: Some(jwt_secret_bytes),
-        embedder_enabled: true,
         ..Default::default()
     }
 }
@@ -212,7 +211,6 @@ async fn admin_token_returns_status_with_source_summary() {
     let (status, body) = call(app, "GET", "/v1/admin/ingest/status", Some(&token), None).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["active_embedding_model"], "bge-base-en-v1.5@1");
-    assert_eq!(body["embedder_worker_enabled"], true);
 
     let our_row = body["sources"]
         .as_array()
@@ -255,20 +253,6 @@ async fn source_with_no_active_version_returns_zeros() {
     assert_eq!(our_row["total_chunks"], 0);
     assert_eq!(our_row["ready_chunks"], 0);
     assert_eq!(our_row["embed_failed_chunks"], 0);
-}
-
-#[tokio::test]
-async fn embedder_worker_enabled_reflects_config() {
-    let h = common::boot().await;
-    let kp = Keypair::generate();
-    let mut cfg = cfg_with_auth(user_store_for("aaron", &kp), vec![7u8; 32]);
-    cfg.embedder_enabled = false;
-    let app = app::build(h.pool.clone(), cfg).expect("build app");
-    let token = mint_admin_token(app.clone(), "aaron", &kp).await;
-
-    let (status, body) = call(app, "GET", "/v1/admin/ingest/status", Some(&token), None).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["embedder_worker_enabled"], false);
 }
 
 #[tokio::test]

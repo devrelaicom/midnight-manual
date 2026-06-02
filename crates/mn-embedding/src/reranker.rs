@@ -1,8 +1,8 @@
 //! `bge-reranker-base` cross-encoder wrapper (D2).
 //!
-//! Lazy singleton behind a `OnceCell`, same pattern as
-//! [`crate::embedder::global`]. The reranker is used MCP-side only; the cloud
-//! server never sees a reranker invocation.
+//! Lazy singleton behind a `OnceCell`. The reranker is used MCP-side only; the
+//! cloud server never sees a reranker invocation. It is the only fastembed
+//! model left in the corpus path — the embedder is now VoyageAI (remote).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -105,7 +105,8 @@ impl Reranker {
     }
 }
 
-/// Process-wide lazy singleton, matching [`crate::embedder::global`].
+/// Process-wide lazy singleton. First call loads the model; concurrent callers
+/// all wait on the same `OnceCell::get_or_try_init` future.
 static GLOBAL: OnceCell<Reranker> = OnceCell::const_new();
 
 /// Get the process-wide reranker, initializing on first call.

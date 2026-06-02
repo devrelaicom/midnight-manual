@@ -6,7 +6,6 @@
 //!
 //! - The active embedding model identifier (mirror of `/v1/models/active`
 //!   for one-stop diagnostics).
-//! - Whether the embedder worker is configured to run server-side.
 //! - One row per registered source: active source_version revision (or
 //!   `None` when no version is active yet), total chunks, ready chunks,
 //!   embed_failed chunks. Sources with no version at all return zeroes.
@@ -35,9 +34,6 @@ pub fn router() -> Router<AppState> {
 pub struct IngestStatusResponse {
     /// The corpus's active embedding model wire id (`name@revision`).
     pub active_embedding_model: String,
-    /// Whether the embedder worker is enabled in the running server's
-    /// config (mirrors `MIDNIGHT_MANUAL_EMBEDDER_ENABLED`).
-    pub embedder_worker_enabled: bool,
     /// Per-source summary. Ordered by `slug` ASC for stable rendering.
     pub sources: Vec<SourceStatus>,
 }
@@ -142,7 +138,6 @@ async fn ingest_status(
 
     Json(IngestStatusResponse {
         active_embedding_model: model_wire,
-        embedder_worker_enabled: state.cfg.embedder_enabled,
         sources: summaries,
     })
     .into_response()

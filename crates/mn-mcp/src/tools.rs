@@ -2,8 +2,9 @@
 //!
 //! Thirteen tools, four categories:
 //!
-//! - `status` / `pull_models` — local-only; talk to the embedder/reranker
-//!   model cache. No cloud round-trip.
+//! - `status` / `pull_models` — local-only; talk to the reranker model cache.
+//!   The corpus embedder is VoyageAI (remote), so there is no local embedder to
+//!   load here. No cloud round-trip.
 //! - `search` — embed via VoyageAI (BYOK or server-proxy), post to the cloud
 //!   `/v1/search`, optionally rerank with the local cross-encoder.
 //! - All other tools (`get_chunk` / `get_chunk_next` / `get_chunk_prev` /
@@ -21,7 +22,7 @@ use std::time::Instant;
 
 use mn_core::scoring::normalize_rerank;
 use mn_core::scoring_policy::ScoringPolicy;
-use mn_embedding::{client as embed_client, embedder, reranker, voyage};
+use mn_embedding::{client as embed_client, reranker, voyage};
 use serde::Serialize;
 use serde_json::json;
 use uuid::Uuid;
@@ -106,7 +107,7 @@ pub fn list() -> ToolsListResult {
             ToolDescription {
                 name: "pull_models",
                 description:
-                    "Download / load the embedder (bge-base-en-v1.5) and reranker (bge-reranker-base) into the local model cache. Required on first use and after a corpus-side model migration (signalled by an `embedding_model_mismatch` error from search).",
+                    "Download / load the reranker (bge-reranker-base) into the local model cache. Required on first use of `search` with reranking enabled. The corpus embedder is VoyageAI (remote — BYOK or the server's /v1/embeddings proxy), so no embedder is downloaded.",
                 input_schema: json!({
                     "type": "object",
                     "properties": {},
@@ -314,9 +315,8 @@ pub(crate) fn run_install_search_skill_in(
 pub struct StatusOutput {
     /// mn-mcp crate version.
     pub server_version: &'static str,
-    /// Embedder model identifier.
-    pub embedder: &'static str,
-    /// Reranker model identifier.
+    /// Reranker model identifier. The corpus embedder is VoyageAI (remote), so
+    /// no local embedder is reported.
     pub reranker: &'static str,
     /// Current model state.
     pub model_state: ModelState,
@@ -328,9 +328,9 @@ pub struct StatusOutput {
 #[derive(Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ModelState {
-    /// Models not yet loaded for this process.
+    /// Reranker not yet loaded for this process.
     Missing,
-    /// Models loaded and ready to use.
+    /// Reranker loaded and ready to use.
     Ready,
 }
 
@@ -339,19 +339,15 @@ pub enum ModelState {
 pub fn run_status(cache_dir: Option<&PathBuf>) -> StatusOutput {
     StatusOutput {
         server_version: crate::VERSION,
-        embedder: mn_embedding::EMBEDDER_MODEL_NAME,
         reranker: mn_embedding::RERANKER_MODEL_NAME,
-        model_state: if embedder_loaded() && reranker_loaded() {
+        // Only the reranker is a local model now; the embedder is remote Voyage.
+        model_state: if reranker_loaded() {
             ModelState::Ready
         } else {
             ModelState::Missing
         },
         cache_dir: cache_dir.map(|p| p.display().to_string()),
     }
-}
-
-fn embedder_loaded() -> bool {
-    LOADED_MARKERS.load_relaxed_embedder()
 }
 
 fn reranker_loaded() -> bool {
@@ -361,30 +357,21 @@ fn reranker_loaded() -> bool {
 mod markers {
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    /// Process-wide markers tracking whether `pull_models` has completed.
+    /// Process-wide marker tracking whether the reranker has been loaded
+    /// (by `pull_models` or the first reranking `search`).
     pub struct LoadedMarkers {
-        embedder: AtomicBool,
         reranker: AtomicBool,
     }
 
     impl LoadedMarkers {
         pub const fn new() -> Self {
             Self {
-                embedder: AtomicBool::new(false),
                 reranker: AtomicBool::new(false),
             }
         }
 
-        pub fn mark_embedder(&self) {
-            self.embedder.store(true, Ordering::Release);
-        }
-
         pub fn mark_reranker(&self) {
             self.reranker.store(true, Ordering::Release);
-        }
-
-        pub fn load_relaxed_embedder(&self) -> bool {
-            self.embedder.load(Ordering::Acquire)
         }
 
         pub fn load_relaxed_reranker(&self) -> bool {
@@ -404,32 +391,25 @@ pub(crate) static LOADED_MARKERS: LoadedMarkers = LoadedMarkers::new();
 /// `pull_models` response payload.
 #[derive(Debug, Serialize)]
 pub struct PullModelsOutput {
-    /// Embedder model identifier.
-    pub embedder: &'static str,
-    /// Reranker model identifier.
+    /// Reranker model identifier. The corpus embedder is VoyageAI (remote), so
+    /// `pull_models` only fetches the reranker.
     pub reranker: &'static str,
-    /// Whether the embedder was loaded by this call (false = cached).
-    pub embedder_loaded: bool,
     /// Whether the reranker was loaded by this call (false = cached).
     pub reranker_loaded: bool,
     /// Total milliseconds spent in this call.
     pub took_ms: u128,
 }
 
-/// Dispatch the `pull_models` tool. Returns once both `OnceCell`s are filled.
+/// Dispatch the `pull_models` tool. Fetches the reranker into the local cache;
+/// the corpus embedder is VoyageAI (remote) so nothing is downloaded for it.
+/// Returns once the reranker `OnceCell` is filled.
 ///
 /// # Errors
 ///
-/// Returns a string error message if either model fails to initialize.
+/// Returns a string error message if the reranker fails to initialize.
 pub async fn run_pull_models(cache_dir: PathBuf) -> Result<PullModelsOutput, String> {
     let t0 = Instant::now();
-    let embedder_was_loaded = LOADED_MARKERS.load_relaxed_embedder();
     let reranker_was_loaded = LOADED_MARKERS.load_relaxed_reranker();
-
-    embedder::global(cache_dir.clone())
-        .await
-        .map_err(|e| format!("embedder init failed: {e}"))?;
-    LOADED_MARKERS.mark_embedder();
 
     reranker::global(cache_dir)
         .await
@@ -437,9 +417,7 @@ pub async fn run_pull_models(cache_dir: PathBuf) -> Result<PullModelsOutput, Str
     LOADED_MARKERS.mark_reranker();
 
     Ok(PullModelsOutput {
-        embedder: mn_embedding::EMBEDDER_MODEL_NAME,
         reranker: mn_embedding::RERANKER_MODEL_NAME,
-        embedder_loaded: !embedder_was_loaded,
         reranker_loaded: !reranker_was_loaded,
         took_ms: t0.elapsed().as_millis(),
     })
@@ -501,10 +479,8 @@ pub async fn run_search(
     let voyage_key = mn_core::config::resolve_voyage_api_key(None, &core_cfg.models, &cfg_env);
 
     // Embed all queries via VoyageAI — either BYOK (direct) or through the
-    // cloud server's /v1/embeddings proxy. The local fastembed embedder is no
-    // longer used on this path; LOADED_MARKERS.mark_embedder() is intentionally
-    // omitted here (the marker is only meaningful when the local ONNX model has
-    // been loaded by pull_models).
+    // cloud server's /v1/embeddings proxy. There is no local embedder; the only
+    // local model is the reranker (loaded lazily in `rerank_results`).
     let embedded = if let Some(key) = voyage_key.as_deref() {
         let v = voyage::VoyageEmbedder::new(
             key,
@@ -1232,7 +1208,6 @@ mod tests {
     #[test]
     fn status_reports_models() {
         let s = run_status(None);
-        assert_eq!(s.embedder, "bge-base-en-v1.5");
         assert_eq!(s.reranker, "bge-reranker-base");
         assert!(matches!(s.model_state, ModelState::Missing | ModelState::Ready));
     }
