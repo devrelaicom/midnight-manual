@@ -201,7 +201,7 @@ async fn embeddings(
     // an explicit per-request opt-out (`no_global_limit`), honoured ONLY for
     // admin-tier callers — a non-admin setting the flag stays counted (the
     // server checks the admin role, not just the flag).
-    let bypass_global = req.no_global_limit && matches!(tier, TokenTier::Admin);
+    let bypass_global = resolve_bypass_global(req.no_global_limit, tier);
 
     // 6. Single timestamp for the whole request so reserve/settle/snapshot agree.
     let now = OffsetDateTime::now_utc().unix_timestamp();
@@ -259,6 +259,15 @@ async fn embeddings(
         },
     })
     .into_response()
+}
+
+/// Resolve whether this request bypasses the site-wide global token cap.
+///
+/// The bypass is honoured ONLY when the caller explicitly requested it AND the
+/// caller is admin-tier. A non-admin requesting it has no effect — the request
+/// stays counted against the global cap (Constitution: anti-Sybil cost ceiling).
+const fn resolve_bypass_global(requested: bool, tier: TokenTier) -> bool {
+    requested && matches!(tier, TokenTier::Admin)
 }
 
 /// Format unix-seconds as an RFC3339 timestamp. Returns an empty string for
@@ -334,4 +343,51 @@ fn char_estimate(inputs: &[String]) -> u64 {
         .iter()
         .map(|s| (s.len() as u64).div_ceil(4).max(1))
         .sum()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// THE security property: the global-cap bypass is honoured ONLY when the
+    /// caller is admin-tier. A non-admin sending `no_global_limit: true` must NOT
+    /// escape the site-wide cap — `resolve_bypass_global` returns `false`, so the
+    /// request stays counted (Constitution: anti-Sybil cost ceiling). Checking
+    /// the flag alone — without also checking the admin role — would be the bug
+    /// this test exists to prevent.
+    #[test]
+    fn non_admin_cannot_bypass_global_cap_even_with_flag() {
+        // Anonymous tier with the flag set still does NOT bypass.
+        assert!(
+            !resolve_bypass_global(true, TokenTier::Anonymous),
+            "anonymous + no_global_limit must stay counted (no bypass)"
+        );
+        // The SSO/read-uplift tier likewise cannot bypass with the flag.
+        assert!(
+            !resolve_bypass_global(true, TokenTier::ReadUplift),
+            "read-uplift + no_global_limit must stay counted (no bypass)"
+        );
+    }
+
+    /// Full (flag × tier) matrix. The bypass is `true` for exactly one cell:
+    /// admin-tier AND the flag set. Every other combination is `false`.
+    #[test]
+    fn resolve_bypass_global_matrix() {
+        // (requested, tier, expected_bypass)
+        let cases = [
+            (true, TokenTier::Admin, true),       // admin opts out -> bypass
+            (false, TokenTier::Admin, false),     // admin didn't ask -> counted
+            (true, TokenTier::Anonymous, false),  // non-admin can't bypass even with flag
+            (true, TokenTier::ReadUplift, false), // same for the SSO/uplift tier
+            (false, TokenTier::Anonymous, false),
+            (false, TokenTier::ReadUplift, false),
+        ];
+        for (requested, tier, expected) in cases {
+            assert_eq!(
+                resolve_bypass_global(requested, tier),
+                expected,
+                "resolve_bypass_global({requested}, {tier:?}) should be {expected}"
+            );
+        }
+    }
 }

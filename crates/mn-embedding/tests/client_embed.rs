@@ -60,3 +60,38 @@ async fn server_mode_calls_v1_embeddings() {
     assert_eq!(out.vectors, vec![vec![0.5_f32; 4]]);
     assert_eq!(out.total_tokens, 2);
 }
+
+#[tokio::test]
+async fn server_mode_sends_no_global_limit_true_on_the_wire() {
+    let srv = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        // Prove the admin opt-out travels on the wire: the body must carry
+        // `no_global_limit: true`. The mock only matches when it does, so a
+        // request that dropped or flipped the flag would 404 and fail the embed.
+        .and(body_partial_json(serde_json::json!({ "no_global_limit": true })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "model": "voyage-code-3@1",
+            "embeddings": [vec![0.5_f32; 4]],
+            "usage": { "total_tokens": 2 },
+            "rate": {
+                "hour": {"limit": 2000, "remaining": 1998, "reset_at": "2030-01-01T00:00:00Z"},
+                "day": {"limit": 20000, "remaining": 19998, "reset_at": "2030-01-01T00:00:00Z"}
+            }
+        })))
+        .mount(&srv)
+        .await;
+    let out = embed(
+        vec!["q".into()],
+        InputType::Query,
+        EmbedSource::Server {
+            base_url: &srv.uri(),
+            bearer: None,
+            no_global_limit: true,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(out.vectors, vec![vec![0.5_f32; 4]]);
+    assert_eq!(out.total_tokens, 2);
+}
