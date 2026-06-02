@@ -56,6 +56,12 @@ pub struct Cli {
     #[arg(long, global = true, env = "MIDNIGHT_MANUAL_DISABLE_TELEMETRY")]
     pub no_telemetry: bool,
 
+    /// Voyage API key for BYOK embedding (overrides env + config).
+    /// Resolution order: this flag > VOYAGE_API_KEY env > config.toml.
+    /// When absent, embedding is proxied through the server endpoint.
+    #[arg(long, global = true)]
+    pub voyage_api_key: Option<String>,
+
     /// The subcommand.
     #[command(subcommand)]
     pub cmd: Command,
@@ -122,6 +128,7 @@ const ADMIN_SUBCOMMANDS: &[&str] = &[
 /// # Errors
 ///
 /// Returns `anyhow::Error` on argument-parse failures or subcommand failures.
+#[allow(clippy::too_many_lines)]
 pub async fn run() -> Result<()> {
     let show_admin = should_show_admin_cmds();
     let mut cmd = Cli::command();
@@ -156,8 +163,16 @@ pub async fn run() -> Result<()> {
         Command::Version => commands::version::run(cli.json),
         Command::Doctor(args) => commands::doctor::run(args, cli.json).await,
         Command::Search(args) => {
-            commands::search::run(args, cli.server.as_deref(), &telemetry, crate::VERSION, cli.json)
-                .await
+            commands::search::run(
+                args,
+                cli.server.as_deref(),
+                cli.config.as_deref(),
+                cli.voyage_api_key.as_deref(),
+                &telemetry,
+                crate::VERSION,
+                cli.json,
+            )
+            .await
         }
         Command::Sources(args) => {
             commands::sources::run(args, cli.server.as_deref(), cli.json).await

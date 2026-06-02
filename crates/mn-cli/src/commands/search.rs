@@ -10,10 +10,14 @@
 //!    Anonymous still works; the server's `/v1/search` is public and the
 //!    bearer only affects rate-limit tier.
 //!
-//! 3. Load the local embedder (`bge-base-en-v1.5`) and encode every query
-//!    (one primary plus any `--query` / `--queries-stdin` extras) in one
-//!    batch. First-run cost is the ~100 MB model download; subsequent runs
-//!    hit the on-disk cache and are fast.
+//! 3. Embed every query via VoyageAI. Two modes:
+//!    - **BYOK** (flag/env/config key present): call Voyage directly with the
+//!      caller's own key via [`mn_embedding::client::EmbedSource::Byok`].
+//!    - **Server-proxy** (no key): POST to the server's `/v1/embeddings`
+//!      endpoint, which holds the platform key and enforces token limits.
+//!
+//!    The corpus active model is fetched from `GET /v1/models/active` to form
+//!    the canonical wire id (`name@revision`) labelling the request.
 //!
 //! 4. `POST /v1/search` with the resulting `{text, vector}` pairs. With more
 //!    than one query the server RRFs across them; the response's per-query and
@@ -39,9 +43,11 @@ use mn_telemetry::{Event, TelemetryClient};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
-/// Default embedding model the CLI declares to the server. The server 409s
-/// `embedding_model_mismatch` if its active corpus model doesn't agree.
-pub const DEFAULT_EMBEDDING_MODEL: &str = "bge-base-en-v1.5@1";
+/// Sentinel embedding model wire id used when `--embedding-model` is not
+/// explicitly overridden. At runtime the CLI resolves the true corpus wire id
+/// from `GET /v1/models/active`; this constant is only the `clap` default so
+/// `args.embedding_model` has a value for the explicit-override comparison.
+pub const DEFAULT_EMBEDDING_MODEL: &str = "auto";
 
 /// Maximum number of queries the CLI will send in one request (matches the
 /// server's hard ceiling).
@@ -68,9 +74,10 @@ pub struct Args {
     #[arg(long, default_value_t = 10)]
     pub limit: u32,
 
-    /// Override the embedding-model wire id. Defaults to
-    /// `bge-base-en-v1.5@1`; only override if your local model and the
-    /// corpus's model are out of sync (run `mnm models pull` first).
+    /// Override the embedding-model wire id sent with the search request.
+    /// When omitted (or set to `"auto"`), the CLI fetches the corpus's active
+    /// model from `GET /v1/models/active` and uses that wire id. Only set
+    /// this explicitly when you need to pin a specific `name@revision`.
     #[arg(long, default_value = DEFAULT_EMBEDDING_MODEL)]
     pub embedding_model: String,
 }
@@ -79,12 +86,14 @@ pub struct Args {
 ///
 /// # Errors
 ///
-/// Returns `anyhow::Error` when the embedder cannot be loaded, the cache dir
-/// cannot be resolved, the HTTP round-trip fails, or the response can't be
+/// Returns `anyhow::Error` when the active model cannot be resolved, the
+/// embedding call fails, the HTTP round-trip fails, or the response can't be
 /// decoded.
 pub async fn run(
     args: Args,
     server_flag: Option<&str>,
+    config_path: Option<&Path>,
+    voyage_api_key: Option<&str>,
     telemetry: &TelemetryClient,
     cli_version: &str,
     json: bool,
@@ -101,6 +110,8 @@ pub async fn run(
         &server_url,
         auth_path.as_deref(),
         &cache_dir,
+        config_path,
+        voyage_api_key,
         telemetry,
         cli_version,
         json,
@@ -108,31 +119,72 @@ pub async fn run(
     .await
 }
 
-/// Path-explicit driver. Loads the local embedder, encodes the query, and
-/// hands off to [`search_via_http`].
+/// Path-explicit driver. Embeds the query via VoyageAI (BYOK or server-proxy),
+/// resolves the corpus wire id, and hands off to [`search_via_http`].
+///
+/// The `cache_dir` parameter is retained for the local reranker path that the
+/// `--rerank` flag will use (Task 9.4); the corpus embedder is now Voyage, so
+/// it is currently unused in the body.
 ///
 /// # Errors
 ///
 /// See [`run`].
+#[allow(clippy::too_many_arguments)]
 pub async fn run_with_paths(
     args: Args,
     server_url: &str,
     auth_path: Option<&Path>,
     cache_dir: &Path,
+    config_path: Option<&Path>,
+    voyage_api_key: Option<&str>,
     telemetry: &TelemetryClient,
     cli_version: &str,
     json: bool,
 ) -> Result<()> {
+    // Retained for the upcoming `--rerank` local-reranker path (Task 9.4).
+    let _ = cache_dir;
+
     let texts = collect_query_texts(&args)?;
     let started = Instant::now();
 
-    let embedder = mn_embedding::embedder::global(cache_dir.to_path_buf())
+    // Resolve bearer first — needed for both the server-embed path and the
+    // subsequent /v1/search request.
+    let bearer = auth_path.and_then(resolve_best_bearer);
+
+    // Resolve the Voyage API key (flag > VOYAGE_API_KEY env > config). Honor the
+    // caller's `--config` path so a key stored in a non-default config is found.
+    let env = mn_core::config::StdEnv;
+    let (cfg, _) = mn_core::config::Config::discover(config_path, &env).unwrap_or_default();
+    let voyage_key = mn_core::config::resolve_voyage_api_key(voyage_api_key, &cfg.models, &env);
+
+    let input_type = mn_embedding::voyage::InputType::Query;
+    let embedded = if let Some(key) = voyage_key.as_deref() {
+        let embedder = mn_embedding::voyage::VoyageEmbedder::new(
+            key,
+            &cfg.models.embedding,
+            cfg.models.voyage_output_dimension,
+            &cfg.models.voyage_output_dtype,
+        );
+        mn_embedding::client::embed(
+            texts.clone(),
+            input_type,
+            mn_embedding::client::EmbedSource::Byok(&embedder),
+        )
         .await
-        .context("load embedder (first run downloads ~100 MB)")?;
-    let vectors = embedder
-        .embed_blocking(texts.clone(), None)
+    } else {
+        mn_embedding::client::embed(
+            texts.clone(),
+            input_type,
+            mn_embedding::client::EmbedSource::Server {
+                base_url: server_url,
+                bearer: bearer.as_deref(),
+            },
+        )
         .await
-        .context("encode queries")?;
+    }
+    .context("embed queries via Voyage")?;
+
+    let vectors = embedded.vectors;
     if vectors.len() != texts.len() {
         return Err(anyhow!(
             "embedder returned {} vectors for {} queries",
@@ -141,7 +193,19 @@ pub async fn run_with_paths(
         ));
     }
 
-    let bearer = auth_path.and_then(resolve_best_bearer);
+    // Resolve the corpus wire id. When the sentinel "auto" is present, fetch
+    // the active model from the server so the wire id always matches the
+    // active corpus model. If the caller supplied an explicit
+    // --embedding-model override, honour it directly and skip the round-trip.
+    let client_embedding_model = if args.embedding_model == DEFAULT_EMBEDDING_MODEL {
+        let active = crate::commands::models::fetch_active(server_url)
+            .await
+            .context("resolve active corpus model")?;
+        format!("{}@{}", active.name, active.revision)
+    } else {
+        args.embedding_model.clone()
+    };
+
     let queries: Vec<QueryPair> = texts
         .into_iter()
         .zip(vectors)
@@ -149,7 +213,7 @@ pub async fn run_with_paths(
         .collect();
     let request = SearchRequest {
         queries,
-        client_embedding_model: args.embedding_model.clone(),
+        client_embedding_model,
         limit: args.limit,
         filters: SearchFilters::default(),
     };
@@ -332,7 +396,8 @@ pub struct SearchRequest {
 pub struct QueryPair {
     /// Verbatim query text.
     pub text: String,
-    /// Pre-computed embedding (768 dims for bge-base-en-v1.5).
+    /// Pre-computed embedding; its dimension is set by the active corpus model
+    /// (e.g. 1024 for voyage-code-3).
     pub vector: Vec<f32>,
 }
 
