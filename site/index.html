@@ -216,6 +216,21 @@ args = ["mcp", "serve"]'>Copy</button></div>
     </div>
   </section>
 
+  <section class="section" id="private">
+    <div class="container" data-reveal>
+      <p class="marker">Local &amp; private</p>
+      <h2 class="h-section">Your queries<br>stay yours</h2>
+      <div class="cards grid-3" style="margin-top:24px">
+        <div class="card"><p class="card__title">Local models</p>
+          <p>Embedding (<code>bge-base-en-v1.5</code>) and reranking (<code>bge-reranker-base</code>) run on your machine via fastembed/ONNX — no Python, no GPU, no API key, no account.</p></div>
+        <div class="card"><p class="card__title">Opt-out telemetry</p>
+          <p>Carries no query or chunk content, no tokens, no paths. Opt out three ways: an env var, a config flag, or <code>mnm telemetry disable</code>.</p></div>
+        <div class="card"><p class="card__title">Enforced by a canary</p>
+          <p>A CI test feeds fake tokens, paths, and queries through every path that touches user content — any leak fails the build.</p></div>
+      </div>
+    </div>
+  </section>
+
   <!-- sticky install CTA -->
   <a class="btn-pill btn-pill--solid sticky-cta" href="#quickstart">Install</a>
   <!-- later sections appended below -->
