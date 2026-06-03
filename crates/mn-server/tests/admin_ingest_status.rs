@@ -20,10 +20,8 @@ use uuid::Uuid;
 
 fn cfg_with_auth(user_store_body: String, jwt_secret_bytes: Vec<u8>) -> ServerConfig {
     ServerConfig {
-        corpus_model: Some("bge-base-en-v1.5@1".to_owned()),
         user_store_body: Some(user_store_body),
         jwt_secret: Some(jwt_secret_bytes),
-        embedder_enabled: true,
         ..Default::default()
     }
 }
@@ -97,7 +95,7 @@ async fn mint_admin_token(app: axum::Router, user_id: &str, kp: &Keypair) -> Str
 /// Seed one source with one active source_version containing 2 ready + 1
 /// embed_failed chunk. Returns the source slug.
 async fn seed_active_source_with_chunks(pool: &sqlx::PgPool) -> String {
-    let model_id = embedding_model::upsert(pool, "bge-base-en-v1.5", 1, 768, "baai")
+    let model_id = embedding_model::upsert(pool, "voyage-code-3", 1, 1024, "voyageai")
         .await
         .unwrap();
     let slug = format!("status-test-{}", Uuid::new_v4());
@@ -154,9 +152,9 @@ async fn seed_active_source_with_chunks(pool: &sqlx::PgPool) -> String {
             node::insert(pool, sv_id, Some(doc_node), NodeKind::Chunk, &format!("c{i}"), 0)
                 .await
                 .unwrap();
-        // Ready chunks need a valid 768-dim embedding.
+        // Ready chunks need a valid 1024-dim embedding (voyage-code-3 width).
         let embedding = if matches!(status, ChunkStatus::Ready) {
-            Some(vec![0.1_f32; 768])
+            Some(vec![0.1_f32; 1024])
         } else {
             None
         };
@@ -212,8 +210,7 @@ async fn admin_token_returns_status_with_source_summary() {
 
     let (status, body) = call(app, "GET", "/v1/admin/ingest/status", Some(&token), None).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["active_embedding_model"], "bge-base-en-v1.5@1");
-    assert_eq!(body["embedder_worker_enabled"], true);
+    assert_eq!(body["active_embedding_model"], "voyage-code-3@1");
 
     let our_row = body["sources"]
         .as_array()
@@ -256,20 +253,6 @@ async fn source_with_no_active_version_returns_zeros() {
     assert_eq!(our_row["total_chunks"], 0);
     assert_eq!(our_row["ready_chunks"], 0);
     assert_eq!(our_row["embed_failed_chunks"], 0);
-}
-
-#[tokio::test]
-async fn embedder_worker_enabled_reflects_config() {
-    let h = common::boot().await;
-    let kp = Keypair::generate();
-    let mut cfg = cfg_with_auth(user_store_for("aaron", &kp), vec![7u8; 32]);
-    cfg.embedder_enabled = false;
-    let app = app::build(h.pool.clone(), cfg).expect("build app");
-    let token = mint_admin_token(app.clone(), "aaron", &kp).await;
-
-    let (status, body) = call(app, "GET", "/v1/admin/ingest/status", Some(&token), None).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["embedder_worker_enabled"], false);
 }
 
 #[tokio::test]

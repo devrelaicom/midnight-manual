@@ -48,3 +48,45 @@ pub fn service_unavailable(reason: impl Into<String>, request_id: impl Into<Stri
         .build();
     into_response(err, request_id)
 }
+
+/// Build a response with an explicit HTTP status, bypassing the
+/// [`ErrorCode::http_status`] mapping.
+///
+/// `into_response` derives the status from the error's `ErrorCode`. A few HTTP
+/// statuses (502, 413) have no dedicated `ErrorCode` variant yet, so this helper
+/// pairs the closest generic code with a forced status code. The wire body shape
+/// is identical to [`into_response`].
+fn with_status(status: StatusCode, err: CoreError, request_id: impl Into<String>) -> Response {
+    let body = ErrorBody {
+        error: err,
+        request_id: request_id.into(),
+    };
+    (status, Json(body)).into_response()
+}
+
+/// Convenience for the 502 path: an upstream dependency (e.g. the Voyage
+/// embedding API) returned an error or was unreachable. There is no dedicated
+/// `ErrorCode` for "bad gateway" yet, so this reuses [`ErrorCode::ServiceUnavailable`]
+/// (the closest upstream-failure code) but forces HTTP 502.
+#[must_use]
+pub fn bad_gateway(message: impl Into<String>, request_id: impl Into<String>) -> Response {
+    let err = CoreError::builder(ErrorCode::ServiceUnavailable)
+        .message(message)
+        .remediation("the upstream embedding provider failed; retry with backoff")
+        .build();
+    with_status(StatusCode::BAD_GATEWAY, err, request_id)
+}
+
+/// Convenience for the 413 path: the request body is well-formed but too large
+/// to process (e.g. more inputs than the per-request batch cap). There is no
+/// dedicated `ErrorCode` for "payload too large" yet, so this reuses
+/// [`ErrorCode::InvalidRequest`] (the closest client-error code) but forces
+/// HTTP 413.
+#[must_use]
+pub fn payload_too_large(message: impl Into<String>, request_id: impl Into<String>) -> Response {
+    let err = CoreError::builder(ErrorCode::InvalidRequest)
+        .message(message)
+        .remediation("split the request into smaller batches and retry")
+        .build();
+    with_status(StatusCode::PAYLOAD_TOO_LARGE, err, request_id)
+}

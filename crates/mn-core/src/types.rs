@@ -117,6 +117,35 @@ pub struct RateLimitOverride {
     pub created_at: OffsetDateTime,
 }
 
+/// A per-subject (CIDR block or user id) embedding token-limit override
+/// (`token_limit_override`, Voyage embeddings workstream).
+///
+/// Unlike [`RateLimitOverride`], the `subject` column is plain `text` in
+/// Postgres (not the `cidr` type), so no `::text` cast is needed on reads.
+/// On insert, when `subject_kind == "cidr"`, the entity normalises the
+/// address via `network($2::inet)::text` to mask off host bits.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenLimitOverride {
+    /// Database UUID.
+    pub id: Uuid,
+    /// Discriminator: `"cidr"` or `"user"`.
+    pub subject_kind: String,
+    /// The CIDR block or user id the limit applies to.
+    pub subject: String,
+    /// Per-hour embedding token ceiling (non-negative).
+    pub hourly: i64,
+    /// Per-day embedding token ceiling (non-negative).
+    pub daily: i64,
+    /// When the override stops being effective.
+    pub expires_at: OffsetDateTime,
+    /// Free-form operator note.
+    pub note: Option<String>,
+    /// `user_id` of the admin who created the override (JWT `sub` claim).
+    pub created_by: String,
+    /// When the override row was inserted.
+    pub created_at: OffsetDateTime,
+}
+
 /// `embedding_model` registry row — the typed view of the table.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EmbeddingModel {

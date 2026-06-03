@@ -40,6 +40,7 @@
 - [Admin & operations](#admin--operations)
 - [The cloud server](#the-cloud-server)
 - [Telemetry & privacy](#telemetry--privacy)
+- [Embeddings & third-party processing](#embeddings--third-party-processing)
 - [Configuration](#configuration)
 - [Deep dives](#deep-dives)
 - [Project links](#project-links)
@@ -141,7 +142,7 @@ Restart your client and ask it something Midnight-specific. It will reach for th
 
 ## The MCP server
 
-`mnm mcp serve` is a hand-rolled MCP server (JSON-RPC 2.0 framed over stdio) with **lazy model loading** — it starts in well under half a second and only loads the embedder/reranker the first time a query actually needs them, so adding it to your client costs you nothing at idle.
+`mnm mcp serve` is a hand-rolled MCP server (JSON-RPC 2.0 framed over stdio) with **lazy model loading** — it starts in well under half a second and only loads the reranker the first time a reranking query needs it (the embedder is remote VoyageAI), so adding it to your client costs you nothing at idle.
 
 It exposes **11 tools**, grouped by what they do:
 
@@ -169,7 +170,7 @@ A search result is a chunk. These tools let your assistant pull exactly as much 
 | Tool | What it does |
 | --- | --- |
 | **`list_sources`** | Enumerate corpus sources — slug, display name, kind, active revision. |
-| **`pull_models`** | Download the embedder + reranker on demand; reports load state and timing. |
+| **`pull_models`** | Download the reranker on demand; reports load state and timing. (The embedder is remote VoyageAI.) |
 | **`status`** | Health report: server version, model names, `ready`/`missing` state, cache dir. |
 
 ### Why it's good
@@ -299,7 +300,7 @@ Overrides are time-boxed (they expire on their `--ttl`) and the server refreshes
 
 ## The CLI
 
-`midnight-manual` / `mnm` is a noun-first command tree: pick a noun, then a verb. No account or API key is required — embedding and reranking run **locally on your machine**; only the search request itself reaches the hosted corpus. Add `--json` to any command for scripting.
+`midnight-manual` / `mnm` is a noun-first command tree: pick a noun, then a verb. Reranking runs **locally on your machine**; query embedding goes through VoyageAI (bring-your-own-key, or proxied by the hosted server), and the search request itself reaches the hosted corpus. Add `--json` to any command for scripting.
 
 ```text
 mnm search   "<query>"                 ad-hoc hybrid search
@@ -307,7 +308,7 @@ mnm sources  list | show               browse corpus sources
 mnm versions list | show | promote …   inspect source versions
 mnm chunks   show | next | prev        walk the chunk graph by id
 mnm documents show | full | chunks     read documents, windowed
-mnm models   pull | list | prune       manage local embedder/reranker
+mnm models   pull | list | prune       manage the local reranker
 mnm config   show | edit | defaults    resolved configuration
 mnm telemetry disable | enable | status opt out (or back in)
 mnm auth     github | status           GitHub OAuth for rate-limit uplift
@@ -330,10 +331,10 @@ mnm chunks next <chunk-id> --count 10
 mnm documents full <doc-id>
 mnm documents chunks <doc-id> --from 0 --limit 20
 
-# Manage local models
-mnm models pull          # fetch embedder + reranker
+# Manage the local reranker (the embedder is remote VoyageAI)
+mnm models pull          # fetch the reranker
 mnm models list          # what's cached
-mnm models prune --keep bge-base-en-v1.5
+mnm models prune --keep bge-reranker-base
 ```
 
 ### Global flags
@@ -353,19 +354,17 @@ mnm models prune --keep bge-base-en-v1.5
 
 ![Local models](docs/assets/readme/local-models.png)
 
-## Local models
+## Models
 
-Embedding and reranking run **on your machine**, not in a third-party API. Your queries are turned into vectors locally; only the resulting search request hits the corpus.
+| Role | Model | Where it runs | Notes |
+| --- | --- | --- | --- |
+| Embedder | **`voyage-code-3`** | VoyageAI (remote) | 1024-dimensional embeddings. Your client embeds queries via VoyageAI — bring-your-own-key, or proxied through the server's `/v1/embeddings`. |
+| Reranker | **`bge-reranker-base`** | on your machine | Cross-encoder, used only when `rerank` is requested. |
 
-| Role | Model | Notes |
-| --- | --- | --- |
-| Embedder | **`bge-base-en-v1.5`** | 768-dimensional sentence embeddings. |
-| Reranker | **`bge-reranker-base`** | Cross-encoder, used only when `rerank` is requested. |
-
-- **Powered by [`fastembed`](https://github.com/Anush008/fastembed-rs)** over the ONNX runtime — no Python, no GPU required.
-- **Lazy & cached.** Models download on first use into `$XDG_DATA_HOME/midnight-manual/models/` (override with `models.cache_dir`). Subsequent runs load from disk; the MCP server only loads them when a query needs them.
-- **Pin & prune.** `mnm models pull`, `mnm models list`, and `mnm models prune --keep <name>` give you full control of what's on disk.
-- **Version-aware.** The corpus advertises its active embedding model as `name@revision` (e.g. `bge-base-en-v1.5@1`). If the corpus rolls forward, clients are told to `pull_models` rather than silently returning mis-scored results.
+- **Reranker powered by [`fastembed`](https://github.com/Anush008/fastembed-rs)** over the ONNX runtime — no Python, no GPU required. The embedder is remote (VoyageAI), so there is nothing to download for it.
+- **Lazy & cached.** The reranker downloads on first use into `$XDG_DATA_HOME/midnight-manual/models/` (override with `models.cache_dir`). Subsequent runs load from disk; the MCP server only loads it when a reranking query needs it.
+- **Pin & prune.** `mnm models pull` (reranker), `mnm models list`, and `mnm models prune --keep <name>` give you full control of what's on disk.
+- **Version-aware.** The corpus advertises its active embedding model as `name@revision` (e.g. `voyage-code-3@1`). If the corpus rolls forward, clients are told to re-embed against the new model rather than silently returning mis-scored results.
 
 ---
 
@@ -414,7 +413,7 @@ Grammars are **Cargo-feature-gated** into tiers (`core-grammars` → `markup-gra
 Getting content into the corpus is a single, resumable, atomically-promoted flow. The orchestrator is pure — it never touches the database directly — which makes ingestion predictable and testable.
 
 ```text
-manifest ─▶ .gitignore-aware walk ─▶ per-file chunker ─▶ local embedder ─▶ versioned corpus ─▶ promote
+manifest ─▶ .gitignore-aware walk ─▶ per-file chunker ─▶ VoyageAI embed ─▶ versioned corpus ─▶ promote
    (or auto-generated)          (markdown / code / fallback)            (carry-forward unchanged docs)
 ```
 
@@ -423,7 +422,7 @@ What makes it nice:
 - **Versioned, atomic promotion.** Every ingest builds a new `source_version` in a `building` state, invisible to search. A single `finalize` step flips it `active` and demotes the previous one in one transaction — readers never see a half-built corpus, and rollback is one command.
 - **Carry-forward.** If a document's content hash is unchanged from the active version, its chunks (and their embeddings) are re-linked instead of re-embedded. Re-ingesting a docs site where two pages changed costs you two pages of work, not the whole site.
 - **Per-file dispatch.** A `README.md` next to a `lib.rs` next to a `Cargo.toml` each routes to the right chunker automatically, by extension (and shebang).
-- **Resilient.** Binary files are sniffed and skipped, oversize files (>10 MiB) are skipped with a warning, and chunks the embedder rejects land in an `embed_failed` state and are simply skipped by readers (so navigation has clean gaps, never broken links).
+- **Resilient.** Binary files are sniffed and skipped, oversize files (>10 MiB) are skipped with a warning, and any chunk that fails to embed lands in an `embed_failed` state and is simply skipped by readers (so navigation has clean gaps, never broken links).
 - **Observable.** Each run emits an `ingest_complete` event with documents added / updated / skipped and duration — counts only, never content (see [privacy](#telemetry--privacy)).
 
 ---
@@ -604,6 +603,62 @@ A CI test feeds query stand-ins, fake tokens, fake paths, and fake env values th
 
 ---
 
+## Embeddings & third-party processing
+
+Telemetry is the easy half of the privacy story — it carries no content at all. Embedding is the harder half, because a search query *is* content, and turning it into a vector means a model has to read it. Here's exactly where your text goes.
+
+### The corpus is public
+
+The indexed corpus is built from **public Midnight repositories** — the docs site and open-source code. Nothing private is in it, and nothing you search reveals anything to other users. What follows is only about where *your query text* travels on its way to a vector.
+
+### Where query text goes — two embedding paths
+
+Query embedding uses VoyageAI's **`voyage-code-3`** model (1024-dimensional). Reranking, when you ask for it, runs locally. Which path your query text takes depends on whether you supply your own Voyage key:
+
+| Path | When it applies | What text reaches Voyage |
+| --- | --- | --- |
+| **BYOK** (bring your own key) | a Voyage key is set | Your client embeds directly against **your own** Voyage account — query (and, when ingesting, document) text is sent to Voyage under *your* account. |
+| **Server-proxy** | no Voyage key | Your client POSTs raw query text to the hosted server's `/v1/embeddings`, which calls Voyage under the **operator's** platform account. Your query text reaches Voyage under their account, not yours. |
+
+Either way the query text reaches Voyage; the only question is *whose* Voyage account processes it. There is no path that embeds entirely on your machine — the embedder is remote by design.
+
+The server records only **token counts** and an anonymised **subject key** (a hashed IP, or your SSO user id) for budget accounting — it **never** logs or persists the submitted query text. That invariant is enforced by a CI canary alongside the telemetry one.
+
+### BYOK setup
+
+Set a Voyage key any one of these ways and your client embeds directly, skipping the server proxy:
+
+```bash
+export VOYAGE_API_KEY=…                 # environment
+mnm search "…" --voyage-api-key …       # per-invocation flag
+```
+
+```toml
+[models]
+voyage_api_key = "…"                    # config file (lowest precedence)
+```
+
+Precedence is the usual **flag › env › config**.
+
+### Reranking stays on your machine — with one exception
+
+By default the reranker is the local `bge-reranker-base` cross-encoder; it and every other local option run entirely on your machine, so candidate text never leaves. The **Voyage reranker options are the exception** — they send the query *and* the candidate passages to Voyage, the same way the embedder does. Choose a reranker with `--reranker`, `MIDNIGHT_MANUAL_RERANKER`, or `models.reranker`:
+
+| Reranker id | Runs | Notes |
+| --- | --- | --- |
+| **`bge-reranker-base`** | local | **default** — native `fastembed` cross-encoder |
+| `bge-reranker-v2-m3` | local | native `fastembed` |
+| `jina-reranker-v1-turbo-en` | local | native `fastembed` |
+| `ms-marco-minilm-l2` / `-l6` / `-l12` | local | auto-fetched ONNX |
+| `mxbai-rerank-base-v1` | local | auto-fetched ONNX |
+| `mxbai-rerank-base-v2` | local | auto-fetched ONNX (experimental) |
+| `custom` | local | your own model dir (`--reranker-path` / `models.reranker_path`) with `model.onnx` + tokenizer files |
+| `voyage-rerank-2.5` / `-2.5-lite` / `-2` | **Voyage API** | **sends query + candidate text to Voyage** (needs a Voyage key) |
+
+> `jina-reranker-v2-base-multilingual` is **intentionally excluded** — its licence is `cc-by-nc-4.0` (non-commercial).
+
+---
+
 ![Configuration](docs/assets/readme/config.png)
 
 ## Configuration
@@ -617,9 +672,9 @@ Configuration resolves in a clear precedence order — **command-line flag › e
 url = "https://midnight-manual.midnightntwrk.expert"
 
 [models]
-embedding = "bge-base-en-v1.5"
-reranker  = "bge-reranker-base"
-# cache_dir = "/custom/model/cache"   # optional
+embedding = "voyage-code-3"          # remote VoyageAI embedder
+reranker  = "bge-reranker-base"       # local fastembed cross-encoder
+# cache_dir = "/custom/model/cache"   # optional (reranker cache)
 
 [telemetry]
 enabled = true

@@ -1,0 +1,54 @@
+name: Reranker smoke
+
+# Loads the real `bge-reranker-base` cross-encoder and exercises it
+# end-to-end (crates/mn-embedding/tests/real_reranker_smoke.rs). The test is
+# `#[ignore]`-gated so the main CI workflow does not download ~270 MB of ONNX
+# weights on every lap.
+#
+# The corpus embedder is now VoyageAI (client-side BYOK or the server's
+# /v1/embeddings proxy), so there is no local embedder left to smoke-test; the
+# reranker is the only model still riding on fastembed.
+#
+# Runs daily at 04:00 UTC and can be triggered manually via the
+# "Run workflow" button on the Actions tab (workflow_dispatch).
+
+on:
+  schedule:
+    - cron: "0 4 * * *"   # 04:00 UTC daily
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  reranker-smoke:
+    name: real-reranker smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RUST_LOG: info
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.91.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+
+      # Persist the fastembed ONNX bundle between runs so the daily lap
+      # doesn't re-pull ~270 MB from Hugging Face every morning. The cache
+      # key encodes the model identifier so any future reranker bump in
+      # mn-embedding forces a clean re-download.
+      - name: Cache fastembed model bundles
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/midnight-manual/models
+          key: fastembed-bge-reranker-base-v1
+          restore-keys: |
+            fastembed-
+
+      - name: Run real-reranker smoke test
+        run: |
+          cargo test -p mn-embedding --test real_reranker_smoke \
+            -- --ignored --nocapture

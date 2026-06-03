@@ -93,7 +93,7 @@ pub enum SortBy {
 pub struct QueryPair {
     /// The query text, used for the full-text-search half of retrieval.
     pub text: String,
-    /// The pre-computed embedding (768 dimensions for bge-base-en-v1.5).
+    /// The pre-computed embedding; its dimension must match the active corpus model.
     pub vector: Vec<f32>,
 }
 
@@ -266,42 +266,50 @@ async fn search(
     }
     let limit = req.limit.min(max_limit()).max(1);
 
-    // Model-mismatch guard. The active corpus model is resolved at boot and
-    // stamped into ServerConfig; if it's somehow None here the server is
-    // mis-configured and we 503 rather than silently compare against a
-    // hardcoded literal (which used to cause spec drift if migration 0006
-    // ever seeded a different revision).
-    let Some(corpus_model_id) = state.cfg.corpus_model.clone() else {
+    // Model-mismatch guard. The active corpus model is resolved at boot (and
+    // re-resolved after each ingest finalize) into the AppState RwLock; if it's
+    // somehow None here the server is mis-configured and we 503 rather than
+    // silently compare against a hardcoded literal (which used to cause spec
+    // drift if migration 0006 ever seeded a different revision).
+    // Snapshot the model behind the lock and drop the guard immediately, so the
+    // read lock isn't held across the rest of the handler.
+    let snapshot = state
+        .corpus_model
+        .read()
+        .expect("corpus_model lock poisoned")
+        .clone();
+    let Some(cm) = snapshot else {
         return error::service_unavailable(
             "server has no resolved corpus_model; check boot logs",
             rid,
         );
     };
-    if req.client_embedding_model != corpus_model_id {
+    if req.client_embedding_model != cm.wire {
         return error::into_response(
             CoreError::builder(ErrorCode::EmbeddingModelMismatch)
                 .message(format!(
-                    "client_embedding_model `{}` does not match corpus model `{corpus_model_id}`",
-                    req.client_embedding_model,
+                    "client_embedding_model `{}` does not match corpus model `{}`",
+                    req.client_embedding_model, cm.wire,
                 ))
                 .remediation("re-run `mnm models pull` to fetch the corpus model")
-                .context("corpus_model", corpus_model_id.clone())
+                .context("corpus_model", cm.wire.clone())
                 .context("client_model", req.client_embedding_model.clone())
                 .build(),
             rid,
         );
     }
 
-    // Vector-dim guard: every query's vector must be 768 dims (the seed model).
+    // Vector-dim guard: every query's vector must match the corpus model's dim.
     for (i, q) in queries.iter().enumerate() {
-        if q.vector.len() != 768 {
+        if q.vector.len() != cm.dim {
             return error::into_response(
                 CoreError::builder(ErrorCode::InvalidRequest)
                     .message(format!(
-                        "queries[{i}].vector has {} dimensions; expected 768",
+                        "queries[{i}].vector has {} dimensions; expected {}",
                         q.vector.len(),
+                        cm.dim,
                     ))
-                    .remediation("re-embed with bge-base-en-v1.5 (768 dims)")
+                    .remediation("re-embed with the corpus model (run `mnm models pull`)")
                     .build(),
                 rid,
             );
@@ -351,6 +359,10 @@ async fn search(
     // Hybrid retrieval: for each distinct query run BOTH pgvector and FTS,
     // collecting one ranked candidate list per (query, mode). RRF (k=60) then
     // fuses every list — across modes and across queries — in a single pass.
+    // Candidates are restricted to chunks on the corpus model's source_versions
+    // so off-model rows never surface. Copied into a local `Uuid` so the loop
+    // body doesn't borrow `cm`.
+    let corpus_model_id = cm.id;
     let mut per_query = Vec::with_capacity(distinct.len());
     let mut ranked_lists: Vec<Vec<Uuid>> = Vec::with_capacity(distinct.len() * 2);
     // Per chunk: which distinct queries contributed at least one rank, and the
@@ -362,7 +374,9 @@ async fn search(
 
     for (i, q) in distinct.iter().enumerate() {
         let t0 = std::time::Instant::now();
-        let vector_hits = match vector_search(&state.pool, &q.vector, &req.filters).await {
+        let vector_hits = match vector_search(&state.pool, &q.vector, &req.filters, corpus_model_id)
+            .await
+        {
             Ok(hits) => hits,
             Err(e) => {
                 tracing::warn!(request_id = rid, error = %e, query_index = i, "vector search failed");
@@ -375,7 +389,7 @@ async fn search(
         let vector_latency_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
         let t1 = std::time::Instant::now();
-        let fts_hits = match fts_search(&state.pool, &q.text, &req.filters).await {
+        let fts_hits = match fts_search(&state.pool, &q.text, &req.filters, corpus_model_id).await {
             Ok(hits) => hits,
             Err(e) => {
                 tracing::warn!(request_id = rid, error = %e, query_index = i, "fts search failed");
@@ -676,7 +690,7 @@ fn normalize_queries(req: &SearchRequest) -> Result<Vec<QueryPair>, (String, Str
         }]),
         (Some(_), None) | (None, Some(_)) => Err((
             "the single-query form requires both `query` and `vector`".to_owned(),
-            "include the 768-dim `vector` alongside `query`, or use the `queries` array".to_owned(),
+            "include the embedding `vector` (dimension must match the corpus model) alongside `query`, or use the `queries` array".to_owned(),
         )),
         (None, None) => Ok(Vec::new()),
     }
@@ -707,6 +721,7 @@ async fn vector_search(
     pool: &sqlx::PgPool,
     vector: &[f32],
     filters: &SearchFilters,
+    corpus_model_id: Uuid,
 ) -> Result<Vec<(Uuid, f64)>, sqlx::Error> {
     // pgvector cosine distance: 0 = identical, 2 = opposite. Top 100 per query.
     let mut qb: QueryBuilder<Postgres> =
@@ -717,6 +732,11 @@ async fn vector_search(
     qb.push(
         " WHERE chunk.embedding IS NOT NULL AND chunk.status = 'ready' AND sv.is_active = true",
     );
+    // Restrict to chunks encoded with the corpus model so off-model rows
+    // (e.g. a mid-migration source_version on a different embedder) never leak
+    // into candidates — their vectors aren't comparable to the query's.
+    qb.push(" AND sv.embedding_model_id = ");
+    qb.push_bind(corpus_model_id);
     push_filter_predicates(&mut qb, filters);
     qb.push(" ORDER BY chunk.embedding <=> ");
     qb.push_bind(Vector::from(vector.to_vec()));
@@ -747,6 +767,7 @@ async fn fts_search(
     pool: &sqlx::PgPool,
     text: &str,
     filters: &SearchFilters,
+    corpus_model_id: Uuid,
 ) -> Result<Vec<Uuid>, sqlx::Error> {
     let mut qb: QueryBuilder<Postgres> = QueryBuilder::new(
         "SELECT chunk.id FROM chunk JOIN source_version sv ON sv.id = chunk.source_version_id",
@@ -755,6 +776,10 @@ async fn fts_search(
     qb.push(" WHERE chunk.tsvector @@ websearch_to_tsquery('english', ");
     qb.push_bind(text.to_owned());
     qb.push(") AND chunk.status = 'ready' AND sv.is_active = true");
+    // Restrict to chunks encoded with the corpus model (see `vector_search`):
+    // an off-model active source_version must not contribute FTS candidates.
+    qb.push(" AND sv.embedding_model_id = ");
+    qb.push_bind(corpus_model_id);
     push_filter_predicates(&mut qb, filters);
     qb.push(" ORDER BY ts_rank(chunk.tsvector, websearch_to_tsquery('english', ");
     qb.push_bind(text.to_owned());

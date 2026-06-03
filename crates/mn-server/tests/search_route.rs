@@ -26,16 +26,16 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 fn unit_vector(seed: f32) -> Vec<f32> {
-    // Deterministic 768-dim vector for tests. Not normalized; pgvector cosine
-    // operator handles arbitrary magnitudes.
+    // Deterministic 1024-dim vector for tests (voyage-code-3 width). Not
+    // normalized; pgvector cosine operator handles arbitrary magnitudes.
     #[allow(clippy::cast_precision_loss)]
-    (0..768_i32).map(|i| seed + (i as f32) * 0.0001).collect()
+    (0..1024_i32).map(|i| seed + (i as f32) * 0.0001).collect()
 }
 
 async fn seed(pool: &sqlx::PgPool) -> (Uuid, Uuid) {
     // Returns (chunk_id_a, chunk_id_b). Slug is randomized per call so parallel
     // CI test runs don't collide on the unique constraint.
-    let model_id = embedding_model::upsert(pool, "bge-base-en-v1.5", 1, 768, "baai")
+    let model_id = embedding_model::upsert(pool, "voyage-code-3", 1, 1024, "voyageai")
         .await
         .unwrap();
     let slug = format!("search-route-test-{}", Uuid::new_v4());
@@ -130,19 +130,19 @@ async fn seed(pool: &sqlx::PgPool) -> (Uuid, Uuid) {
 }
 
 fn cfg() -> ServerConfig {
-    ServerConfig {
-        // Tests bypass the boot-time resolver so we pin the corpus model
-        // explicitly. Matches the seeded `embedding_model` row in migration 0006.
-        corpus_model: Some("bge-base-en-v1.5@1".to_owned()),
-        ..Default::default()
-    }
+    // The corpus model is no longer pinned in config; `app::build_resolved`
+    // resolves it from the DB. Each test seeds an active voyage-code-3@1
+    // source_version before building, so resolution yields voyage-code-3@1/1024.
+    ServerConfig::default()
 }
 
 #[tokio::test]
 async fn search_returns_nearest_chunk_first() {
     let h = common::boot().await;
     let (a, _b) = seed(&h.pool).await;
-    let app = app::build(h.pool.clone(), cfg()).expect("build app");
+    let app = app::build_resolved(h.pool.clone(), cfg())
+        .await
+        .expect("build app");
 
     // Query vector very close to chunk_a's seed (0.10) — chunk_a should rank
     // first. `limit` is generous because parallel CI shares one schema: every
@@ -155,7 +155,7 @@ async fn search_returns_nearest_chunk_first() {
             "text": "alpha-ish content",
             "vector": unit_vector(0.11),
         }],
-        "client_embedding_model": "bge-base-en-v1.5@1",
+        "client_embedding_model": "voyage-code-3@1",
         "limit": 100,
     });
     let resp = app
@@ -195,7 +195,9 @@ async fn search_returns_nearest_chunk_first() {
 async fn search_returns_409_on_model_mismatch() {
     let h = common::boot().await;
     let _ = seed(&h.pool).await;
-    let app = app::build(h.pool.clone(), cfg()).expect("build app");
+    let app = app::build_resolved(h.pool.clone(), cfg())
+        .await
+        .expect("build app");
 
     let body = serde_json::json!({
         "queries": [{ "text": "x", "vector": unit_vector(0.0) }],
@@ -217,7 +219,7 @@ async fn search_returns_409_on_model_mismatch() {
     let body = to_bytes(resp.into_body(), 4096).await.unwrap();
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(v["error"]["code"], "embedding_model_mismatch");
-    assert_eq!(v["error"]["context"]["corpus_model"], "bge-base-en-v1.5@1");
+    assert_eq!(v["error"]["context"]["corpus_model"], "voyage-code-3@1");
     assert_eq!(v["error"]["context"]["client_model"], "bge-small-en-v1.5@1");
 }
 
@@ -225,11 +227,13 @@ async fn search_returns_409_on_model_mismatch() {
 async fn search_returns_400_on_wrong_dim() {
     let h = common::boot().await;
     let _ = seed(&h.pool).await;
-    let app = app::build(h.pool.clone(), cfg()).expect("build app");
+    let app = app::build_resolved(h.pool.clone(), cfg())
+        .await
+        .expect("build app");
 
     let body = serde_json::json!({
         "queries": [{ "text": "x", "vector": vec![0.0_f32; 128] }],
-        "client_embedding_model": "bge-base-en-v1.5@1",
+        "client_embedding_model": "voyage-code-3@1",
         "limit": 5,
     });
     let resp = app
@@ -252,11 +256,13 @@ async fn search_returns_400_on_wrong_dim() {
 #[tokio::test]
 async fn search_returns_400_on_empty_queries() {
     let h = common::boot().await;
-    let app = app::build(h.pool.clone(), cfg()).expect("build app");
+    let app = app::build_resolved(h.pool.clone(), cfg())
+        .await
+        .expect("build app");
 
     let body = serde_json::json!({
         "queries": [],
-        "client_embedding_model": "bge-base-en-v1.5@1",
+        "client_embedding_model": "voyage-code-3@1",
     });
     let resp = app
         .oneshot(
@@ -276,11 +282,13 @@ async fn search_returns_400_on_empty_queries() {
 async fn search_respects_limit_cap() {
     let h = common::boot().await;
     let _ = seed(&h.pool).await;
-    let app = app::build(h.pool.clone(), cfg()).expect("build app");
+    let app = app::build_resolved(h.pool.clone(), cfg())
+        .await
+        .expect("build app");
 
     let body = serde_json::json!({
         "queries": [{ "text": "x", "vector": unit_vector(0.5) }],
-        "client_embedding_model": "bge-base-en-v1.5@1",
+        "client_embedding_model": "voyage-code-3@1",
         "limit": 1,
     });
     let resp = app
@@ -305,7 +313,7 @@ async fn search_respects_limit_cap() {
 /// `NULL` embedding whose content carries a globally-rare token. Returns
 /// `(embedded_chunk_id, fts_only_chunk_id)`.
 async fn seed_hybrid(pool: &sqlx::PgPool) -> (Uuid, Uuid) {
-    let model_id = embedding_model::upsert(pool, "bge-base-en-v1.5", 1, 768, "baai")
+    let model_id = embedding_model::upsert(pool, "voyage-code-3", 1, 1024, "voyageai")
         .await
         .unwrap();
     let slug = format!("search-hybrid-test-{}", Uuid::new_v4());
@@ -412,7 +420,7 @@ async fn seed_hybrid(pool: &sqlx::PgPool) -> (Uuid, Uuid) {
 /// `high` (Foundation, verified, fresh) and `low` (Unknown, unverified, stale).
 /// Returns `(high_chunk_id, low_chunk_id, rare_token)`.
 async fn seed_scored(pool: &sqlx::PgPool) -> (Uuid, Uuid, String) {
-    let model_id = embedding_model::upsert(pool, "bge-base-en-v1.5", 1, 768, "baai")
+    let model_id = embedding_model::upsert(pool, "voyage-code-3", 1, 1024, "voyageai")
         .await
         .unwrap();
     let slug = format!("search-scored-test-{}", Uuid::new_v4());
@@ -548,7 +556,7 @@ async fn seed_scored_chunk(
 /// `>=0.23`, depends on npm `@midnight-ntwrk/midnight-js >=1.0.0`, and belongs
 /// to a rust package. Returns `(chunk_id, source_slug, package_name, rare_token)`.
 async fn seed_filter_fixture(pool: &sqlx::PgPool) -> (Uuid, String, String, String) {
-    let model_id = embedding_model::upsert(pool, "bge-base-en-v1.5", 1, 768, "baai")
+    let model_id = embedding_model::upsert(pool, "voyage-code-3", 1, 1024, "voyageai")
         .await
         .unwrap();
     let slug = format!("filter-fixture-{}", Uuid::new_v4());
@@ -658,7 +666,9 @@ async fn post_search(app: axum::Router, body: serde_json::Value) -> serde_json::
 async fn fts_only_chunk_appears_via_hybrid_union() {
     let h = common::boot().await;
     let (_embedded, fts_only) = seed_hybrid(&h.pool).await;
-    let app = app::build(h.pool.clone(), cfg()).expect("build app");
+    let app = app::build_resolved(h.pool.clone(), cfg())
+        .await
+        .expect("build app");
 
     // Text matches the FTS-only chunk; vector targets the embedded chunk. The
     // FTS-only chunk has a NULL embedding, so it can only appear via the FTS
@@ -667,7 +677,7 @@ async fn fts_only_chunk_appears_via_hybrid_union() {
         app,
         serde_json::json!({
             "queries": [{ "text": "zzqxftsonly", "vector": unit_vector(0.4243) }],
-            "client_embedding_model": "bge-base-en-v1.5@1",
+            "client_embedding_model": "voyage-code-3@1",
             "limit": 50,
         }),
     )
@@ -696,7 +706,9 @@ async fn fts_only_chunk_appears_via_hybrid_union() {
 async fn matched_queries_reflects_contributing_queries() {
     let h = common::boot().await;
     let (embedded, fts_only) = seed_hybrid(&h.pool).await;
-    let app = app::build(h.pool.clone(), cfg()).expect("build app");
+    let app = app::build_resolved(h.pool.clone(), cfg())
+        .await
+        .expect("build app");
 
     // q0 FTS-matches the FTS-only chunk; both queries vector-match the embedded
     // chunk (their vectors bracket its 0.4242 seed). q1's text matches nothing.
@@ -707,7 +719,7 @@ async fn matched_queries_reflects_contributing_queries() {
                 { "text": "zzqxftsonly",       "vector": unit_vector(0.4243) },
                 { "text": "nomatchtoken99zz",  "vector": unit_vector(0.4244) },
             ],
-            "client_embedding_model": "bge-base-en-v1.5@1",
+            "client_embedding_model": "voyage-code-3@1",
             "limit": 50,
         }),
     )
@@ -752,13 +764,15 @@ async fn matched_queries_reflects_contributing_queries() {
 async fn results_carry_rrf_score_in_descending_order() {
     let h = common::boot().await;
     let _ = seed_hybrid(&h.pool).await;
-    let app = app::build(h.pool.clone(), cfg()).expect("build app");
+    let app = app::build_resolved(h.pool.clone(), cfg())
+        .await
+        .expect("build app");
 
     let v = post_search(
         app,
         serde_json::json!({
             "queries": [{ "text": "zzqxftsonly rare", "vector": unit_vector(0.4243) }],
-            "client_embedding_model": "bge-base-en-v1.5@1",
+            "client_embedding_model": "voyage-code-3@1",
             "limit": 50,
         }),
     )
@@ -782,14 +796,16 @@ async fn convenience_form_is_accepted_end_to_end() {
     // accepts the shape end-to-end and returns the expected chunk.)
     let h = common::boot().await;
     let (_embedded, fts_only) = seed_hybrid(&h.pool).await;
-    let app = app::build(h.pool.clone(), cfg()).expect("build app");
+    let app = app::build_resolved(h.pool.clone(), cfg())
+        .await
+        .expect("build app");
 
     let v = post_search(
         app,
         serde_json::json!({
             "query": "zzqxftsonly",
             "vector": unit_vector(0.4243),
-            "client_embedding_model": "bge-base-en-v1.5@1",
+            "client_embedding_model": "voyage-code-3@1",
             "limit": 50,
         }),
     )
@@ -812,14 +828,16 @@ async fn results_carry_confidence_fields() {
     // confidence_factors breakdown whose relevance_source is "rrf" on the cloud.
     let h = common::boot().await;
     let (_high, _low, token) = seed_scored(&h.pool).await;
-    let app = app::build(h.pool.clone(), cfg()).expect("build app");
+    let app = app::build_resolved(h.pool.clone(), cfg())
+        .await
+        .expect("build app");
 
     let v = post_search(
         app,
         serde_json::json!({
             "query": token,
             "vector": unit_vector(0.314),
-            "client_embedding_model": "bge-base-en-v1.5@1",
+            "client_embedding_model": "voyage-code-3@1",
             "limit": 50,
         }),
     )
@@ -847,14 +865,16 @@ async fn higher_trust_outranks_under_default_confidence_sort() {
     // confidence sort.
     let h = common::boot().await;
     let (high, low, token) = seed_scored(&h.pool).await;
-    let app = app::build(h.pool.clone(), cfg()).expect("build app");
+    let app = app::build_resolved(h.pool.clone(), cfg())
+        .await
+        .expect("build app");
 
     let v = post_search(
         app,
         serde_json::json!({
             "query": token,
             "vector": unit_vector(0.314),
-            "client_embedding_model": "bge-base-en-v1.5@1",
+            "client_embedding_model": "voyage-code-3@1",
             "limit": 50,
         }),
     )
@@ -883,14 +903,16 @@ async fn version_match_boost_applies_with_filter() {
     // matching chunk's version_match_multiplier above neutral.
     let h = common::boot().await;
     let (high, _low, token) = seed_scored(&h.pool).await;
-    let app = app::build(h.pool.clone(), cfg()).expect("build app");
+    let app = app::build_resolved(h.pool.clone(), cfg())
+        .await
+        .expect("build app");
 
     let v = post_search(
         app,
         serde_json::json!({
             "query": token,
             "vector": unit_vector(0.314),
-            "client_embedding_model": "bge-base-en-v1.5@1",
+            "client_embedding_model": "voyage-code-3@1",
             "limit": 50,
             "filters": { "language_target": { "name": "compact", "version_constraint_satisfies": "0.31" } },
         }),
@@ -914,14 +936,16 @@ async fn min_confidence_filters_before_limit() {
     // reports the count in filtered_by_confidence.
     let h = common::boot().await;
     let (_high, _low, token) = seed_scored(&h.pool).await;
-    let app = app::build(h.pool.clone(), cfg()).expect("build app");
+    let app = app::build_resolved(h.pool.clone(), cfg())
+        .await
+        .expect("build app");
 
     let v = post_search(
         app,
         serde_json::json!({
             "query": token,
             "vector": unit_vector(0.314),
-            "client_embedding_model": "bge-base-en-v1.5@1",
+            "client_embedding_model": "voyage-code-3@1",
             "limit": 50,
             // Confidence is strictly < 1.0 (the relevance term never reaches 1),
             // so a floor of 1.0 filters everything.
@@ -945,14 +969,16 @@ async fn include_scores_false_omits_scores() {
     // happens server-side.
     let h = common::boot().await;
     let (_high, _low, token) = seed_scored(&h.pool).await;
-    let app = app::build(h.pool.clone(), cfg()).expect("build app");
+    let app = app::build_resolved(h.pool.clone(), cfg())
+        .await
+        .expect("build app");
 
     let v = post_search(
         app,
         serde_json::json!({
             "query": token,
             "vector": unit_vector(0.314),
-            "client_embedding_model": "bge-base-en-v1.5@1",
+            "client_embedding_model": "voyage-code-3@1",
             "limit": 50,
             "include_scores": false,
         }),
@@ -982,13 +1008,15 @@ async fn run_filtered(
     token: &str,
     filters: serde_json::Value,
 ) -> serde_json::Value {
-    let app = app::build(pool.clone(), cfg()).expect("build app");
+    let app = app::build_resolved(pool.clone(), cfg())
+        .await
+        .expect("build app");
     post_search(
         app,
         serde_json::json!({
             "query": token,
             "vector": unit_vector(0.271),
-            "client_embedding_model": "bge-base-en-v1.5@1",
+            "client_embedding_model": "voyage-code-3@1",
             "limit": 100,
             "filters": filters,
         }),
@@ -1109,14 +1137,16 @@ async fn semver_filters_language_target_and_sdk_dependency() {
 async fn search_returns_400_when_all_text_empty() {
     // Acceptance #7: every query with empty/whitespace text is rejected.
     let h = common::boot().await;
-    let app = app::build(h.pool.clone(), cfg()).expect("build app");
+    let app = app::build_resolved(h.pool.clone(), cfg())
+        .await
+        .expect("build app");
 
     let body = serde_json::json!({
         "queries": [
             { "text": "", "vector": unit_vector(0.1) },
             { "text": "   ", "vector": unit_vector(0.2) },
         ],
-        "client_embedding_model": "bge-base-en-v1.5@1",
+        "client_embedding_model": "voyage-code-3@1",
     });
     let resp = app
         .oneshot(

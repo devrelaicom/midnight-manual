@@ -46,25 +46,51 @@ impl Default for ServerConfig {
     }
 }
 
-/// `[models]` — local ML model lifecycle.
+/// `[models]` — ML model selection and Voyage API settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelsConfig {
-    /// Embedder model identifier (`{name}` only; revision is server-supplied).
+    /// Corpus embedding model name (e.g. "voyage-code-3").
     pub embedding: String,
-    /// Reranker model identifier.
+    /// Reranker catalog id (see mn-embedding `reranker_catalog`).
     pub reranker: String,
     /// Override for the on-disk model cache directory. When `None`, the
     /// discoverer resolves to `$XDG_DATA_HOME/midnight-manual/models/`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_dir: Option<PathBuf>,
+    /// Voyage API key (BYOK). Resolved with flag > env > config precedence;
+    /// this is the config-file fallback only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voyage_api_key: Option<String>,
+    /// Voyage output dimension (Matryoshka): 256/512/1024/2048.
+    #[serde(default = "default_voyage_dim")]
+    pub voyage_output_dimension: u32,
+    /// Voyage output dtype: "float" | "int8" | "uint8" | "binary" | "ubinary".
+    #[serde(default = "default_voyage_dtype")]
+    pub voyage_output_dtype: String,
+    /// Directory holding a custom reranker (model.onnx + tokenizer files) when
+    /// `reranker == "custom"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reranker_path: Option<PathBuf>,
+}
+
+const fn default_voyage_dim() -> u32 {
+    1024
+}
+
+fn default_voyage_dtype() -> String {
+    "float".to_owned()
 }
 
 impl Default for ModelsConfig {
     fn default() -> Self {
         Self {
-            embedding: "bge-base-en-v1.5".into(),
+            embedding: "voyage-code-3".into(),
             reranker: "bge-reranker-base".into(),
             cache_dir: None,
+            voyage_api_key: None,
+            voyage_output_dimension: default_voyage_dim(),
+            voyage_output_dtype: default_voyage_dtype(),
+            reranker_path: None,
         }
     }
 }
@@ -164,6 +190,35 @@ fn xdg_config_path(env: &impl ConfigEnv) -> Option<PathBuf> {
         );
     }
     None
+}
+
+/// Resolve the Voyage API key with precedence flag > `VOYAGE_API_KEY` env > config.
+///
+/// An empty string at a level is treated as absent and falls through to the
+/// next source. If all sources are absent or empty, returns `None`.
+pub fn resolve_voyage_api_key(
+    flag: Option<&str>,
+    cfg: &ModelsConfig,
+    env: &impl ConfigEnv,
+) -> Option<String> {
+    flag.map(str::to_owned)
+        .filter(|s| !s.is_empty())
+        .or_else(|| env.var("VOYAGE_API_KEY").filter(|s| !s.is_empty()))
+        .or_else(|| cfg.voyage_api_key.clone().filter(|s| !s.is_empty()))
+}
+
+/// Resolve the reranker id with precedence flag > `MIDNIGHT_MANUAL_RERANKER` env > config.
+///
+/// An empty flag or env value falls through to the next source, ending at the
+/// configured reranker id (defaulting to `bge-reranker-base` when unset).
+pub fn resolve_reranker(flag: Option<&str>, cfg: &ModelsConfig, env: &impl ConfigEnv) -> String {
+    flag.map(str::to_owned)
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            env.var("MIDNIGHT_MANUAL_RERANKER")
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or_else(|| cfg.reranker.clone())
 }
 
 /// All the ways config discovery can fail.
@@ -267,5 +322,79 @@ mod tests {
     fn server_url_default_is_production_host() {
         let cfg = Config::default();
         assert_eq!(cfg.server.url, "https://midnight-manual.midnightntwrk.expert");
+    }
+
+    #[test]
+    fn models_config_defaults_to_voyage_code_3() {
+        let m = ModelsConfig::default();
+        assert_eq!(m.embedding, "voyage-code-3");
+        assert_eq!(m.reranker, "bge-reranker-base");
+        assert_eq!(m.voyage_output_dimension, 1024);
+        assert_eq!(m.voyage_output_dtype, "float");
+        assert!(m.voyage_api_key.is_none());
+        assert!(m.reranker_path.is_none());
+    }
+
+    #[test]
+    fn models_config_roundtrips_through_toml() {
+        let toml_src = r#"
+embedding = "voyage-code-3"
+reranker = "jina-reranker-v1-turbo-en"
+voyage_output_dimension = 1024
+voyage_output_dtype = "float"
+"#;
+        let m: ModelsConfig = toml::from_str(toml_src).unwrap();
+        assert_eq!(m.reranker, "jina-reranker-v1-turbo-en");
+        assert_eq!(m.voyage_output_dimension, 1024);
+        assert_eq!(m.voyage_output_dtype, "float"); // default filled in
+        assert!(m.voyage_api_key.is_none()); // Option default
+        assert!(m.reranker_path.is_none()); // Option default
+        assert!(m.cache_dir.is_none()); // Option default
+    }
+
+    #[test]
+    fn resolve_voyage_key_prefers_flag_then_env_then_config() {
+        let cfg = ModelsConfig {
+            voyage_api_key: Some("from-config".into()),
+            ..Default::default()
+        };
+        let env = FakeEnv::default().set("VOYAGE_API_KEY", "from-env");
+
+        assert_eq!(
+            resolve_voyage_api_key(Some("from-flag"), &cfg, &env).as_deref(),
+            Some("from-flag")
+        );
+        assert_eq!(resolve_voyage_api_key(None, &cfg, &env).as_deref(), Some("from-env"));
+
+        let empty = FakeEnv::default();
+        assert_eq!(resolve_voyage_api_key(None, &cfg, &empty).as_deref(), Some("from-config"));
+
+        // An empty value at a level is absent and falls through to the next source.
+        assert_eq!(resolve_voyage_api_key(Some(""), &cfg, &env).as_deref(), Some("from-env"));
+        let env_empty = FakeEnv::default().set("VOYAGE_API_KEY", "");
+        assert_eq!(resolve_voyage_api_key(None, &cfg, &env_empty).as_deref(), Some("from-config"));
+        // All sources absent or empty → None.
+        let cfg_none = ModelsConfig::default();
+        assert_eq!(resolve_voyage_api_key(Some(""), &cfg_none, &env_empty), None);
+    }
+
+    #[test]
+    fn resolve_reranker_prefers_flag_then_env_then_config() {
+        let cfg = ModelsConfig {
+            reranker: "from-config-reranker".into(),
+            ..Default::default()
+        };
+        let env = FakeEnv::default().set("MIDNIGHT_MANUAL_RERANKER", "from-env-reranker");
+
+        assert_eq!(resolve_reranker(Some("from-flag-reranker"), &cfg, &env), "from-flag-reranker");
+        assert_eq!(resolve_reranker(None, &cfg, &env), "from-env-reranker");
+
+        let empty = FakeEnv::default();
+        assert_eq!(resolve_reranker(None, &cfg, &empty), "from-config-reranker");
+
+        // An empty flag/env value falls through to the next source.
+        assert_eq!(resolve_reranker(Some(""), &cfg, &env), "from-env-reranker");
+        let env_empty = FakeEnv::default().set("MIDNIGHT_MANUAL_RERANKER", "");
+        assert_eq!(resolve_reranker(Some(""), &cfg, &env_empty), "from-config-reranker");
     }
 }

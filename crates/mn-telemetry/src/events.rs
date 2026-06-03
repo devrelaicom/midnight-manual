@@ -220,6 +220,8 @@ pub enum CliCommandName {
     Ingest,
     /// `mnm ratelimits` (admin).
     Ratelimits,
+    /// `mnm tokenlimits` (admin).
+    Tokenlimits,
     /// `mnm manifest` (any sub).
     Manifest,
     /// `mnm chunks` (any sub).

@@ -36,17 +36,21 @@
 mod common;
 
 use std::path::Path;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use mn_auth::{mint_jwt, Claims, Keypair, Role, SigningSecret, DEFAULT_ADMIN_TTL};
 use mn_cli::commands::ingest::run::{run_with_paths, Args as IngestArgs};
 use mn_core::auth_file::AuthFile;
 use mn_core::types::SourceKind;
+use mn_embedding::voyage::VoyageEmbedder;
 use mn_server::{app, config::ServerConfig};
-use mn_store::entities::{embedding_model, source};
+use mn_store::entities::source;
 use mn_telemetry::TelemetryClient;
 use time::OffsetDateTime;
 use uuid::Uuid;
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
 /// Subset of the `document` columns the F-bug fix is responsible for.
 /// Selected from Postgres after the ingest completes.
@@ -60,10 +64,31 @@ struct DocRow {
     token_count: i32,
 }
 
-/// Boot the axum app, bind it to an ephemeral 127.0.0.1 port, spawn the
-/// `axum::serve` task, and return the base URL the CLI should hit.
-async fn spawn_server(pool: sqlx::PgPool, cfg: ServerConfig) -> String {
-    let app = app::build(pool, cfg).expect("build app");
+/// Boot the axum app with a mock Voyage embedder and resolved corpus model,
+/// bind it to an ephemeral 127.0.0.1 port, spawn the `axum::serve` task,
+/// and return the base URL the CLI should hit.
+///
+/// `voyage_mock_uri` must point at a running `wiremock::MockServer` that
+/// handles `POST /v1/embeddings`. The caller keeps the `MockServer` alive for
+/// the duration of the test.
+async fn spawn_server(pool: sqlx::PgPool, cfg: ServerConfig, voyage_mock_uri: &str) -> String {
+    // Resolve the corpus model that migration 0008 registered (voyage-code-3@1).
+    let cm = mn_server::corpus_model::resolve(&pool).await.ok();
+    let corpus_model = Arc::new(RwLock::new(cm));
+
+    let limiter = mn_server::ratelimit::RateLimiter::from_config(&cfg);
+    let token_limiter = mn_server::tokenlimit::TokenUsageLimiter::from_config(&cfg);
+
+    // Point the server-side VoyageEmbedder at the local wiremock, so
+    // POST /v1/embeddings is served in-process without network egress.
+    let voyage = Some(Arc::new(
+        VoyageEmbedder::new("test-key", "voyage-code-3", 1024, "float")
+            .with_base_url(voyage_mock_uri),
+    ));
+
+    let app = app::build_with_limiter(pool, cfg, limiter, corpus_model, token_limiter, voyage)
+        .expect("build app");
+
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind ephemeral port");
@@ -75,6 +100,36 @@ async fn spawn_server(pool: sqlx::PgPool, cfg: ServerConfig) -> String {
     // bind() returns, but axum::serve needs a tick to install its acceptor.
     tokio::time::sleep(Duration::from_millis(20)).await;
     format!("http://{addr}")
+}
+
+/// Mount a dynamic `POST /v1/embeddings` mock that reads `input.len()` from
+/// the request body and returns that many zero-filled 1024-dim vectors. The
+/// mock remains active for the lifetime of the returned `MockServer`.
+async fn voyage_mock() -> MockServer {
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(|req: &Request| {
+            let body: serde_json::Value =
+                serde_json::from_slice(&req.body).unwrap_or(serde_json::Value::Null);
+            let n = body["input"].as_array().map_or(0, Vec::len);
+            let data: Vec<serde_json::Value> = (0..n)
+                .map(|k| {
+                    serde_json::json!({
+                        "embedding": vec![0.0_f32; 1024],
+                        "index": k
+                    })
+                })
+                .collect();
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": data,
+                "model": "voyage-code-3",
+                "usage": { "total_tokens": n }
+            }))
+        })
+        .mount(&mock)
+        .await;
+    mock
 }
 
 fn user_store_for(user_id: &str, kp: &Keypair) -> String {
@@ -125,10 +180,7 @@ fn write_admin_auth_toml(dir: &Path, user_id: &str, token: &str) -> std::path::P
 async fn document_metadata_persists_to_postgres_through_full_ingest() {
     let h = common::boot().await;
 
-    // ── Pre-seed: embedding model + source ─────────────────────────────────
-    embedding_model::upsert(&h.pool, "bge-base-en-v1.5", 1, 768, "baai")
-        .await
-        .expect("seed embedding model");
+    // ── Pre-seed: source (migration 0008 already registered voyage-code-3@1) ─
     let source_slug = format!("f-bug-e2e-{}", Uuid::new_v4());
     let _source_id =
         source::insert(&h.pool, &source_slug, "F-Bug E2E", SourceKind::DocsSite, None, 5)
@@ -140,12 +192,17 @@ async fn document_metadata_persists_to_postgres_through_full_ingest() {
     let user_id = "aaron";
     let jwt_secret_bytes = vec![0xAA_u8; 32];
     let cfg = ServerConfig {
-        corpus_model: Some("bge-base-en-v1.5@1".to_owned()),
         user_store_body: Some(user_store_for(user_id, &kp)),
         jwt_secret: Some(jwt_secret_bytes.clone()),
         ..Default::default()
     };
-    let server_url = spawn_server(h.pool.clone(), cfg).await;
+
+    // ── Start the Voyage mock and boot the server ──────────────────────────
+    //
+    // Keep `voyage_mock_server` alive until the test ends: dropping it shuts
+    // down the mock, which would cause in-flight embedding requests to fail.
+    let voyage_mock_server = voyage_mock().await;
+    let server_url = spawn_server(h.pool.clone(), cfg, &voyage_mock_server.uri()).await;
 
     // ── Mint an admin JWT directly (skipping the challenge-response dance).
     //
@@ -187,16 +244,14 @@ async fn document_metadata_persists_to_postgres_through_full_ingest() {
         manifest: manifest_path,
         source_slug: source_slug.clone(),
         revision: Some("rev-fbug-e2e".to_owned()),
-        embedding_model: "bge-base-en-v1.5@1".to_owned(),
+        // "auto" → resolve the corpus wire id from the live server.
+        embedding_model: mn_cli::commands::ingest::run::DEFAULT_EMBEDDING_MODEL.to_owned(),
         note: Some("f-bug e2e regression".to_owned()),
         source_root: Some(workdir.path().to_path_buf()),
         dry_run: false,
         yes: true, // not strictly needed (source pre-seeded) but defensive
         source_base_url: Some("https://github.com/example/docs/blob/main".to_owned()),
         batch_size: 50,
-        // Text-only upload (server-side embedding path); keeps this live-server
-        // e2e from loading the ONNX model in-process.
-        enable_server_embedding: true,
         code_chunk_tokens: 400,
         code_chunk_lines: 60,
         code_chunk_overlap: 20,
@@ -205,10 +260,14 @@ async fn document_metadata_persists_to_postgres_through_full_ingest() {
         no_respect_gitignore: false,
         disable_default_ignore_list: false,
         max_file_size: 10 * 1024 * 1024,
+        unsafe_no_global_limit: false,
     };
     let telemetry = TelemetryClient::Disabled;
 
-    run_with_paths(args, &server_url, &auth_path, &telemetry, "0.1.0-e2e", true)
+    // Server-proxy embedding mode: no BYOK key (config discovery bypassed,
+    // no --voyage-api-key) so the CLI embeds via the live server's
+    // /v1/embeddings.
+    run_with_paths(args, &server_url, &auth_path, None, None, &telemetry, "0.1.0-e2e", true)
         .await
         .expect("ingest run completes against live mn-server");
 

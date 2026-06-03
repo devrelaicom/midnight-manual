@@ -1,8 +1,10 @@
 //! Integration tests for `mnm ingest` driven against a `wiremock` mock of
 //! the three-step admin ingest flow. Asserts:
 //!
-//! 1. The CLI walks a real manifest + source root, builds the plan, and
-//!    POSTs the documents in the expected wire shape.
+//! 1. The CLI walks a real manifest + source root, embeds every chunk via the
+//!    Voyage `/v1/embeddings` server proxy (`input_type=document`), and POSTs
+//!    the documents — each carrying its 1024-dim vector — in the expected wire
+//!    shape, stamped with the corpus wire id from `GET /v1/models/active`.
 //!
 //! 2. The bearer token is sent on every request and never logged to the
 //!    captured stdout (FR-019).
@@ -11,16 +13,61 @@
 //!
 //! 4. A 409 `run_aborted` mid-flow surfaces as a CLI error and triggers
 //!    the abort fallback.
+//!
+//! These tests run in **server-proxy** embedding mode: no BYOK Voyage key is
+//! resolved (config discovery is bypassed with `config_path = None` and no
+//! `--voyage-api-key`), so the CLI POSTs chunk texts to the mock's
+//! `/v1/embeddings`. The BYOK branch of `client::embed` is covered by the
+//! `mn-embedding` unit tests.
 
 use std::sync::{Arc, Mutex};
 
-use mn_cli::commands::ingest::run::Args as IngestArgs;
+use mn_cli::commands::ingest::run::{Args as IngestArgs, DEFAULT_EMBEDDING_MODEL};
 use mn_core::auth_file::AuthFile;
 use mn_telemetry::TelemetryClient;
 use serde_json::json;
 use time::OffsetDateTime;
-use wiremock::matchers::{method, path_regex};
+use wiremock::matchers::{method, path, path_regex};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+
+/// The active-model response → corpus wire id `voyage-code-3@1`.
+fn active_model_body() -> serde_json::Value {
+    json!({
+        "name": "voyage-code-3",
+        "revision": 1,
+        "dim": 1024,
+        "provider": "voyageai"
+    })
+}
+
+/// Build a stub `/v1/embeddings` response with one 1024-dim vector per input
+/// text. Mirrors the `mn-embedding` server-proxy response shape
+/// (`{ embeddings: [...], usage: { total_tokens } }`).
+fn embeddings_response_for(req: &Request) -> ResponseTemplate {
+    let body: serde_json::Value = req.body_json().unwrap_or(serde_json::Value::Null);
+    let n = body["input"].as_array().map_or(0, Vec::len);
+    let embeddings: Vec<Vec<f32>> = (0..n).map(|_| vec![0.25_f32; 1024]).collect();
+    ResponseTemplate::new(200).set_body_json(json!({
+        "model": "voyage-code-3@1",
+        "embeddings": embeddings,
+        "usage": { "total_tokens": 4 * n }
+    }))
+}
+
+/// Mount `GET /v1/models/active` + `POST /v1/embeddings` on `server` so a run
+/// in server-proxy embedding mode can resolve the corpus wire id and embed.
+async fn mount_embedding_mocks(server: &MockServer) {
+    Mock::given(method("GET"))
+        .and(path("/v1/models/active"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(active_model_body()))
+        .mount(server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(embeddings_response_for)
+        .mount(server)
+        .await;
+}
 
 fn write_manifest(dir: &std::path::Path, files: &[&str]) -> std::path::PathBuf {
     let manifest_path = dir.join("hierarchy.yaml");
@@ -56,12 +103,15 @@ fn write_admin_auth(dir: &std::path::Path) -> std::path::PathBuf {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // happy-path flow + embed/upload body assertions
 async fn happy_path_posts_three_step_flow() {
     let server = MockServer::start().await;
     let captured_starts = Arc::new(Mutex::new(0_usize));
     let captured_uploads = Arc::new(Mutex::new(0_usize));
     let captured_finalizes = Arc::new(Mutex::new(0_usize));
     let captured_bearer = Arc::new(Mutex::new(Option::<String>::None));
+
+    mount_embedding_mocks(&server).await;
 
     // Mock: GET /v1/sources/:slug — source exists, return 200.
     Mock::given(method("GET"))
@@ -130,7 +180,8 @@ async fn happy_path_posts_three_step_flow() {
         manifest: manifest_path,
         source_slug: "docs".to_owned(),
         revision: Some("rev-1".to_owned()),
-        embedding_model: "bge-base-en-v1.5@1".to_owned(),
+        // "auto" → resolve the corpus wire id from GET /v1/models/active.
+        embedding_model: DEFAULT_EMBEDDING_MODEL.to_owned(),
         note: None,
         source_root: Some(dir.path().to_path_buf()),
         dry_run: false,
@@ -145,9 +196,7 @@ async fn happy_path_posts_three_step_flow() {
         no_respect_gitignore: false,
         disable_default_ignore_list: false,
         max_file_size: 10 * 1024 * 1024,
-        // Flow/error tests assert request shape, not embeddings — keep them
-        // hermetic (server-side embedding path = no local ONNX model load).
-        enable_server_embedding: true,
+        unsafe_no_global_limit: false,
     };
     let telemetry = TelemetryClient::Disabled;
 
@@ -155,6 +204,8 @@ async fn happy_path_posts_three_step_flow() {
         args,
         &server.uri(),
         &auth_path,
+        None, // config_path → bypass discovery so no stray BYOK key resolves
+        None, // voyage_api_key → server-proxy embedding mode
         &telemetry,
         "0.1.0-test",
         true,
@@ -167,6 +218,42 @@ async fn happy_path_posts_three_step_flow() {
     assert_eq!(*captured_finalizes.lock().unwrap(), 1);
     let bearer = captured_bearer.lock().unwrap().clone().unwrap();
     assert!(bearer.starts_with("Bearer "), "bearer header missing");
+
+    // The chunk batch must have been embedded via Voyage (input_type=document)
+    // and each chunk uploaded carrying its 1024-dim vector + the corpus wire id.
+    let requests = server.received_requests().await.unwrap();
+
+    let embed_req = requests
+        .iter()
+        .find(|r| r.method == wiremock::http::Method::POST && r.url.path() == "/v1/embeddings")
+        .expect("POST /v1/embeddings must have been made");
+    let embed_body: serde_json::Value =
+        serde_json::from_slice(&embed_req.body).expect("embeddings body is JSON");
+    assert_eq!(
+        embed_body["input_type"], "document",
+        "ingest must embed with input_type=document"
+    );
+    assert!(
+        embed_body["input"]
+            .as_array()
+            .is_some_and(|a| !a.is_empty()),
+        "embeddings request must carry the chunk texts"
+    );
+
+    let put_req = requests
+        .iter()
+        .find(|r| r.method == wiremock::http::Method::PUT)
+        .expect("PUT /documents must have been made");
+    let put_body: serde_json::Value =
+        serde_json::from_slice(&put_req.body).expect("PUT body is JSON");
+    assert_eq!(
+        put_body["embedding_model"], "voyage-code-3@1",
+        "upload must be stamped with the corpus wire id"
+    );
+    let first_vec = put_body["documents"][0]["chunks"][0]["embedding"]
+        .as_array()
+        .expect("every uploaded chunk must carry an embedding vector");
+    assert_eq!(first_vec.len(), 1024, "vector must be 1024-dim (voyage-code-3)");
 }
 
 #[tokio::test]
@@ -184,7 +271,7 @@ async fn dry_run_does_not_hit_the_server() {
         manifest: manifest_path,
         source_slug: "docs".to_owned(),
         revision: Some("rev".to_owned()),
-        embedding_model: "bge-base-en-v1.5@1".to_owned(),
+        embedding_model: DEFAULT_EMBEDDING_MODEL.to_owned(),
         note: None,
         source_root: Some(dir.path().to_path_buf()),
         dry_run: true,
@@ -199,9 +286,7 @@ async fn dry_run_does_not_hit_the_server() {
         no_respect_gitignore: false,
         disable_default_ignore_list: false,
         max_file_size: 10 * 1024 * 1024,
-        // Flow/error tests assert request shape, not embeddings — keep them
-        // hermetic (server-side embedding path = no local ONNX model load).
-        enable_server_embedding: true,
+        unsafe_no_global_limit: false,
     };
     let telemetry = TelemetryClient::Disabled;
 
@@ -209,6 +294,8 @@ async fn dry_run_does_not_hit_the_server() {
         args,
         &server.uri(),
         &auth_path,
+        None,
+        None,
         &telemetry,
         "0.1.0-test",
         true,
@@ -229,7 +316,7 @@ async fn missing_admin_token_errors_with_clear_message() {
         manifest: manifest_path,
         source_slug: "docs".to_owned(),
         revision: Some("rev".to_owned()),
-        embedding_model: "bge-base-en-v1.5@1".to_owned(),
+        embedding_model: DEFAULT_EMBEDDING_MODEL.to_owned(),
         note: None,
         source_root: Some(dir.path().to_path_buf()),
         dry_run: false,
@@ -244,9 +331,7 @@ async fn missing_admin_token_errors_with_clear_message() {
         no_respect_gitignore: false,
         disable_default_ignore_list: false,
         max_file_size: 10 * 1024 * 1024,
-        // Flow/error tests assert request shape, not embeddings — keep them
-        // hermetic (server-side embedding path = no local ONNX model load).
-        enable_server_embedding: true,
+        unsafe_no_global_limit: false,
     };
     let telemetry = TelemetryClient::Disabled;
 
@@ -254,6 +339,8 @@ async fn missing_admin_token_errors_with_clear_message() {
         args,
         &server.uri(),
         &auth_path,
+        None,
+        None,
         &telemetry,
         "0.1.0-test",
         true,
@@ -268,6 +355,8 @@ async fn missing_admin_token_errors_with_clear_message() {
 async fn aborts_run_when_upload_fails() {
     let server = MockServer::start().await;
     let abort_hit = Arc::new(Mutex::new(false));
+
+    mount_embedding_mocks(&server).await;
 
     // Mock: GET /v1/sources/:slug — source exists.
     Mock::given(method("GET"))
@@ -316,7 +405,7 @@ async fn aborts_run_when_upload_fails() {
         manifest: manifest_path,
         source_slug: "docs".to_owned(),
         revision: Some("rev".to_owned()),
-        embedding_model: "bge-base-en-v1.5@1".to_owned(),
+        embedding_model: DEFAULT_EMBEDDING_MODEL.to_owned(),
         note: None,
         source_root: Some(dir.path().to_path_buf()),
         dry_run: false,
@@ -331,9 +420,7 @@ async fn aborts_run_when_upload_fails() {
         no_respect_gitignore: false,
         disable_default_ignore_list: false,
         max_file_size: 10 * 1024 * 1024,
-        // Flow/error tests assert request shape, not embeddings — keep them
-        // hermetic (server-side embedding path = no local ONNX model load).
-        enable_server_embedding: true,
+        unsafe_no_global_limit: false,
     };
     let telemetry = TelemetryClient::Disabled;
 
@@ -341,6 +428,8 @@ async fn aborts_run_when_upload_fails() {
         args,
         &server.uri(),
         &auth_path,
+        None,
+        None,
         &telemetry,
         "0.1.0-test",
         true,
@@ -363,6 +452,8 @@ async fn aborts_run_when_upload_fails() {
 #[allow(clippy::too_many_lines)] // complex regression test — keeping in one function for readability
 async fn published_url_inheritance_survives_to_upload_body() {
     let server = MockServer::start().await;
+
+    mount_embedding_mocks(&server).await;
 
     // Mock: GET /v1/sources/:slug — source exists.
     Mock::given(method("GET"))
@@ -425,7 +516,7 @@ async fn published_url_inheritance_survives_to_upload_body() {
         manifest: manifest_path,
         source_slug: "docs".to_owned(),
         revision: Some("rev-fbug".to_owned()),
-        embedding_model: "bge-base-en-v1.5@1".to_owned(),
+        embedding_model: DEFAULT_EMBEDDING_MODEL.to_owned(),
         note: None,
         source_root: Some(dir.path().to_path_buf()),
         dry_run: false,
@@ -440,9 +531,7 @@ async fn published_url_inheritance_survives_to_upload_body() {
         no_respect_gitignore: false,
         disable_default_ignore_list: false,
         max_file_size: 10 * 1024 * 1024,
-        // Flow/error tests assert request shape, not embeddings — keep them
-        // hermetic (server-side embedding path = no local ONNX model load).
-        enable_server_embedding: true,
+        unsafe_no_global_limit: false,
     };
     let telemetry = mn_telemetry::TelemetryClient::Disabled;
 
@@ -450,6 +539,8 @@ async fn published_url_inheritance_survives_to_upload_body() {
         args,
         &server.uri(),
         &auth_path,
+        None,
+        None,
         &telemetry,
         "0.1.0-test",
         true,
@@ -512,7 +603,7 @@ async fn manifest_missing_file_errors_before_any_http() {
         manifest: manifest_path,
         source_slug: "docs".to_owned(),
         revision: Some("rev".to_owned()),
-        embedding_model: "bge-base-en-v1.5@1".to_owned(),
+        embedding_model: DEFAULT_EMBEDDING_MODEL.to_owned(),
         note: None,
         source_root: Some(dir.path().to_path_buf()),
         dry_run: false,
@@ -527,9 +618,7 @@ async fn manifest_missing_file_errors_before_any_http() {
         no_respect_gitignore: false,
         disable_default_ignore_list: false,
         max_file_size: 10 * 1024 * 1024,
-        // Flow/error tests assert request shape, not embeddings — keep them
-        // hermetic (server-side embedding path = no local ONNX model load).
-        enable_server_embedding: true,
+        unsafe_no_global_limit: false,
     };
     let telemetry = TelemetryClient::Disabled;
 
@@ -537,6 +626,8 @@ async fn manifest_missing_file_errors_before_any_http() {
         args,
         &server.uri(),
         &auth_path,
+        None,
+        None,
         &telemetry,
         "0.1.0-test",
         true,

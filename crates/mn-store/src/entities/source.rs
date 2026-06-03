@@ -88,6 +88,34 @@ pub async fn list_all(pool: &PgPool) -> Result<Vec<Source>> {
     rows.into_iter().map(TryInto::try_into).collect()
 }
 
+/// Sources whose ACTIVE version is NOT on `target_model_id`, ordered by best
+/// (lowest-rank) document attribution then slug. Foundation(1) → Partner(2) →
+/// ThirdParty(3) → Community(4) → Unknown(5).
+///
+/// Only non-retired sources with an active `source_version` are considered.
+/// Sources whose active version has no documents at all sort as Unknown (rank 5).
+///
+/// # Errors
+///
+/// Returns a store error on driver failure or a malformed `kind`.
+pub async fn list_active_not_on_model(pool: &PgPool, target_model_id: Uuid) -> Result<Vec<Source>> {
+    let rows = sqlx::query_as::<_, SourceRow>(
+        "SELECT s.id, s.slug, s.display_name, s.kind, s.origin_url, s.retention_count, s.created_at, s.retired_at \
+         FROM source s \
+         JOIN source_version sv ON sv.source_id = s.id AND sv.is_active = true \
+         LEFT JOIN document d ON d.source_version_id = sv.id \
+         WHERE s.retired_at IS NULL AND sv.embedding_model_id <> $1 \
+         GROUP BY s.id, s.slug, s.display_name, s.kind, s.origin_url, s.retention_count, s.created_at, s.retired_at \
+         ORDER BY MIN(CASE d.provenance->>'attribution' \
+                        WHEN 'foundation' THEN 1 WHEN 'partner' THEN 2 WHEN 'third_party' THEN 3 \
+                        WHEN 'community' THEN 4 ELSE 5 END) ASC NULLS LAST, s.slug ASC",
+    )
+    .bind(target_model_id)
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter().map(TryInto::try_into).collect()
+}
+
 /// Sparse patch applied by [`update`] — `Some(value)` updates the column,
 /// `None` leaves it untouched.
 #[derive(Debug, Default, Clone)]

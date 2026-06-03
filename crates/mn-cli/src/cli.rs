@@ -56,6 +56,12 @@ pub struct Cli {
     #[arg(long, global = true, env = "MIDNIGHT_MANUAL_DISABLE_TELEMETRY")]
     pub no_telemetry: bool,
 
+    /// Voyage API key for BYOK embedding (overrides env + config).
+    /// Resolution order: this flag > VOYAGE_API_KEY env > config.toml.
+    /// When absent, embedding is proxied through the server endpoint.
+    #[arg(long, global = true)]
+    pub voyage_api_key: Option<String>,
+
     /// The subcommand.
     #[command(subcommand)]
     pub cmd: Command,
@@ -94,6 +100,8 @@ pub enum Command {
     Ingest(commands::ingest::Args),
     /// Per-CIDR rate-limit override CRUD (admin; hidden by default).
     Ratelimits(commands::ratelimits::Args),
+    /// Per-CIDR / per-user embedding token-limit override CRUD (admin; hidden by default).
+    Tokenlimits(commands::tokenlimits::Args),
     /// Manifest authoring + validation (local only).
     Manifest(commands::manifest::Args),
     /// Inspect chunks: show, next, prev, neighbors.
@@ -106,13 +114,21 @@ pub enum Command {
 
 /// Subcommand names that are admin-only and therefore hidden from `--help`
 /// unless `MIDNIGHT_MANUAL_SHOW_ADMIN_CMDS=1` is set (FR-066).
-const ADMIN_SUBCOMMANDS: &[&str] = &["keys", "login", "users", "ingest", "ratelimits"];
+const ADMIN_SUBCOMMANDS: &[&str] = &[
+    "keys",
+    "login",
+    "users",
+    "ingest",
+    "ratelimits",
+    "tokenlimits",
+];
 
 /// Parse argv and dispatch.
 ///
 /// # Errors
 ///
 /// Returns `anyhow::Error` on argument-parse failures or subcommand failures.
+#[allow(clippy::too_many_lines)]
 pub async fn run() -> Result<()> {
     let show_admin = should_show_admin_cmds();
     let mut cmd = Cli::command();
@@ -147,8 +163,16 @@ pub async fn run() -> Result<()> {
         Command::Version => commands::version::run(cli.json),
         Command::Doctor(args) => commands::doctor::run(args, cli.json).await,
         Command::Search(args) => {
-            commands::search::run(args, cli.server.as_deref(), &telemetry, crate::VERSION, cli.json)
-                .await
+            commands::search::run(
+                args,
+                cli.server.as_deref(),
+                cli.config.as_deref(),
+                cli.voyage_api_key.as_deref(),
+                &telemetry,
+                crate::VERSION,
+                cli.json,
+            )
+            .await
         }
         Command::Sources(args) => {
             commands::sources::run(args, cli.server.as_deref(), cli.json).await
@@ -159,8 +183,16 @@ pub async fn run() -> Result<()> {
         Command::Config(args) => commands::config::run(args, cli.config.as_deref(), cli.json).await,
         Command::Mcp(args) => commands::mcp::run(args).await,
         Command::Models(args) => {
-            commands::models::run(args, cli.server.as_deref(), &telemetry, crate::VERSION, cli.json)
-                .await
+            commands::models::run(
+                args,
+                cli.server.as_deref(),
+                cli.config.as_deref(),
+                cli.voyage_api_key.as_deref(),
+                &telemetry,
+                crate::VERSION,
+                cli.json,
+            )
+            .await
         }
         Command::Auth(args) => commands::auth::run(args, cli.server.as_deref(), cli.json).await,
         Command::Telemetry(args) => commands::telemetry::run(&args, cli.json),
@@ -168,11 +200,22 @@ pub async fn run() -> Result<()> {
         Command::Login(args) => commands::login::run(args, cli.server.as_deref(), cli.json).await,
         Command::Users(args) => commands::users::run(args, cli.json),
         Command::Ingest(args) => {
-            commands::ingest::run(args, cli.server.as_deref(), &telemetry, crate::VERSION, cli.json)
-                .await
+            commands::ingest::run(
+                args,
+                cli.server.as_deref(),
+                cli.config.as_deref(),
+                cli.voyage_api_key.as_deref(),
+                &telemetry,
+                crate::VERSION,
+                cli.json,
+            )
+            .await
         }
         Command::Ratelimits(args) => {
             commands::ratelimits::run(args, cli.server.as_deref(), cli.json).await
+        }
+        Command::Tokenlimits(args) => {
+            commands::tokenlimits::run(args, cli.server.as_deref(), cli.json).await
         }
         Command::Manifest(args) => commands::manifest::run(args).await,
         Command::Chunks(args) => {
@@ -233,6 +276,7 @@ const fn cli_command_name(cmd: &Command) -> CliCommandName {
         Command::Telemetry(_) => CliCommandName::Telemetry,
         Command::Ingest(_) => CliCommandName::Ingest,
         Command::Ratelimits(_) => CliCommandName::Ratelimits,
+        Command::Tokenlimits(_) => CliCommandName::Tokenlimits,
         Command::Manifest(_) => CliCommandName::Manifest,
         Command::Chunks(_) => CliCommandName::Chunks,
         Command::Documents(_) => CliCommandName::Documents,

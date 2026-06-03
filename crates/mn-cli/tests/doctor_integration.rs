@@ -16,8 +16,7 @@ async fn fetch_corpus_report_decodes_canonical_shape() {
     Mock::given(method("GET"))
         .and(path("/v1/admin/ingest/status"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "active_embedding_model": "bge-base-en-v1.5@1",
-            "embedder_worker_enabled": true,
+            "active_embedding_model": "voyage-code-3@1",
             "sources": [
                 {
                     "slug": "docs",
@@ -41,8 +40,7 @@ async fn fetch_corpus_report_decodes_canonical_shape() {
     let r = fetch_corpus_report(&server.uri(), "test-bearer")
         .await
         .expect("decode");
-    assert_eq!(r.active_embedding_model, "bge-base-en-v1.5@1");
-    assert!(r.embedder_worker_enabled);
+    assert_eq!(r.active_embedding_model, "voyage-code-3@1");
     assert_eq!(r.sources.len(), 2);
     let docs = r.sources.iter().find(|s| s.slug == "docs").unwrap();
     assert_eq!(docs.active_revision, Some(3));
@@ -66,7 +64,6 @@ async fn fetch_corpus_report_sends_bearer_header() {
             }
             ResponseTemplate::new(200).set_body_json(json!({
                 "active_embedding_model": "x@1",
-                "embedder_worker_enabled": false,
                 "sources": [],
             }))
         })

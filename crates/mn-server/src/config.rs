@@ -17,10 +17,6 @@ pub struct ServerConfig {
     pub port: u16,
     /// When `false`, skip the automatic migration runner at startup (D22).
     pub auto_migrate: bool,
-    /// When set, every search-or-chunk endpoint refuses unless the caller's
-    /// `client_embedding_model` matches this canonical model identifier.
-    /// Server resolves this from the active embedding_model row on boot.
-    pub corpus_model: Option<String>,
     /// `MIDNIGHT_MANUAL_USER_STORE` — the in-memory TOML body of the user
     /// store. When `None`, the auth endpoints (FR-056 challenge / verify)
     /// return 503 `service_unavailable` rather than refusing boot.
@@ -61,17 +57,6 @@ pub struct ServerConfig {
     /// GitHub OAuth token-exchange URL. Defaults to
     /// `https://github.com/login/oauth/access_token`. Tests override.
     pub github_token_url: String,
-    /// `MIDNIGHT_MANUAL_EMBEDDER_ENABLED` — when true, spawns the
-    /// background embedder worker (Phase 11a). Defaults to true on
-    /// production; tests opt out with `false` so the ONNX bundle never
-    /// downloads inside CI.
-    pub embedder_enabled: bool,
-    /// `MIDNIGHT_MANUAL_EMBEDDER_INTERVAL_MS` — poll interval for the
-    /// embedder worker. Defaults to 30000 (30s); clamped to `[1_000, 600_000]`.
-    pub embedder_interval_ms: u64,
-    /// `MIDNIGHT_MANUAL_EMBEDDER_BATCH_SIZE` — chunks per worker tick.
-    /// Defaults to 16; clamped to `[1, 128]`.
-    pub embedder_batch_size: i64,
     /// `MIDNIGHT_MANUAL_SOURCE_RETIREMENT_ENABLED` — when true, spawns the
     /// background source-retention sweep that hard-deletes sources whose
     /// `retired_at` is older than the grace window (Phase 13). Defaults to
@@ -127,6 +112,49 @@ pub struct ServerConfig {
     /// [`ScoringPolicy::default`] is used when the env var is unset. An invalid
     /// file fails startup (Constitution VI / VIII).
     pub scoring_policy: ScoringPolicy,
+    /// `VOYAGE_API_KEY` — VoyageAI API key for server-side embedding. When
+    /// `None`, `POST /v1/embeddings` returns 503; there is no local embedder
+    /// fallback (the fastembed corpus embedder was retired when the corpus
+    /// moved to VoyageAI).
+    pub voyage_api_key: Option<String>,
+    /// `MIDNIGHT_MANUAL_VOYAGE_MODEL` — VoyageAI embedding model name.
+    /// Defaults to `"voyage-code-3"`.
+    pub voyage_model: String,
+    /// `MIDNIGHT_MANUAL_VOYAGE_DIM` — output dimension for VoyageAI embeddings.
+    /// Defaults to 1024.
+    pub voyage_output_dimension: u32,
+    /// `MIDNIGHT_MANUAL_VOYAGE_DTYPE` — output dtype for VoyageAI embeddings.
+    /// Defaults to `"float"`.
+    pub voyage_output_dtype: String,
+    /// `MIDNIGHT_MANUAL_TOKEN_LIMIT_ANON_HOURLY` — hourly token budget for
+    /// anonymous callers. Defaults to 2 000.
+    pub token_limit_anon_hourly: u64,
+    /// `MIDNIGHT_MANUAL_TOKEN_LIMIT_ANON_DAILY` — daily token budget for
+    /// anonymous callers. Defaults to 20 000.
+    pub token_limit_anon_daily: u64,
+    /// `MIDNIGHT_MANUAL_TOKEN_LIMIT_UPLIFT_HOURLY` — hourly token budget for
+    /// read-uplift (GitHub SSO) callers. Defaults to 4 000.
+    pub token_limit_uplift_hourly: u64,
+    /// `MIDNIGHT_MANUAL_TOKEN_LIMIT_UPLIFT_DAILY` — daily token budget for
+    /// read-uplift callers. Defaults to 40 000.
+    pub token_limit_uplift_daily: u64,
+    /// `MIDNIGHT_MANUAL_TOKEN_LIMIT_ADMIN_HOURLY` — hourly token budget for
+    /// admin-tier callers. Defaults to 500 000.
+    pub token_limit_admin_hourly: u64,
+    /// `MIDNIGHT_MANUAL_TOKEN_LIMIT_ADMIN_DAILY` — daily token budget for
+    /// admin-tier callers. Defaults to 100 000 000.
+    pub token_limit_admin_daily: u64,
+    /// `MIDNIGHT_MANUAL_TOKEN_SNAPSHOT_SECS` — interval at which the token-
+    /// usage counters are flushed to the store. Defaults to 300 s (5 min);
+    /// clamped to `[1, ∞)`.
+    pub token_snapshot_secs: u64,
+    /// `MIDNIGHT_MANUAL_TOKEN_LIMIT_GLOBAL` — site-wide token ceiling over
+    /// `token_limit_global_window_secs`, an anti-Sybil backstop applied to
+    /// non-admin tiers. Defaults to 10_000_000. `u64::MAX` disables it.
+    pub token_limit_global: u64,
+    /// `MIDNIGHT_MANUAL_TOKEN_LIMIT_GLOBAL_WINDOW_SECS` — rolling window for the
+    /// global cap. Defaults to 10_800 s (3 h).
+    pub token_limit_global_window_secs: u64,
 }
 
 impl Default for ServerConfig {
@@ -138,7 +166,6 @@ impl Default for ServerConfig {
             database_url: String::new(),
             port: 8080,
             auto_migrate: false,
-            corpus_model: None,
             user_store_body: None,
             jwt_secret: None,
             github_oauth_client_id: None,
@@ -150,9 +177,6 @@ impl Default for ServerConfig {
             github_api_base_url: "https://api.github.com".into(),
             github_authorize_url: "https://github.com/login/oauth/authorize".into(),
             github_token_url: "https://github.com/login/oauth/access_token".into(),
-            embedder_enabled: false,
-            embedder_interval_ms: 30_000,
-            embedder_batch_size: 16,
             source_retirement_enabled: false,
             source_retirement_grace_hours: 24,
             source_retirement_interval_minutes: 60,
@@ -166,6 +190,19 @@ impl Default for ServerConfig {
             rate_limit_override_refresh_secs: 30,
             max_queries_per_request: 10,
             scoring_policy: ScoringPolicy::default(),
+            voyage_api_key: None,
+            voyage_model: "voyage-code-3".into(),
+            voyage_output_dimension: 1024,
+            voyage_output_dtype: "float".into(),
+            token_limit_anon_hourly: 2_000,
+            token_limit_anon_daily: 20_000,
+            token_limit_uplift_hourly: 4_000,
+            token_limit_uplift_daily: 40_000,
+            token_limit_admin_hourly: 500_000,
+            token_limit_admin_daily: 100_000_000,
+            token_snapshot_secs: 300,
+            token_limit_global: 10_000_000,
+            token_limit_global_window_secs: 10_800,
         }
     }
 }
@@ -207,17 +244,6 @@ impl ServerConfig {
             .ok()
             .and_then(|s| s.parse::<i64>().ok())
             .map_or(7, |v| v.clamp(1, 365));
-        let embedder_enabled = env::var("MIDNIGHT_MANUAL_EMBEDDER_ENABLED")
-            .map(|v| !matches!(v.as_str(), "0" | "false" | "no"))
-            .unwrap_or(true);
-        let embedder_interval_ms = env::var("MIDNIGHT_MANUAL_EMBEDDER_INTERVAL_MS")
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .map_or(30_000, |v| v.clamp(1_000, 600_000));
-        let embedder_batch_size = env::var("MIDNIGHT_MANUAL_EMBEDDER_BATCH_SIZE")
-            .ok()
-            .and_then(|s| s.parse::<i64>().ok())
-            .map_or(16, |v| v.clamp(1, 128));
         let source_retirement_enabled = env::var("MIDNIGHT_MANUAL_SOURCE_RETIREMENT_ENABLED")
             .map(|v| !matches!(v.as_str(), "0" | "false" | "no"))
             .unwrap_or(true);
@@ -269,11 +295,45 @@ impl ServerConfig {
             .and_then(|s| s.parse::<u32>().ok())
             .map_or(10, |v| v.clamp(1, 50));
         let scoring_policy = load_scoring_policy()?;
+        let voyage_api_key = env::var("VOYAGE_API_KEY").ok().filter(|s| !s.is_empty());
+        let voyage_model = env::var("MIDNIGHT_MANUAL_VOYAGE_MODEL")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "voyage-code-3".into());
+        let voyage_output_dimension: u32 = env::var("MIDNIGHT_MANUAL_VOYAGE_DIM")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1024);
+        let voyage_output_dtype = env::var("MIDNIGHT_MANUAL_VOYAGE_DTYPE")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "float".into());
+        let tl = |name: &str, default: u64| -> u64 {
+            env::var(name)
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(default)
+        };
+        let token_limit_anon_hourly = tl("MIDNIGHT_MANUAL_TOKEN_LIMIT_ANON_HOURLY", 2_000);
+        let token_limit_anon_daily = tl("MIDNIGHT_MANUAL_TOKEN_LIMIT_ANON_DAILY", 20_000);
+        let token_limit_uplift_hourly = tl("MIDNIGHT_MANUAL_TOKEN_LIMIT_UPLIFT_HOURLY", 4_000);
+        let token_limit_uplift_daily = tl("MIDNIGHT_MANUAL_TOKEN_LIMIT_UPLIFT_DAILY", 40_000);
+        let token_limit_admin_hourly = tl("MIDNIGHT_MANUAL_TOKEN_LIMIT_ADMIN_HOURLY", 500_000);
+        let token_limit_admin_daily = tl("MIDNIGHT_MANUAL_TOKEN_LIMIT_ADMIN_DAILY", 100_000_000);
+        let token_snapshot_secs = env::var("MIDNIGHT_MANUAL_TOKEN_SNAPSHOT_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .map_or(300, |v: u64| v.max(1));
+        let token_limit_global = tl("MIDNIGHT_MANUAL_TOKEN_LIMIT_GLOBAL", 10_000_000);
+        let token_limit_global_window_secs =
+            env::var("MIDNIGHT_MANUAL_TOKEN_LIMIT_GLOBAL_WINDOW_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .map_or(10_800, |v: u64| v.max(60));
         Ok(Self {
             database_url,
             port,
             auto_migrate,
-            corpus_model: None,
             user_store_body,
             jwt_secret,
             github_oauth_client_id,
@@ -285,9 +345,6 @@ impl ServerConfig {
             github_api_base_url: "https://api.github.com".into(),
             github_authorize_url: "https://github.com/login/oauth/authorize".into(),
             github_token_url: "https://github.com/login/oauth/access_token".into(),
-            embedder_enabled,
-            embedder_interval_ms,
-            embedder_batch_size,
             source_retirement_enabled,
             source_retirement_grace_hours,
             source_retirement_interval_minutes,
@@ -301,6 +358,19 @@ impl ServerConfig {
             rate_limit_override_refresh_secs,
             max_queries_per_request,
             scoring_policy,
+            voyage_api_key,
+            voyage_model,
+            voyage_output_dimension,
+            voyage_output_dtype,
+            token_limit_anon_hourly,
+            token_limit_anon_daily,
+            token_limit_uplift_hourly,
+            token_limit_uplift_daily,
+            token_limit_admin_hourly,
+            token_limit_admin_daily,
+            token_snapshot_secs,
+            token_limit_global,
+            token_limit_global_window_secs,
         })
     }
 }
@@ -368,6 +438,24 @@ mod tests {
         assert_eq!(c.rate_limit_client_ip_header, "fly-client-ip");
         assert_eq!(c.rate_limit_override_refresh_secs, 30);
         assert_eq!(c.max_queries_per_request, 10);
+    }
+
+    #[test]
+    fn token_limit_defaults() {
+        let c = ServerConfig::default();
+        assert_eq!(c.token_limit_anon_hourly, 2_000);
+        assert_eq!(c.token_limit_anon_daily, 20_000);
+        assert_eq!(c.token_limit_uplift_hourly, 4_000);
+        assert_eq!(c.token_limit_uplift_daily, 40_000);
+        assert_eq!(c.token_limit_admin_hourly, 500_000);
+        assert_eq!(c.token_limit_admin_daily, 100_000_000);
+        assert_eq!(c.token_snapshot_secs, 300);
+        assert_eq!(c.token_limit_global, 10_000_000);
+        assert_eq!(c.token_limit_global_window_secs, 10_800);
+        assert_eq!(c.voyage_model, "voyage-code-3");
+        assert_eq!(c.voyage_output_dimension, 1024);
+        assert_eq!(c.voyage_output_dtype, "float");
+        assert!(c.voyage_api_key.is_none());
     }
 
     #[test]

@@ -60,6 +60,10 @@ jobs:
         run: |
           cargo test --package mn-server --features integration --test telemetry_endpoint -- --nocapture 2>&1 | tee -a canary-output.log
 
+      - name: Run /v1/embeddings privacy canary
+        run: |
+          cargo test --package mn-server --features integration --test embeddings_no_query_text -- --nocapture 2>&1 | tee -a canary-output.log
+
       - name: Dump telemetry_event_raw
         run: |
           psql "$DATABASE_URL" -c "COPY (SELECT row_to_json(t) FROM telemetry_event_raw t) TO STDOUT" > telemetry-dump.ndjson || true

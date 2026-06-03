@@ -10,21 +10,28 @@
 //!    Anonymous still works; the server's `/v1/search` is public and the
 //!    bearer only affects rate-limit tier.
 //!
-//! 3. Load the local embedder (`bge-base-en-v1.5`) and encode every query
-//!    (one primary plus any `--query` / `--queries-stdin` extras) in one
-//!    batch. First-run cost is the ~100 MB model download; subsequent runs
-//!    hit the on-disk cache and are fast.
+//! 3. Embed every query via VoyageAI. Two modes:
+//!    - **BYOK** (flag/env/config key present): call Voyage directly with the
+//!      caller's own key via [`mn_embedding::client::EmbedSource::Byok`].
+//!    - **Server-proxy** (no key): POST to the server's `/v1/embeddings`
+//!      endpoint, which holds the platform key and enforces token limits.
+//!
+//!    The corpus active model is fetched from `GET /v1/models/active` to form
+//!    the canonical wire id (`name@revision`) labelling the request.
 //!
 //! 4. `POST /v1/search` with the resulting `{text, vector}` pairs. With more
 //!    than one query the server RRFs across them; the response's per-query and
 //!    per-result diagnostics are surfaced in the rendered output.
 //!
-//! 5. Render the response — human table by default, single-line NDJSON when
-//!    `--json` is set.
+//! 5. Optionally rerank. By default the CLI does NOT rerank — quick queries
+//!    trade the quality boost for lower latency and a smaller install
+//!    footprint. Pass `--rerank` to opt in: the response candidates are
+//!    reranked client-side via the configured reranker catalog id
+//!    (`--reranker` flag > `MIDNIGHT_MANUAL_RERANKER` env > config, default
+//!    `bge-reranker-base`), the same catalog the MCP `search` tool uses.
 //!
-//! Unlike the MCP `search` tool, this command does NOT run a local reranker.
-//! Quick CLI queries trade the rerank quality boost for lower latency and a
-//! smaller install footprint.
+//! 6. Render the response — human table by default, single-line NDJSON when
+//!    `--json` is set.
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -33,19 +40,30 @@ use std::time::Instant;
 use anyhow::{anyhow, Context as _, Result};
 use clap::Args as ClapArgs;
 use mn_core::auth_file::AuthFile;
+use mn_core::config::ConfigEnv as _;
 use mn_retrieval::filters::SearchFilters;
 use mn_telemetry::events::{CliCommandName, Component, EventPayload, Outcome};
 use mn_telemetry::{Event, TelemetryClient};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
-/// Default embedding model the CLI declares to the server. The server 409s
-/// `embedding_model_mismatch` if its active corpus model doesn't agree.
-pub const DEFAULT_EMBEDDING_MODEL: &str = "bge-base-en-v1.5@1";
+/// Sentinel embedding model wire id used when `--embedding-model` is not
+/// explicitly overridden. At runtime the CLI resolves the true corpus wire id
+/// from `GET /v1/models/active`; this constant is only the `clap` default so
+/// `args.embedding_model` has a value for the explicit-override comparison.
+pub const DEFAULT_EMBEDDING_MODEL: &str = "auto";
 
 /// Maximum number of queries the CLI will send in one request (matches the
 /// server's hard ceiling).
 const MAX_QUERIES: usize = 10;
+
+/// Candidate pool size requested from the cloud when `--rerank` is set (mirrors
+/// the MCP `search` tool's constant of the same name). Reranking needs a pool
+/// wider than the caller's `--limit` so the cross-encoder can *promote* a chunk
+/// the cloud ranked below the cutoff — not merely reorder the caller's top-N.
+/// The reranker truncates back to `--limit` after scoring; the server's
+/// `/v1/search` accepts a `limit` up to 100, so 50 is within range.
+const RERANK_FETCH: u32 = 50;
 
 /// Args for `mnm search`.
 #[derive(Debug, ClapArgs)]
@@ -68,23 +86,40 @@ pub struct Args {
     #[arg(long, default_value_t = 10)]
     pub limit: u32,
 
-    /// Override the embedding-model wire id. Defaults to
-    /// `bge-base-en-v1.5@1`; only override if your local model and the
-    /// corpus's model are out of sync (run `mnm models pull` first).
+    /// Override the embedding-model wire id sent with the search request.
+    /// When omitted (or set to `"auto"`), the CLI fetches the corpus's active
+    /// model from `GET /v1/models/active` and uses that wire id. Only set
+    /// this explicitly when you need to pin a specific `name@revision`.
     #[arg(long, default_value = DEFAULT_EMBEDDING_MODEL)]
     pub embedding_model: String,
+
+    /// Rerank the results client-side with a cross-encoder before rendering.
+    /// Off by default (lower latency, no model download); the MCP `search` tool
+    /// reranks by default, this CLI is opt-in.
+    #[arg(long)]
+    pub rerank: bool,
+
+    /// Reranker catalog id to use when `--rerank` is set (e.g.
+    /// `bge-reranker-base`, `jina-reranker-v1-turbo-en`, `voyage-rerank-2.5-lite`,
+    /// `custom`). Precedence: this flag > `MIDNIGHT_MANUAL_RERANKER` env >
+    /// config `[models].reranker` (default `bge-reranker-base`). Ignored unless
+    /// `--rerank` is set.
+    #[arg(long)]
+    pub reranker: Option<String>,
 }
 
 /// Dispatch.
 ///
 /// # Errors
 ///
-/// Returns `anyhow::Error` when the embedder cannot be loaded, the cache dir
-/// cannot be resolved, the HTTP round-trip fails, or the response can't be
+/// Returns `anyhow::Error` when the active model cannot be resolved, the
+/// embedding call fails, the HTTP round-trip fails, or the response can't be
 /// decoded.
 pub async fn run(
     args: Args,
     server_flag: Option<&str>,
+    config_path: Option<&Path>,
+    voyage_api_key: Option<&str>,
     telemetry: &TelemetryClient,
     cli_version: &str,
     json: bool,
@@ -101,6 +136,8 @@ pub async fn run(
         &server_url,
         auth_path.as_deref(),
         &cache_dir,
+        config_path,
+        voyage_api_key,
         telemetry,
         cli_version,
         json,
@@ -108,17 +145,23 @@ pub async fn run(
     .await
 }
 
-/// Path-explicit driver. Loads the local embedder, encodes the query, and
-/// hands off to [`search_via_http`].
+/// Path-explicit driver. Embeds the query via VoyageAI (BYOK or server-proxy),
+/// resolves the corpus wire id, posts `/v1/search`, and — when `args.rerank` is
+/// set — reranks the candidates client-side via the configured reranker catalog
+/// id before rendering. `cache_dir` is the on-disk fastembed model cache used
+/// by the local reranker variants.
 ///
 /// # Errors
 ///
 /// See [`run`].
+#[allow(clippy::too_many_arguments)]
 pub async fn run_with_paths(
     args: Args,
     server_url: &str,
     auth_path: Option<&Path>,
     cache_dir: &Path,
+    config_path: Option<&Path>,
+    voyage_api_key: Option<&str>,
     telemetry: &TelemetryClient,
     cli_version: &str,
     json: bool,
@@ -126,13 +169,46 @@ pub async fn run_with_paths(
     let texts = collect_query_texts(&args)?;
     let started = Instant::now();
 
-    let embedder = mn_embedding::embedder::global(cache_dir.to_path_buf())
+    // Resolve bearer first — needed for both the server-embed path and the
+    // subsequent /v1/search request.
+    let bearer = auth_path.and_then(resolve_best_bearer);
+
+    // Resolve the Voyage API key (flag > VOYAGE_API_KEY env > config). Honor the
+    // caller's `--config` path so a key stored in a non-default config is found.
+    let env = mn_core::config::StdEnv;
+    let (cfg, _) = mn_core::config::Config::discover(config_path, &env).unwrap_or_default();
+    let voyage_key = mn_core::config::resolve_voyage_api_key(voyage_api_key, &cfg.models, &env);
+
+    let input_type = mn_embedding::voyage::InputType::Query;
+    let embedded = if let Some(key) = voyage_key.as_deref() {
+        let embedder = mn_embedding::voyage::VoyageEmbedder::new(
+            key,
+            &cfg.models.embedding,
+            cfg.models.voyage_output_dimension,
+            &cfg.models.voyage_output_dtype,
+        );
+        mn_embedding::client::embed(
+            texts.clone(),
+            input_type,
+            mn_embedding::client::EmbedSource::Byok(&embedder),
+        )
         .await
-        .context("load embedder (first run downloads ~100 MB)")?;
-    let vectors = embedder
-        .embed_blocking(texts.clone(), None)
+    } else {
+        mn_embedding::client::embed(
+            texts.clone(),
+            input_type,
+            mn_embedding::client::EmbedSource::Server {
+                base_url: server_url,
+                bearer: bearer.as_deref(),
+                // Search never opts out of the global cap (read path, not ingest).
+                no_global_limit: false,
+            },
+        )
         .await
-        .context("encode queries")?;
+    }
+    .context("embed queries via Voyage")?;
+
+    let vectors = embedded.vectors;
     if vectors.len() != texts.len() {
         return Err(anyhow!(
             "embedder returned {} vectors for {} queries",
@@ -141,20 +217,52 @@ pub async fn run_with_paths(
         ));
     }
 
-    let bearer = auth_path.and_then(resolve_best_bearer);
+    // Resolve the corpus wire id. When the sentinel "auto" is present, fetch
+    // the active model from the server so the wire id always matches the
+    // active corpus model. If the caller supplied an explicit
+    // --embedding-model override, honour it directly and skip the round-trip.
+    let client_embedding_model = if args.embedding_model == DEFAULT_EMBEDDING_MODEL {
+        let active = crate::commands::models::fetch_active(server_url)
+            .await
+            .context("resolve active corpus model")?;
+        format!("{}@{}", active.name, active.revision)
+    } else {
+        args.embedding_model.clone()
+    };
+
     let queries: Vec<QueryPair> = texts
         .into_iter()
         .zip(vectors)
         .map(|(text, vector)| QueryPair { text, vector })
         .collect();
-    let request = SearchRequest {
-        queries,
-        client_embedding_model: args.embedding_model.clone(),
-        limit: args.limit,
-        filters: SearchFilters::default(),
-    };
+    let request = build_search_request(queries, client_embedding_model, args.limit, args.rerank);
 
-    let result = search_via_http(server_url, bearer.as_deref(), &request, json).await;
+    // Resolve the env-dependent rerank selection up front (synchronously) into
+    // owned data. The `ConfigEnv` trait carries no `Sync` guarantee, so threading
+    // an `&impl ConfigEnv` borrow through the `.await` below would make this
+    // future non-`Send` for arbitrary impls; resolving to owned values first keeps
+    // `DispatchSearch` env-free and its future `Send`. Cheap when `--rerank` is
+    // off (only a couple of lookups).
+    let reranker_id =
+        mn_core::config::resolve_reranker(args.reranker.as_deref(), &cfg.models, &env);
+    let voyage_base_url = env
+        .var("MIDNIGHT_MANUAL_VOYAGE_BASE_URL")
+        .filter(|s| !s.is_empty());
+
+    let result = dispatch_search(DispatchSearch {
+        rerank: args.rerank,
+        limit: args.limit,
+        server_url,
+        bearer: bearer.as_deref(),
+        request: &request,
+        reranker_id: &reranker_id,
+        reranker_path: cfg.models.reranker_path.as_deref(),
+        voyage_key: voyage_key.as_deref(),
+        voyage_base_url: voyage_base_url.as_deref(),
+        cache_dir,
+        json,
+    })
+    .await;
 
     let duration_ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
     let outcome = if result.is_ok() {
@@ -176,11 +284,103 @@ pub async fn run_with_paths(
     result
 }
 
+/// Build the outgoing `/v1/search` body, sizing the candidate pool for the
+/// chosen path.
+///
+/// When `rerank` is set we widen the cloud `limit` to [`RERANK_FETCH`] and ask
+/// for relevance order (`sort_by = "score"`) so the cross-encoder can *promote* a
+/// chunk the cloud ranked below the caller's `limit` — not merely reorder the
+/// caller's top-N (this mirrors the MCP `search` tool). `apply_rerank` later
+/// truncates the reranked set back to `limit`. When `rerank` is off the body
+/// carries the caller's `limit` and omits `sort_by` (`skip_serializing_if`), so
+/// the wire body is byte-identical to the pre-Task-9.4 form.
+fn build_search_request(
+    queries: Vec<QueryPair>,
+    client_embedding_model: String,
+    limit: u32,
+    rerank: bool,
+) -> SearchRequest {
+    let (cloud_limit, sort_by) = if rerank {
+        (RERANK_FETCH, Some("score".to_owned()))
+    } else {
+        (limit, None)
+    };
+    SearchRequest {
+        queries,
+        client_embedding_model,
+        limit: cloud_limit,
+        filters: SearchFilters::default(),
+        sort_by,
+    }
+}
+
+/// Everything [`dispatch_search`] needs, already resolved off the `ConfigEnv`
+/// (whose trait carries no `Sync` guarantee) into owned data so the async future
+/// stays `Send`. Grouped into a struct to keep the function under the
+/// argument-count lint.
+struct DispatchSearch<'a> {
+    /// Whether to run the client-side rerank pass.
+    rerank: bool,
+    /// Caller's result limit.
+    limit: u32,
+    /// Cloud base URL.
+    server_url: &'a str,
+    /// Bearer to forward (rate-limit tier; `/v1/search` is public).
+    bearer: Option<&'a str>,
+    /// The fully-formed search request.
+    request: &'a SearchRequest,
+    /// Resolved reranker catalog id (flag > env > config).
+    reranker_id: &'a str,
+    /// Backing dir for the `custom` catalog id.
+    reranker_path: Option<&'a Path>,
+    /// Voyage API key (required for Voyage catalog ids).
+    voyage_key: Option<&'a str>,
+    /// Resolved Voyage base-url override (self-host / proxy / test mock).
+    voyage_base_url: Option<&'a str>,
+    /// On-disk fastembed model cache.
+    cache_dir: &'a Path,
+    /// Render as NDJSON when set.
+    json: bool,
+}
+
+/// Pick the search path based on `d.rerank`: the rerank path hands off to
+/// [`rerank_via_http`] with the pre-resolved reranker selection; the no-rerank
+/// path is the unchanged [`search_via_http`]. All env reads happen before this
+/// `async fn` (see [`DispatchSearch`]) so its future is `Send`.
+///
+/// # Errors
+///
+/// Propagates the HTTP / decode / rerank-load errors from the chosen path.
+async fn dispatch_search(d: DispatchSearch<'_>) -> Result<()> {
+    if !d.rerank {
+        return search_via_http(d.server_url, d.bearer, d.request, d.json).await;
+    }
+    rerank_via_http(
+        d.server_url,
+        d.bearer,
+        d.request,
+        RerankSelection {
+            reranker_id: d.reranker_id,
+            reranker_path: d.reranker_path,
+            voyage_key: d.voyage_key,
+            voyage_base_url: d.voyage_base_url,
+            cache_dir: d.cache_dir,
+        },
+        d.limit,
+        d.json,
+    )
+    .await
+}
+
 /// POST `/v1/search` with the supplied request and render the response.
 ///
 /// Exposed for integration testing without spinning up the local embedder
 /// (model downloads make in-CI tests slow and flaky). Production callers
 /// should usually go through [`run`] / [`run_with_paths`].
+///
+/// This is the no-rerank path: it fetches via [`fetch_search`] then renders.
+/// The signature and observable behaviour are unchanged from before Task 9.4
+/// (the integration tests in `tests/search_integration.rs` depend on it).
 ///
 /// # Errors
 ///
@@ -193,6 +393,27 @@ pub async fn search_via_http(
     request: &SearchRequest,
     json: bool,
 ) -> Result<()> {
+    let resp = fetch_search(server_url, bearer, request).await?;
+    let texts: Vec<String> = request.queries.iter().map(|q| q.text.clone()).collect();
+    println!("{}", render(&texts, &resp, json));
+    Ok(())
+}
+
+/// POST `/v1/search` and decode the response, WITHOUT rendering. The fetch +
+/// decode half of [`search_via_http`], split out so the `--rerank` path can
+/// post-process the decoded results before rendering. Used by both
+/// [`search_via_http`] (no rerank) and the private `rerank_via_http` path.
+///
+/// # Errors
+///
+/// Returns `anyhow::Error` on HTTP failure or on a non-success status from the
+/// server. The error message strips long base64-y blobs before echoing the
+/// server's body (FR-019).
+pub async fn fetch_search(
+    server_url: &str,
+    bearer: Option<&str>,
+    request: &SearchRequest,
+) -> Result<SearchResponse> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
@@ -207,13 +428,125 @@ pub async fn search_via_http(
         let body = resp.text().await.unwrap_or_default();
         return Err(anyhow!("{status} from /v1/search: {}", redact_token_like(&body)));
     }
-    let parsed: SearchResponse = resp
-        .json()
-        .await
-        .context("parse /v1/search response body")?;
+    resp.json().await.context("parse /v1/search response body")
+}
+
+/// The reranker selection threaded into [`rerank_via_http`]. Grouped into a
+/// struct so the function stays under the argument-count lint while carrying
+/// everything [`mn_embedding::reranker::LoadedReranker::load`] needs.
+struct RerankSelection<'a> {
+    /// Catalog id (resolved flag > env > config).
+    reranker_id: &'a str,
+    /// Backing dir for the `custom` catalog id; `None` otherwise.
+    reranker_path: Option<&'a Path>,
+    /// Voyage API key (required for Voyage catalog ids).
+    voyage_key: Option<&'a str>,
+    /// Optional Voyage base-url override (self-host / proxy / test mock).
+    voyage_base_url: Option<&'a str>,
+    /// On-disk fastembed model cache.
+    cache_dir: &'a Path,
+}
+
+/// `--rerank` path: fetch `/v1/search`, load the configured reranker, rerank
+/// the candidates against the first query, re-order + truncate, then render.
+///
+/// This mirrors the MCP `search` tool: the `request` passed here was built with
+/// a wider [`RERANK_FETCH`] candidate pool sorted by score (`sort_by =
+/// "score"`), the candidates are reranked against the first query, and
+/// [`apply_rerank`] truncates the reranked set back to the caller's `--limit`.
+/// Candidates are mapped back by [`mn_embedding::RerankResult::index`] (NOT
+/// positionally — a remote reranker like Voyage reorders), and each surviving
+/// result is stamped with a `rerank_score` in its `scores` bag.
+///
+/// # Errors
+///
+/// Returns `anyhow::Error` on the HTTP fetch failure, a reranker load failure
+/// (bad catalog id, missing model, missing Voyage key), or a rerank failure.
+async fn rerank_via_http(
+    server_url: &str,
+    bearer: Option<&str>,
+    request: &SearchRequest,
+    sel: RerankSelection<'_>,
+    limit: u32,
+    json: bool,
+) -> Result<()> {
+    let resp = fetch_search(server_url, bearer, request).await?;
     let texts: Vec<String> = request.queries.iter().map(|q| q.text.clone()).collect();
-    println!("{}", render(&texts, &parsed, json));
+
+    // Empty result set: nothing to rerank — render straight through.
+    if resp.results.is_empty() {
+        println!("{}", render(&texts, &resp, json));
+        return Ok(());
+    }
+
+    let spec = mn_embedding::reranker_catalog::resolve(sel.reranker_id, sel.reranker_path)
+        .with_context(|| format!("resolve reranker `{}`", sel.reranker_id))?;
+    let reranker = mn_embedding::reranker::LoadedReranker::load(
+        spec,
+        sel.cache_dir.to_path_buf(),
+        sel.voyage_key,
+        sel.voyage_base_url,
+    )
+    .await
+    .with_context(|| format!("load reranker `{}`", sel.reranker_id))?;
+
+    // Pivot on the first query (the most "user-facing" text for HyDE / expansion).
+    let pivot = texts.first().cloned().unwrap_or_default();
+    let docs: Vec<String> = resp.results.iter().map(|r| r.content.clone()).collect();
+    let scores = reranker
+        .rerank(pivot, docs)
+        .await
+        .with_context(|| format!("rerank with `{}`", sel.reranker_id))?;
+
+    let reordered = apply_rerank(resp.results, &scores, limit);
+    let out = SearchResponse {
+        results: reordered,
+        search_metadata: resp.search_metadata,
+    };
+    println!("{}", render(&texts, &out, json));
     Ok(())
+}
+
+/// Re-order `results` by reranker score (descending) and truncate to `limit`,
+/// mapping each score back to its result by [`mn_embedding::RerankResult::index`]
+/// — NOT positionally, because a remote reranker (Voyage) may return results in
+/// a different order than the input. A `rerank_score` is stamped into each
+/// surviving result's `scores` JSON. Indices that fall outside `results` or
+/// repeat are dropped defensively.
+///
+/// Pure (no model / IO) so it is unit-testable without a reranker or network.
+fn apply_rerank(
+    mut results: Vec<SearchResult>,
+    scores: &[mn_embedding::RerankResult],
+    limit: u32,
+) -> Vec<SearchResult> {
+    let mut seen = std::collections::HashSet::new();
+    let mut indexed: Vec<(f32, SearchResult)> = scores
+        .iter()
+        .filter_map(|s| {
+            if s.index >= results.len() || !seen.insert(s.index) {
+                return None;
+            }
+            let mut taken = std::mem::take(&mut results[s.index]);
+            stamp_rerank_score(&mut taken, s.score);
+            Some((s.score, taken))
+        })
+        .collect();
+    // total_cmp keeps a strict total order even if a NaN score sneaks in.
+    indexed.sort_by(|a, b| b.0.total_cmp(&a.0));
+    indexed.truncate(limit as usize);
+    indexed.into_iter().map(|(_, r)| r).collect()
+}
+
+/// Record the raw reranker logit as `scores.rerank_score`, creating the
+/// `scores` object if the server didn't send one.
+fn stamp_rerank_score(result: &mut SearchResult, score: f32) {
+    let scores = result
+        .scores
+        .get_or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    if let Some(obj) = scores.as_object_mut() {
+        obj.insert("rerank_score".to_owned(), serde_json::Value::from(score));
+    }
 }
 
 /// Assemble the final list of query texts from the CLI args.
@@ -315,7 +648,7 @@ fn redact_token_like(s: &str) -> String {
 }
 
 /// Outgoing search request body. Matches `SearchRequest` on the server side.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct SearchRequest {
     /// Query pairs.
     pub queries: Vec<QueryPair>,
@@ -325,6 +658,13 @@ pub struct SearchRequest {
     pub limit: u32,
     /// Per-result filters.
     pub filters: SearchFilters,
+    /// Optional ordering hint for the candidate pool. The rerank path sets this
+    /// to `"score"` so the cloud returns relevance-ordered candidates (rather
+    /// than its confidence-first default) before the cross-encoder reranks them.
+    /// `None` for the non-rerank path — `skip_serializing_if` then omits the key
+    /// entirely, keeping that wire body byte-identical to the pre-Task-9.4 form.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sort_by: Option<String>,
 }
 
 /// One {text, vector} pair.
@@ -332,7 +672,8 @@ pub struct SearchRequest {
 pub struct QueryPair {
     /// Verbatim query text.
     pub text: String,
-    /// Pre-computed embedding (768 dims for bge-base-en-v1.5).
+    /// Pre-computed embedding; its dimension is set by the active corpus model
+    /// (e.g. 1024 for voyage-code-3).
     pub vector: Vec<f32>,
 }
 
@@ -350,7 +691,7 @@ pub struct SearchResponse {
 }
 
 /// One result row.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SearchResult {
     /// Chunk identifier.
     pub chunk_id: uuid::Uuid,
@@ -651,6 +992,8 @@ mod tests {
             queries_stdin: stdin,
             limit: 10,
             embedding_model: DEFAULT_EMBEDDING_MODEL.to_owned(),
+            rerank: false,
+            reranker: None,
         }
     }
 
@@ -702,5 +1045,142 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("auth.toml");
         assert!(resolve_best_bearer(&missing).is_none());
+    }
+
+    fn result(chunk: u128, content: &str) -> SearchResult {
+        SearchResult {
+            chunk_id: uuid::Uuid::from_u128(chunk),
+            content: content.to_owned(),
+            ..SearchResult::default()
+        }
+    }
+
+    #[test]
+    fn apply_rerank_reorders_by_score_via_index_not_position() {
+        // Three results in input order a/b/c. The reranker returns scores keyed
+        // by the ORIGINAL index, out of order, with b most relevant. The remap
+        // must be index-based: if it zipped positionally instead, the scores
+        // would be misattributed and the order would be wrong.
+        let results = vec![result(1, "a"), result(2, "b"), result(3, "c")];
+        let scores = vec![
+            mn_embedding::RerankResult { index: 2, score: 0.20 }, // c
+            mn_embedding::RerankResult { index: 0, score: 0.10 }, // a
+            mn_embedding::RerankResult { index: 1, score: 0.95 }, // b — most relevant
+        ];
+        let out = apply_rerank(results, &scores, 10);
+        let order: Vec<&str> = out.iter().map(|r| r.content.as_str()).collect();
+        assert_eq!(order, vec!["b", "c", "a"], "must sort by score desc, mapped by index");
+        // b kept its own content despite arriving second in `scores`.
+        assert_eq!(out[0].content, "b");
+        // rerank_score stamped, and it matches b's score (0.95), proving the
+        // score was attributed to the right result by index.
+        let top_score = out[0].scores.as_ref().unwrap()["rerank_score"]
+            .as_f64()
+            .unwrap();
+        assert!((top_score - 0.95).abs() < 1e-6, "top rerank_score was {top_score}");
+    }
+
+    #[test]
+    fn build_request_rerank_widens_pool_and_sets_score_sort() {
+        let q = vec![QueryPair {
+            text: "x".to_owned(),
+            vector: vec![0.0],
+        }];
+        let req = build_search_request(q, "voyage-code-3@1".to_owned(), 5, true);
+        // Caller asked for 5 but the cloud pool is widened so the reranker can
+        // promote a below-cutoff candidate.
+        assert_eq!(req.limit, RERANK_FETCH);
+        assert_eq!(req.sort_by.as_deref(), Some("score"));
+        // sort_by serializes as the "score" key when present.
+        let body = serde_json::to_value(&req).unwrap();
+        assert_eq!(body["limit"], RERANK_FETCH);
+        assert_eq!(body["sort_by"], "score");
+    }
+
+    #[test]
+    fn build_request_non_rerank_keeps_limit_and_omits_sort_by() {
+        let q = vec![QueryPair {
+            text: "x".to_owned(),
+            vector: vec![0.0],
+        }];
+        let req = build_search_request(q, "voyage-code-3@1".to_owned(), 5, false);
+        assert_eq!(req.limit, 5);
+        assert!(req.sort_by.is_none());
+        // None must be OMITTED on the wire (skip_serializing_if), not null —
+        // proving the non-rerank body stays byte-identical to pre-Task-9.4.
+        let body = serde_json::to_value(&req).unwrap();
+        assert_eq!(body["limit"], 5);
+        assert!(
+            body.as_object().unwrap().get("sort_by").is_none(),
+            "sort_by key must be absent for the non-rerank path"
+        );
+    }
+
+    #[test]
+    fn apply_rerank_truncates_to_limit() {
+        let results = vec![result(1, "a"), result(2, "b"), result(3, "c")];
+        let scores = vec![
+            mn_embedding::RerankResult { index: 0, score: 0.1 },
+            mn_embedding::RerankResult { index: 1, score: 0.9 },
+            mn_embedding::RerankResult { index: 2, score: 0.5 },
+        ];
+        let out = apply_rerank(results, &scores, 2);
+        assert_eq!(out.len(), 2);
+        // Top two by score: b (0.9) then c (0.5); a (0.1) is dropped.
+        assert_eq!(out[0].content, "b");
+        assert_eq!(out[1].content, "c");
+    }
+
+    #[test]
+    fn apply_rerank_drops_out_of_range_and_duplicate_indices() {
+        let results = vec![result(1, "a"), result(2, "b")];
+        let scores = vec![
+            mn_embedding::RerankResult { index: 0, score: 0.5 },
+            mn_embedding::RerankResult { index: 5, score: 0.9 }, // out of range — dropped
+            mn_embedding::RerankResult { index: 0, score: 0.8 }, // duplicate — dropped
+            mn_embedding::RerankResult { index: 1, score: 0.3 },
+        ];
+        let out = apply_rerank(results, &scores, 10);
+        assert_eq!(out.len(), 2, "only the two valid, unique indices survive");
+        assert_eq!(out[0].content, "a"); // 0.5 > 0.3
+        assert_eq!(out[1].content, "b");
+    }
+
+    #[test]
+    fn apply_rerank_stamps_score_creating_scores_object() {
+        // A result with no `scores` from the server still gains a scores object
+        // carrying rerank_score.
+        let results = vec![result(1, "a")];
+        let scores = vec![mn_embedding::RerankResult { index: 0, score: 1.25 }];
+        let out = apply_rerank(results, &scores, 10);
+        assert!(out[0].scores.is_some(), "scores object must be created");
+        assert!(out[0].scores.as_ref().unwrap()["rerank_score"].is_number());
+    }
+
+    #[test]
+    fn search_args_rerank_flag_defaults_false_and_reranker_parses() {
+        use clap::Parser as _;
+
+        #[derive(clap::Parser)]
+        struct Probe {
+            #[command(flatten)]
+            inner: Args,
+        }
+
+        // Default: --rerank absent → false, --reranker absent → None.
+        let p = Probe::parse_from(["search", "q"]);
+        assert!(!p.inner.rerank, "--rerank must default to false (opt-in)");
+        assert!(p.inner.reranker.is_none());
+
+        // Present: both flags parse.
+        let p = Probe::parse_from([
+            "search",
+            "q",
+            "--rerank",
+            "--reranker",
+            "voyage-rerank-2.5-lite",
+        ]);
+        assert!(p.inner.rerank);
+        assert_eq!(p.inner.reranker.as_deref(), Some("voyage-rerank-2.5-lite"));
     }
 }

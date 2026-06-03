@@ -67,8 +67,6 @@ struct DisabledBy {
 pub struct CorpusReport {
     /// Active embedding model wire id (`name@revision`).
     pub active_embedding_model: String,
-    /// Whether the cloud's embedder worker is enabled.
-    pub embedder_worker_enabled: bool,
     /// One row per registered source.
     pub sources: Vec<CorpusSourceStatus>,
 }
@@ -84,7 +82,7 @@ pub struct CorpusSourceStatus {
     pub total_chunks: i64,
     /// Chunks ready for search.
     pub ready_chunks: i64,
-    /// Chunks still pending embedder work.
+    /// Chunks missing an embedding (no vector — not ready for search).
     pub embed_failed_chunks: i64,
 }
 
@@ -208,14 +206,6 @@ fn print_corpus(c: &CorpusReport) {
     println!();
     println!("  corpus ingest:");
     println!("    active model:    {}", c.active_embedding_model);
-    println!(
-        "    embedder worker: {}",
-        if c.embedder_worker_enabled {
-            "enabled"
-        } else {
-            "disabled"
-        },
-    );
     if c.sources.is_empty() {
         println!("    sources:         (none registered)");
         return;

@@ -116,10 +116,7 @@ async fn seed_two_chunks(pool: &sqlx::PgPool) -> (Uuid, Uuid, Uuid) {
 }
 
 fn cfg() -> ServerConfig {
-    ServerConfig {
-        corpus_model: None,
-        ..Default::default()
-    }
+    ServerConfig::default()
 }
 
 #[tokio::test]

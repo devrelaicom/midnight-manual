@@ -22,23 +22,31 @@ use mn_core::types::{ChunkStatus, DocumentKind, NodeKind, SourceKind};
 use mn_server::app;
 use mn_server::config::ServerConfig;
 use mn_server::ratelimit::RateLimiter;
+use mn_server::tokenlimit::TokenUsageLimiter;
 use mn_store::entities::{chunk, document, embedding_model, node, source, source_version};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 use uuid::Uuid;
 
 fn unit_vector(seed: f32) -> Vec<f32> {
-    (0..768_i32).map(|i| seed + (i as f32) * 0.0001).collect()
+    (0..1024_i32).map(|i| seed + (i as f32) * 0.0001).collect()
 }
 
 fn rl_cfg(anonymous_rps: u32, max_queries: u32) -> ServerConfig {
     ServerConfig {
-        corpus_model: Some("bge-base-en-v1.5@1".to_owned()),
         rate_limit_enabled: true,
         rate_limit_anonymous_rps: anonymous_rps,
         max_queries_per_request: max_queries,
         ..Default::default()
     }
+}
+
+/// Resolve the corpus model from the DB (the seeded voyage-code-3@1 active
+/// source_version) into the `Shared` handle `build_with_limiter` expects, so
+/// the search handler's model-mismatch + dim guards see voyage-code-3@1/1024.
+async fn resolved_cm(pool: &sqlx::PgPool) -> mn_server::corpus_model::Shared {
+    let cm = mn_server::corpus_model::resolve(pool).await.ok();
+    std::sync::Arc::new(std::sync::RwLock::new(cm))
 }
 
 fn unique_ip() -> String {
@@ -48,7 +56,7 @@ fn unique_ip() -> String {
 
 /// Seed one queryable chunk so valid searches return 200.
 async fn seed(pool: &sqlx::PgPool) {
-    let model_id = embedding_model::upsert(pool, "bge-base-en-v1.5", 1, 768, "baai")
+    let model_id = embedding_model::upsert(pool, "voyage-code-3", 1, 1024, "voyageai")
         .await
         .unwrap();
     let slug = format!("mq-test-{}", Uuid::new_v4());
@@ -117,7 +125,7 @@ async fn seed(pool: &sqlx::PgPool) {
 async fn search(app: axum::Router, ip: &str, queries: Value) -> (StatusCode, HeaderMap, Value) {
     let body = json!({
         "queries": queries,
-        "client_embedding_model": "bge-base-en-v1.5@1",
+        "client_embedding_model": "voyage-code-3@1",
         "limit": 5,
     });
     let resp = app
@@ -150,7 +158,16 @@ async fn over_cap_returns_400_and_refunds_the_base_token() {
     // anon floor of 1 token, cap of 2 queries.
     let cfg = rl_cfg(1, 2);
     let limiter = RateLimiter::from_config(&cfg);
-    let app = app::build_with_limiter(h.pool.clone(), cfg, limiter).expect("build");
+    let token_limiter = TokenUsageLimiter::from_config(&cfg);
+    let app = app::build_with_limiter(
+        h.pool.clone(),
+        cfg,
+        limiter,
+        resolved_cm(&h.pool).await,
+        token_limiter,
+        None,
+    )
+    .expect("build");
     let ip = unique_ip();
 
     // 3 queries > cap 2 → 400 multi_query_limit_exceeded.
@@ -174,7 +191,16 @@ async fn duplicate_queries_do_not_inflate_cost() {
     seed(&h.pool).await;
     let cfg = rl_cfg(2, 10);
     let limiter = RateLimiter::from_config(&cfg);
-    let app = app::build_with_limiter(h.pool.clone(), cfg, limiter).expect("build");
+    let token_limiter = TokenUsageLimiter::from_config(&cfg);
+    let app = app::build_with_limiter(
+        h.pool.clone(),
+        cfg,
+        limiter,
+        resolved_cm(&h.pool).await,
+        token_limiter,
+        None,
+    )
+    .expect("build");
     let ip = unique_ip();
 
     // 3 identical queries → dedup to 1 → cost 1 (base only), 200.
@@ -190,7 +216,16 @@ async fn distinct_queries_charge_n_tokens() {
     seed(&h.pool).await;
     let cfg = rl_cfg(5, 10);
     let limiter = RateLimiter::from_config(&cfg);
-    let app = app::build_with_limiter(h.pool.clone(), cfg, limiter).expect("build");
+    let token_limiter = TokenUsageLimiter::from_config(&cfg);
+    let app = app::build_with_limiter(
+        h.pool.clone(),
+        cfg,
+        limiter,
+        resolved_cm(&h.pool).await,
+        token_limiter,
+        None,
+    )
+    .expect("build");
     let ip = unique_ip();
 
     // 3 distinct queries → cost 3 → remaining 5 - 3 = 2 (post-charge balance).
@@ -211,7 +246,16 @@ async fn insufficient_budget_returns_429() {
     // Capacity 2, but 3 distinct queries cost 3 → over budget.
     let cfg = rl_cfg(2, 10);
     let limiter = RateLimiter::from_config(&cfg);
-    let app = app::build_with_limiter(h.pool.clone(), cfg, limiter).expect("build");
+    let token_limiter = TokenUsageLimiter::from_config(&cfg);
+    let app = app::build_with_limiter(
+        h.pool.clone(),
+        cfg,
+        limiter,
+        resolved_cm(&h.pool).await,
+        token_limiter,
+        None,
+    )
+    .expect("build");
     let ip = unique_ip();
 
     let (s, headers, b) = search(app, &ip, json!([q(0.1), q(0.5), q(0.9)])).await;

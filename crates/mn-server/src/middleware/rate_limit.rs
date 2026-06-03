@@ -41,7 +41,7 @@ fn is_exempt(path: &str) -> bool {
 
 /// Extract the client IP from the configured proxy header, falling back to the
 /// first `X-Forwarded-For` entry, then a shared `"unknown"` bucket.
-fn client_ip(headers: &HeaderMap, header_name: &str) -> String {
+pub(crate) fn client_ip(headers: &HeaderMap, header_name: &str) -> String {
     if let Some(v) = headers.get(header_name).and_then(|v| v.to_str().ok()) {
         let v = v.trim();
         if !v.is_empty() {

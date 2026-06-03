@@ -26,7 +26,9 @@ use crate::transport::{FrameReader, FrameWriter};
 /// Per-instance server config.
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
-    /// Where the embedder / reranker store their ONNX files.
+    /// Where the reranker stores its ONNX files. (The corpus embedder is no
+    /// longer local — embedding runs via VoyageAI — so nothing embedder-side
+    /// is cached here.)
     pub cache_dir: PathBuf,
     /// Base URL of the cloud server (`https://midnight-manual.midnightntwrk.expert` in
     /// production). Tools call this for everything except `status` /
@@ -37,9 +39,10 @@ pub struct ServerConfig {
     /// anonymous read mode.
     pub bearer_token: Option<String>,
     /// `{name}@{revision}` model identifier the cloud expects clients to
-    /// declare on every search. For the v1 corpus this is
-    /// `"bge-base-en-v1.5@1"` (seeded by migration 0006). Configurable here
-    /// so tests can pin a different value.
+    /// declare on every search. NOTE: since the Voyage cutover, `run_search`
+    /// resolves the corpus wire id live via `CloudClient::fetch_active_model`
+    /// (`GET /v1/models/active`) and no longer reads this field; it is retained
+    /// for config back-compat and other potential consumers.
     pub client_embedding_model: String,
     /// Resolved telemetry sink URL. Defaults to `{cloud_url}/v1/telemetry/events`.
     pub telemetry_url: String,
@@ -50,7 +53,7 @@ pub struct ServerConfig {
 
 impl ServerConfig {
     /// Build a config with the production defaults: production cloud URL,
-    /// no bearer, the seeded `bge-base-en-v1.5@1` model id, and telemetry
+    /// no bearer, the `voyage-code-3@1` corpus model id, and telemetry
     /// enabled (subject to the opt-out resolver).
     #[must_use]
     pub fn with_defaults(cache_dir: PathBuf) -> Self {
@@ -60,7 +63,7 @@ impl ServerConfig {
             cache_dir,
             cloud_url,
             bearer_token: None,
-            client_embedding_model: "bge-base-en-v1.5@1".to_owned(),
+            client_embedding_model: "voyage-code-3@1".to_owned(),
             telemetry_url,
             telemetry_enabled: true,
         }

@@ -18,7 +18,7 @@ use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, Buf
 /// Maximum body size accepted by [`FrameReader::next_message`]. The MCP server
 /// is a long-lived child of an arbitrary AI client, so we refuse oversize
 /// `Content-Length` declarations before allocating. 16 MiB is well above any
-/// reasonable real-world payload (a 50-vector query at 768 dims is ~600 KiB).
+/// reasonable real-world payload (a 50-vector query at 1024 dims is ~600 KiB).
 pub const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 
 /// Tokio-friendly reader that yields one JSON message at a time over a

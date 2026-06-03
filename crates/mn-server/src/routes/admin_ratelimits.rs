@@ -215,7 +215,10 @@ async fn delete_override(
 /// response, or `None` when the caller is admin-authorised.
 ///
 /// The 403 names both the caller's role and the required role (EC-61).
-fn admin_reject(rid: &str, auth: Option<&Extension<AuthContext>>) -> Option<Response> {
+///
+/// Shared with [`crate::routes::admin_tokenlimits`] so both admin-override CRUD
+/// surfaces enforce auth identically.
+pub(crate) fn admin_reject(rid: &str, auth: Option<&Extension<AuthContext>>) -> Option<Response> {
     match auth {
         None => Some(error::into_response(
             CoreError::builder(ErrorCode::Unauthorized)
@@ -237,14 +240,17 @@ fn admin_reject(rid: &str, auth: Option<&Extension<AuthContext>>) -> Option<Resp
 
 /// Extract the caller's `sub` claim (the admin user_id) for `created_by`.
 /// Only meaningful after [`admin_reject`] has confirmed an admin caller.
-fn sub_of(auth: Option<&Extension<AuthContext>>) -> String {
+pub(crate) fn sub_of(auth: Option<&Extension<AuthContext>>) -> String {
     auth.map(|Extension(ctx)| ctx.sub.clone())
         .unwrap_or_default()
 }
 
 /// Validate a `addr/prefix` (or bare address) CIDR string without pulling in an
 /// IP-network dependency. Returns `Some(response)` describing the problem.
-fn validate_cidr(cidr: &str, rid: &str) -> Option<Response> {
+///
+/// Shared with [`crate::routes::admin_tokenlimits`], which validates the
+/// `subject` of a `subject_kind == "cidr"` token-limit override the same way.
+pub(crate) fn validate_cidr(cidr: &str, rid: &str) -> Option<Response> {
     let bad = |reason: &str| -> Response {
         bad_request(
             format!("invalid cidr `{cidr}`: {reason}"),
@@ -277,7 +283,9 @@ fn validate_cidr(cidr: &str, rid: &str) -> Option<Response> {
 /// Why a supplied `expires_at` was rejected. Kept small so the parse helper's
 /// `Result` stays cheap (avoids `clippy::result_large_err` from carrying a
 /// whole `Response`).
-enum TimestampError {
+///
+/// Shared with [`crate::routes::admin_tokenlimits`] via [`parse_future_timestamp`].
+pub(crate) enum TimestampError {
     /// Not a parseable RFC 3339 timestamp.
     Malformed(String),
     /// Parses, but is not in the future.
@@ -285,7 +293,7 @@ enum TimestampError {
 }
 
 impl TimestampError {
-    fn into_response(self, rid: &str) -> Response {
+    pub(crate) fn into_response(self, rid: &str) -> Response {
         match self {
             Self::Malformed(s) => bad_request(
                 format!("`{s}` is not a valid RFC 3339 timestamp"),
@@ -302,7 +310,9 @@ impl TimestampError {
 }
 
 /// Parse an RFC 3339 timestamp and require it be in the future.
-fn parse_future_timestamp(s: &str) -> std::result::Result<OffsetDateTime, TimestampError> {
+pub(crate) fn parse_future_timestamp(
+    s: &str,
+) -> std::result::Result<OffsetDateTime, TimestampError> {
     let ts =
         OffsetDateTime::parse(s, &Rfc3339).map_err(|_| TimestampError::Malformed(s.to_owned()))?;
     if ts <= OffsetDateTime::now_utc() {
@@ -312,7 +322,13 @@ fn parse_future_timestamp(s: &str) -> std::result::Result<OffsetDateTime, Timest
 }
 
 /// Build a `400 invalid_request` response.
-fn bad_request(message: impl Into<String>, remediation: impl Into<String>, rid: &str) -> Response {
+///
+/// Shared with [`crate::routes::admin_tokenlimits`].
+pub(crate) fn bad_request(
+    message: impl Into<String>,
+    remediation: impl Into<String>,
+    rid: &str,
+) -> Response {
     error::into_response(
         CoreError::builder(ErrorCode::InvalidRequest)
             .message(message)

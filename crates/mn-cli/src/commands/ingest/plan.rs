@@ -24,9 +24,9 @@ pub struct Args {
     #[arg(long)]
     pub revision: Option<String>,
 
-    /// Embedding-model wire id (`name@revision`). Defaults to
-    /// `bge-base-en-v1.5@1` to match the corpus's current model.
-    #[arg(long, default_value = "bge-base-en-v1.5@1")]
+    /// Embedding-model wire id (`name@revision`). Defaults to `auto`, which
+    /// resolves the corpus's active model (matching `mnm ingest run` / `search`).
+    #[arg(long, default_value = "auto")]
     pub embedding_model: String,
 
     /// Override the source root directory (default: the manifest's parent dir).
