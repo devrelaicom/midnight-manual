@@ -182,3 +182,8 @@ h1,h2,h3,p{margin:0;}
 .factor b{font-family:var(--sans); font-weight:700; font-size:14px; display:block; margin-bottom:4px;}
 .factor span{font-size:12px; color:var(--graphite-soft);}
 @media (max-width:820px){ .factors{grid-template-columns:repeat(2,1fr);} }
+
+.langs{display:flex; flex-wrap:wrap; gap:8px; margin-top:22px;}
+.lang{font-family:var(--mono); font-size:12px; color:var(--ink); border:1px solid var(--ink-hair);
+  border-radius:5px; padding:6px 10px;}
+.lang--first{border-color:var(--accent); color:var(--accent);}

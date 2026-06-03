@@ -195,6 +195,27 @@ args = ["mcp", "serve"]'>Copy</button></div>
     </div>
   </section>
 
+  <section class="section section--band" id="chunker">
+    <div class="container" data-reveal>
+      <p class="marker">The smart chunker</p>
+      <h2 class="h-section">It understands structure</h2>
+      <p class="subhead">Markdown is split along its heading hierarchy (every chunk carries its
+      <code>heading_path</code>). Source files are parsed with tree-sitter and split on real syntactic
+      boundaries — functions, impl blocks, modules — never mid-expression, each recording a structured
+      <code>symbol_path</code>. <strong>Compact is a first-class citizen:</strong> circuits, ledger
+      declarations, witnesses, and contracts each become their own attributable chunk.</p>
+      <div class="langs">
+        <span class="lang lang--first">Compact</span>
+        <span class="lang">Rust</span><span class="lang">TypeScript</span><span class="lang">JavaScript</span>
+        <span class="lang">Python</span><span class="lang">Go</span><span class="lang">Solidity</span>
+        <span class="lang">Java</span><span class="lang">C#</span><span class="lang">Kotlin</span>
+        <span class="lang">Swift</span><span class="lang">Ruby</span><span class="lang">Haskell</span>
+        <span class="lang">Bash</span><span class="lang">Scheme</span><span class="lang">TOML</span>
+        <span class="lang">YAML</span><span class="lang">HTML / XML</span>
+      </div>
+    </div>
+  </section>
+
   <!-- sticky install CTA -->
   <a class="btn-pill btn-pill--solid sticky-cta" href="#quickstart">Install</a>
   <!-- later sections appended below -->
