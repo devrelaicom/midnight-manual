@@ -176,3 +176,9 @@ h1,h2,h3,p{margin:0;}
 .qs-step h3{font-family:var(--sans); font-weight:700; font-size:16px; margin:6px 0 6px;}
 .qs-step p{font-size:14px; color:var(--graphite-soft);}
 @media (max-width:820px){ .qs-steps{grid-template-columns:1fr;} }
+
+.factors{display:grid; grid-template-columns:repeat(5,1fr); gap:12px; margin-top:24px;}
+.factor{border:1px solid var(--ink-hair); border-radius:var(--radius); padding:14px;}
+.factor b{font-family:var(--sans); font-weight:700; font-size:14px; display:block; margin-bottom:4px;}
+.factor span{font-size:12px; color:var(--graphite-soft);}
+@media (max-width:820px){ .factors{grid-template-columns:repeat(2,1fr);} }

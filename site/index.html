@@ -120,6 +120,24 @@ args = ["mcp", "serve"]'>Copy</button></div>
     </div>
   </section>
 
+  <section class="section section--band" id="engine">
+    <div class="container" data-reveal>
+      <p class="marker">The retrieval engine</p>
+      <h2 class="h-section">Confidence = trust × relevance</h2>
+      <p class="subhead">Lexical (PostgreSQL full-text) and semantic (pgvector) candidates are fused with
+      Reciprocal Rank Fusion (k=60). An optional <code>bge-reranker-base</code> cross-encoder sharpens the top
+      results. Then every hit's relevance is multiplied by a <strong>trust score</strong> — and the per-factor
+      breakdown comes back with it, so your assistant can explain <em>why</em> a passage is trustworthy.</p>
+      <div class="factors">
+        <div class="factor"><b>Attribution</b><span>Foundation › Partner › Third-party › Community.</span></div>
+        <div class="factor"><b>Verification</b><span>Verified by the Foundation, a partner, or unverified.</span></div>
+        <div class="factor"><b>Freshness</b><span>Exponential decay by age.</span></div>
+        <div class="factor"><b>Deprecation</b><span>Flagged content is down-weighted.</span></div>
+        <div class="factor"><b>Version match</b><span>Boosted when it targets your version.</span></div>
+      </div>
+    </div>
+  </section>
+
   <!-- sticky install CTA -->
   <a class="btn-pill btn-pill--solid sticky-cta" href="#quickstart">Install</a>
   <!-- later sections appended below -->
