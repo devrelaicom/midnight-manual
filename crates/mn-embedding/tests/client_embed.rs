@@ -29,6 +29,54 @@ async fn byok_uses_voyage_directly() {
 }
 
 #[tokio::test]
+async fn byok_retries_transient_503_then_succeeds() {
+    let voyage = MockServer::start().await;
+    // First call -> 503 (retryable). Higher precedence, exhausted after one hit.
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(ResponseTemplate::new(503))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&voyage)
+        .await;
+    // Subsequent calls -> 200.
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [{ "embedding": vec![1.0_f32; 4], "index": 0 }],
+            "model": "voyage-code-3",
+            "usage": { "total_tokens": 3 }
+        })))
+        .with_priority(2)
+        .mount(&voyage)
+        .await;
+    let v = VoyageEmbedder::new("k", "voyage-code-3", 1024, "float").with_base_url(&voyage.uri());
+    let out = embed(vec!["q".into()], InputType::Query, EmbedSource::Byok(&v))
+        .await
+        .expect("a transient 503 must be retried, not surfaced");
+    assert_eq!(out.vectors.len(), 1);
+    assert_eq!(out.total_tokens, 3);
+}
+
+#[tokio::test]
+async fn byok_does_not_retry_400() {
+    let voyage = MockServer::start().await;
+    // 400 is permanent (e.g. an over-limit batch). `.expect(1)` is verified on
+    // server drop: a retry would make it 2+ calls and fail the test.
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(ResponseTemplate::new(400).set_body_string("too many tokens"))
+        .expect(1)
+        .mount(&voyage)
+        .await;
+    let v = VoyageEmbedder::new("k", "voyage-code-3", 1024, "float").with_base_url(&voyage.uri());
+    let err = embed(vec!["q".into()], InputType::Query, EmbedSource::Byok(&v))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, mn_embedding::voyage::VoyageError::Status { status: 400, .. }));
+}
+
+#[tokio::test]
 async fn server_mode_calls_v1_embeddings() {
     let srv = MockServer::start().await;
     Mock::given(method("POST"))

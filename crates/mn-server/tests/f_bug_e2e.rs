@@ -252,6 +252,7 @@ async fn document_metadata_persists_to_postgres_through_full_ingest() {
         yes: true, // not strictly needed (source pre-seeded) but defensive
         source_base_url: Some("https://github.com/example/docs/blob/main".to_owned()),
         batch_size: 50,
+        voyage_timeout_secs: None,
         code_chunk_tokens: 400,
         code_chunk_lines: 60,
         code_chunk_overlap: 20,

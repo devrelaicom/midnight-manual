@@ -237,6 +237,7 @@ async fn code_ingest_smoke_persists_symbol_paths_and_packages() {
         yes: true,
         source_base_url: None,
         batch_size: 50,
+        voyage_timeout_secs: None,
         code_chunk_tokens: 400,
         code_chunk_lines: 60,
         code_chunk_overlap: 20,
