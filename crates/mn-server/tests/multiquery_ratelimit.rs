@@ -29,7 +29,7 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 fn unit_vector(seed: f32) -> Vec<f32> {
-    (0..768_i32).map(|i| seed + (i as f32) * 0.0001).collect()
+    (0..1024_i32).map(|i| seed + (i as f32) * 0.0001).collect()
 }
 
 fn rl_cfg(anonymous_rps: u32, max_queries: u32) -> ServerConfig {
@@ -41,9 +41,9 @@ fn rl_cfg(anonymous_rps: u32, max_queries: u32) -> ServerConfig {
     }
 }
 
-/// Resolve the corpus model from the DB (the seeded bge-base-en-v1.5@1 active
+/// Resolve the corpus model from the DB (the seeded voyage-code-3@1 active
 /// source_version) into the `Shared` handle `build_with_limiter` expects, so
-/// the search handler's model-mismatch + dim guards see bge@1/768.
+/// the search handler's model-mismatch + dim guards see voyage-code-3@1/1024.
 async fn resolved_cm(pool: &sqlx::PgPool) -> mn_server::corpus_model::Shared {
     let cm = mn_server::corpus_model::resolve(pool).await.ok();
     std::sync::Arc::new(std::sync::RwLock::new(cm))
@@ -56,7 +56,7 @@ fn unique_ip() -> String {
 
 /// Seed one queryable chunk so valid searches return 200.
 async fn seed(pool: &sqlx::PgPool) {
-    let model_id = embedding_model::upsert(pool, "bge-base-en-v1.5", 1, 768, "baai")
+    let model_id = embedding_model::upsert(pool, "voyage-code-3", 1, 1024, "voyageai")
         .await
         .unwrap();
     let slug = format!("mq-test-{}", Uuid::new_v4());
@@ -125,7 +125,7 @@ async fn seed(pool: &sqlx::PgPool) {
 async fn search(app: axum::Router, ip: &str, queries: Value) -> (StatusCode, HeaderMap, Value) {
     let body = json!({
         "queries": queries,
-        "client_embedding_model": "bge-base-en-v1.5@1",
+        "client_embedding_model": "voyage-code-3@1",
         "limit": 5,
     });
     let resp = app

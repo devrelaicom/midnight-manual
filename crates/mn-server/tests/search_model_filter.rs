@@ -30,11 +30,11 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 fn unit_vector(seed: f32) -> Vec<f32> {
-    // Deterministic 768-dim vector for tests. Both models in this test use dim
-    // 768 so the same shape is valid for either; the filter — not the dim —
+    // Deterministic 1024-dim vector for tests. Both models in this test use dim
+    // 1024 so the same shape is valid for either; the filter — not the dim —
     // is what excludes the off-model chunk.
     #[allow(clippy::cast_precision_loss)]
-    (0..768_i32).map(|i| seed + (i as f32) * 0.0001).collect()
+    (0..1024_i32).map(|i| seed + (i as f32) * 0.0001).collect()
 }
 
 /// Seed one active source_version + one ready chunk on `model_id`, under a
@@ -118,12 +118,13 @@ async fn seed_on_model(
 async fn off_model_chunks_excluded_from_results() {
     let h = common::boot().await;
 
-    // Corpus model (bge, 768) and a second model on a different id, also 768 so
-    // the dim guard can't be what excludes it — the model-id filter must.
-    let bge_id = embedding_model::upsert(&h.pool, "bge-base-en-v1.5", 1, 768, "baai")
+    // Corpus model (voyage-code-3, 1024) and a second model on a different id,
+    // also 1024 so the dim guard can't be what excludes it — the model-id
+    // filter must.
+    let corpus_id = embedding_model::upsert(&h.pool, "voyage-code-3", 1, 1024, "voyageai")
         .await
         .unwrap();
-    let other_id = embedding_model::upsert(&h.pool, "other-model", 1, 768, "other")
+    let other_id = embedding_model::upsert(&h.pool, "other-model", 1, 1024, "other")
         .await
         .unwrap();
 
@@ -141,15 +142,15 @@ async fn off_model_chunks_excluded_from_results() {
     source_version::finalize(&h.pool, off_sv).await.unwrap();
 
     let (on_sv, on_chunk) =
-        seed_on_model(&h.pool, bge_id, "model-filter-on", &token, &vector).await;
+        seed_on_model(&h.pool, corpus_id, "model-filter-on", &token, &vector).await;
     source_version::finalize(&h.pool, on_sv).await.unwrap();
 
-    // Pin the corpus model explicitly to bge so this test exercises the
-    // model-id filter deterministically, independent of `get_active` ordering.
+    // Pin the corpus model explicitly to voyage-code-3 so this test exercises
+    // the model-id filter deterministically, independent of `get_active` order.
     let corpus_model = Arc::new(RwLock::new(Some(CorpusModel {
-        wire: "bge-base-en-v1.5@1".to_owned(),
-        id: bge_id,
-        dim: 768,
+        wire: "voyage-code-3@1".to_owned(),
+        id: corpus_id,
+        dim: 1024,
     })));
     let cfg = ServerConfig::default();
     let limiter = mn_server::ratelimit::RateLimiter::from_config(&cfg);
@@ -161,7 +162,7 @@ async fn off_model_chunks_excluded_from_results() {
     let body = serde_json::json!({
         "query": token,
         "vector": vector,
-        "client_embedding_model": "bge-base-en-v1.5@1",
+        "client_embedding_model": "voyage-code-3@1",
         "limit": 100,
     });
     let resp = app
