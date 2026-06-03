@@ -5,9 +5,9 @@
 //! 2. `$XDG_DATA_HOME/midnight-manual/models/`
 //! 3. `$HOME/.local/share/midnight-manual/models/`
 //!
-//! The cache is shared between the embedder (`bge-base-en-v1.5`) and the
-//! reranker (`bge-reranker-base`); each model lives in its own subdirectory
-//! managed by fastembed.
+//! The cache holds the fastembed reranker model (`bge-reranker-base` by
+//! default); each model lives in its own subdirectory managed by fastembed.
+//! The corpus embedder is no longer local — embedding runs via VoyageAI.
 
 use std::path::PathBuf;
 

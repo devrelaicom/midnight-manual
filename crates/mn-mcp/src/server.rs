@@ -26,7 +26,9 @@ use crate::transport::{FrameReader, FrameWriter};
 /// Per-instance server config.
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
-    /// Where the embedder / reranker store their ONNX files.
+    /// Where the reranker stores its ONNX files. (The corpus embedder is no
+    /// longer local — embedding runs via VoyageAI — so nothing embedder-side
+    /// is cached here.)
     pub cache_dir: PathBuf,
     /// Base URL of the cloud server (`https://midnight-manual.midnightntwrk.expert` in
     /// production). Tools call this for everything except `status` /
@@ -51,7 +53,7 @@ pub struct ServerConfig {
 
 impl ServerConfig {
     /// Build a config with the production defaults: production cloud URL,
-    /// no bearer, the seeded `bge-base-en-v1.5@1` model id, and telemetry
+    /// no bearer, the `voyage-code-3@1` corpus model id, and telemetry
     /// enabled (subject to the opt-out resolver).
     #[must_use]
     pub fn with_defaults(cache_dir: PathBuf) -> Self {
@@ -61,7 +63,7 @@ impl ServerConfig {
             cache_dir,
             cloud_url,
             bearer_token: None,
-            client_embedding_model: "bge-base-en-v1.5@1".to_owned(),
+            client_embedding_model: "voyage-code-3@1".to_owned(),
             telemetry_url,
             telemetry_enabled: true,
         }
