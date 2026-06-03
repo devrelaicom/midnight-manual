@@ -1,0 +1,37 @@
+/* ============ Design tokens ============ */
+:root{
+  --paper:#F4EFE3;
+  --paper-2:#EDE7D9;
+  --ink:#1F3DF5;
+  --ink-soft:rgba(31,61,245,.5);
+  --ink-hair:rgba(31,61,245,.22);
+  --graphite:#2A2A28;
+  --graphite-soft:#55524b;
+  --accent:#E5392F;
+  --ink-on-dark:#9FB4FF;
+  --paper-on-dark:#ECE7D8;
+  --term-bg:#0B1020;
+
+  --display:"Anton",Impact,sans-serif;
+  --sans:"Space Grotesk",system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+  --mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+
+  --maxw:1120px;
+  --pad:clamp(20px,5vw,64px);
+  --section-y:clamp(64px,9vw,120px);
+  --radius:8px;
+}
+
+/* ============ Base ============ */
+*,*::before,*::after{box-sizing:border-box;}
+html{scroll-behavior:smooth;}
+body{
+  margin:0; background:var(--paper); color:var(--graphite);
+  font-family:var(--sans); font-weight:400; line-height:1.55;
+  -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
+}
+img,svg{max-width:100%; height:auto; display:block;}
+a{color:var(--ink); text-decoration:none;}
+a:hover{text-decoration:underline;}
+:focus-visible{outline:2px solid var(--ink); outline-offset:3px; border-radius:2px;}
+h1,h2,h3,p{margin:0;}
