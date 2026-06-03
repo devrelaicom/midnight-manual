@@ -60,6 +60,58 @@
     </div>
   </section>
 
+  <section class="section section--band" id="quickstart">
+    <div class="container" data-reveal>
+      <p class="marker">Quick start</p>
+      <h2 class="h-section">Up and running<br>in three steps</h2>
+      <p class="subhead">No database, no API key, no account. You need a Rust toolchain (1.91+); the corpus and models are fetched on demand.</p>
+
+      <div class="qs-steps">
+        <div class="qs-step"><p class="qs-step__n">01</p><h3>Build the CLI</h3>
+          <p>Clone, build the <code>mnm</code> binary, and put it on your PATH.</p></div>
+        <div class="qs-step"><p class="qs-step__n">02</p><h3>Add to your client</h3>
+          <p>One command wires the MCP server into your AI assistant.</p></div>
+        <div class="qs-step"><p class="qs-step__n">03</p><h3>Search</h3>
+          <p>Ask something Midnight-specific and get cited, ranked answers.</p></div>
+      </div>
+
+      <div class="cmd" style="margin-bottom:14px">
+        <code>cargo build --release -p mn-cli &amp;&amp; install -m 0755 target/release/mnm ~/.local/bin/mnm</code>
+        <button class="cmd__copy" data-copy="cargo build --release -p mn-cli && install -m 0755 target/release/mnm ~/.local/bin/mnm">Copy</button>
+      </div>
+
+      <div class="tabs" role="tablist" aria-label="Add to your client" style="margin-bottom:14px">
+        <button class="tab" role="tab" aria-selected="true"  aria-controls="tab-claude">Claude Code</button>
+        <button class="tab" role="tab" aria-selected="false" aria-controls="tab-codex">Codex</button>
+        <button class="tab" role="tab" aria-selected="false" aria-controls="tab-cursor">Cursor</button>
+      </div>
+      <div id="tab-claude" class="tabpanel" role="tabpanel">
+        <div class="cmd"><code>claude mcp add midnight-manual -- mnm mcp serve</code>
+          <button class="cmd__copy" data-copy="claude mcp add midnight-manual -- mnm mcp serve">Copy</button></div>
+      </div>
+      <div id="tab-codex" class="tabpanel" role="tabpanel" hidden>
+        <div class="cmd"><code># ~/.codex/config.toml — [mcp_servers.midnight-manual] command="mnm" args=["mcp","serve"]</code>
+          <button class="cmd__copy" data-copy='[mcp_servers.midnight-manual]
+command = "mnm"
+args = ["mcp", "serve"]'>Copy</button></div>
+      </div>
+      <div id="tab-cursor" class="tabpanel" role="tabpanel" hidden>
+        <div class="cmd"><code># ~/.cursor/mcp.json — { "mcpServers": { "midnight-manual": { "command": "mnm", "args": ["mcp","serve"] } } }</code>
+          <button class="cmd__copy" data-copy='{ "mcpServers": { "midnight-manual": { "command": "mnm", "args": ["mcp", "serve"] } } }'>Copy</button></div>
+      </div>
+
+      <div class="terminal" style="margin-top:22px" data-reveal>
+        <div class="terminal__bar"><i></i><i></i><i></i></div>
+        <div class="terminal__body">
+          <span class="ok">$</span> mnm search "how do I write a Compact contract with a sealed ledger?"<br>
+          <span class="file">▸ midnight-docs › compact-ledger.md</span> &nbsp; <span class="conf">confidence 0.94</span> &nbsp; foundation · verified · recent<br>
+          <span class="file">▸ openzeppelin-compact › access/Ownable.compact</span> &nbsp; <span class="conf">confidence 0.88</span> &nbsp; partner · version-match<br>
+          <span class="file">▸ example-kitties › src/contract.compact</span> &nbsp; <span class="conf">confidence 0.81</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
   <!-- sticky install CTA -->
   <a class="btn-pill btn-pill--solid sticky-cta" href="#quickstart">Install</a>
   <!-- later sections appended below -->
