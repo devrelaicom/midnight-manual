@@ -81,26 +81,26 @@
       </div>
 
       <div class="tabs" role="tablist" aria-label="Add to your client" style="margin-bottom:14px">
-        <button class="tab" role="tab" aria-selected="true"  aria-controls="tab-claude">Claude Code</button>
-        <button class="tab" role="tab" aria-selected="false" aria-controls="tab-codex">Codex</button>
-        <button class="tab" role="tab" aria-selected="false" aria-controls="tab-cursor">Cursor</button>
+        <button class="tab" role="tab" aria-selected="true"  id="tab-btn-claude" aria-controls="tab-claude">Claude Code</button>
+        <button class="tab" role="tab" aria-selected="false" id="tab-btn-codex"  aria-controls="tab-codex">Codex</button>
+        <button class="tab" role="tab" aria-selected="false" id="tab-btn-cursor" aria-controls="tab-cursor">Cursor</button>
       </div>
-      <div id="tab-claude" class="tabpanel" role="tabpanel">
+      <div id="tab-claude" class="tabpanel" role="tabpanel" aria-labelledby="tab-btn-claude" tabindex="0">
         <div class="cmd"><code>claude mcp add midnight-manual -- mnm mcp serve</code>
           <button class="cmd__copy" data-copy="claude mcp add midnight-manual -- mnm mcp serve">Copy</button></div>
       </div>
-      <div id="tab-codex" class="tabpanel" role="tabpanel" hidden>
+      <div id="tab-codex" class="tabpanel" role="tabpanel" aria-labelledby="tab-btn-codex" tabindex="0" hidden>
         <div class="cmd"><code># ~/.codex/config.toml — [mcp_servers.midnight-manual] command="mnm" args=["mcp","serve"]</code>
           <button class="cmd__copy" data-copy='[mcp_servers.midnight-manual]
 command = "mnm"
 args = ["mcp", "serve"]'>Copy</button></div>
       </div>
-      <div id="tab-cursor" class="tabpanel" role="tabpanel" hidden>
+      <div id="tab-cursor" class="tabpanel" role="tabpanel" aria-labelledby="tab-btn-cursor" tabindex="0" hidden>
         <div class="cmd"><code># ~/.cursor/mcp.json — { "mcpServers": { "midnight-manual": { "command": "mnm", "args": ["mcp","serve"] } } }</code>
           <button class="cmd__copy" data-copy='{ "mcpServers": { "midnight-manual": { "command": "mnm", "args": ["mcp", "serve"] } } }'>Copy</button></div>
       </div>
 
-      <div class="terminal" style="margin-top:22px" data-reveal>
+      <div class="terminal" style="margin-top:22px" data-reveal aria-hidden="true">
         <div class="terminal__bar"><i></i><i></i><i></i></div>
         <div class="terminal__body">
           <span class="ok">$</span> mnm search "how do I write a Compact contract with a sealed ledger?"<br>
