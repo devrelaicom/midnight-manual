@@ -26,7 +26,7 @@ use url::Url;
 pub struct QueryPair {
     /// Original query text — kept for FTS / logging on the cloud side.
     pub text: String,
-    /// Locally produced embedding vector (768 dims for bge-base-en-v1.5).
+    /// Locally produced embedding vector (1024 dims for voyage-code-3).
     pub vector: Vec<f32>,
 }
 

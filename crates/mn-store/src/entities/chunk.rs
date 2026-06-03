@@ -1,7 +1,7 @@
 //! `chunk` entity queries.
 //!
 //! Chunks carry the FTS vector (`tsvector`, GENERATED STORED) and the
-//! embedding (`vector(768)`); both are written at insert time. The trigger
+//! embedding (`vector(1024)`); both are written at insert time. The trigger
 //! `trg_chunk_embedding_model_match` ensures `chunk.embedding_model_id`
 //! always matches the owning `source_version.embedding_model_id` (FR-002).
 
@@ -81,7 +81,8 @@ pub struct NewChunk<'a> {
     pub content: &'a str,
     /// SHA-256 of `content`.
     pub content_hash: &'a str,
-    /// Embedding vector. Must have exactly 768 dimensions for v1.
+    /// Embedding vector. Must have exactly 1024 dimensions (the `voyage-code-3`
+    /// width) when present; `None` for not-yet-embedded chunks.
     pub embedding: Option<Vec<f32>>,
     /// Embedding model used to produce `embedding`. MUST match the owning
     /// source_version's embedding_model_id (trigger-enforced).
