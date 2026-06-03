@@ -10,7 +10,7 @@ function initCopy(){
         const prev = btn.textContent;
         btn.dataset.copied = "true";
         btn.textContent = "Copied";
-        setTimeout(() => { btn.dataset.copied = "false"; btn.textContent = prev; }, 1400);
+        setTimeout(() => { btn.removeAttribute("data-copied"); btn.textContent = prev; }, 1400);
       } catch { /* clipboard blocked; no-op */ }
     });
   });
@@ -29,6 +29,19 @@ function initTabs(){
       });
     };
     tabs.forEach((t) => t.addEventListener("click", () => select(t)));
+    // Keyboard support for the ARIA tablist pattern (arrow/Home/End).
+    group.addEventListener("keydown", (e) => {
+      const i = tabs.indexOf(document.activeElement);
+      if (i === -1) return;
+      let n = null;
+      if (e.key === "ArrowRight") n = (i + 1) % tabs.length;
+      else if (e.key === "ArrowLeft") n = (i - 1 + tabs.length) % tabs.length;
+      else if (e.key === "Home") n = 0;
+      else if (e.key === "End") n = tabs.length - 1;
+      if (n !== null){ e.preventDefault(); tabs[n].focus(); select(tabs[n]); }
+    });
+    // Enforce initial state from JS so sections need not pre-hide panels.
+    if (tabs.length) select(tabs[0]);
   });
 }
 
