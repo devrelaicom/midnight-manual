@@ -143,7 +143,7 @@ Restart your client and ask it something Midnight-specific. It will reach for th
 
 `mnm mcp serve` is a hand-rolled MCP server (JSON-RPC 2.0 framed over stdio) with **lazy model loading** — it starts in well under half a second and only loads the embedder/reranker the first time a query actually needs them, so adding it to your client costs you nothing at idle.
 
-It exposes **11 tools**, grouped by what they do:
+It exposes **13 tools**, grouped by what they do:
 
 ### Search
 
@@ -159,6 +159,7 @@ A search result is a chunk. These tools let your assistant pull exactly as much 
 | --- | --- |
 | **`get_chunk`** | Fetch one chunk by id, plus its parent document metadata and source slug. |
 | **`get_chunk_next`** / **`get_chunk_prev`** | Walk forward/backward `count` chunks (default 5, max 100). Skips `embed_failed` gaps. |
+| **`get_chunk_neighbors`** | Fetch a chunk plus `count` neighbours on each side (default 2, max 100) — `prev` + the chunk + `next` — in one round-trip. |
 | **`get_chunk_parents`** | Walk the parent chain up to the source-version root — great for "where does this live?". |
 | **`get_document`** | Document metadata + the ordered list of its chunk ids (no bodies). |
 | **`get_document_full`** | The whole document with chunks inlined (capped at 500 ready chunks; over that it points you to `get_document_chunks`). |
@@ -171,6 +172,7 @@ A search result is a chunk. These tools let your assistant pull exactly as much 
 | **`list_sources`** | Enumerate corpus sources — slug, display name, kind, active revision. |
 | **`pull_models`** | Download the embedder + reranker on demand; reports load state and timing. |
 | **`status`** | Health report: server version, model names, `ready`/`missing` state, cache dir. |
+| **`install_search_skill`** | Install the Advanced Search Skill (`SKILL.md`) into your detected AI harness(es); reports the paths written and the per-harness reload step. |
 
 ### Why it's good
 
