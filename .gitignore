@@ -40,3 +40,6 @@ discovery/.claude/
 # Per-user / per-machine plugin state (don't commit; users have their own)
 .claude/
 .midnight-expert/
+
+# Brainstorming visual-companion scratch (mockups; not part of the project)
+.superpowers/
