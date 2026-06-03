@@ -132,3 +132,39 @@ h1,h2,h3,p{margin:0;}
 @media (max-width:520px){
   .grid-4{grid-template-columns:1fr;}
 }
+
+/* ============ Hero ============ */
+.hero{padding-block:clamp(36px,6vw,72px) var(--section-y);}
+.hero__top{display:flex; justify-content:space-between; font-family:var(--mono); font-size:11px;
+  letter-spacing:.12em; color:var(--ink); opacity:.75; border-bottom:1px solid var(--ink-hair);
+  padding-bottom:14px; margin-bottom:36px;}
+.hero__grid{display:grid; grid-template-columns:1.05fr .95fr; gap:48px; align-items:center;}
+.hero__grid > *{min-width:0;}
+.hero__title{font-size:clamp(44px,7.5vw,104px); margin:0 0 18px;}
+.hero__sub{font-size:clamp(16px,2vw,20px); color:var(--graphite); max-width:42ch; margin-bottom:26px;}
+.hero__cmd{margin-bottom:22px; max-width:520px;}
+.hero__cta{display:flex; gap:14px; flex-wrap:wrap;}
+
+/* Engine colour + type come from CSS, because var() does not resolve in SVG
+   presentation attributes. */
+.engine svg{ overflow:visible; stroke:var(--ink); fill:none; }
+.engine text{ stroke:none; fill:var(--ink); font-family:var(--mono); font-size:12px; }
+
+/* Engine: parts start nudged + faint, settle on .engine--assembled; leaders draw in */
+.engine [data-part]{opacity:0; transform:translate(6px,8px); transition:opacity .55s ease, transform .55s ease;}
+.engine [data-leader]{stroke-dasharray:240; stroke-dashoffset:240; transition:stroke-dashoffset .7s ease .35s;}
+.engine [data-axis]{opacity:0; transition:opacity .5s ease;}
+.engine--assembled [data-part]{opacity:1; transform:none;}
+.engine--assembled [data-part]:nth-of-type(1){transition-delay:.05s;}
+.engine--assembled [data-part]:nth-of-type(2){transition-delay:.13s;}
+.engine--assembled [data-part]:nth-of-type(3){transition-delay:.21s;}
+.engine--assembled [data-part]:nth-of-type(4){transition-delay:.29s;}
+.engine--assembled [data-leader]{stroke-dashoffset:0;}
+.engine--assembled [data-axis]{opacity:.4;}
+
+@media (max-width:880px){
+  .hero__grid{grid-template-columns:1fr; gap:32px;}
+  .hero__title{font-size:clamp(40px,12vw,72px);}
+  .engine{overflow:hidden;}
+  .engine svg{overflow:hidden;}
+}

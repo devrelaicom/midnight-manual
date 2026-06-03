@@ -11,10 +11,58 @@
 </head>
 <body>
   <main id="top">
-    <section class="section"><div class="container">
-  <div class="cmd"><code>echo hello</code>
-    <button class="cmd__copy" data-copy="echo hello">Copy</button></div>
-</div></section>
+  <section class="hero section" id="hero">
+    <div class="container">
+      <div class="hero__top">
+        <span>MCP · CLI · HTTP</span>
+        <span>PRE-PRODUCTION · RUST 1.91</span>
+      </div>
+      <div class="hero__grid">
+        <div>
+          <p class="eyebrow" style="margin-bottom:14px">A retrieval engine for the Midnight Network</p>
+          <h1 class="display hero__title">Ask your docs,<br>not your model</h1>
+          <p class="hero__sub">Privacy-respecting hybrid search over the real Midnight docs and source — right inside your AI client.</p>
+          <div class="cmd hero__cmd">
+            <code>claude mcp add midnight-manual -- mnm mcp serve</code>
+            <button class="cmd__copy" data-copy="claude mcp add midnight-manual -- mnm mcp serve">Copy</button>
+          </div>
+          <div class="hero__cta">
+            <a class="btn-pill btn-pill--solid" href="#quickstart">Install</a>
+            <a class="btn-pill" href="https://github.com/devrelaicom/midnight-manual" rel="noopener">View on GitHub ↗</a>
+          </div>
+        </div>
+        <div class="engine" aria-hidden="true">
+          <!-- Exploded "Retrieval Engine": discs along a diagonal axis with mono callouts.
+               Colour/font come from CSS (.engine svg / .engine text), NOT presentation attributes. -->
+          <svg viewBox="0 0 560 360" width="100%">
+            <line data-axis x1="50" y1="300" x2="320" y2="70" stroke-width="1" stroke-dasharray="3 5"/>
+            <g stroke-width="1.6">
+              <g data-part><ellipse cx="90" cy="270" rx="56" ry="18"/><ellipse cx="90" cy="262" rx="56" ry="18" opacity=".5"/></g>
+              <g data-part><ellipse cx="165" cy="216" rx="56" ry="18"/><ellipse cx="165" cy="208" rx="56" ry="18" opacity=".5"/></g>
+              <g data-part><ellipse cx="240" cy="162" rx="56" ry="18"/><ellipse cx="240" cy="154" rx="56" ry="18" opacity=".5"/></g>
+              <g data-part><ellipse cx="315" cy="108" rx="56" ry="18"/><ellipse cx="315" cy="100" rx="56" ry="18" opacity=".5"/></g>
+            </g>
+            <g stroke-width="1" opacity=".55">
+              <line data-leader x1="146" y1="270" x2="350" y2="270"/>
+              <line data-leader x1="221" y1="216" x2="350" y2="216"/>
+              <line data-leader x1="296" y1="162" x2="350" y2="162"/>
+              <line data-leader x1="371" y1="108" x2="380" y2="108"/>
+            </g>
+            <g>
+              <text x="356" y="274">embed</text>
+              <text x="356" y="220">hybrid · lexical+vector</text>
+              <text x="356" y="166">RRF · k=60</text>
+              <text x="386" y="112">rerank → confidence</text>
+            </g>
+          </svg>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- sticky install CTA -->
+  <a class="btn-pill btn-pill--solid sticky-cta" href="#quickstart">Install</a>
+  <!-- later sections appended below -->
   </main>
   <script type="module" src="js/main.js"></script>
 </body>
