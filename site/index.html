@@ -153,6 +153,24 @@ args = ["mcp", "serve"]'>Copy</button></div>
     </div>
   </section>
 
+  <section class="section section--band" id="mcp">
+    <div class="container" data-reveal>
+      <p class="marker">In your AI client</p>
+      <h2 class="h-section">11 tools, lazy-loaded</h2>
+      <p class="subhead">A hand-rolled MCP server (JSON-RPC over stdio) that starts in under half a second and
+      only loads the models the first time a query needs them. When the corpus rolls its embedding model forward,
+      <code>search</code> returns a structured <code>embedding_model_mismatch</code> envelope that tells the client to <code>pull_models</code> — no cryptic failures.</p>
+      <div class="cards grid-3" style="margin-top:24px">
+        <div class="card"><p class="card__meta">// SEARCH</p><p class="card__title">Find</p>
+          <p><code>search</code> — hybrid full-text + vector retrieval, optional rerank, filters by source / tier / language / package. Every hit carries a confidence score.</p></div>
+        <div class="card"><p class="card__meta">// READ IN CONTEXT</p><p class="card__title">Navigate</p>
+          <p><code>get_chunk</code>, <code>get_chunk_next/prev</code>, <code>get_chunk_parents</code>, <code>get_document</code>, <code>get_document_full</code>, <code>get_document_chunks</code> — pull exactly as much surrounding context as needed.</p></div>
+        <div class="card"><p class="card__meta">// CORPUS &amp; MODELS</p><p class="card__title">Operate</p>
+          <p><code>list_sources</code>, <code>pull_models</code>, <code>status</code> — enumerate sources, fetch the embedder + reranker on demand, and report health.</p></div>
+      </div>
+    </div>
+  </section>
+
   <!-- sticky install CTA -->
   <a class="btn-pill btn-pill--solid sticky-cta" href="#quickstart">Install</a>
   <!-- later sections appended below -->
