@@ -425,29 +425,28 @@ async fn search(
         let run_vector = matches!(req.mode, SearchMode::Hybrid | SearchMode::Vector);
         let run_fts = matches!(req.mode, SearchMode::Hybrid | SearchMode::Fts);
 
-        let mut vector_hits: Vec<(Uuid, f64)> = Vec::new();
-        let mut vector_latency_ms = 0.0;
-        if run_vector {
+        let (vector_hits, vector_latency_ms): (Vec<(Uuid, f64)>, f64) = if run_vector {
             let t0 = std::time::Instant::now();
-            vector_hits =
-                match vector_search(&state.pool, &q.vector, &req.filters, corpus_model_id).await {
-                    Ok(hits) => hits,
-                    Err(e) => {
-                        tracing::warn!(request_id = rid, error = %e, query_index = i, "vector search failed");
-                        return error::service_unavailable(
-                            format!("vector search failed for query {i}"),
-                            rid,
-                        );
-                    }
-                };
-            vector_latency_ms = t0.elapsed().as_secs_f64() * 1000.0;
-        }
+            let hits = match vector_search(&state.pool, &q.vector, &req.filters, corpus_model_id)
+                .await
+            {
+                Ok(hits) => hits,
+                Err(e) => {
+                    tracing::warn!(request_id = rid, error = %e, query_index = i, "vector search failed");
+                    return error::service_unavailable(
+                        format!("vector search failed for query {i}"),
+                        rid,
+                    );
+                }
+            };
+            (hits, t0.elapsed().as_secs_f64() * 1000.0)
+        } else {
+            (Vec::new(), 0.0)
+        };
 
-        let mut fts_hits: Vec<Uuid> = Vec::new();
-        let mut fts_latency_ms = 0.0;
-        if run_fts {
+        let (fts_hits, fts_latency_ms): (Vec<Uuid>, f64) = if run_fts {
             let t1 = std::time::Instant::now();
-            fts_hits = match fts_search(&state.pool, &q.text, &req.filters, corpus_model_id).await {
+            let hits = match fts_search(&state.pool, &q.text, &req.filters, corpus_model_id).await {
                 Ok(hits) => hits,
                 Err(e) => {
                     tracing::warn!(request_id = rid, error = %e, query_index = i, "fts search failed");
@@ -457,8 +456,10 @@ async fn search(
                     );
                 }
             };
-            fts_latency_ms = t1.elapsed().as_secs_f64() * 1000.0;
-        }
+            (hits, t1.elapsed().as_secs_f64() * 1000.0)
+        } else {
+            (Vec::new(), 0.0)
+        };
 
         per_query.push(PerQueryRecord {
             query_index: i,
@@ -868,75 +869,287 @@ async fn fts_search(
         .collect())
 }
 
-/// Whether any filter needs the `document` table joined (it carries provenance
-/// and `package_id`).
-const fn needs_document_join(filters: &SearchFilters) -> bool {
-    !filters.attribution.is_empty()
-        || filters.verified.is_some()
-        || !filters.content_type.is_empty()
-        || !filters.package.is_empty()
+/// Whether any filter needs the `document` table joined. `document` carries
+/// provenance JSON (attribution, content_type, verified, deprecated, tags,
+/// language_targets, sdk_dependencies), the `kind`/`language` columns, the
+/// `package_id` FK, and `source_modified_at`.
+//
+// Not `const`: `SetMatch::is_empty` is deliberately a non-const method in
+// `mn-retrieval`, so this can't be a `const fn` (unlike the old all-`Vec`
+// `SearchFilters`, whose `Vec::is_empty` was const).
+fn needs_document_join(f: &SearchFilters) -> bool {
+    !f.attribution.is_empty()
+        || f.verified.is_some()
+        || f.deprecated.is_some()
+        || !f.content_type.is_empty()
+        || !f.kind.is_empty()
+        || !f.language.is_empty()
+        || !f.tags.is_empty()
+        || !f.package.is_empty()
+        || !f.language_target.is_empty()
+        || !f.sdk_dependency.is_empty()
+        || f.source_modified_at.is_some()
 }
 
-/// Append the JOINs required by the active SQL filter dimensions. Both
-/// candidate queries call this immediately after the `source_version` join so
-/// the alias set (`chunk`, `sv`, `d`, `s`, `p`) is consistent.
-fn push_filter_joins(qb: &mut QueryBuilder<'_, Postgres>, filters: &SearchFilters) {
-    if needs_document_join(filters) {
+/// Append the JOINs required by the active SQL filter facets. Both candidate
+/// queries call this immediately after the `source_version` join so the alias
+/// set (`chunk`, `sv`, `d`, `s`, `p`) is consistent.
+fn push_filter_joins(qb: &mut QueryBuilder<'_, Postgres>, f: &SearchFilters) {
+    if needs_document_join(f) {
         qb.push(" JOIN document d ON d.id = chunk.document_id");
     }
-    if !filters.source_slug.is_empty() {
+    if !f.source_slug.is_empty() || !f.source_kind.is_empty() {
         qb.push(" JOIN source s ON s.id = sv.source_id");
     }
-    if !filters.package.is_empty() {
+    if !f.package.is_empty() {
         qb.push(" LEFT JOIN package p ON p.id = d.package_id");
     }
 }
 
-/// Append the SQL-expressible filter predicates (`attribution`, `verified`,
-/// `content_type`, `source_slug`, `package`) as ` AND (...)` clauses. AND
-/// across keys; OR within each key's value array. The semver-bearing
-/// `language_target`/`sdk_dependency` dimensions are handled in Rust by
+/// Append the SQL-expressible filter predicates as ` AND (...)` clauses, one
+/// per constrained facet. AND across facets; OR within each facet's `any_of`;
+/// exclude each facet's `none_of`. Covers every v1 facet that Postgres can
+/// express: the column-backed string sets (`kind`, `language`, `source_slug`,
+/// `source_kind`), the provenance-backed enums (`attribution`, `content_type`),
+/// the bools (`verified`, `deprecated`), the array/JSONB sets (`tags`,
+/// `heading_path`, `symbol`), `package` tuples, the `language_target`/
+/// `sdk_dependency` *name* membership, and the temporal/numeric ranges
+/// (`ingested_at`, `source_modified_at`, `token_count`). The semver refinements
+/// on `language_target`/`sdk_dependency` (version constraints) can't be
+/// expressed in SQL and are applied post-fetch by
 /// [`SearchFilters::semver_post_match`].
-fn push_filter_predicates(qb: &mut QueryBuilder<'_, Postgres>, filters: &SearchFilters) {
-    if !filters.attribution.is_empty() {
-        qb.push(" AND COALESCE(d.provenance->>'attribution', 'unknown') = ANY(");
-        qb.push_bind(filters.attribution.clone());
-        qb.push(")");
-    }
-    if let Some(verified) = filters.verified {
+fn push_filter_predicates(qb: &mut QueryBuilder<'_, Postgres>, f: &SearchFilters) {
+    // -- enum / open-set string facets backed by a column --
+    push_text_set(qb, "d.kind", &f.kind);
+    push_text_set(qb, "d.language", &f.language);
+    push_text_set(qb, "s.slug", &f.source_slug);
+    push_text_set(qb, "s.kind", &f.source_kind);
+    // provenance-backed enums (default-coalesced to match the old behaviour)
+    push_prov_set(qb, "attribution", "unknown", &f.attribution);
+    push_prov_set(qb, "content_type", "other", &f.content_type);
+
+    // -- bools --
+    if let Some(v) = f.verified {
         qb.push(" AND COALESCE((d.provenance->>'verified')::boolean, false) = ");
-        qb.push_bind(verified);
+        qb.push_bind(v);
     }
-    if !filters.content_type.is_empty() {
-        qb.push(" AND COALESCE(d.provenance->>'content_type', 'other') = ANY(");
-        qb.push_bind(filters.content_type.clone());
+    if let Some(v) = f.deprecated {
+        qb.push(
+            " AND COALESCE((d.provenance->'deprecation'->>'is_deprecated')::boolean, false) = ",
+        );
+        qb.push_bind(v);
+    }
+
+    // -- tags: JSONB array overlap (any_of) / NOT overlap (none_of) --
+    if !f.tags.any_of.is_empty() {
+        qb.push(" AND d.provenance->'tags' ?| ");
+        qb.push_bind(f.tags.any_of.clone());
+    }
+    if !f.tags.none_of.is_empty() {
+        qb.push(" AND NOT (d.provenance->'tags' ?| ");
+        qb.push_bind(f.tags.none_of.clone());
         qb.push(")");
     }
-    if !filters.source_slug.is_empty() {
-        qb.push(" AND s.slug = ANY(");
-        qb.push_bind(filters.source_slug.clone());
+
+    // -- heading_path: text[] overlap --
+    if !f.heading_path.any_of.is_empty() {
+        qb.push(" AND chunk.heading_path && ");
+        qb.push_bind(f.heading_path.any_of.clone());
+    }
+    if !f.heading_path.none_of.is_empty() {
+        qb.push(" AND NOT (chunk.heading_path && ");
+        qb.push_bind(f.heading_path.none_of.clone());
         qb.push(")");
     }
-    if !filters.package.is_empty() {
+
+    // -- symbol: JSONB containment per element (OR within any_of) --
+    push_symbol(qb, &f.symbol);
+
+    // -- package: (kind,name) tuples (OR within any_of) --
+    push_package(qb, &f.package);
+
+    // -- language_target / sdk_dependency: name membership in SQL --
+    push_language_target_names(qb, &f.language_target);
+    push_sdk_dependency_names(qb, &f.sdk_dependency);
+
+    // -- ranges --
+    if let Some(r) = &f.ingested_at {
+        if let Some(a) = r.after {
+            qb.push(" AND sv.ingested_at >= ");
+            qb.push_bind(date_to_dt(a));
+        }
+        if let Some(b) = r.before {
+            qb.push(" AND sv.ingested_at <= ");
+            qb.push_bind(date_to_dt(b));
+        }
+    }
+    if let Some(r) = &f.source_modified_at {
+        if let Some(a) = r.after {
+            qb.push(" AND d.source_modified_at >= ");
+            qb.push_bind(date_to_dt(a));
+        }
+        if let Some(b) = r.before {
+            qb.push(" AND d.source_modified_at <= ");
+            qb.push_bind(date_to_dt(b));
+        }
+    }
+    if let Some(r) = &f.token_count {
+        if let Some(min) = r.min {
+            qb.push(" AND chunk.token_count >= ");
+            qb.push_bind(i32::try_from(min).unwrap_or(i32::MAX));
+        }
+        if let Some(max) = r.max {
+            qb.push(" AND chunk.token_count <= ");
+            qb.push_bind(i32::try_from(max).unwrap_or(i32::MAX));
+        }
+    }
+}
+
+/// Emit ` AND {col} = ANY(any_of)` / ` AND {col} <> ALL(none_of)` for a string
+/// set facet backed directly by a column.
+fn push_text_set(
+    qb: &mut QueryBuilder<'_, Postgres>,
+    col: &str,
+    set: &mn_retrieval::filters::SetMatch<String>,
+) {
+    if !set.any_of.is_empty() {
+        qb.push(format!(" AND {col} = ANY("));
+        qb.push_bind(set.any_of.clone());
+        qb.push(")");
+    }
+    if !set.none_of.is_empty() {
+        qb.push(format!(" AND {col} <> ALL("));
+        qb.push_bind(set.none_of.clone());
+        qb.push(")");
+    }
+}
+
+/// Like [`push_text_set`] but reads the value out of `document.provenance`,
+/// coalescing absent values to `default` so missing provenance keys still match
+/// the historical "treat absent as the catch-all bucket" behaviour.
+fn push_prov_set(
+    qb: &mut QueryBuilder<'_, Postgres>,
+    key: &str,
+    default: &str,
+    set: &mn_retrieval::filters::SetMatch<String>,
+) {
+    if !set.any_of.is_empty() {
+        qb.push(format!(" AND COALESCE(d.provenance->>'{key}', '{default}') = ANY("));
+        qb.push_bind(set.any_of.clone());
+        qb.push(")");
+    }
+    if !set.none_of.is_empty() {
+        qb.push(format!(" AND COALESCE(d.provenance->>'{key}', '{default}') <> ALL("));
+        qb.push_bind(set.none_of.clone());
+        qb.push(")");
+    }
+}
+
+/// Emit JSONB-containment predicates for the `symbol` facet: OR across
+/// `any_of` elements, exclude each `none_of` element.
+fn push_symbol(
+    qb: &mut QueryBuilder<'_, Postgres>,
+    set: &mn_retrieval::filters::SetMatch<mn_retrieval::filters::SymbolMatch>,
+) {
+    if !set.any_of.is_empty() {
         qb.push(" AND (");
-        for (i, pkg) in filters.package.iter().enumerate() {
+        for (i, s) in set.any_of.iter().enumerate() {
+            if i > 0 {
+                qb.push(" OR ");
+            }
+            qb.push("chunk.symbol_path @> ");
+            qb.push_bind(symbol_json(s));
+        }
+        qb.push(")");
+    }
+    for s in &set.none_of {
+        qb.push(" AND NOT (chunk.symbol_path @> ");
+        qb.push_bind(symbol_json(s));
+        qb.push(")");
+    }
+}
+
+/// Build a one-element JSONB containment doc, e.g. `[{"kind":"circuit"}]`.
+fn symbol_json(s: &mn_retrieval::filters::SymbolMatch) -> serde_json::Value {
+    let mut obj = serde_json::Map::new();
+    if let Some(k) = &s.kind {
+        obj.insert("kind".into(), serde_json::Value::String(k.clone()));
+    }
+    if let Some(n) = &s.name {
+        obj.insert("name".into(), serde_json::Value::String(n.clone()));
+    }
+    serde_json::Value::Array(vec![serde_json::Value::Object(obj)])
+}
+
+/// Emit `(p.kind = .. AND p.name = ..)` tuple predicates for the `package`
+/// facet: OR across `any_of` elements, exclude each `none_of` element.
+fn push_package(
+    qb: &mut QueryBuilder<'_, Postgres>,
+    set: &mn_retrieval::filters::SetMatch<mn_retrieval::filters::PackageMatch>,
+) {
+    if !set.any_of.is_empty() {
+        qb.push(" AND (");
+        for (i, p) in set.any_of.iter().enumerate() {
             if i > 0 {
                 qb.push(" OR ");
             }
             qb.push("(p.kind = ");
-            qb.push_bind(pkg.kind.clone());
+            qb.push_bind(p.kind.clone());
             qb.push(" AND p.name = ");
-            qb.push_bind(pkg.name.clone());
+            qb.push_bind(p.name.clone());
             qb.push(")");
         }
         qb.push(")");
     }
+    for p in &set.none_of {
+        qb.push(" AND NOT (p.kind = ");
+        qb.push_bind(p.kind.clone());
+        qb.push(" AND p.name = ");
+        qb.push_bind(p.name.clone());
+        qb.push(")");
+    }
+}
+
+/// Emit a JSONB `EXISTS` over `provenance.language_targets` matching any
+/// requested `name`. The semver refinement is applied post-fetch.
+fn push_language_target_names(
+    qb: &mut QueryBuilder<'_, Postgres>,
+    set: &mn_retrieval::filters::SetMatch<mn_retrieval::filters::LanguageTargetMatch>,
+) {
+    if set.any_of.is_empty() {
+        return;
+    }
+    let names: Vec<String> = set.any_of.iter().map(|t| t.name.clone()).collect();
+    qb.push(" AND EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(d.provenance->'language_targets','[]'::jsonb)) lt WHERE lt->>'name' = ANY(");
+    qb.push_bind(names);
+    qb.push("))");
+}
+
+/// Emit a JSONB `EXISTS` over `provenance.sdk_dependencies` matching any
+/// requested `name`. The semver refinement is applied post-fetch.
+fn push_sdk_dependency_names(
+    qb: &mut QueryBuilder<'_, Postgres>,
+    set: &mn_retrieval::filters::SetMatch<mn_retrieval::filters::SdkDependencyMatch>,
+) {
+    if set.any_of.is_empty() {
+        return;
+    }
+    let names: Vec<String> = set.any_of.iter().map(|d| d.name.clone()).collect();
+    qb.push(" AND EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(d.provenance->'sdk_dependencies','[]'::jsonb)) dep WHERE dep->>'name' = ANY(");
+    qb.push_bind(names);
+    qb.push("))");
+}
+
+/// Lift an ISO `Date` to a UTC midnight `OffsetDateTime` for binding against a
+/// `timestamptz` column.
+fn date_to_dt(d: time::Date) -> time::OffsetDateTime {
+    d.with_hms(0, 0, 0).unwrap().assume_utc()
 }
 
 #[cfg(test)]
 mod tests {
     use super::{normalize_queries, QueryPair, SearchMode, SearchRequest, SortBy};
-    use mn_retrieval::filters::SearchFilters;
+    use mn_retrieval::filters::{NumericRange, SearchFilters, SetMatch};
 
     fn req(
         queries: Vec<QueryPair>,
@@ -1021,5 +1234,52 @@ mod tests {
         });
         let req2: SearchRequest = serde_json::from_value(body2).unwrap();
         assert_eq!(req2.mode, SearchMode::Fts);
+    }
+
+    fn built_sql(filters: &SearchFilters) -> String {
+        let mut qb: sqlx::QueryBuilder<sqlx::Postgres> = sqlx::QueryBuilder::new(
+            "SELECT chunk.id FROM chunk JOIN source_version sv ON sv.id = chunk.source_version_id",
+        );
+        super::push_filter_joins(&mut qb, filters);
+        qb.push(" WHERE true");
+        super::push_filter_predicates(&mut qb, filters);
+        qb.sql().to_owned()
+    }
+
+    #[test]
+    fn kind_emits_document_join_and_any_predicate() {
+        let f = SearchFilters {
+            kind: SetMatch {
+                any_of: vec!["code".into()],
+                none_of: vec![],
+            },
+            ..Default::default()
+        };
+        let sql = built_sql(&f);
+        assert!(sql.contains("JOIN document d"), "kind needs the document join");
+        assert!(sql.contains("d.kind = ANY("), "got: {sql}");
+    }
+
+    #[test]
+    fn language_none_of_emits_not_predicate() {
+        let f = SearchFilters {
+            language: SetMatch {
+                any_of: vec![],
+                none_of: vec!["typescript".into()],
+            },
+            ..Default::default()
+        };
+        let sql = built_sql(&f);
+        assert!(sql.contains("d.language") && sql.contains("<> ALL("), "got: {sql}");
+    }
+
+    #[test]
+    fn token_count_min_emits_range() {
+        let f = SearchFilters {
+            token_count: Some(NumericRange { min: Some(50), max: None }),
+            ..Default::default()
+        };
+        let sql = built_sql(&f);
+        assert!(sql.contains("chunk.token_count >="), "got: {sql}");
     }
 }
