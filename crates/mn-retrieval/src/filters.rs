@@ -5,8 +5,9 @@
 //! structured elements, a bare bool, or a range. Combination is AND across
 //! facets, OR within `any_of`, exclude `none_of`. The semver-bearing facets
 //! (`language_target`, `sdk_dependency`) carry a `version_satisfies` field
-//! evaluated in the Rust post-match (a later task), not SQL.
+//! evaluated in [`SearchFilters::semver_post_match`], not SQL.
 
+use mn_core::provenance::Provenance;
 use mn_core::scoring::parse_version;
 use serde::{Deserialize, Serialize};
 use time::Date;
@@ -254,6 +255,47 @@ impl SearchFilters {
         check_temporal_range("source_modified_at", self.source_modified_at.as_ref())?;
         Ok(())
     }
+
+    /// Evaluate the semver refinements Postgres can't express against a chunk's
+    /// provenance. `language_target` / `sdk_dependency` use OR-within-`any_of`
+    /// semantics: the chunk passes if it matches at least one element (name +
+    /// version). Facets with empty `any_of` impose no constraint.
+    #[must_use]
+    pub fn semver_post_match(&self, provenance: &Provenance) -> bool {
+        if !self.language_target.any_of.is_empty() {
+            let ok = self.language_target.any_of.iter().any(|want| {
+                provenance.language_targets.iter().any(|have| {
+                    have.name.eq_ignore_ascii_case(&want.name)
+                        && version_satisfies(
+                            want.version_satisfies.as_deref(),
+                            have.version_constraint.as_deref(),
+                        )
+                })
+            });
+            if !ok {
+                return false;
+            }
+        }
+        if !self.sdk_dependency.any_of.is_empty() {
+            // Exact `name` match (vs the case-insensitive language-target name
+            // above): package identifiers are canonical and case-significant
+            // (npm scoped names, crates.io), unlike free-form language labels.
+            let ok = self.sdk_dependency.any_of.iter().any(|want| {
+                provenance.sdk_dependencies.iter().any(|have| {
+                    have.kind.eq_ignore_ascii_case(&want.kind)
+                        && have.name == want.name
+                        && version_satisfies(
+                            want.version_satisfies.as_deref(),
+                            have.version_constraint.as_deref(),
+                        )
+                })
+            });
+            if !ok {
+                return false;
+            }
+        }
+        true
+    }
 }
 
 fn check_string_set(key: &str, set: &SetMatch<String>) -> Result<(), FilterError> {
@@ -313,9 +355,61 @@ fn check_temporal_range(key: &str, r: Option<&TemporalRange>) -> Result<(), Filt
     Ok(())
 }
 
+/// Does a requested version satisfy a chunk's declared constraint? `None`
+/// request always passes; an unparseable request is treated as no constraint
+/// (callers are expected to `validate()` first); an unconstrained chunk passes
+/// any request; a chunk constraint that fails to parse never satisfies.
+fn version_satisfies(requested: Option<&str>, chunk_constraint: Option<&str>) -> bool {
+    let Some(req) = requested else { return true };
+    let Some(candidate) = parse_version(req) else {
+        return true;
+    };
+    chunk_constraint
+        .is_none_or(|c| semver::VersionReq::parse(c).is_ok_and(|r| r.matches(&candidate)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mn_core::provenance::LanguageTarget;
+
+    #[test]
+    fn semver_post_match_filters_by_version() {
+        let prov = Provenance {
+            language_targets: vec![LanguageTarget {
+                name: "compact".into(),
+                version_constraint: Some(">=0.23".into()),
+            }],
+            ..Provenance::default()
+        };
+        let satisfies = SearchFilters {
+            language_target: SetMatch {
+                any_of: vec![LanguageTargetMatch {
+                    name: "compact".into(),
+                    version_satisfies: Some("0.31".into()),
+                }],
+                none_of: vec![],
+            },
+            ..Default::default()
+        };
+        assert!(satisfies.semver_post_match(&prov));
+        let misses = SearchFilters {
+            language_target: SetMatch {
+                any_of: vec![LanguageTargetMatch {
+                    name: "compact".into(),
+                    version_satisfies: Some("0.10".into()),
+                }],
+                none_of: vec![],
+            },
+            ..Default::default()
+        };
+        assert!(!misses.semver_post_match(&prov));
+    }
+
+    #[test]
+    fn empty_filter_post_matches_anything() {
+        assert!(SearchFilters::default().semver_post_match(&Provenance::default()));
+    }
 
     #[test]
     fn full_shape_round_trips() {
