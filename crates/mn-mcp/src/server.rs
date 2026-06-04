@@ -273,6 +273,7 @@ fn tool_name_for_event(name: &str) -> Option<McpToolName> {
         "get_document_full" => Some(McpToolName::GetDocumentFull),
         "get_document_chunks" => Some(McpToolName::GetDocumentChunks),
         "list_sources" => Some(McpToolName::ListSources),
+        "facets" => Some(McpToolName::Facets),
         "pull_models" => Some(McpToolName::PullModels),
         "status" => Some(McpToolName::Status),
         "install_search_skill" => Some(McpToolName::InstallSearchSkill),
@@ -308,6 +309,10 @@ async fn dispatch_tool_inner(
             Err(CloudError::NotFound(msg)) => {
                 Err(Response::err(id.clone(), ErrorCode::ToolFailed, format!("not found: {msg}")))
             }
+            Err(e) => Err(Response::err(id.clone(), ErrorCode::ToolFailed, e.to_string())),
+        },
+        "facets" => match state.cloud.get_facets().await {
+            Ok(v) => Ok(v.to_string()),
             Err(e) => Err(Response::err(id.clone(), ErrorCode::ToolFailed, e.to_string())),
         },
         "install_search_skill" => match tools::run_install_search_skill(&params.arguments) {

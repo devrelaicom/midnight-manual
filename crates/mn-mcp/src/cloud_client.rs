@@ -330,6 +330,14 @@ impl CloudClient {
         self.get_json(&path).await
     }
 
+    /// `GET /v1/facets` — the corpus's filterable facets + corpus-derived values.
+    ///
+    /// # Errors
+    /// Propagates any [`CloudError`] from the transport / status mapping.
+    pub async fn get_facets(&self) -> Result<serde_json::Value, CloudError> {
+        self.get_json("/v1/facets").await
+    }
+
     async fn get_json(&self, path: &str) -> Result<serde_json::Value, CloudError> {
         let url = self
             .base

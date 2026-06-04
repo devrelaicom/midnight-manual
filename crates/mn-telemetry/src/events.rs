@@ -185,6 +185,8 @@ pub enum McpToolName {
     GetDocumentChunks,
     /// `list_sources` tool.
     ListSources,
+    /// `facets` tool.
+    Facets,
     /// `pull_models` tool.
     PullModels,
     /// `status` tool.

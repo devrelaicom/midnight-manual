@@ -38,6 +38,10 @@ use crate::server::ServerConfig;
 /// Schemas here are kept in sync with the canonical document by way of the
 /// contract tests in `tests/`.
 #[must_use]
+// A flat manifest of `ToolDescription` literals: length is inherent to the
+// data (one entry per tool), so splitting it would hurt readability without
+// reducing any real complexity.
+#[allow(clippy::too_many_lines)]
 pub fn list() -> ToolsListResult {
     ToolsListResult {
         tools: vec![
@@ -99,6 +103,16 @@ pub fn list() -> ToolsListResult {
                 name: "list_sources",
                 description:
                     "Enumerate the corpus's available sources so an agent can narrow filters.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false,
+                }),
+            },
+            ToolDescription {
+                name: "facets",
+                description:
+                    "List the filterable facets for `search`, their types, whether they support exclusion (none_of), and the values present in the active corpus (languages, tags, sources, packages). Call this before constructing a `filters` object to learn valid values. Closed-enum facets (kind, content_type, attribution, source_kind) carry their full value list; high-cardinality sets (tags, package) are top-N with `truncated`/`total`.",
                 input_schema: json!({
                     "type": "object",
                     "properties": {},
@@ -1220,7 +1234,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tool_list_has_all_thirteen_tools() {
+    fn tool_list_has_all_fourteen_tools() {
         let m = list();
         let names: Vec<_> = m.tools.iter().map(|t| t.name).collect();
         for expected in [
@@ -1234,13 +1248,14 @@ mod tests {
             "get_document_full",
             "get_document_chunks",
             "list_sources",
+            "facets",
             "pull_models",
             "status",
             "install_search_skill",
         ] {
             assert!(names.contains(&expected), "missing tool: {expected}");
         }
-        assert_eq!(names.len(), 13, "expected 13 tools, got {}", names.len());
+        assert_eq!(names.len(), 14, "expected 14 tools, got {}", names.len());
     }
 
     #[test]
