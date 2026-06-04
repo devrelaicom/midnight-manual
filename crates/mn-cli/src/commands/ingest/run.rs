@@ -388,7 +388,7 @@ async fn run_inner(
             split: &doc.split,
             resolved: &doc.resolved,
             source_modified_at: doc.source_modified_at,
-            package: detect_package_ref(&source_root, &doc.rel_path),
+            package: detect_package_ref(&source_root, &doc.rel_path, &doc.content),
         };
         builder
             .add_walked_document(&ctx)
@@ -1122,14 +1122,19 @@ struct FinalizeResult {
     demoted_revision: Option<i32>,
 }
 
-/// Detect package membership for a single file by walking up to the source root
-/// and looking for the nearest `Cargo.toml` or `package.json` manifest.
+/// Detect package membership for a single file.
 ///
-/// Returns `None` for files that are not enclosed by any known manifest.
+/// `.compact` files are detected from their contents (a single top-level
+/// `module <Name>`); all other files walk up to the source root for the nearest
+/// `Cargo.toml` / `package.json`.
 fn detect_package_ref(
     source_root: &std::path::Path,
     rel_path: &std::path::Path,
+    content: &str,
 ) -> Option<mn_core::types::PackageRef> {
+    if rel_path.extension().and_then(|e| e.to_str()) == Some("compact") {
+        return mn_content::detect_compact_package(content);
+    }
     let abs = source_root.join(rel_path);
     mn_content::package::detect(&abs, source_root).map(|p| mn_core::types::PackageRef {
         kind: p.kind,
@@ -1520,5 +1525,29 @@ mod tests {
             .as_array()
             .expect("embedding present on the wire");
         assert_eq!(emb.len(), 1024);
+    }
+}
+
+#[cfg(test)]
+mod compact_package_routing_tests {
+    use super::detect_package_ref;
+    use std::path::Path;
+
+    #[test]
+    fn compact_file_routes_to_module_detection() {
+        let root = tempfile::tempdir().unwrap();
+        let body = "module M {\n  export ledger b: Field;\n}\n";
+        let pkg = detect_package_ref(root.path(), Path::new("src/Token.compact"), body)
+            .expect("module M should be detected");
+        assert_eq!(pkg.kind, "compact");
+        assert_eq!(pkg.name, "M");
+    }
+
+    #[test]
+    fn non_compact_file_ignores_content() {
+        let root = tempfile::tempdir().unwrap();
+        // No Cargo.toml/package.json anywhere → None, regardless of content.
+        let pkg = detect_package_ref(root.path(), Path::new("src/lib.rs"), "module M {}");
+        assert!(pkg.is_none());
     }
 }
