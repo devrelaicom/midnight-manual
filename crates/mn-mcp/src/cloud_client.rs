@@ -39,8 +39,9 @@ pub struct SearchRequest {
     pub client_embedding_model: String,
     /// Max results to return from the cloud (cloud caps at 100).
     pub limit: u32,
-    /// Filter spec passed through verbatim. The MCP tool's input schema mirrors
-    /// the cloud's, so callers can pass arbitrary filter JSON.
+    /// Per-facet filter spec. The MCP tool validates this at the boundary
+    /// (deserialize into `mn_retrieval::filters::SearchFilters` + `.validate()`)
+    /// before forwarding, so the cloud receives a registry-conformant object.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub filters: Option<serde_json::Value>,
     /// Cloud-side ordering key. When reranking locally, the MCP server asks for
@@ -49,6 +50,9 @@ pub struct SearchRequest {
     /// (US6). `None` lets the cloud apply its default (`confidence`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sort_by: Option<&'static str>,
+    /// Query mode forwarded to the cloud (`hybrid` | `vector` | `fts`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<&'static str>,
 }
 
 /// Errors the cloud client can produce.

@@ -183,43 +183,57 @@ fn document_chunks_schema() -> serde_json::Value {
     })
 }
 
+#[allow(clippy::too_many_lines)]
 fn search_input_schema() -> serde_json::Value {
+    use mn_retrieval::facets;
+    let set_of = |values: Option<&[&str]>| {
+        let items = values.map_or_else(
+            || json!({ "type": "string" }),
+            |v| json!({ "type": "string", "enum": v }),
+        );
+        json!({
+            "type": "object",
+            "properties": { "any_of": { "type": "array", "items": items }, "none_of": { "type": "array", "items": items } },
+            "additionalProperties": false,
+        })
+    };
     json!({
         "type": "object",
         "properties": {
-            "query": {
-                "type": "string",
-                "minLength": 1,
-                "description": "Single-query convenience form (mutually exclusive with queries).",
-            },
-            "queries": {
-                "type": "array",
-                "minItems": 1,
-                "maxItems": 50,
-                "items": { "type": "string", "minLength": 1 },
-                "description": "Multi-query input for HyDE / expansion / step-back patterns.",
-            },
-            "limit": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 50,
-                "default": 10,
-                "description": "Max results returned to the caller. Capped at 50 (FR-088).",
-            },
-            "rerank": {
-                "type": "boolean",
-                "default": true,
-                "description": "Apply local cross-encoder reranking. Disable for ultra-low-latency callers.",
-            },
+            "query": { "type": "string", "minLength": 1, "description": "Single-query convenience form (mutually exclusive with queries)." },
+            "queries": { "type": "array", "minItems": 1, "maxItems": 50, "items": { "type": "string", "minLength": 1 }, "description": "Multi-query input for HyDE / expansion / step-back patterns." },
+            "limit": { "type": "integer", "minimum": 1, "maximum": 50, "default": 10, "description": "Max results returned to the caller. Capped at 50." },
+            "rerank": { "type": "boolean", "default": true, "description": "Apply local cross-encoder reranking. Disable for ultra-low-latency callers." },
+            "mode": { "type": "string", "enum": ["hybrid", "vector", "fts"], "default": "hybrid",
+                      "description": "fts skips embedding entirely (lowest latency); vector is semantic-only; hybrid (default) fuses both." },
             "filters": {
                 "type": "object",
-                "description": "Filter spec forwarded verbatim to the cloud /v1/search endpoint.",
-            },
+                "additionalProperties": false,
+                "properties": {
+                    "kind":         set_of(Some(facets::KIND_VALUES)),
+                    "source_kind":  set_of(Some(facets::SOURCE_KIND_VALUES)),
+                    "attribution":  set_of(Some(facets::ATTRIBUTION_VALUES)),
+                    "content_type": set_of(Some(facets::CONTENT_TYPE_VALUES)),
+                    "language":     set_of(None),
+                    "tags":         set_of(None),
+                    "source_slug":  set_of(None),
+                    "heading_path": set_of(None),
+                    "verified":   { "type": "boolean" },
+                    "deprecated": { "type": "boolean" },
+                    "symbol": { "type": "object", "properties": { "any_of": { "type": "array", "items": {
+                        "type": "object", "properties": { "kind": { "type": "string", "enum": facets::SYMBOL_KIND_VALUES }, "name": { "type": "string" } },
+                        "additionalProperties": false } } }, "additionalProperties": false },
+                    "package": { "type": "object", "properties": { "any_of": { "type": "array", "items": {
+                        "type": "object", "required": ["kind","name"], "properties": { "kind": { "type": "string", "enum": facets::PACKAGE_KIND_VALUES }, "name": { "type": "string" } },
+                        "additionalProperties": false } } }, "additionalProperties": false },
+                    "ingested_at": { "type": "object", "properties": { "after": { "type": "string", "format": "date" }, "before": { "type": "string", "format": "date" } }, "additionalProperties": false },
+                    "source_modified_at": { "type": "object", "properties": { "after": { "type": "string", "format": "date" }, "before": { "type": "string", "format": "date" } }, "additionalProperties": false },
+                    "token_count": { "type": "object", "properties": { "min": { "type": "integer" }, "max": { "type": "integer" } }, "additionalProperties": false }
+                },
+                "description": "Per-facet filters. AND across keys, OR within any_of, exclude none_of. See the `facets` tool for corpus-derived values."
+            }
         },
-        "oneOf": [
-            { "required": ["query"] },
-            { "required": ["queries"] },
-        ],
+        "oneOf": [ { "required": ["query"] }, { "required": ["queries"] } ]
     })
 }
 
@@ -585,6 +599,7 @@ pub async fn run_search(
         // candidates before we rerank). Pass-through (rerank=false) keeps the
         // cloud's confidence ordering.
         sort_by: if parsed.rerank { Some("score") } else { None },
+        mode: Some(parsed.mode),
     };
     let cloud_resp = match cloud.search(&req).await {
         Ok(v) => v,
@@ -694,6 +709,7 @@ struct ParsedSearchArgs {
     limit: u32,
     rerank: bool,
     filters: Option<serde_json::Value>,
+    mode: &'static str,
 }
 
 fn parse_search_args(v: &serde_json::Value) -> Result<ParsedSearchArgs, String> {
@@ -755,11 +771,27 @@ fn parse_search_args(v: &serde_json::Value) -> Result<ParsedSearchArgs, String> 
         .unwrap_or(true);
     let filters = obj.get("filters").cloned();
 
+    let mode: &'static str = match obj.get("mode").and_then(serde_json::Value::as_str) {
+        None | Some("hybrid") => "hybrid",
+        Some("vector") => "vector",
+        Some("fts") => "fts",
+        Some(other) => return Err(format!("unknown mode `{other}` (expected hybrid|vector|fts)")),
+    };
+    // Validate the filters object against the registry before forwarding (fail fast).
+    if let Some(fv) = obj.get("filters") {
+        let parsed: mn_retrieval::filters::SearchFilters =
+            serde_json::from_value(fv.clone()).map_err(|e| format!("invalid filters: {e}"))?;
+        parsed
+            .validate()
+            .map_err(|e| format!("invalid filter `{}`: {}", e.facet, e.message))?;
+    }
+
     Ok(ParsedSearchArgs {
         queries,
         limit,
         rerank,
         filters,
+        mode,
     })
 }
 
@@ -1279,6 +1311,17 @@ mod tests {
         let s = search_input_schema();
         assert_eq!(s["type"], "object");
         assert!(s.get("oneOf").is_some());
+    }
+
+    #[test]
+    fn parse_rejects_unknown_mode_and_bad_filter() {
+        let bad_mode = serde_json::json!({ "query": "x", "mode": "fuzzy" });
+        assert!(parse_search_args(&bad_mode).is_err());
+        let bad_filter =
+            serde_json::json!({ "query": "x", "filters": { "kind": { "any_of": ["binary"] } } });
+        assert!(parse_search_args(&bad_filter).is_err());
+        let ok = serde_json::json!({ "query": "x", "mode": "fts", "filters": { "kind": { "any_of": ["code"] } } });
+        assert!(parse_search_args(&ok).is_ok());
     }
 
     fn result_with_trust(chunk: &str, trust: f64) -> serde_json::Value {

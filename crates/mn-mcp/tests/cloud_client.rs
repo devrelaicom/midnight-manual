@@ -22,6 +22,7 @@ fn make_search_req() -> SearchRequest {
         limit: 10,
         filters: None,
         sort_by: None,
+        mode: None,
     }
 }
 
