@@ -111,6 +111,11 @@ base64           = "0.22"
 # Content processing
 pulldown-cmark   = "0.12"
 quick-xml        = "0.31"
+# Compact parser frontend (rowan-based, pure Rust — no native build step).
+# Optional + feature-gated in mn-content. Exact pin: pre-release (beta) API.
+compactp_parser = "=0.1.0-beta.1"
+compactp_ast    = "=0.1.0-beta.1"
+compactp_syntax = "=0.1.0-beta.1"
 # tree-sitter runtime is pinned to 0.25 (selects 0.25.10). This is the version
 # text-splitter 0.27 requires (`^0.25`) AND the newest line whose `tokenizers`
 # transitive dep still resolves to 0.21 (text-splitter 0.28+ bumped to

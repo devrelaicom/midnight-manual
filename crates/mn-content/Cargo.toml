@@ -15,7 +15,7 @@ workspace = true
 
 [features]
 integration = []
-default = ["core-grammars"]
+default = ["core-grammars", "compact"]
 # Scheme is vendored (no crate); its build.rs + parser.c land in Task 16. The
 # `scheme` feature is an empty flag for now so default builds opt in early.
 core-grammars = [
@@ -35,6 +35,9 @@ all-grammars = [
     "dep:tree-sitter-swift", "dep:tree-sitter-ruby", "dep:tree-sitter-kotlin-ng",
     "dep:tree-sitter-c-sharp", "dep:tree-sitter-haskell", "dep:tree-sitter-java",
 ]
+# Compact chunking via the compactp library (experimental; default-on).
+# Build without it: `cargo build -p mn-cli --no-default-features`.
+compact = ["dep:compactp_parser", "dep:compactp_ast", "dep:compactp_syntax"]
 
 [dependencies]
 mn-core               = { path = "../mn-core" }
@@ -63,6 +66,9 @@ tree-sitter-kotlin-ng  = { workspace = true, optional = true }
 tree-sitter-c-sharp    = { workspace = true, optional = true }
 tree-sitter-haskell    = { workspace = true, optional = true }
 tree-sitter-java       = { workspace = true, optional = true }
+compactp_parser       = { workspace = true, optional = true }
+compactp_ast          = { workspace = true, optional = true }
+compactp_syntax       = { workspace = true, optional = true }
 tokenizers            = { workspace = true }
 serde                 = { workspace = true }
 serde_json            = { workspace = true }

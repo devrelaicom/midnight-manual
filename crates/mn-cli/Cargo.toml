@@ -15,6 +15,9 @@ workspace = true
 
 [features]
 integration = []
+default = ["compact"]
+# Compact chunking (default-on). Exclude with `--no-default-features`.
+compact = ["mn-content/compact"]
 
 # Two binary names from one crate, per D16 / Story 10. Cargo dislikes pointing two
 # bin targets at the same file, so `mnm` is a thin shim in src/bin/mnm.rs that defers
@@ -31,7 +34,7 @@ path = "src/bin/mnm.rs"
 [dependencies]
 mn-core       = { path = "../mn-core" }
 mn-auth       = { path = "../mn-auth" }
-mn-content    = { path = "../mn-content" }
+mn-content    = { path = "../mn-content", default-features = false, features = ["core-grammars"] }
 mn-embedding  = { path = "../mn-embedding" }
 mn-mcp        = { path = "../mn-mcp" }
 mn-retrieval  = { path = "../mn-retrieval" }

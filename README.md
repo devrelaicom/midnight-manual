@@ -399,6 +399,8 @@ Source files are parsed with [`tree-sitter`](https://tree-sitter.github.io/) and
 
 Grammars are **Cargo-feature-gated** into tiers (`core-grammars` → `markup-grammars` → `extended-grammars` → `all-grammars`) so a lean build stays small. Crucially, **an absent grammar degrades gracefully**: an unknown or unbuilt language falls back to a line-window chunker (60-line windows, 20-line overlap) so it's still ingestible — just without symbol paths.
 
+Compact chunking is its own default-on feature (`compact`, backed by the [`compactp`](https://crates.io/crates/compactp_parser) parser); build the CLI without the experimental Compact chunker via `cargo build -p mn-cli --no-default-features` (the tree-sitter grammars stay on).
+
 ### The details that matter
 
 - **Token-budgeted.** Chunks target a real BPE token budget (default **400 tokens**) so they fit the embedder cleanly — measured with the same tokenizer the model uses, not a character heuristic.

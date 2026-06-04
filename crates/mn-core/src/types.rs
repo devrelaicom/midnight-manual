@@ -235,7 +235,7 @@ pub enum PackageKind {
 /// (plan → upload). Lighter than [`Package`] (no DB id / `source_version_id`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PackageRef {
-    /// Ecosystem: `"rust"` or `"npm"`.
+    /// Ecosystem: `"rust"`, `"npm"`, or `"compact"` (`snake_case` of [`PackageKind`]).
     pub kind: String,
     /// Package name.
     pub name: String,

@@ -722,6 +722,59 @@ dependencies = [
 ]
 
 [[package]]
+name = "compactp_ast"
+version = "0.1.0-beta.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c0d8795de9d689cdad7f5167103b5c8e94dcdf5e7bb30172c54db885b0577c1c"
+dependencies = [
+ "compactp_syntax",
+ "rowan",
+]
+
+[[package]]
+name = "compactp_diagnostics"
+version = "0.1.0-beta.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "92313f545179b7007eec6312a4a754a097b29457a0ca89d2f179acb3961a16ff"
+dependencies = [
+ "compactp_syntax",
+ "rowan",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "compactp_lexer"
+version = "0.1.0-beta.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ce53377fc551a6c2119c08e7a9b17c7a32ebb8183353a371180a0521553ca85"
+dependencies = [
+ "compactp_syntax",
+]
+
+[[package]]
+name = "compactp_parser"
+version = "0.1.0-beta.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "14cb3528ce7c133b57d9fdbb2a99c15bdde3db2f47a37a029f68b171626b4378"
+dependencies = [
+ "compactp_diagnostics",
+ "compactp_lexer",
+ "compactp_syntax",
+ "drop_bomb",
+ "rowan",
+]
+
+[[package]]
+name = "compactp_syntax"
+version = "0.1.0-beta.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b9aaacc4f23830631d8585d045ab1906cf943f641360e3a6fdf38af445598d5c"
+dependencies = [
+ "rowan",
+]
+
+[[package]]
 name = "concurrent-queue"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -800,6 +853,12 @@ checksum = "77745e017f5edba1a9c1d854f6f3a52dac8a12dd5af5d2f54aecf61e43d80d30"
 dependencies = [
  "libm",
 ]
+
+[[package]]
+name = "countme"
+version = "3.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7704b5fdd17b18ae31c4c1da5a2e0305a2bf17b5249300a9ee9ed7b72114c636"
 
 [[package]]
 name = "cpufeatures"
@@ -1202,6 +1261,12 @@ name = "dotenvy"
 version = "0.15.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
+
+[[package]]
+name = "drop_bomb"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9bda8e21c04aca2ae33ffc2fd8c23134f3cac46db123ba97bd9d3f3b8a4a85e1"
 
 [[package]]
 name = "dunce"
@@ -2818,6 +2883,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "cc",
+ "compactp_ast",
+ "compactp_parser",
+ "compactp_syntax",
  "globset",
  "ignore",
  "mn-core",
@@ -3846,7 +3914,7 @@ dependencies = [
  "pin-project-lite",
  "quinn-proto",
  "quinn-udp",
- "rustc-hash",
+ "rustc-hash 2.1.2",
  "rustls",
  "socket2",
  "thiserror 2.0.18",
@@ -3866,7 +3934,7 @@ dependencies = [
  "lru-slab",
  "rand 0.9.4",
  "ring",
- "rustc-hash",
+ "rustc-hash 2.1.2",
  "rustls",
  "rustls-pki-types",
  "slab",
@@ -4269,6 +4337,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rowan"
+version = "0.16.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "417a3a9f582e349834051b8a10c8d71ca88da4211e4093528e36b9845f6b5f21"
+dependencies = [
+ "countme",
+ "hashbrown 0.14.5",
+ "rustc-hash 1.1.0",
+ "text-size",
+]
+
+[[package]]
 name = "rsa"
 version = "0.9.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4287,6 +4367,12 @@ dependencies = [
  "subtle",
  "zeroize",
 ]
+
+[[package]]
+name = "rustc-hash"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08d43f7aa6b08d49f382cde6a7982047c3426db949b1424bc4b7ec9ae12c6ce2"
 
 [[package]]
 name = "rustc-hash"
@@ -5217,6 +5303,12 @@ dependencies = [
  "tokio-util",
  "url",
 ]
+
+[[package]]
+name = "text-size"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f18aa187839b2bdb1ad2fa35ead8c4c2976b64e4363c386d45ac0f7ee85c9233"
 
 [[package]]
 name = "text-splitter"

@@ -1,0 +1,32 @@
+import CompactStandardLibrary;
+
+module M {
+  export ledger b: Field;
+
+  export circuit brad(a: Field, c: Boolean): Field {
+    if(disclose(c)) {
+      b = disclose(a);
+    }
+
+    return b;
+  }
+
+  export circuit olaf(a: Field, b: Field) : Field {
+    return brad(a + b, true);
+  }
+}
+
+import M prefix $;
+export {$brad}
+
+ledger x: Field;
+export ledger set: Set<Field>;
+
+circuit andy(a: Field, b: Boolean) : [] {
+  $brad(a, b);
+}
+
+export circuit gary(a: Field, b: Boolean) : [] {
+  $brad($brad(disclose(a), disclose(b)), disclose(b));
+  $olaf(disclose(a), disclose(a));
+}

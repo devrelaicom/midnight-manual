@@ -21,6 +21,9 @@ pub mod bash;
 #[cfg(feature = "scheme")]
 pub mod scheme;
 
+#[cfg(feature = "compact")]
+pub mod compact;
+
 #[cfg(feature = "extended-grammars")]
 pub mod go;
 
@@ -217,6 +220,8 @@ pub fn chunker_for_ext(lang: Language, ext: &str) -> Box<dyn Chunker> {
         Language::Haskell => Box::new(haskell::HaskellChunker),
         #[cfg(feature = "all-grammars")]
         Language::Java => Box::new(java::JavaChunker),
+        #[cfg(feature = "compact")]
+        Language::Compact => Box::new(compact::CompactChunker),
         _ => Box::new(LineWindowChunker),
     }
 }
