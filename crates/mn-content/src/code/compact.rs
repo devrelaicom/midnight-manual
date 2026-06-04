@@ -281,4 +281,37 @@ mod tests {
         assert!(nested, "expected module-nested path: {:?}",
             chunks.iter().map(|c| &c.symbol_path).collect::<Vec<_>>());
     }
+
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn ranges_tile_and_cover_non_whitespace(n in 1usize..10, budget in 6u32..40) {
+            // Build a valid multi-circuit file from a proven-good template.
+            use std::fmt::Write as _;
+            let mut src = String::new();
+            for i in 0..n {
+                let _ = write!(src, "export circuit c{i}(a: Field): Field {{\n  return a;\n}}\n\n");
+            }
+            let cfg = ChunkerConfig { max_tokens: budget, ..ChunkerConfig::default() };
+            let chunks = CompactChunker.chunk(&src, &cfg).unwrap();
+            prop_assume!(chunks.iter().all(|c| !c.fallback_used));
+
+            // sorted + non-overlapping
+            for w in chunks.windows(2) {
+                prop_assert!(w[0].end_byte <= w[1].start_byte);
+            }
+            // byte-accurate
+            for c in &chunks {
+                prop_assert_eq!(&c.content, &src[c.start_byte..c.end_byte]);
+            }
+            // every non-whitespace byte is covered by some chunk
+            for (i, b) in src.bytes().enumerate() {
+                if !b.is_ascii_whitespace() {
+                    let covered = chunks.iter().any(|c| c.start_byte <= i && i < c.end_byte);
+                    prop_assert!(covered, "byte {} not covered", i);
+                }
+            }
+        }
+    }
 }
