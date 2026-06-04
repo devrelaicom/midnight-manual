@@ -221,6 +221,10 @@ async fn search(
     let rid = req_id.as_str();
     let rl_ctx = rl.as_ref().map(|Extension(c)| c);
 
+    // Which retrieval halves this mode runs (loop-invariant).
+    let run_vector = matches!(req.mode, SearchMode::Hybrid | SearchMode::Vector);
+    let run_fts = matches!(req.mode, SearchMode::Hybrid | SearchMode::Fts);
+
     // Normalize the single-query convenience form `{query, vector}` (#6) into
     // the canonical query list. Ambiguous/incomplete requests are rejected.
     let queries = match normalize_queries(&req) {
@@ -274,9 +278,7 @@ async fn search(
     // request can never drive the FTS half of retrieval and signals a malformed
     // caller. Only applies when FTS actually runs (hybrid or fts mode); a
     // vector-only request has no use for query text.
-    if matches!(req.mode, SearchMode::Hybrid | SearchMode::Fts)
-        && queries.iter().all(|q| q.text.trim().is_empty())
-    {
+    if run_fts && queries.iter().all(|q| q.text.trim().is_empty()) {
         return error::into_response(
             CoreError::builder(ErrorCode::InvalidRequest)
                 .message("every query has empty `text`")
@@ -322,8 +324,7 @@ async fn search(
     // The vector half (and its model/dim guards) only runs in hybrid/vector
     // mode. fts mode skips embedding entirely, so `client_embedding_model` and
     // `vector` are optional and ignored.
-    let needs_vector = matches!(req.mode, SearchMode::Hybrid | SearchMode::Vector);
-    if needs_vector {
+    if run_vector {
         let Some(client_model) = req.client_embedding_model.as_deref() else {
             return error::into_response(
                 CoreError::builder(ErrorCode::InvalidRequest)
@@ -421,10 +422,8 @@ async fn search(
         std::collections::HashMap::new();
 
     for (i, q) in distinct.iter().enumerate() {
-        // Per-mode gating: hybrid runs both halves; vector/fts run one each.
-        let run_vector = matches!(req.mode, SearchMode::Hybrid | SearchMode::Vector);
-        let run_fts = matches!(req.mode, SearchMode::Hybrid | SearchMode::Fts);
-
+        // Per-mode gating uses the hoisted, loop-invariant flags: hybrid runs
+        // both halves; vector/fts run one each.
         let (vector_hits, vector_latency_ms): (Vec<(Uuid, f64)>, f64) = if run_vector {
             let t0 = std::time::Instant::now();
             let hits = match vector_search(&state.pool, &q.vector, &req.filters, corpus_model_id)
@@ -765,6 +764,11 @@ fn normalize_queries(req: &SearchRequest) -> Result<Vec<QueryPair>, (String, Str
             text: text.clone(),
             vector: vector.clone(),
         }]),
+        // fts mode skips embedding, so a vector-less single query is valid.
+        (Some(text), None) if req.mode == SearchMode::Fts => Ok(vec![QueryPair {
+            text: text.clone(),
+            vector: Vec::new(),
+        }]),
         (Some(_), None) | (None, Some(_)) => Err((
             "the single-query form requires both `query` and `vector`".to_owned(),
             "include the embedding `vector` (dimension must match the corpus model) alongside `query`, or use the `queries` array".to_owned(),
@@ -994,6 +998,8 @@ fn push_filter_predicates(qb: &mut QueryBuilder<'_, Postgres>, f: &SearchFilters
         }
     }
     if let Some(r) = &f.token_count {
+        // Saturating to i32::MAX is intentional: chunk token counts fit
+        // comfortably in i32, and validation already rejects `min > max`.
         if let Some(min) = r.min {
             qb.push(" AND chunk.token_count >= ");
             qb.push_bind(i32::try_from(min).unwrap_or(i32::MAX));
@@ -1143,7 +1149,9 @@ fn push_sdk_dependency_names(
 /// Lift an ISO `Date` to a UTC midnight `OffsetDateTime` for binding against a
 /// `timestamptz` column.
 fn date_to_dt(d: time::Date) -> time::OffsetDateTime {
-    d.with_hms(0, 0, 0).unwrap().assume_utc()
+    d.with_hms(0, 0, 0)
+        .expect("00:00:00 is always a valid time")
+        .assume_utc()
 }
 
 #[cfg(test)]
@@ -1217,6 +1225,21 @@ mod tests {
         assert!(normalize_queries(&req(Vec::new(), None, None))
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn fts_mode_allows_vectorless_single_query() {
+        let mut r = req(Vec::new(), Some("hello".to_owned()), None);
+        r.mode = SearchMode::Fts;
+        let qs = normalize_queries(&r).unwrap();
+        assert_eq!(qs.len(), 1);
+        assert_eq!(qs[0].text, "hello");
+        assert!(qs[0].vector.is_empty());
+
+        // Non-fts mode still requires the vector for the convenience form.
+        let mut r2 = req(Vec::new(), Some("hello".to_owned()), None);
+        r2.mode = SearchMode::Hybrid;
+        assert!(normalize_queries(&r2).is_err());
     }
 
     #[test]
