@@ -8,7 +8,7 @@
 use std::ops::Range;
 
 use compactp_ast::{AstNode, Item, SourceFile};
-use compactp_syntax::{SyntaxNode, SyntaxToken};
+use compactp_syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 use mn_core::types::SymbolSegment;
 
 use crate::chunk::{Chunk, ChunkError, Chunker, ChunkerConfig};
@@ -24,6 +24,10 @@ impl Chunker for CompactChunker {
         }
         let parsed = compactp_parser::parse(body);
         let root = SyntaxNode::new_root(parsed.green);
+
+        if error_bytes(&root) * 2 > body.len() {
+            return LineWindowChunker.chunk(body, cfg);
+        }
 
         if SourceFile::cast(root.clone()).is_none() {
             return LineWindowChunker.chunk(body, cfg);
@@ -118,6 +122,31 @@ fn split_node(node: &SyntaxNode, body: &str, budget: u32, out: &mut Vec<Range<us
     if let Some(r) = run.take() {
         out.push(r);
     }
+}
+
+/// Total bytes covered by `ERROR` regions — interior ERROR *nodes* (parser-level
+/// recovery wrapping otherwise-valid tokens) and leaf ERROR *tokens* (lexer-level
+/// unknown input). Summing the *outermost* ERROR element of each subtree (never
+/// descending into an ERROR node) counts each garbage region once, so an ERROR
+/// node and the tokens nested inside it are not double-counted.
+fn error_bytes(root: &SyntaxNode) -> usize {
+    let mut total = 0;
+    for el in root.children_with_tokens() {
+        if let Some(n) = el.as_node() {
+            if n.kind() == SyntaxKind::ERROR {
+                let r = n.text_range();
+                total += usize::from(r.end()) - usize::from(r.start());
+            } else {
+                total += error_bytes(n);
+            }
+        } else if let Some(t) = el.as_token() {
+            if t.kind() == SyntaxKind::ERROR {
+                let r = t.text_range();
+                total += usize::from(r.end()) - usize::from(r.start());
+            }
+        }
+    }
+    total
 }
 
 /// Map a CST node to a symbol segment if it is a named Compact item.
@@ -219,6 +248,31 @@ mod tests {
     #[test]
     fn empty_input_yields_no_chunks() {
         assert!(CompactChunker.chunk("   \n\t", &ChunkerConfig::default()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn garbage_falls_back_to_line_window() {
+        // Non-Compact junk: each non-ASCII glyph lexes to an ERROR token, so
+        // error bytes dominate → catastrophic fallback.
+        let src = "🔥🔥🔥 ❌❌❌ ¡¡¡¡ §§§§ ".repeat(60);
+        let chunks = CompactChunker.chunk(&src, &ChunkerConfig::default()).unwrap();
+        assert!(chunks.iter().any(|c| c.fallback_used), "garbage must fall back");
+    }
+
+    #[test]
+    fn token_soup_falls_back_to_line_window() {
+        // Valid tokens in nonsense order: the parser wraps them in ERROR *nodes*
+        // (not ERROR tokens), so this exercises the parser-recovery path that the
+        // emoji fixture (lexer ERROR tokens) does not.
+        let src = "foo bar baz 123 qux wibble wobble 456 zzz plugh ".repeat(40);
+        let chunks = CompactChunker.chunk(&src, &ChunkerConfig::default()).unwrap();
+        assert!(chunks.iter().any(|c| c.fallback_used), "token-soup garbage must fall back");
+    }
+
+    #[test]
+    fn valid_compact_does_not_fall_back() {
+        let chunks = CompactChunker.chunk(COUNTER, &ChunkerConfig::default()).unwrap();
+        assert!(chunks.iter().all(|c| !c.fallback_used));
     }
 
     #[test]
