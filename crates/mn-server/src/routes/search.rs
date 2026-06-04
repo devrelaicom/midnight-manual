@@ -50,10 +50,10 @@ pub struct SearchRequest {
     /// Single-query convenience form: the pre-computed embedding for `query`.
     #[serde(default)]
     pub vector: Option<Vec<f32>>,
-    /// The embedding model identifier the client used to produce each
-    /// `vector`. MUST match the corpus's active model identifier (D12 /
-    /// FR-038); mismatch returns 409.
-    pub client_embedding_model: String,
+    /// The embedding model identifier the client used. REQUIRED for `hybrid`
+    /// and `vector` modes; optional/ignored for `fts` mode.
+    #[serde(default)]
+    pub client_embedding_model: Option<String>,
     /// Maximum number of results to return. Capped at 100 server-side.
     #[serde(default = "default_limit")]
     pub limit: u32,
@@ -63,6 +63,9 @@ pub struct SearchRequest {
     /// Result ordering key (US6 acceptance #9). Defaults to `confidence`.
     #[serde(default)]
     pub sort_by: SortBy,
+    /// Which retrieval halves to run. Defaults to `hybrid`.
+    #[serde(default)]
+    pub mode: SearchMode,
     /// Drop results whose `confidence` is below this floor before applying
     /// `limit` (US6 acceptance #10). Defaults to 0.0 (no filtering).
     #[serde(default)]
@@ -88,12 +91,27 @@ pub enum SortBy {
     Score,
 }
 
+/// Which retrieval halves to run (per-request).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchMode {
+    /// Run both pgvector and FTS, fuse via RRF. The default.
+    #[default]
+    Hybrid,
+    /// pgvector only. Requires `vector` + `client_embedding_model`.
+    Vector,
+    /// FTS only. `vector` / `client_embedding_model` are optional and ignored.
+    Fts,
+}
+
 /// One {text, vector} pair.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct QueryPair {
     /// The query text, used for the full-text-search half of retrieval.
     pub text: String,
-    /// The pre-computed embedding; its dimension must match the active corpus model.
+    /// The pre-computed embedding; its dimension must match the active corpus
+    /// model. Optional so `fts`-mode callers can omit it.
+    #[serde(default)]
     pub vector: Vec<f32>,
 }
 
@@ -859,7 +877,7 @@ fn push_filter_predicates(qb: &mut QueryBuilder<'_, Postgres>, filters: &SearchF
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_queries, QueryPair, SearchRequest, SortBy};
+    use super::{normalize_queries, QueryPair, SearchMode, SearchRequest, SortBy};
     use mn_retrieval::filters::SearchFilters;
 
     fn req(
@@ -871,10 +889,11 @@ mod tests {
             queries,
             query,
             vector,
-            client_embedding_model: "bge-base-en-v1.5@1".to_owned(),
+            client_embedding_model: Some("bge-base-en-v1.5@1".to_owned()),
             limit: 20,
             filters: SearchFilters::default(),
             sort_by: SortBy::default(),
+            mode: SearchMode::default(),
             min_confidence: 0.0,
             include_scores: true,
         }
@@ -927,5 +946,22 @@ mod tests {
         assert!(normalize_queries(&req(Vec::new(), None, None))
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn mode_defaults_to_hybrid_and_parses() {
+        let body = serde_json::json!({
+            "queries": [{ "text": "x", "vector": [0.0] }],
+            "client_embedding_model": "voyage-code-3@1"
+        });
+        let req: SearchRequest = serde_json::from_value(body).unwrap();
+        assert_eq!(req.mode, SearchMode::Hybrid);
+
+        let body2 = serde_json::json!({
+            "query": "x", "vector": [0.0],
+            "client_embedding_model": "voyage-code-3@1", "mode": "fts"
+        });
+        let req2: SearchRequest = serde_json::from_value(body2).unwrap();
+        assert_eq!(req2.mode, SearchMode::Fts);
     }
 }
