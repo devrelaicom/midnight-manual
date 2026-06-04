@@ -77,7 +77,7 @@
     <div class="container" data-reveal>
       <p class="marker">Quick start</p>
       <h2 class="h-section">Up and running<br>in three steps</h2>
-      <p class="subhead">No database, no API key, no account. You need a Rust toolchain (1.91+); the corpus and models are fetched on demand.</p>
+      <p class="subhead">No database, no API key, no account. You need a Rust toolchain (1.91+); the corpus is hosted and the reranker is fetched on demand.</p>
 
       <div class="qs-steps">
         <div class="qs-step"><p class="qs-step__n">01</p><h3>Build the CLI</h3>
@@ -129,7 +129,7 @@ args = ["mcp", "serve"]'>Copy</button></div>
     <div class="container" data-reveal>
       <p class="lead">Your assistant's training data went stale the day it shipped.
       <strong>midnight-manual</strong> gives it hybrid search over the live Midnight corpus —
-      ranked, reranked, and cited — with the embeddings running on your machine, so your queries stay yours.</p>
+      ranked, reranked, and cited — so its answers trace back to the real docs and source, not a stale guess.</p>
     </div>
   </section>
 
@@ -159,7 +159,7 @@ args = ["mcp", "serve"]'>Copy</button></div>
         <div class="card"><p class="card__meta">// MCP SERVER</p><p class="card__title">In your AI client</p>
           <p>Drop <code>mnm mcp serve</code> into Claude Code, Codex, or Cursor — your assistant gains hybrid search, reranking, and document navigation.</p></div>
         <div class="card"><p class="card__meta">// CLI · mnm</p><p class="card__title">In your terminal</p>
-          <p>Search the corpus, inspect chunks and documents, and manage local models. Add <code>--json</code> to anything for scripting.</p></div>
+          <p>Search the corpus, inspect chunks and documents, and manage the local reranker. Add <code>--json</code> to anything for scripting.</p></div>
         <div class="card"><p class="card__meta">// CLOUD CORPUS</p><p class="card__title">Hosted by default</p>
           <p>An <code>axum</code> + Postgres&nbsp;+&nbsp;pgvector service hosts the indexed corpus. It's the compiled-in default — most users never run a server.</p></div>
       </div>
@@ -171,7 +171,7 @@ args = ["mcp", "serve"]'>Copy</button></div>
       <p class="marker">In your AI client</p>
       <h2 class="h-section">13 tools, lazy-loaded</h2>
       <p class="subhead">A hand-rolled MCP server (JSON-RPC over stdio) that starts in under half a second and
-      only loads the models the first time a query needs them. When the corpus rolls its embedding model forward,
+      only loads the reranker the first time a query needs it (query embedding is remote, via VoyageAI). When the corpus rolls its embedding model forward,
       <code>search</code> returns a structured <code>embedding_model_mismatch</code> envelope that tells the client to <code>pull_models</code> — no cryptic failures.</p>
       <div class="cards grid-3" style="margin-top:24px">
         <div class="card"><p class="card__meta">// SEARCH</p><p class="card__title">Find</p>
@@ -179,7 +179,7 @@ args = ["mcp", "serve"]'>Copy</button></div>
         <div class="card"><p class="card__meta">// READ IN CONTEXT</p><p class="card__title">Navigate</p>
           <p><code>get_chunk</code>, <code>get_chunk_next/prev</code>, <code>get_chunk_neighbors</code>, <code>get_chunk_parents</code>, <code>get_document</code>, <code>get_document_full</code>, <code>get_document_chunks</code> — pull exactly as much surrounding context as needed.</p></div>
         <div class="card"><p class="card__meta">// CORPUS &amp; MODELS</p><p class="card__title">Operate</p>
-          <p><code>list_sources</code>, <code>pull_models</code>, <code>status</code>, <code>install_search_skill</code> — enumerate sources, fetch the embedder + reranker on demand, report health, and install the Advanced Search Skill.</p></div>
+          <p><code>list_sources</code>, <code>pull_models</code>, <code>status</code>, <code>install_search_skill</code> — enumerate sources, fetch the reranker on demand, report health, and install the Advanced Search Skill.</p></div>
       </div>
     </div>
   </section>
@@ -231,11 +231,11 @@ args = ["mcp", "serve"]'>Copy</button></div>
 
   <section class="section" id="private">
     <div class="container" data-reveal>
-      <p class="marker">Local &amp; private</p>
-      <h2 class="h-section">Your queries<br>stay yours</h2>
+      <p class="marker">Privacy</p>
+      <h2 class="h-section">Where your<br>text goes</h2>
       <div class="cards grid-3" style="margin-top:24px">
-        <div class="card"><p class="card__title">Local models</p>
-          <p>Embedding (<code>bge-base-en-v1.5</code>) and reranking (<code>bge-reranker-base</code>) run on your machine via fastembed/ONNX — no Python, no GPU, no API key, no account.</p></div>
+        <div class="card"><p class="card__title">Embed remote, rerank local</p>
+          <p>Query embedding uses VoyageAI's <code>voyage-code-3</code> — bring your own key, or let the hosted server proxy it (no account needed; it logs only token counts, never your query text). Reranking runs locally via <code>bge-reranker-base</code> (fastembed/ONNX) — no Python, no GPU.</p></div>
         <div class="card"><p class="card__title">Opt-out telemetry</p>
           <p>Carries no query or chunk content, no tokens, no paths. Opt out three ways: an env var, a config flag, or <code>mnm telemetry disable</code>.</p></div>
         <div class="card"><p class="card__title">Enforced by a canary</p>

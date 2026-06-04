@@ -11,7 +11,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/built_with-Rust_1.91-CE412B" alt="Rust 1.91">
   <img src="https://img.shields.io/badge/interface-MCP_+_CLI_+_HTTP-4C6FFF" alt="MCP + CLI + HTTP">
-  <img src="https://img.shields.io/badge/models-local_%26_offline-2DBfA5" alt="local models">
+  <img src="https://img.shields.io/badge/models-remote_embed_%2B_local_rerank-2DBfA5" alt="models: remote embed, local rerank">
   <img src="https://img.shields.io/badge/telemetry-opt--out_%E2%80%A2_canary--enforced-6E56CF" alt="privacy">
   <img src="https://img.shields.io/badge/status-pre--production-E5A000" alt="pre-production">
 </p>
@@ -34,7 +34,7 @@
 - [Advanced search skills](#advanced-search-skills)
 - [Rate limits and uplift](#rate-limits-and-uplift)
 - [The CLI](#the-cli)
-- [Local models](#local-models)
+- [Models](#models)
 - [The smart chunker](#the-smart-chunker)
 - [The ingestion pipeline](#the-ingestion-pipeline)
 - [Admin & operations](#admin--operations)
@@ -51,7 +51,7 @@
 
 ## Quick start
 
-You need a [Rust toolchain](https://rustup.rs) (1.91+). Everything else — the corpus, the embedding models — is fetched on demand. There is **no database, no API key, and no account** required to search.
+You need a [Rust toolchain](https://rustup.rs) (1.91+) — nothing else. The corpus is hosted, query embedding runs through VoyageAI (proxied by the hosted server), and the only model fetched to your machine is the local reranker, on demand. There is **no database, no API key, and no account** required to search.
 
 ### 1. Build the CLI from source
 
@@ -76,7 +76,7 @@ mnm doctor                                            # verify reachability + mo
 mnm search "how do I write a Compact contract with a sealed ledger?"
 ```
 
-The first search downloads the embedding + reranker models (a one-time ~hundreds-of-MB fetch into your local cache), then returns ranked, source-attributed results — each with a **confidence score** and a one-line provenance breakdown.
+`mnm search` returns ranked, source-attributed results straight away — each with a **confidence score** and a one-line provenance breakdown. Embedding runs through VoyageAI (proxied by the hosted server, so no key is needed), with no local model to download for a basic search. Add `--rerank` and the first reranked query fetches the `bge-reranker-base` cross-encoder once (~hundreds of MB) into your local cache.
 
 ### 3. Install the MCP server into your AI client
 
@@ -354,7 +354,7 @@ mnm models prune --keep bge-reranker-base
 
 ---
 
-![Local models](docs/assets/readme/local-models.png)
+![Models](docs/assets/readme/local-models.png)
 
 ## Models
 
@@ -459,6 +459,8 @@ Roles: **`admin`** (full surface, including user + rate-limit management) and **
 
 An ingest needs a **manifest** (what to ingest and how to attribute it) and a **source root** (where the files are).
 
+> Ingestion embeds every chunk through VoyageAI. For bulk runs, set `VOYAGE_API_KEY` to embed directly against your own account (BYOK); otherwise embedding is proxied by the server and counts against its token budget. Large batches can take tens of seconds — widen the per-request timeout with `--voyage-timeout-secs <N>` (env `VOYAGE_TIMEOUT_SECS`, default 120).
+
 #### Example A — ingest the Midnight docs (Markdown, with a manifest)
 
 Clone the docs, write a manifest that attributes them and maps them to their published URLs, then ingest:
@@ -494,7 +496,7 @@ mnm ingest run \
   --source-root ./midnight-docs
 ```
 
-The CLI chunks every file, embeds locally, uploads in batches, and finalizes the new version — atomically promoting it live when the run completes.
+The CLI chunks every file, embeds each chunk through VoyageAI, uploads in batches, and finalizes the new version — atomically promoting it live when the run completes.
 
 #### Example B — ingest a code repo **without hand-writing a manifest**
 
@@ -677,6 +679,8 @@ url = "https://midnight-manual.midnightntwrk.expert"
 embedding = "voyage-code-3"          # remote VoyageAI embedder
 reranker  = "bge-reranker-base"       # local fastembed cross-encoder
 # cache_dir = "/custom/model/cache"   # optional (reranker cache)
+# voyage_api_key = "…"                # optional — BYOK embedding (else server-proxied)
+# voyage_timeout_secs = 120           # optional — per-request Voyage embed timeout
 
 [telemetry]
 enabled = true
@@ -701,6 +705,9 @@ mnm config edit       # open it in $EDITOR
 | `MIDNIGHT_MANUAL_CONFIG` | Config file path. |
 | `MIDNIGHT_MANUAL_DISABLE_TELEMETRY` | Opt out of telemetry. |
 | `MIDNIGHT_MANUAL_SHOW_ADMIN_CMDS` | Reveal admin subcommands. |
+| `VOYAGE_API_KEY` | Your Voyage key for BYOK embedding (and Voyage rerankers). Unset → query embedding is proxied by the hosted server. |
+| `VOYAGE_TIMEOUT_SECS` | Per-request timeout (seconds) for Voyage embedding calls (default 120). Flag form: `--voyage-timeout-secs`. |
+| `MIDNIGHT_MANUAL_RERANKER` | Reranker catalog id (same as `--reranker`). |
 | `RUST_LOG` | Log verbosity. |
 | `MIDNIGHT_MANUAL_USER_STORE` / `MIDNIGHT_MANUAL_JWT_SECRET` | Server-side: user store + JWT secret. |
 
