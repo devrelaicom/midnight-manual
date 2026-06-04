@@ -271,9 +271,12 @@ async fn search(
     }
 
     // Reject when every query has empty/whitespace-only text (#7): such a
-    // request can never drive the FTS half of hybrid retrieval and signals a
-    // malformed caller.
-    if queries.iter().all(|q| q.text.trim().is_empty()) {
+    // request can never drive the FTS half of retrieval and signals a malformed
+    // caller. Only applies when FTS actually runs (hybrid or fts mode); a
+    // vector-only request has no use for query text.
+    if matches!(req.mode, SearchMode::Hybrid | SearchMode::Fts)
+        && queries.iter().all(|q| q.text.trim().is_empty())
+    {
         return error::into_response(
             CoreError::builder(ErrorCode::InvalidRequest)
                 .message("every query has empty `text`")
@@ -283,6 +286,19 @@ async fn search(
         );
     }
     let limit = req.limit.min(max_limit()).max(1);
+
+    // Validate the filter object at the boundary (registry-backed closed-set
+    // checks, range ordering, semver parseability). A bad filter is a 400.
+    if let Err(e) = req.filters.validate() {
+        return error::into_response(
+            CoreError::builder(ErrorCode::InvalidRequest)
+                .message(format!("invalid filter `{}`: {}", e.facet, e.message))
+                .remediation("see GET /v1/facets for valid facets and values")
+                .context("facet", e.facet)
+                .build(),
+            rid,
+        );
+    }
 
     // Model-mismatch guard. The active corpus model is resolved at boot (and
     // re-resolved after each ingest finalize) into the AppState RwLock; if it's
@@ -302,35 +318,49 @@ async fn search(
             rid,
         );
     };
-    if req.client_embedding_model != cm.wire {
-        return error::into_response(
-            CoreError::builder(ErrorCode::EmbeddingModelMismatch)
-                .message(format!(
-                    "client_embedding_model `{}` does not match corpus model `{}`",
-                    req.client_embedding_model, cm.wire,
-                ))
-                .remediation("re-run `mnm models pull` to fetch the corpus model")
-                .context("corpus_model", cm.wire.clone())
-                .context("client_model", req.client_embedding_model.clone())
-                .build(),
-            rid,
-        );
-    }
 
-    // Vector-dim guard: every query's vector must match the corpus model's dim.
-    for (i, q) in queries.iter().enumerate() {
-        if q.vector.len() != cm.dim {
+    // The vector half (and its model/dim guards) only runs in hybrid/vector
+    // mode. fts mode skips embedding entirely, so `client_embedding_model` and
+    // `vector` are optional and ignored.
+    let needs_vector = matches!(req.mode, SearchMode::Hybrid | SearchMode::Vector);
+    if needs_vector {
+        let Some(client_model) = req.client_embedding_model.as_deref() else {
             return error::into_response(
                 CoreError::builder(ErrorCode::InvalidRequest)
-                    .message(format!(
-                        "queries[{i}].vector has {} dimensions; expected {}",
-                        q.vector.len(),
-                        cm.dim,
-                    ))
-                    .remediation("re-embed with the corpus model (run `mnm models pull`)")
+                    .message("client_embedding_model is required for hybrid/vector mode")
+                    .remediation("supply client_embedding_model, or use mode=fts to skip embedding")
                     .build(),
                 rid,
             );
+        };
+        if client_model != cm.wire {
+            return error::into_response(
+                CoreError::builder(ErrorCode::EmbeddingModelMismatch)
+                    .message(format!(
+                        "client_embedding_model `{client_model}` does not match corpus model `{}`",
+                        cm.wire,
+                    ))
+                    .remediation("re-run `mnm models pull` to fetch the corpus model")
+                    .context("corpus_model", cm.wire.clone())
+                    .context("client_model", client_model.to_owned())
+                    .build(),
+                rid,
+            );
+        }
+        for (i, q) in queries.iter().enumerate() {
+            if q.vector.len() != cm.dim {
+                return error::into_response(
+                    CoreError::builder(ErrorCode::InvalidRequest)
+                        .message(format!(
+                            "queries[{i}].vector has {} dimensions; expected {}",
+                            q.vector.len(),
+                            cm.dim,
+                        ))
+                        .remediation("re-embed with the corpus model (run `mnm models pull`)")
+                        .build(),
+                    rid,
+                );
+            }
         }
     }
 
@@ -391,30 +421,44 @@ async fn search(
         std::collections::HashMap::new();
 
     for (i, q) in distinct.iter().enumerate() {
-        let t0 = std::time::Instant::now();
-        let vector_hits = match vector_search(&state.pool, &q.vector, &req.filters, corpus_model_id)
-            .await
-        {
-            Ok(hits) => hits,
-            Err(e) => {
-                tracing::warn!(request_id = rid, error = %e, query_index = i, "vector search failed");
-                return error::service_unavailable(
-                    format!("vector search failed for query {i}"),
-                    rid,
-                );
-            }
-        };
-        let vector_latency_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        // Per-mode gating: hybrid runs both halves; vector/fts run one each.
+        let run_vector = matches!(req.mode, SearchMode::Hybrid | SearchMode::Vector);
+        let run_fts = matches!(req.mode, SearchMode::Hybrid | SearchMode::Fts);
 
-        let t1 = std::time::Instant::now();
-        let fts_hits = match fts_search(&state.pool, &q.text, &req.filters, corpus_model_id).await {
-            Ok(hits) => hits,
-            Err(e) => {
-                tracing::warn!(request_id = rid, error = %e, query_index = i, "fts search failed");
-                return error::service_unavailable(format!("fts search failed for query {i}"), rid);
-            }
-        };
-        let fts_latency_ms = t1.elapsed().as_secs_f64() * 1000.0;
+        let mut vector_hits: Vec<(Uuid, f64)> = Vec::new();
+        let mut vector_latency_ms = 0.0;
+        if run_vector {
+            let t0 = std::time::Instant::now();
+            vector_hits =
+                match vector_search(&state.pool, &q.vector, &req.filters, corpus_model_id).await {
+                    Ok(hits) => hits,
+                    Err(e) => {
+                        tracing::warn!(request_id = rid, error = %e, query_index = i, "vector search failed");
+                        return error::service_unavailable(
+                            format!("vector search failed for query {i}"),
+                            rid,
+                        );
+                    }
+                };
+            vector_latency_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        }
+
+        let mut fts_hits: Vec<Uuid> = Vec::new();
+        let mut fts_latency_ms = 0.0;
+        if run_fts {
+            let t1 = std::time::Instant::now();
+            fts_hits = match fts_search(&state.pool, &q.text, &req.filters, corpus_model_id).await {
+                Ok(hits) => hits,
+                Err(e) => {
+                    tracing::warn!(request_id = rid, error = %e, query_index = i, "fts search failed");
+                    return error::service_unavailable(
+                        format!("fts search failed for query {i}"),
+                        rid,
+                    );
+                }
+            };
+            fts_latency_ms = t1.elapsed().as_secs_f64() * 1000.0;
+        }
 
         per_query.push(PerQueryRecord {
             query_index: i,
@@ -441,8 +485,14 @@ async fn search(
             matched.entry(*id).or_default().insert(i);
         }
 
-        ranked_lists.push(vector_ids);
-        ranked_lists.push(fts_hits);
+        // Only push the lists for halves that actually ran, so RRF doesn't fuse
+        // empty placeholder lists (which would otherwise be harmless no-ops).
+        if run_vector {
+            ranked_lists.push(vector_ids);
+        }
+        if run_fts {
+            ranked_lists.push(fts_hits);
+        }
     }
 
     // Single RRF pass across all (query, mode) lists. We score the FULL fused
@@ -463,11 +513,19 @@ async fn search(
         }
     };
 
-    // Query-side version constraint (borrows from req.filters), built once.
-    let version_query = req.filters.language_target.as_ref().map(|lt| VersionQuery {
-        name: &lt.name,
-        version_constraint_satisfies: lt.version_constraint_satisfies.as_deref(),
-    });
+    // Query-side version constraint for the scoring boost (borrows from
+    // req.filters), built once from the first `language_target` element. The
+    // full multi-element semver match is applied separately by
+    // `semver_post_match`; this preserves the prior single-target boost.
+    let version_query = req
+        .filters
+        .language_target
+        .any_of
+        .first()
+        .map(|lt| VersionQuery {
+            name: &lt.name,
+            version_constraint_satisfies: lt.version_satisfies.as_deref(),
+        });
     let now = OffsetDateTime::now_utc();
 
     // Score each candidate in fused order. Rows missing (deleted since the
