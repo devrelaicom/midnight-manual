@@ -1,156 +1,203 @@
-//! Search-filter parser + SQL construction (US4 acceptance #11).
+//! Per-facet match model for `POST /v1/search` filters (see
+//! docs/superpowers/specs/2026-06-04-search-facets-query-modes-design.md).
 //!
-//! Filters are an object on `POST /v1/search`:
-//! ```json
-//! {
-//!   "attribution": ["foundation", "partner"],
-//!   "verified": true,
-//!   "content_type": ["tutorial"],
-//!   "source_slug": ["midnight-docs"],
-//!   "language_target": { "name": "compact", "version_constraint_satisfies": "0.31" },
-//!   "sdk_dependency": [{ "kind": "npm", "name": "@midnight-ntwrk/midnight-js" }],
-//!   "package": [{ "kind": "rust", "name": "midnight-foo" }]
-//! }
-//! ```
-//!
-//! Semantics: AND across keys, OR within each key's array. The
-//! `language_target.version_constraint_satisfies` field is handled at the
-//! application layer (semver crate) since Postgres has no native semver type.
+//! Every facet is one of: a set-match (`{any_of, none_of}`) over strings or
+//! structured elements, a bare bool, or a range. Combination is AND across
+//! facets, OR within `any_of`, exclude `none_of`. The semver-bearing facets
+//! (`language_target`, `sdk_dependency`) carry a `version_satisfies` field
+//! evaluated in the Rust post-match (a later task), not SQL.
 
-use mn_core::provenance::Provenance;
-use mn_core::scoring::parse_version;
 use serde::{Deserialize, Serialize};
+use time::Date;
 
-/// Top-level filter object.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SearchFilters {
-    /// Whitelist of `document.provenance.attribution` values.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub attribution: Vec<String>,
-    /// If set, restrict to documents with `verified` matching this value.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub verified: Option<bool>,
-    /// Whitelist of content-type tags.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub content_type: Vec<String>,
-    /// Whitelist of source slugs.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub source_slug: Vec<String>,
-    /// Optional language-target constraint.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub language_target: Option<LanguageTargetFilter>,
-    /// Whitelist of SDK dependencies.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub sdk_dependency: Vec<SdkDependencyFilter>,
-    /// Whitelist of packages.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub package: Vec<PackageFilter>,
+/// Set membership for one facet: OR within `any_of`, exclude `none_of`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetMatch<T> {
+    /// Values that satisfy the facet; empty means "no positive constraint".
+    #[serde(default = "Vec::new", skip_serializing_if = "Vec::is_empty")]
+    pub any_of: Vec<T>,
+    /// Values that disqualify a row regardless of `any_of`.
+    #[serde(default = "Vec::new", skip_serializing_if = "Vec::is_empty")]
+    pub none_of: Vec<T>,
 }
 
-/// One language-target filter, optionally with a version constraint.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LanguageTargetFilter {
-    /// Language name (e.g. `"compact"`).
-    pub name: String,
-    /// Optional version constraint: only documents whose
-    /// `provenance.language_targets` include a target whose `version_constraint`
-    /// matches this value satisfy the filter.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub version_constraint_satisfies: Option<String>,
+// Hand-written so the empty `SetMatch` requires no `T: Default` bound — both
+// fields are `Vec<T>`, which is `Default` for any `T`. `#[derive(Default)]`
+// would (incorrectly) add `T: Default`, which the element matchers below
+// (`PackageMatch`, `SdkDependencyMatch`, ...) cannot satisfy.
+impl<T> Default for SetMatch<T> {
+    fn default() -> Self {
+        Self {
+            any_of: Vec::new(),
+            none_of: Vec::new(),
+        }
+    }
 }
 
-/// One SDK-dependency filter.
+impl<T> SetMatch<T> {
+    /// True when neither `any_of` nor `none_of` constrains anything.
+    // Kept non-`const` so the public API stays uniform with the
+    // necessarily-non-const `SearchFilters::is_empty`; the spec fixes these
+    // signatures.
+    #[allow(clippy::missing_const_for_fn)]
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.any_of.is_empty() && self.none_of.is_empty()
+    }
+}
+
+/// One `symbol` element matcher (`chunk.symbol_path` JSONB containment).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SdkDependencyFilter {
-    /// Package-manager kind (e.g. `"npm"`, `"cargo"`).
+#[serde(deny_unknown_fields)]
+pub struct SymbolMatch {
+    /// Symbol kind to match (e.g. `"circuit"`); `None` matches any kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// Symbol name to match; `None` matches any name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+/// One `package` element matcher (`chunk -> document -> package`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PackageMatch {
+    /// Package-manager kind (e.g. `"cargo"`, `"npm"`).
     pub kind: String,
     /// Canonical package name.
     pub name: String,
-    /// Optional concrete version that the chunk's declared
-    /// `provenance.sdk_dependencies[*].version_constraint` must be satisfied by
-    /// (semver, evaluated server-side per FR-033). `None` means name-only.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub version_constraint_satisfies: Option<String>,
 }
 
-/// One package filter (matches `chunk -> document -> package` membership).
+/// One `language_target` element (semver evaluated in the Rust post-match).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PackageFilter {
-    /// Package kind.
-    pub kind: String,
-    /// Package name.
+#[serde(deny_unknown_fields)]
+pub struct LanguageTargetMatch {
+    /// Language-target name (e.g. `"compact"`).
     pub name: String,
+    /// Optional semver requirement evaluated against the target's constraint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version_satisfies: Option<String>,
+}
+
+/// One `sdk_dependency` element (semver evaluated in the Rust post-match).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SdkDependencyMatch {
+    /// Package-manager kind (e.g. `"npm"`, `"cargo"`).
+    pub kind: String,
+    /// Canonical dependency name.
+    pub name: String,
+    /// Optional semver requirement evaluated against the dependency's constraint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version_satisfies: Option<String>,
+}
+
+/// `{after?, before?}` inclusive temporal range (ISO dates).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TemporalRange {
+    /// Inclusive lower bound; `None` leaves the range open below.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<Date>,
+    /// Inclusive upper bound; `None` leaves the range open above.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<Date>,
+}
+
+/// `{min?, max?}` inclusive numeric range.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NumericRange {
+    /// Inclusive lower bound; `None` leaves the range open below.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<i64>,
+    /// Inclusive upper bound; `None` leaves the range open above.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<i64>,
+}
+
+/// Top-level filter object. Every field defaults to empty/absent so a missing
+/// `filters` key means "no constraints". `deny_unknown_fields` makes a
+/// misspelled facet a hard error instead of a silent drop.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SearchFilters {
+    /// `document.provenance.attribution` set-match.
+    #[serde(default, skip_serializing_if = "SetMatch::is_empty")]
+    pub attribution: SetMatch<String>,
+    /// Content-type set-match.
+    #[serde(default, skip_serializing_if = "SetMatch::is_empty")]
+    pub content_type: SetMatch<String>,
+    /// Chunk-kind set-match (e.g. `"code"`, `"prose"`).
+    #[serde(default, skip_serializing_if = "SetMatch::is_empty")]
+    pub kind: SetMatch<String>,
+    /// Source-kind set-match.
+    #[serde(default, skip_serializing_if = "SetMatch::is_empty")]
+    pub source_kind: SetMatch<String>,
+    /// Source-slug set-match.
+    #[serde(default, skip_serializing_if = "SetMatch::is_empty")]
+    pub source_slug: SetMatch<String>,
+    /// Programming-language set-match (e.g. `"compact"`).
+    #[serde(default, skip_serializing_if = "SetMatch::is_empty")]
+    pub language: SetMatch<String>,
+    /// Tag set-match.
+    #[serde(default, skip_serializing_if = "SetMatch::is_empty")]
+    pub tags: SetMatch<String>,
+    /// Heading-path set-match.
+    #[serde(default, skip_serializing_if = "SetMatch::is_empty")]
+    pub heading_path: SetMatch<String>,
+    /// Symbol set-match over `{kind?, name?}` elements.
+    #[serde(default, skip_serializing_if = "SetMatch::is_empty")]
+    pub symbol: SetMatch<SymbolMatch>,
+    /// Package set-match over `{kind, name}` elements.
+    #[serde(default, skip_serializing_if = "SetMatch::is_empty")]
+    pub package: SetMatch<PackageMatch>,
+    /// Restrict to documents whose `verified` flag equals this value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified: Option<bool>,
+    /// Restrict to chunks whose `deprecated` flag equals this value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deprecated: Option<bool>,
+    /// Language-target set-match (semver in the Rust post-match).
+    #[serde(default, skip_serializing_if = "SetMatch::is_empty")]
+    pub language_target: SetMatch<LanguageTargetMatch>,
+    /// SDK-dependency set-match (semver in the Rust post-match).
+    #[serde(default, skip_serializing_if = "SetMatch::is_empty")]
+    pub sdk_dependency: SetMatch<SdkDependencyMatch>,
+    /// Ingestion-timestamp range.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ingested_at: Option<TemporalRange>,
+    /// Upstream source-modified-timestamp range.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_modified_at: Option<TemporalRange>,
+    /// Chunk token-count range.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_count: Option<NumericRange>,
 }
 
 impl SearchFilters {
-    /// `true` when no filters at all are set. Lets the SQL builder short-
-    /// circuit and skip the WHERE-clause additions entirely.
+    /// True when no facet constrains anything (lets the SQL builder skip work).
     #[must_use]
-    pub const fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.attribution.is_empty()
-            && self.verified.is_none()
             && self.content_type.is_empty()
+            && self.kind.is_empty()
+            && self.source_kind.is_empty()
             && self.source_slug.is_empty()
-            && self.language_target.is_none()
-            && self.sdk_dependency.is_empty()
+            && self.language.is_empty()
+            && self.tags.is_empty()
+            && self.heading_path.is_empty()
+            && self.symbol.is_empty()
             && self.package.is_empty()
+            && self.verified.is_none()
+            && self.deprecated.is_none()
+            && self.language_target.is_empty()
+            && self.sdk_dependency.is_empty()
+            && self.ingested_at.is_none()
+            && self.source_modified_at.is_none()
+            && self.token_count.is_none()
     }
-
-    /// Evaluate the filter dimensions that Postgres can't express — the semver
-    /// `version_constraint_satisfies` refinements on `language_target` and
-    /// `sdk_dependency` (FR-033) — against a chunk's provenance.
-    ///
-    /// The scalar/array dimensions (`attribution`, `verified`, `content_type`,
-    /// `source_slug`, `package`) are applied in SQL during candidate retrieval;
-    /// this method handles only what remains so a fully-matching chunk passes
-    /// both layers. Semantics: AND across keys, OR within each key's array.
-    #[must_use]
-    pub fn semver_post_match(&self, provenance: &Provenance) -> bool {
-        if let Some(lt) = &self.language_target {
-            let matched = provenance.language_targets.iter().any(|t| {
-                t.name.eq_ignore_ascii_case(&lt.name)
-                    && version_satisfies(
-                        lt.version_constraint_satisfies.as_deref(),
-                        t.version_constraint.as_deref(),
-                    )
-            });
-            if !matched {
-                return false;
-            }
-        }
-        if !self.sdk_dependency.is_empty() {
-            let matched = self.sdk_dependency.iter().any(|dep| {
-                provenance.sdk_dependencies.iter().any(|d| {
-                    d.kind.eq_ignore_ascii_case(&dep.kind)
-                        && d.name == dep.name
-                        && version_satisfies(
-                            dep.version_constraint_satisfies.as_deref(),
-                            d.version_constraint.as_deref(),
-                        )
-                })
-            });
-            if !matched {
-                return false;
-            }
-        }
-        true
-    }
-}
-
-/// Does a concrete requested version satisfy a chunk's declared version
-/// constraint? `requested = None` (name-only filter) always passes. A chunk
-/// with no constraint applies to every version, so it passes any request. A
-/// malformed requested version is treated leniently (name-only). A chunk
-/// constraint that fails to parse never satisfies.
-fn version_satisfies(requested: Option<&str>, chunk_constraint: Option<&str>) -> bool {
-    let Some(req) = requested else {
-        return true;
-    };
-    let Some(candidate) = parse_version(req) else {
-        return true;
-    };
-    chunk_constraint
-        .is_none_or(|c| semver::VersionReq::parse(c).is_ok_and(|r| r.matches(&candidate)))
 }
 
 #[cfg(test)]
@@ -158,130 +205,49 @@ mod tests {
     use super::*;
 
     #[test]
-    fn empty_default() {
+    fn full_shape_round_trips() {
+        let json = serde_json::json!({
+            "kind":        { "any_of": ["code"] },
+            "language":    { "any_of": ["compact"], "none_of": ["typescript"] },
+            "symbol":      { "any_of": [{ "kind": "circuit" }, { "name": "deployContract" }] },
+            "deprecated":  false,
+            "ingested_at": { "after": "2026-05-01" },
+            "token_count": { "min": 50 }
+        });
+        let f: SearchFilters = serde_json::from_value(json).unwrap();
+        assert_eq!(f.kind.any_of, vec!["code".to_owned()]);
+        assert_eq!(f.language.none_of, vec!["typescript".to_owned()]);
+        assert_eq!(f.symbol.any_of.len(), 2);
+        assert_eq!(f.deprecated, Some(false));
+        assert_eq!(f.token_count.as_ref().unwrap().min, Some(50));
+        // serialize → deserialize identity
+        let back: SearchFilters =
+            serde_json::from_value(serde_json::to_value(&f).unwrap()).unwrap();
+        assert_eq!(f, back);
+    }
+
+    #[test]
+    fn default_is_empty() {
         assert!(SearchFilters::default().is_empty());
     }
 
     #[test]
-    fn round_trips_through_json() {
-        let f = SearchFilters {
-            attribution: vec!["foundation".into(), "partner".into()],
-            verified: Some(true),
-            content_type: vec!["tutorial".into()],
-            source_slug: vec!["midnight-docs".into()],
-            language_target: Some(LanguageTargetFilter {
-                name: "compact".into(),
-                version_constraint_satisfies: Some("0.31".into()),
-            }),
-            sdk_dependency: vec![SdkDependencyFilter {
-                kind: "npm".into(),
-                name: "@midnight-ntwrk/midnight-js".into(),
-                version_constraint_satisfies: Some("1.4.0".into()),
-            }],
-            package: vec![PackageFilter {
-                kind: "rust".into(),
-                name: "midnight-foo".into(),
-            }],
-        };
-        let v = serde_json::to_value(&f).unwrap();
-        let back: SearchFilters = serde_json::from_value(v).unwrap();
-        assert_eq!(f, back);
-        assert!(!back.is_empty());
+    fn empty_arrays_elided_on_serialize() {
+        let v = serde_json::to_value(SearchFilters::default()).unwrap();
+        assert!(v.as_object().unwrap().is_empty(), "default must serialize to `{{}}`");
     }
 
     #[test]
-    fn empty_arrays_are_elided_on_serialize() {
-        let f = SearchFilters::default();
-        let v = serde_json::to_value(f).unwrap();
-        assert!(v.get("attribution").is_none());
-        assert!(v.get("source_slug").is_none());
-    }
-
-    use mn_core::provenance::{LanguageTarget, Provenance, SdkDependency};
-
-    fn prov_with_compact(constraint: Option<&str>) -> Provenance {
-        Provenance {
-            language_targets: vec![LanguageTarget {
-                name: "compact".into(),
-                version_constraint: constraint.map(str::to_owned),
-            }],
-            ..Provenance::default()
-        }
-    }
-
-    #[test]
-    fn empty_filter_post_matches_anything() {
-        assert!(SearchFilters::default().semver_post_match(&Provenance::default()));
-    }
-
-    #[test]
-    fn language_target_name_only_requires_matching_target() {
-        let f = SearchFilters {
-            language_target: Some(LanguageTargetFilter {
-                name: "compact".into(),
-                version_constraint_satisfies: None,
-            }),
-            ..Default::default()
-        };
-        assert!(f.semver_post_match(&prov_with_compact(Some(">=0.23"))));
-        // A chunk with no compact target fails the name filter.
-        assert!(!f.semver_post_match(&Provenance::default()));
-    }
-
-    #[test]
-    fn language_target_version_satisfies_and_misses() {
-        let f = |v: &str| SearchFilters {
-            language_target: Some(LanguageTargetFilter {
-                name: "compact".into(),
-                version_constraint_satisfies: Some(v.to_owned()),
-            }),
-            ..Default::default()
-        };
-        // chunk targets compact >=0.23
-        let prov = prov_with_compact(Some(">=0.23"));
-        assert!(f("0.31").semver_post_match(&prov), "0.31 satisfies >=0.23");
-        assert!(!f("0.10").semver_post_match(&prov), "0.10 misses >=0.23");
-        // chunk with no constraint applies to all versions.
-        assert!(f("0.10").semver_post_match(&prov_with_compact(None)));
-    }
-
-    #[test]
-    fn sdk_dependency_is_or_within_array() {
-        let prov = Provenance {
-            sdk_dependencies: vec![SdkDependency {
-                kind: "npm".into(),
-                name: "@midnight-ntwrk/midnight-js".into(),
-                version_constraint: Some(">=1.0.0".into()),
-            }],
-            ..Provenance::default()
-        };
-        let f = SearchFilters {
-            sdk_dependency: vec![
-                SdkDependencyFilter {
-                    kind: "cargo".into(),
-                    name: "nope".into(),
-                    version_constraint_satisfies: None,
-                },
-                SdkDependencyFilter {
-                    kind: "npm".into(),
-                    name: "@midnight-ntwrk/midnight-js".into(),
-                    version_constraint_satisfies: Some("1.4.0".into()),
-                },
-            ],
-            ..Default::default()
-        };
-        // Second filter entry matches → OR within the array passes.
-        assert!(f.semver_post_match(&prov));
-
-        // A version that the chunk constraint can't satisfy fails.
-        let f_miss = SearchFilters {
-            sdk_dependency: vec![SdkDependencyFilter {
-                kind: "npm".into(),
-                name: "@midnight-ntwrk/midnight-js".into(),
-                version_constraint_satisfies: Some("0.9.0".into()),
-            }],
-            ..Default::default()
-        };
-        assert!(!f_miss.semver_post_match(&prov));
+    fn rejects_unknown_nested_field() {
+        // A typo in a nested matcher must be a hard error, not a silent vacuous
+        // match — `deny_unknown_fields` applies one level down, not just at the
+        // top level. `knid` (a misspelled `kind`) would otherwise deserialize
+        // into a match-anything `SymbolMatch`.
+        let typo_element = serde_json::json!({ "symbol": { "any_of": [{ "knid": "circuit" }] } });
+        assert!(serde_json::from_value::<SearchFilters>(typo_element).is_err());
+        let typo_set = serde_json::json!({ "language": { "any_of": ["x"], "nope": 1 } });
+        assert!(serde_json::from_value::<SearchFilters>(typo_set).is_err());
+        let typo_range = serde_json::json!({ "token_count": { "min": 1, "maxx": 9 } });
+        assert!(serde_json::from_value::<SearchFilters>(typo_range).is_err());
     }
 }
