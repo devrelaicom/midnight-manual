@@ -45,29 +45,13 @@
           </div>
         </div>
         <div class="engine" aria-hidden="true">
-          <!-- Exploded "Retrieval Engine": discs along a diagonal axis with mono callouts.
-               Colour/font come from CSS (.engine svg / .engine text), NOT presentation attributes. -->
-          <svg viewBox="0 0 560 360" width="100%">
-            <line data-axis x1="50" y1="300" x2="320" y2="70" stroke-width="1" stroke-dasharray="3 5"/>
-            <g stroke-width="1.6">
-              <g data-part><ellipse cx="90" cy="270" rx="56" ry="18"/><ellipse cx="90" cy="262" rx="56" ry="18" opacity=".5"/></g>
-              <g data-part><ellipse cx="165" cy="216" rx="56" ry="18"/><ellipse cx="165" cy="208" rx="56" ry="18" opacity=".5"/></g>
-              <g data-part><ellipse cx="240" cy="162" rx="56" ry="18"/><ellipse cx="240" cy="154" rx="56" ry="18" opacity=".5"/></g>
-              <g data-part><ellipse cx="315" cy="108" rx="56" ry="18"/><ellipse cx="315" cy="100" rx="56" ry="18" opacity=".5"/></g>
-            </g>
-            <g stroke-width="1" opacity=".55">
-              <line data-leader x1="146" y1="270" x2="350" y2="270"/>
-              <line data-leader x1="221" y1="216" x2="350" y2="216"/>
-              <line data-leader x1="296" y1="162" x2="350" y2="162"/>
-              <line data-leader x1="371" y1="108" x2="380" y2="108"/>
-            </g>
-            <g>
-              <text x="356" y="274">embed</text>
-              <text x="356" y="220">hybrid · lexical+vector</text>
-              <text x="356" y="166">RRF · k=60</text>
-              <text x="386" y="112">rerank → confidence</text>
-            </g>
-          </svg>
+          <!-- Hero illustration: static placeholder for the looping "Midnight Manual Server"
+               rotation video. To swap the video in later, replace the <img> below with:
+               <video class="engine__img" src="img/hero-server.mp4" poster="img/hero-server.jpg"
+                      width="1024" height="1024" autoplay loop muted playsinline></video>
+               (gate autoplay on prefers-reduced-motion in main.js if you want the still for those users). -->
+          <img class="engine__img" src="img/hero-server.jpg" width="1024" height="1024"
+               alt="" loading="eager" decoding="async">
         </div>
       </div>
     </div>

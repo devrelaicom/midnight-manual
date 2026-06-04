@@ -43,3 +43,7 @@ discovery/.claude/
 
 # Brainstorming visual-companion scratch (mockups; not part of the project)
 .superpowers/
+
+# Hero illustration drafts (exploration renders + clean frames; source material for the
+# rotation video, kept locally but not committed). The chosen frame lives at site/img/hero-server.jpg.
+site/img/draft/
