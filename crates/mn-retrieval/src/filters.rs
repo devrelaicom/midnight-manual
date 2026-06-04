@@ -7,8 +7,11 @@
 //! (`language_target`, `sdk_dependency`) carry a `version_satisfies` field
 //! evaluated in the Rust post-match (a later task), not SQL.
 
+use mn_core::scoring::parse_version;
 use serde::{Deserialize, Serialize};
 use time::Date;
+
+use crate::facets;
 
 /// Set membership for one facet: OR within `any_of`, exclude `none_of`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -200,6 +203,116 @@ impl SearchFilters {
     }
 }
 
+/// A filter validation failure, naming the offending facet. The server maps
+/// this to a 400 `invalid_request` with a remediation pointing at `/v1/facets`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FilterError {
+    /// The wire key of the offending facet (matches a `/v1/facets` key).
+    pub facet: String,
+    /// Human-readable description of the violation.
+    pub message: String,
+}
+
+impl FilterError {
+    fn new(facet: &str, message: impl Into<String>) -> Self {
+        Self {
+            facet: facet.to_owned(),
+            message: message.into(),
+        }
+    }
+}
+
+impl SearchFilters {
+    /// Validate every set facet against the registry (closed-set values +
+    /// negatability), ranges for ordering, and semver constraints for
+    /// parseability. Returns the first violation found.
+    ///
+    /// # Errors
+    /// Returns [`FilterError`] naming the offending facet on any violation.
+    pub fn validate(&self) -> Result<(), FilterError> {
+        check_string_set("attribution", &self.attribution)?;
+        check_string_set("content_type", &self.content_type)?;
+        check_string_set("kind", &self.kind)?;
+        check_string_set("source_kind", &self.source_kind)?;
+        check_string_set("source_slug", &self.source_slug)?;
+        check_string_set("language", &self.language)?;
+        check_string_set("tags", &self.tags)?;
+        check_string_set("heading_path", &self.heading_path)?;
+        check_negatable("symbol", &self.symbol)?;
+        check_negatable("package", &self.package)?;
+        // language_target / sdk_dependency: not negatable + semver parseable.
+        check_negatable("language_target", &self.language_target)?;
+        check_negatable("sdk_dependency", &self.sdk_dependency)?;
+        for lt in &self.language_target.any_of {
+            check_semver("language_target", lt.version_satisfies.as_deref())?;
+        }
+        for dep in &self.sdk_dependency.any_of {
+            check_semver("sdk_dependency", dep.version_satisfies.as_deref())?;
+        }
+        check_numeric_range("token_count", self.token_count.as_ref())?;
+        check_temporal_range("ingested_at", self.ingested_at.as_ref())?;
+        check_temporal_range("source_modified_at", self.source_modified_at.as_ref())?;
+        Ok(())
+    }
+}
+
+fn check_string_set(key: &str, set: &SetMatch<String>) -> Result<(), FilterError> {
+    // Negatability is the same rule for every set facet, so defer to the shared
+    // check rather than duplicate it here.
+    check_negatable(key, set)?;
+    let desc = facets::lookup(key).expect("registry key");
+    if let Some(allowed) = desc.closed_values {
+        for v in set.any_of.iter().chain(set.none_of.iter()) {
+            if !allowed.contains(&v.as_str()) {
+                return Err(FilterError::new(
+                    key,
+                    format!("`{v}` is not a valid `{key}` value (allowed: {})", allowed.join(", ")),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn check_negatable<T>(key: &str, set: &SetMatch<T>) -> Result<(), FilterError> {
+    let desc = facets::lookup(key).expect("registry key");
+    if !desc.negatable && !set.none_of.is_empty() {
+        return Err(FilterError::new(key, format!("`{key}` does not support `none_of`")));
+    }
+    Ok(())
+}
+
+fn check_semver(key: &str, constraint: Option<&str>) -> Result<(), FilterError> {
+    if let Some(c) = constraint {
+        if parse_version(c).is_none() {
+            return Err(FilterError::new(key, format!("`{c}` is not a valid version")));
+        }
+    }
+    Ok(())
+}
+
+fn check_numeric_range(key: &str, r: Option<&NumericRange>) -> Result<(), FilterError> {
+    if let Some(r) = r {
+        if let (Some(min), Some(max)) = (r.min, r.max) {
+            if min > max {
+                return Err(FilterError::new(key, "min must be <= max"));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn check_temporal_range(key: &str, r: Option<&TemporalRange>) -> Result<(), FilterError> {
+    if let Some(r) = r {
+        if let (Some(after), Some(before)) = (r.after, r.before) {
+            if after > before {
+                return Err(FilterError::new(key, "after must be <= before"));
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -249,5 +362,89 @@ mod tests {
         assert!(serde_json::from_value::<SearchFilters>(typo_set).is_err());
         let typo_range = serde_json::json!({ "token_count": { "min": 1, "maxx": 9 } });
         assert!(serde_json::from_value::<SearchFilters>(typo_range).is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_closed_enum_value() {
+        let f = SearchFilters {
+            kind: SetMatch {
+                any_of: vec!["binary".to_owned()],
+                none_of: vec![],
+            },
+            ..Default::default()
+        };
+        let err = f.validate().unwrap_err();
+        assert_eq!(err.facet, "kind");
+        assert!(err.message.contains("binary"));
+    }
+
+    #[test]
+    fn rejects_negation_on_non_negatable_facet() {
+        let f = SearchFilters {
+            language_target: SetMatch {
+                any_of: vec![],
+                none_of: vec![LanguageTargetMatch {
+                    name: "compact".into(),
+                    version_satisfies: None,
+                }],
+            },
+            ..Default::default()
+        };
+        let err = f.validate().unwrap_err();
+        assert_eq!(err.facet, "language_target");
+    }
+
+    #[test]
+    fn rejects_contradictory_numeric_range() {
+        let f = SearchFilters {
+            token_count: Some(NumericRange { min: Some(100), max: Some(10) }),
+            ..Default::default()
+        };
+        assert!(f.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_contradictory_temporal_range() {
+        let after = Date::from_calendar_date(2026, time::Month::June, 1).unwrap();
+        let before = Date::from_calendar_date(2026, time::Month::January, 1).unwrap();
+        let f = SearchFilters {
+            ingested_at: Some(TemporalRange {
+                after: Some(after),
+                before: Some(before),
+            }),
+            ..Default::default()
+        };
+        assert!(f.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_malformed_version_satisfies() {
+        let f = SearchFilters {
+            language_target: SetMatch {
+                any_of: vec![LanguageTargetMatch {
+                    name: "compact".into(),
+                    version_satisfies: Some("not-a-version".into()),
+                }],
+                none_of: vec![],
+            },
+            ..Default::default()
+        };
+        assert!(f.validate().is_err());
+    }
+
+    #[test]
+    fn valid_filter_passes() {
+        let f = SearchFilters {
+            kind: SetMatch {
+                any_of: vec!["code".into()],
+                none_of: vec![],
+            },
+            language: SetMatch {
+                any_of: vec!["compact".into()],
+                none_of: vec!["typescript".into()],
+            },
+            ..Default::default()
+        };
+        assert!(f.validate().is_ok());
     }
 }
