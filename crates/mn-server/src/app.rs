@@ -51,6 +51,10 @@ pub struct AppState {
     /// On-disk model-cache directory, used by the embeddings handler's
     /// best-effort token pre-count (to locate a tokenizer when one is present).
     pub cache_dir: std::path::PathBuf,
+    /// Shared TTL cache for the `/v1/facets` response (see `routes::facets`).
+    /// Held per-app (not a module-global static) so each constructed app —
+    /// including each integration test's app — gets an isolated cache.
+    pub facets_cache: crate::routes::facets::FacetsCache,
 }
 
 /// Resolved auth subsystem state — set once at boot when both the user
@@ -238,6 +242,7 @@ pub fn build_with_limiter(
         voyage,
         token_limiter,
         cache_dir,
+        facets_cache: crate::routes::facets::new_cache(),
     };
 
     Ok(Router::new()
