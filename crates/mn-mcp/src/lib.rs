@@ -12,6 +12,10 @@
 //! - Local install: `install_search_skill` (writes the advanced-search
 //!   `SKILL.md` into the user's AI harness(es)).
 
+// The `search` tool's `input_schema` is one deeply nested `serde_json::json!`
+// literal (typed per-facet `filters`), so its macro expansion exceeds the
+// default 128-frame recursion limit.
+#![recursion_limit = "256"]
 #![doc(html_root_url = "https://docs.rs/mn-mcp/0.1.0")]
 #![allow(
     clippy::doc_markdown,

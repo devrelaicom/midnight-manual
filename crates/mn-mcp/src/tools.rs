@@ -48,7 +48,7 @@ pub fn list() -> ToolsListResult {
             ToolDescription {
                 name: "search",
                 description:
-                    "Hybrid (FTS + vector) retrieval over the Midnight corpus, with optional cross-encoder reranking and trust-aware confidence scoring. Provide the single-query `{query, vector}` form, or a `queries` array of 1-10 `{text, vector}` pairs that RRF fuses across. The caller embeds each text. Rate-limit cost is max(1, distinct queries) tokens (D25).\n\nPatterns (full worked examples in docs/cookbook/query-enhancement.md):\n- hyde: send the question plus a hypothetical answer as a second query, e.g. queries=[\"<the user's question>\", \"<a 1-2 sentence hypothetical answer the agent drafts>\"]. Lifts recall when the question is short or jargon-light.\n- multi_query: send 2-3 paraphrases varying vocabulary and breadth, e.g. queries=[\"compile a contract\", \"build source into a deployable artifact\", \"smart-contract build step\"]. Helps when synonyms matter.\n- step_back: send the question plus a more abstract framing, e.g. queries=[\"why did this specific call fail?\", \"how does the platform validate calls?\"]. Helps when the question is over-specific.",
+                    "Hybrid (FTS + vector) retrieval over the Midnight corpus, with optional cross-encoder reranking and trust-aware confidence scoring. Provide the single-query `{query, vector}` form, or a `queries` array of 1-10 `{text, vector}` pairs that RRF fuses across. The caller embeds each text (except in `fts` mode). Rate-limit cost is max(1, distinct queries) tokens (D25).\n\nPatterns (full worked examples in docs/cookbook/query-enhancement.md):\n- hyde: send the question plus a hypothetical answer as a second query, e.g. queries=[\"<the user's question>\", \"<a 1-2 sentence hypothetical answer the agent drafts>\"]. Lifts recall when the question is short or jargon-light.\n- multi_query: send 2-3 paraphrases varying vocabulary and breadth, e.g. queries=[\"compile a contract\", \"build source into a deployable artifact\", \"smart-contract build step\"]. Helps when synonyms matter.\n- step_back: send the question plus a more abstract framing, e.g. queries=[\"why did this specific call fail?\", \"how does the platform validate calls?\"]. Helps when the question is over-specific.",
                 input_schema: search_input_schema(),
             },
             ToolDescription {
@@ -236,10 +236,20 @@ fn search_input_schema() -> serde_json::Value {
                     "deprecated": { "type": "boolean" },
                     "symbol": { "type": "object", "properties": { "any_of": { "type": "array", "items": {
                         "type": "object", "properties": { "kind": { "type": "string", "enum": facets::SYMBOL_KIND_VALUES }, "name": { "type": "string" } },
+                        "additionalProperties": false } }, "none_of": { "type": "array", "items": {
+                        "type": "object", "properties": { "kind": { "type": "string", "enum": facets::SYMBOL_KIND_VALUES }, "name": { "type": "string" } },
                         "additionalProperties": false } } }, "additionalProperties": false },
                     "package": { "type": "object", "properties": { "any_of": { "type": "array", "items": {
                         "type": "object", "required": ["kind","name"], "properties": { "kind": { "type": "string", "enum": facets::PACKAGE_KIND_VALUES }, "name": { "type": "string" } },
+                        "additionalProperties": false } }, "none_of": { "type": "array", "items": {
+                        "type": "object", "required": ["kind","name"], "properties": { "kind": { "type": "string", "enum": facets::PACKAGE_KIND_VALUES }, "name": { "type": "string" } },
                         "additionalProperties": false } } }, "additionalProperties": false },
+                    "language_target": { "type": "object", "additionalProperties": false, "properties": { "any_of": { "type": "array", "items": {
+                        "type": "object", "required": ["name"], "additionalProperties": false,
+                        "properties": { "name": { "type": "string" }, "version_satisfies": { "type": "string" } } } } } },
+                    "sdk_dependency": { "type": "object", "additionalProperties": false, "properties": { "any_of": { "type": "array", "items": {
+                        "type": "object", "required": ["kind", "name"], "additionalProperties": false,
+                        "properties": { "kind": { "type": "string" }, "name": { "type": "string" }, "version_satisfies": { "type": "string" } } } } } },
                     "ingested_at": { "type": "object", "properties": { "after": { "type": "string", "format": "date" }, "before": { "type": "string", "format": "date" } }, "additionalProperties": false },
                     "source_modified_at": { "type": "object", "properties": { "after": { "type": "string", "format": "date" }, "before": { "type": "string", "format": "date" } }, "additionalProperties": false },
                     "token_count": { "type": "object", "properties": { "min": { "type": "integer" }, "max": { "type": "integer" } }, "additionalProperties": false }
@@ -552,10 +562,11 @@ const RERANK_FETCH: u32 = 50;
 
 /// Dispatch the `search` tool.
 ///
-/// Embeds each query locally, posts the resulting `{text, vector}` pairs to
-/// the cloud's `/v1/search`, optionally reranks the returned chunks against
-/// the first query, and truncates to the caller's `limit`. When rerank is on
-/// each returned result gains a `rerank_score` field.
+/// Embeds each query locally (except in `fts` mode, which skips embedding
+/// entirely), posts the resulting `{text, vector}` pairs to the cloud's
+/// `/v1/search`, optionally reranks the returned chunks against the first
+/// query, and truncates to the caller's `limit`. When rerank is on each
+/// returned result gains a `rerank_score` field.
 ///
 /// # Errors
 ///
@@ -576,24 +587,37 @@ pub async fn run_search(
     let voyage_key = mn_core::config::resolve_voyage_api_key(None, &core_cfg.models, &cfg_env);
     let rerank_sel = resolve_reranker_selection(&core_cfg.models, &cfg_env);
 
-    // Embed all queries via VoyageAI — either BYOK (direct) or through the
-    // cloud server's /v1/embeddings proxy. There is no local embedder; the only
-    // local model is the reranker (loaded lazily in `rerank_results`).
-    let vectors =
-        embed_queries(&parsed.queries, &core_cfg.models, voyage_key.as_deref(), cfg, cloud).await?;
-    let pairs: Vec<QueryPair> = parsed
-        .queries
-        .iter()
-        .zip(vectors.into_iter())
-        .map(|(text, vector)| QueryPair { text: text.clone(), vector })
-        .collect();
-
-    // Fetch the corpus's active model wire id so the search request is labelled
-    // with the canonical {name}@{revision} the server expects.
-    let client_embedding_model = cloud
-        .fetch_active_model()
-        .await
-        .map_err(|e| SearchError::Cloud(e.to_string()))?;
+    // fts mode skips embedding entirely (its whole point): send text-only query
+    // pairs with empty vectors and no model label — the cloud ignores both when
+    // mode=fts (needs_vector is false server-side). hybrid/vector embed locally
+    // (BYOK Voyage or the cloud's /v1/embeddings proxy) and label the request
+    // with the corpus's active {name}@{revision}.
+    let (pairs, client_embedding_model): (Vec<QueryPair>, String) = if parsed.mode == "fts" {
+        let pairs = parsed
+            .queries
+            .iter()
+            .map(|text| QueryPair {
+                text: text.clone(),
+                vector: Vec::new(),
+            })
+            .collect();
+        (pairs, String::new())
+    } else {
+        let vectors =
+            embed_queries(&parsed.queries, &core_cfg.models, voyage_key.as_deref(), cfg, cloud)
+                .await?;
+        let pairs = parsed
+            .queries
+            .iter()
+            .zip(vectors.into_iter())
+            .map(|(text, vector)| QueryPair { text: text.clone(), vector })
+            .collect();
+        let model = cloud
+            .fetch_active_model()
+            .await
+            .map_err(|e| SearchError::Cloud(e.to_string()))?;
+        (pairs, model)
+    };
 
     // Send to cloud. If rerank is on, ask for a fixed top-K so the reranker
     // has a useful candidate pool independent of the caller's limit.
@@ -785,11 +809,15 @@ fn parse_search_args(v: &serde_json::Value) -> Result<ParsedSearchArgs, String> 
         .unwrap_or(true);
     let filters = obj.get("filters").cloned();
 
-    let mode: &'static str = match obj.get("mode").and_then(serde_json::Value::as_str) {
-        None | Some("hybrid") => "hybrid",
-        Some("vector") => "vector",
-        Some("fts") => "fts",
-        Some(other) => return Err(format!("unknown mode `{other}` (expected hybrid|vector|fts)")),
+    let mode: &'static str = match obj.get("mode") {
+        None => "hybrid",
+        Some(serde_json::Value::String(s)) => match s.as_str() {
+            "hybrid" => "hybrid",
+            "vector" => "vector",
+            "fts" => "fts",
+            other => return Err(format!("unknown mode `{other}` (expected hybrid|vector|fts)")),
+        },
+        Some(_) => return Err("`mode` must be a string".to_owned()),
     };
     // Validate the filters object against the registry before forwarding (fail fast).
     if let Some(fv) = obj.get("filters") {
@@ -1332,6 +1360,8 @@ mod tests {
     fn parse_rejects_unknown_mode_and_bad_filter() {
         let bad_mode = serde_json::json!({ "query": "x", "mode": "fuzzy" });
         assert!(parse_search_args(&bad_mode).is_err());
+        let non_string_mode = serde_json::json!({ "query": "x", "mode": 5 });
+        assert!(parse_search_args(&non_string_mode).is_err());
         let bad_filter =
             serde_json::json!({ "query": "x", "filters": { "kind": { "any_of": ["binary"] } } });
         assert!(parse_search_args(&bad_filter).is_err());
