@@ -1,0 +1,7 @@
+module A {
+  export ledger a: Field;
+}
+
+module B {
+  export ledger b: Field;
+}
