@@ -245,6 +245,7 @@ pub fn build_with_limiter(
         .merge(crate::routes::sources::router())
         .merge(crate::routes::models::router())
         .merge(crate::routes::search::router())
+        .merge(crate::routes::facets::router())
         .merge(crate::routes::embeddings::router())
         .merge(crate::routes::chunks::router())
         .merge(crate::routes::documents::router())
