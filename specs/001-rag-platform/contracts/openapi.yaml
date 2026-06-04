@@ -32,12 +32,54 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/SearchResponse'
-        '400': { $ref: '#/components/responses/InvalidRequest' }
+        '400':
+          description: >-
+            400 invalid_request. A well-formed filter object that fails registry
+            validation (e.g. a value outside a closed enum, `none_of` on a
+            non-negatable facet, an unparseable `version_satisfies`, or a
+            contradictory range) is rejected here, naming the offending facet and
+            pointing at GET /v1/facets. Also covers the other request-shape
+            failures (missing `client_embedding_model` in hybrid/vector mode,
+            mutually-exclusive query forms, empty query text, etc.).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
         '409': { $ref: '#/components/responses/EmbeddingModelMismatch' }
         '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '422':
+          description: >-
+            422 unprocessable_entity. The `filters` object is structurally
+            malformed — an unknown filter key, an unknown nested field, or a
+            type-mismatched value — so the typed deserializer rejects it before
+            registry validation runs. (Well-formed-but-semantically-invalid
+            filters that deserialize cleanly but fail registry validation return
+            400 invalid_request instead.)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
         '429': { $ref: '#/components/responses/RateLimited' }
         '503': { $ref: '#/components/responses/ServiceUnavailable' }
         '504': { $ref: '#/components/responses/QueryTimeout' }
+
+  /facets:
+    get:
+      operationId: getFacets
+      summary: Discover the filterable search facets, their types, and corpus-derived values
+      description: >-
+        Public read endpoint (same posture as /search). Advertises the available
+        `mode` values and the per-facet filter universe so a client can build a
+        valid `filters` object for /search. Closed-enum facets carry their full
+        `values` list; corpus-derived open sets (`language`, `source_slug`,
+        `tags`, `package`) carry top-N `values` plus `truncated` / `total`;
+        high-cardinality facets (`symbol`, `heading_path`) advertise their type
+        only. Backed by a short-lived server-side cache.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FacetsResponse' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
 
   /sources:
     get:
@@ -804,11 +846,15 @@ components:
     # ===== Search =====
     SearchRequest:
       type: object
-      required: [client_embedding_model]
       description: >-
         Provide EITHER `queries` (canonical multi-query form) OR the single-query
         convenience pair `query` + `vector`. The two are mutually exclusive; the
         convenience form behaves identically to a one-element `queries` array.
+
+        `client_embedding_model` is REQUIRED for `hybrid` and `vector` modes (the
+        request is rejected 400 invalid_request without it) and is optional /
+        ignored for `fts` mode (which skips embedding entirely). It is therefore
+        not unconditionally required at the schema level.
       properties:
         queries:
           type: array
@@ -834,7 +880,16 @@ components:
           minItems: 768
           maxItems: 768
           description: Single-query convenience form embedding (pairs with `query`).
-        client_embedding_model: { type: string, description: "{name}@{revision} per FR-039" }
+        client_embedding_model:
+          type: string
+          description: >-
+            {name}@{revision} per FR-039. Required for hybrid/vector mode;
+            optional/ignored for fts.
+        mode:
+          type: string
+          enum: [hybrid, vector, fts]
+          default: hybrid
+          description: "fts skips embedding; vector is semantic-only; hybrid fuses both"
         limit: { type: integer, default: 20, minimum: 1, maximum: 100 }
         sort_by: { type: string, enum: [confidence, trust, relevance, score], default: confidence }
         min_confidence: { type: number, default: 0.0, minimum: 0.0, maximum: 1.0 }
@@ -844,39 +899,264 @@ components:
     SearchFilters:
       type: object
       additionalProperties: false
+      description: >-
+        Per-facet filter object. AND across facets; OR within a facet's `any_of`;
+        exclude a facet's `none_of`. Every facet defaults to absent, so an empty
+        object imposes no constraints, and unknown keys are rejected (the typed
+        deserializer 422s on an unknown facet; a well-formed-but-invalid value —
+        e.g. a value outside a closed enum — is a 400). Set facets carry
+        `{any_of, none_of}` (non-negatable facets omit `none_of`); `verified` /
+        `deprecated` are bare booleans; temporal ranges are `{after, before}`
+        (ISO dates); numeric ranges are `{min, max}`. Call GET /v1/facets to learn
+        valid values for the closed-enum and corpus-derived facets. Mirrors
+        `mn_retrieval::filters::SearchFilters`.
       properties:
-        source_slug:
-          type: array
-          items: { type: string }
         attribution:
-          type: array
-          items: { type: string }
-        verified: { type: boolean }
+          type: object
+          additionalProperties: false
+          description: Provenance attribution (closed enum).
+          properties:
+            any_of:
+              type: array
+              items: { type: string, enum: [foundation, partner, third_party, community, unknown] }
+            none_of:
+              type: array
+              items: { type: string, enum: [foundation, partner, third_party, community, unknown] }
         content_type:
-          type: array
-          items: { type: string }
+          type: object
+          additionalProperties: false
+          description: Document content type (closed enum).
+          properties:
+            any_of:
+              type: array
+              items: { type: string, enum: [doc, tutorial, reference, example, contract_source, sdk_source, test, readme, other] }
+            none_of:
+              type: array
+              items: { type: string, enum: [doc, tutorial, reference, example, contract_source, sdk_source, test, readme, other] }
+        kind:
+          type: object
+          additionalProperties: false
+          description: Chunk content kind (closed enum).
+          properties:
+            any_of:
+              type: array
+              items: { type: string, enum: [markdown, code, plaintext] }
+            none_of:
+              type: array
+              items: { type: string, enum: [markdown, code, plaintext] }
+        source_kind:
+          type: object
+          additionalProperties: false
+          description: Source kind (closed enum).
+          properties:
+            any_of:
+              type: array
+              items: { type: string, enum: [docs_site, code_repo, standalone, mixed] }
+            none_of:
+              type: array
+              items: { type: string, enum: [docs_site, code_repo, standalone, mixed] }
+        source_slug:
+          type: object
+          additionalProperties: false
+          description: Source slug (open set; corpus-derived values via GET /v1/facets).
+          properties:
+            any_of:
+              type: array
+              items: { type: string }
+            none_of:
+              type: array
+              items: { type: string }
+        language:
+          type: object
+          additionalProperties: false
+          description: Programming/markup language (open set; corpus-derived values).
+          properties:
+            any_of:
+              type: array
+              items: { type: string }
+            none_of:
+              type: array
+              items: { type: string }
+        tags:
+          type: object
+          additionalProperties: false
+          description: Provenance tags (open set; corpus-derived top-N values).
+          properties:
+            any_of:
+              type: array
+              items: { type: string }
+            none_of:
+              type: array
+              items: { type: string }
+        heading_path:
+          type: object
+          additionalProperties: false
+          description: Chunk heading-path segments (open set; not enumerated by GET /v1/facets).
+          properties:
+            any_of:
+              type: array
+              items: { type: string }
+            none_of:
+              type: array
+              items: { type: string }
+        symbol:
+          type: object
+          additionalProperties: false
+          description: >-
+            Symbol set-match over `{kind?, name?}` elements (both optional;
+            `kind` is a closed enum, `name` is open).
+          properties:
+            any_of:
+              type: array
+              items: { $ref: '#/components/schemas/SymbolMatch' }
+            none_of:
+              type: array
+              items: { $ref: '#/components/schemas/SymbolMatch' }
+        package:
+          type: object
+          additionalProperties: false
+          description: >-
+            Package set-match over `{kind, name}` elements (both required;
+            `kind` is a closed enum, `name` is open/corpus-derived).
+          properties:
+            any_of:
+              type: array
+              items: { $ref: '#/components/schemas/PackageMatch' }
+            none_of:
+              type: array
+              items: { $ref: '#/components/schemas/PackageMatch' }
+        verified:
+          type: boolean
+          description: Restrict to documents whose provenance `verified` flag equals this value.
+        deprecated:
+          type: boolean
+          description: Restrict to chunks whose `deprecated` flag equals this value.
         language_target:
           type: object
+          additionalProperties: false
+          description: >-
+            Language-target set-match (NOT negatable — `any_of` only). OR within
+            `any_of`; each element matches by `name`, optionally refined by a
+            server-side semver check on `version_satisfies` (FR-033).
           properties:
-            name: { type: string }
-            version_constraint_satisfies: { type: string }
+            any_of:
+              type: array
+              items: { $ref: '#/components/schemas/LanguageTargetMatch' }
         sdk_dependency:
+          type: object
+          additionalProperties: false
+          description: >-
+            SDK-dependency set-match (NOT negatable — `any_of` only). OR within
+            `any_of`; each element matches by `kind` + `name`, optionally refined
+            by a server-side semver check on `version_satisfies` (FR-033).
+          properties:
+            any_of:
+              type: array
+              items: { $ref: '#/components/schemas/SdkDependencyMatch' }
+        ingested_at:
+          type: object
+          additionalProperties: false
+          description: Inclusive ingestion-timestamp range (ISO dates).
+          properties:
+            after: { type: string, format: date }
+            before: { type: string, format: date }
+        source_modified_at:
+          type: object
+          additionalProperties: false
+          description: Inclusive upstream source-modified-timestamp range (ISO dates).
+          properties:
+            after: { type: string, format: date }
+            before: { type: string, format: date }
+        token_count:
+          type: object
+          additionalProperties: false
+          description: Inclusive chunk token-count range.
+          properties:
+            min: { type: integer }
+            max: { type: integer }
+
+    SymbolMatch:
+      type: object
+      additionalProperties: false
+      description: One `symbol` element. Both fields optional; absent means "any".
+      properties:
+        kind: { type: string, enum: [fn, struct, circuit, witness, ledger, module, enum] }
+        name: { type: string }
+
+    PackageMatch:
+      type: object
+      additionalProperties: false
+      required: [kind, name]
+      description: One `package` element.
+      properties:
+        kind: { type: string, enum: [rust, npm, compact, other] }
+        name: { type: string }
+
+    LanguageTargetMatch:
+      type: object
+      additionalProperties: false
+      required: [name]
+      description: One `language_target` element; semver evaluated server-side post-fetch.
+      properties:
+        name: { type: string }
+        version_satisfies: { type: string, description: Optional semver requirement (FR-033). }
+
+    SdkDependencyMatch:
+      type: object
+      additionalProperties: false
+      required: [kind, name]
+      description: One `sdk_dependency` element; semver evaluated server-side post-fetch.
+      properties:
+        kind: { type: string }
+        name: { type: string }
+        version_satisfies: { type: string, description: Optional semver requirement (FR-033). }
+
+    FacetsResponse:
+      type: object
+      required: [modes, filters]
+      description: GET /v1/facets body. Mirrors `mn_server::routes::facets`.
+      properties:
+        modes:
           type: array
-          description: OR within the array; each entry matches by kind + name, optionally refined by a server-side semver check (FR-033).
-          items:
-            type: object
-            properties:
-              kind: { type: string }
-              name: { type: string }
-              version_constraint_satisfies: { type: string }
-        package:
+          description: The accepted `mode` values for /search.
+          items: { type: string, enum: [hybrid, vector, fts] }
+        filters:
           type: array
-          description: OR within the array; each entry matches a chunk's document package by kind + name.
-          items:
-            type: object
-            properties:
-              kind: { type: string }
-              name: { type: string }
+          items: { $ref: '#/components/schemas/FacetDescriptor' }
+
+    FacetDescriptor:
+      type: object
+      required: [key, type, negatable]
+      description: >-
+        One filterable facet. `values` is present for closed enums (the full
+        allowed set) and for corpus-derived open sets (`language`, `source_slug`,
+        `tags`, `package`); for the corpus-derived sets `truncated` / `total`
+        are also present. `symbol` and `heading_path` advertise type only.
+      properties:
+        key: { type: string, description: The wire key used inside a `filters` object. }
+        type:
+          type: string
+          enum: [enum, open_set, object_set, bool, range_temporal, range_numeric]
+        negatable:
+          type: boolean
+          description: Whether the facet accepts a `none_of` exclusion clause.
+        values:
+          type: array
+          description: >-
+            Allowed values (closed enums) or corpus-derived values (open sets).
+            Absent for object-set/range/bool facets and for non-enumerated
+            open sets (`symbol`, `heading_path`).
+          items: { type: string }
+        truncated:
+          type: boolean
+          description: >-
+            Present only for corpus-derived open sets; true when more distinct
+            values exist than are listed in `values`.
+        total:
+          type: integer
+          description: >-
+            Present only for corpus-derived open sets; count of distinct values
+            found (capped, so reads as "N or more" when `truncated`).
 
     SearchResponse:
       type: object

@@ -34,7 +34,7 @@ use crate::server::ServerConfig;
 
 /// Build the static tool manifest sent in response to `tools/list`.
 ///
-/// All thirteen tools declared in spec.md US5 / contracts/mcp-tools.json.
+/// All fourteen tools declared in spec.md US5 / contracts/mcp-tools.json.
 /// Schemas here are kept in sync with the canonical document by way of the
 /// contract tests in `tests/`.
 #[must_use]
