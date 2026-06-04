@@ -145,28 +145,25 @@ h1,h2,h3,p{margin:0;}
 .hero__cmd{margin-bottom:22px; max-width:520px;}
 .hero__cta{display:flex; gap:14px; flex-wrap:wrap;}
 
-/* Engine colour + type come from CSS, because var() does not resolve in SVG
-   presentation attributes. */
-.engine svg{ overflow:visible; stroke:var(--ink); fill:none; }
-.engine text{ stroke:none; fill:var(--ink); font-family:var(--mono); font-size:12px; }
-
-/* Engine: parts start nudged + faint, settle on .engine--assembled; leaders draw in */
-.js .engine [data-part]{opacity:0; transform:translate(6px,8px); transition:opacity .55s ease, transform .55s ease;}
-.js .engine [data-leader]{stroke-dasharray:240; stroke-dashoffset:240; transition:stroke-dashoffset .7s ease .35s;}
-.js .engine [data-axis]{opacity:0; transition:opacity .5s ease;}
-.js .engine--assembled [data-part]{opacity:1; transform:none;}
-.js .engine--assembled [data-part]:nth-of-type(1){transition-delay:.05s;}
-.js .engine--assembled [data-part]:nth-of-type(2){transition-delay:.13s;}
-.js .engine--assembled [data-part]:nth-of-type(3){transition-delay:.21s;}
-.js .engine--assembled [data-part]:nth-of-type(4){transition-delay:.29s;}
-.js .engine--assembled [data-leader]{stroke-dashoffset:0;}
-.js .engine--assembled [data-axis]{opacity:.4;}
+/* Hero illustration — static placeholder for the looping rotation video. Fades/settles in
+   on load via .engine--assembled (toggled by initEngine()); prefers-reduced-motion users get
+   it immediately, since transitions are disabled globally and the class is added at once. */
+.engine{display:flex; justify-content:center;}
+/* The generated frame's cream is ~4/255 off the page paper, so its square edge is faintly
+   visible on the flat field. Feather the outer edge so the boundary dissolves into the page;
+   the server sits centered with margin, so its solid interior is untouched. (Also applies to
+   the future <video>, which shares this class.) */
+.engine__img{width:100%; max-width:480px; height:auto;
+  -webkit-mask-image:radial-gradient(closest-side, #000 70%, transparent 99%);
+          mask-image:radial-gradient(closest-side, #000 70%, transparent 99%);}
+.js .engine__img{opacity:0; transform:translateY(10px) scale(.99);
+  transition:opacity .6s ease, transform .6s ease;}
+.js .engine--assembled .engine__img{opacity:1; transform:none;}
 
 @media (max-width:880px){
   .hero__grid{grid-template-columns:1fr; gap:32px;}
   .hero__title{font-size:clamp(40px,12vw,72px);}
-  .engine{overflow:hidden;}
-  .engine svg{overflow:hidden;}
+  .engine__img{max-width:360px;}
 }
 
 /* ============ Quick start ============ */
