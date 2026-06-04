@@ -487,6 +487,8 @@ async fn ingest_source(
         yes: true,
         source_base_url: None,
         batch_size: 25,
+        // None → resolver falls back to VOYAGE_TIMEOUT_SECS env / config / default.
+        voyage_timeout_secs: None,
         code_chunk_tokens: 400,
         code_chunk_lines: 60,
         code_chunk_overlap: 20,

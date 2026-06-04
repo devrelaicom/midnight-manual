@@ -54,11 +54,17 @@ use uuid::Uuid;
 /// `args.embedding_model` has a value for the explicit-override comparison.
 pub const DEFAULT_EMBEDDING_MODEL: &str = "auto";
 
-/// Voyage caps a single embeddings request at 1000 input texts (it also caps a
-/// request at ~120K tokens, but the 1000-text ceiling is the simple, sufficient
-/// guard for chunk-sized inputs). We sub-batch the per-upload-batch chunk texts
-/// into windows of at most this many before each `client::embed` call.
-const VOYAGE_MAX_TEXTS_PER_REQUEST: usize = 1000;
+/// Max input texts per Voyage embeddings sub-request. `voyage-code-3` rejects
+/// requests over ~120K tokens with HTTP 400 (measured: 500 chunks / 74K tokens
+/// = 200 OK; 1000 chunks / ~148K tokens = 400), so the old 1000-item ceiling
+/// could overshoot. 250 items of ≤400-token chunks stays ≤100K tokens; we also
+/// bound each sub-request by [`VOYAGE_MAX_TOKENS_PER_REQUEST`] for safety.
+const VOYAGE_MAX_TEXTS_PER_REQUEST: usize = 250;
+
+/// Max summed token count per Voyage embeddings sub-request. Sits below the
+/// ~120K-token hard limit `voyage-code-3` enforces (over which it returns 400)
+/// so a sub-batch never trips the cap regardless of per-chunk size.
+const VOYAGE_MAX_TOKENS_PER_REQUEST: usize = 100_000;
 
 /// Args for `mnm ingest run`.
 #[derive(Debug, ClapArgs)]
@@ -112,6 +118,14 @@ pub struct Args {
     /// 413 responses from the server (each chunk carries a 1024-dim vector).
     #[arg(long, default_value_t = 25)]
     pub batch_size: usize,
+
+    /// Override the per-request timeout (seconds) for BYOK Voyage embedding
+    /// calls. Precedence: this flag > `VOYAGE_TIMEOUT_SECS` env > config
+    /// (default 120s). Raise it if large batches time out before Voyage
+    /// finishes. The server-proxy embed path is not tuned by this flag; it
+    /// uses the same 120s default.
+    #[arg(long)]
+    pub voyage_timeout_secs: Option<u64>,
 
     /// Semantic code-chunk budget in tokens.
     #[arg(long, default_value_t = 400)]
@@ -483,6 +497,8 @@ async fn run_inner(
     let env = mn_core::config::StdEnv;
     let (cfg, _) = mn_core::config::Config::discover(config_path, &env).unwrap_or_default();
     let voyage_key = mn_core::config::resolve_voyage_api_key(voyage_api_key, &cfg.models, &env);
+    let voyage_timeout_secs =
+        mn_core::config::resolve_voyage_timeout_secs(args.voyage_timeout_secs, &cfg.models, &env);
     let byok_embedder = voyage_key.as_deref().map(|key| {
         VoyageEmbedder::new(
             key,
@@ -490,6 +506,7 @@ async fn run_inner(
             cfg.models.voyage_output_dimension,
             &cfg.models.voyage_output_dtype,
         )
+        .with_timeout_secs(voyage_timeout_secs)
     });
     reporter.phase(
         "embedder_resolved",
@@ -835,31 +852,48 @@ impl EmbedCtx<'_> {
 /// using `ctx` (BYOK direct, or the server `/v1/embeddings` proxy), and return
 /// the total VoyageAI tokens consumed across this batch's sub-requests.
 ///
-/// The collected chunk texts are sub-batched into windows of at most
-/// [`VOYAGE_MAX_TEXTS_PER_REQUEST`] (Voyage rejects requests over 1000 inputs;
-/// a ~120K-token-per-request cap also exists, but the text-count ceiling is the
-/// simple, sufficient guard for chunk-sized inputs). Vectors are concatenated
-/// in input order before being distributed back across the docs' chunks, and the
-/// per-request `usage.total_tokens` is summed (both BYOK and server-proxy report
-/// it via [`mn_embedding::client::Embedded`]).
+/// The collected chunk texts are greedily packed into sub-requests bounded by
+/// BOTH [`VOYAGE_MAX_TEXTS_PER_REQUEST`] items AND [`VOYAGE_MAX_TOKENS_PER_REQUEST`]
+/// tokens, using each chunk's recorded token count. `voyage-code-3` returns 400
+/// for requests over ~120K tokens (measured: 500 chunks / 74K tokens = 200 OK;
+/// 1000 chunks / ~148K tokens = 400), so the token bound is the real guard; the
+/// item bound is a secondary safety net. A single chunk that alone exceeds the
+/// token budget is still sent as its own sub-request (never dropped). Input order
+/// is preserved: vectors are concatenated in order before being distributed back
+/// across the docs' chunks, and the per-request `usage.total_tokens` is summed
+/// (both BYOK and server-proxy report it via [`mn_embedding::client::Embedded`]).
 ///
 /// # Errors
 ///
 /// Errors if any Voyage call fails or the returned vector count does not match
 /// the chunk count.
 async fn embed_batch(ctx: &EmbedCtx<'_>, docs: &mut [DocumentUpload]) -> Result<u64> {
-    let texts: Vec<String> = docs
+    // Pair each chunk text with its token count so we can bound sub-requests by
+    // both item count and summed tokens. `token_count` is a non-negative i32;
+    // the `0` fallback only affects budgeting — never vector alignment, which is
+    // positional.
+    let texts: Vec<(String, usize)> = docs
         .iter()
-        .flat_map(|d| d.chunks.iter().map(|c| c.content.clone()))
+        .flat_map(|d| {
+            d.chunks
+                .iter()
+                .map(|c| (c.content.clone(), usize::try_from(c.token_count).unwrap_or(0)))
+        })
         .collect();
     if texts.is_empty() {
         return Ok(0);
     }
 
+    let token_counts: Vec<usize> = texts.iter().map(|(_, t)| *t).collect();
+    let plan =
+        plan_subbatches(&token_counts, VOYAGE_MAX_TEXTS_PER_REQUEST, VOYAGE_MAX_TOKENS_PER_REQUEST);
+
     let mut vectors: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
     let mut tokens = 0u64;
-    for sub in texts.chunks(VOYAGE_MAX_TEXTS_PER_REQUEST) {
-        let embedded = embed(sub.to_vec(), InputType::Document, ctx.source())
+    let mut chunks = texts.into_iter().map(|(s, _)| s);
+    for size in plan {
+        let sub: Vec<String> = chunks.by_ref().take(size).collect();
+        let embedded = embed(sub, InputType::Document, ctx.source())
             .await
             .map_err(|e| anyhow!("embed chunks via Voyage: {e}"))?;
         tokens = tokens.saturating_add(embedded.total_tokens);
@@ -868,6 +902,66 @@ async fn embed_batch(ctx: &EmbedCtx<'_>, docs: &mut [DocumentUpload]) -> Result<
 
     attach_embeddings(docs, vectors)?;
     Ok(tokens)
+}
+
+/// Greedily group chunk `token_counts` into sub-request sizes bounded by BOTH
+/// `max_items` items AND `max_tokens` summed tokens, preserving order. A chunk
+/// whose own token count exceeds `max_tokens` forms its own sub-request (it is
+/// never dropped or merged with a neighbour). The returned sizes sum to
+/// `token_counts.len()`.
+fn plan_subbatches(token_counts: &[usize], max_items: usize, max_tokens: usize) -> Vec<usize> {
+    let mut sizes = Vec::new();
+    let mut cur = 0usize;
+    let mut cur_tokens = 0usize;
+    for &tok in token_counts {
+        // Close the current sub-batch before this chunk would push it over either
+        // bound; skip when empty so a lone oversized chunk still goes out alone.
+        if cur > 0 && (cur >= max_items || cur_tokens.saturating_add(tok) > max_tokens) {
+            sizes.push(cur);
+            cur = 0;
+            cur_tokens = 0;
+        }
+        cur += 1;
+        cur_tokens = cur_tokens.saturating_add(tok);
+    }
+    if cur > 0 {
+        sizes.push(cur);
+    }
+    sizes
+}
+
+#[cfg(test)]
+mod plan_subbatches_tests {
+    use super::plan_subbatches;
+
+    #[test]
+    fn splits_on_item_cap() {
+        // 600 zero-token chunks, item cap 250 -> 250 + 250 + 100.
+        assert_eq!(plan_subbatches(&[0usize; 600], 250, 100_000), vec![250, 250, 100]);
+    }
+
+    #[test]
+    fn splits_on_token_cap() {
+        // 30k-token chunks: three fit (90k); the fourth (120k) starts a new batch.
+        assert_eq!(plan_subbatches(&[30_000usize; 7], 250, 100_000), vec![3, 3, 1]);
+    }
+
+    #[test]
+    fn oversized_chunk_goes_out_alone() {
+        // The 150k chunk exceeds the token cap; it must not be merged or dropped.
+        assert_eq!(plan_subbatches(&[10_000, 150_000, 10_000], 250, 100_000), vec![1, 1, 1]);
+    }
+
+    #[test]
+    fn empty_input_yields_no_subbatches() {
+        assert!(plan_subbatches(&[], 250, 100_000).is_empty());
+    }
+
+    #[test]
+    fn sizes_sum_to_len() {
+        let sizes = plan_subbatches(&[500usize; 333], 250, 100_000);
+        assert_eq!(sizes.iter().sum::<usize>(), 333);
+    }
 }
 
 async fn post_json<I: Serialize + Sync, O: for<'de> Deserialize<'de>>(
@@ -1320,6 +1414,30 @@ mod tests {
         ])
         .unwrap();
         assert!(on.inner.unsafe_no_global_limit);
+    }
+
+    #[test]
+    fn voyage_timeout_secs_flag_parses_and_defaults_none() {
+        use clap::Parser as _;
+        #[derive(clap::Parser)]
+        struct Wrap {
+            #[command(flatten)]
+            inner: Args,
+        }
+        // Absent → None (resolver falls back to env/config/default).
+        let off = Wrap::try_parse_from(["ingest-run", "--source-slug", "s", "m.yaml"]).unwrap();
+        assert_eq!(off.inner.voyage_timeout_secs, None);
+        // Present → parsed Some(secs).
+        let on = Wrap::try_parse_from([
+            "ingest-run",
+            "--source-slug",
+            "s",
+            "--voyage-timeout-secs",
+            "180",
+            "m.yaml",
+        ])
+        .unwrap();
+        assert_eq!(on.inner.voyage_timeout_secs, Some(180));
     }
 
     #[test]

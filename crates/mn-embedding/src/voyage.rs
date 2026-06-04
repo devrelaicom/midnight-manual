@@ -3,6 +3,29 @@ use serde::{Deserialize, Serialize};
 
 const DEFAULT_BASE_URL: &str = "https://api.voyageai.com";
 
+/// Default per-request timeout (seconds) for embedding calls.
+///
+/// Over HTTP/1.1 (see `voyage_http_client`) a 250-chunk `voyage-code-3` batch
+/// returns in ~2.4s, so this is generous headroom for very large batches or a
+/// slow/throttled account tier — not a hot path.
+pub const DEFAULT_EMBED_TIMEOUT_SECS: u64 = 120;
+
+/// Build the reqwest client used for all VoyageAI calls.
+///
+/// Forces HTTP/1.1. reqwest negotiates HTTP/2 by default, but Voyage's HTTP/2
+/// endpoint stalls and resets mid-request on multi-hundred-chunk embedding
+/// batches — surfacing as `error sending request` after ~20-40s even with a
+/// generous timeout. Over HTTP/1.1 the identical batch returns in ~2.4s
+/// (verified against the live API).
+fn voyage_http_client(timeout_secs: u64) -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(timeout_secs))
+        .http1_only()
+        .build()
+        .expect("build reqwest client")
+}
+
 /// Whether the input texts are queries or documents.
 ///
 /// Voyage recommends setting this so the model can optimise embeddings accordingly.
@@ -104,17 +127,20 @@ impl VoyageEmbedder {
     #[must_use]
     pub fn new(api_key: &str, model: &str, dim: u32, dtype: &str) -> Self {
         Self {
-            client: reqwest::Client::builder()
-                .connect_timeout(std::time::Duration::from_secs(5))
-                .timeout(std::time::Duration::from_secs(30))
-                .build()
-                .expect("build reqwest client"),
+            client: voyage_http_client(DEFAULT_EMBED_TIMEOUT_SECS),
             api_key: api_key.to_owned(),
             model: model.to_owned(),
             dim,
             dtype: dtype.to_owned(),
             base_url: DEFAULT_BASE_URL.to_owned(),
         }
+    }
+
+    /// Override the per-request timeout (seconds); rebuilds the inner client.
+    #[must_use]
+    pub fn with_timeout_secs(mut self, secs: u64) -> Self {
+        self.client = voyage_http_client(secs);
+        self
     }
 
     /// Override the base URL (for tests / local proxies).
@@ -212,11 +238,7 @@ impl VoyageReranker {
     #[must_use]
     pub fn new(api_key: &str, model: &str) -> Self {
         Self {
-            client: reqwest::Client::builder()
-                .connect_timeout(std::time::Duration::from_secs(5))
-                .timeout(std::time::Duration::from_secs(30))
-                .build()
-                .expect("build reqwest client"),
+            client: voyage_http_client(30),
             api_key: api_key.to_owned(),
             model: model.to_owned(),
             base_url: DEFAULT_BASE_URL.to_owned(),

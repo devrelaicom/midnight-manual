@@ -67,6 +67,11 @@ pub struct ModelsConfig {
     /// Voyage output dtype: "float" | "int8" | "uint8" | "binary" | "ubinary".
     #[serde(default = "default_voyage_dtype")]
     pub voyage_output_dtype: String,
+    /// Per-request timeout (seconds) for BYOK Voyage embedding calls. `voyage-code-3`
+    /// embedding of a few-hundred-chunk batch can take ~38s+, so the default sits
+    /// well above the old 30s ceiling. Resolved with flag > env > config precedence.
+    #[serde(default = "default_voyage_timeout_secs")]
+    pub voyage_timeout_secs: u64,
     /// Directory holding a custom reranker (model.onnx + tokenizer files) when
     /// `reranker == "custom"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -75,6 +80,10 @@ pub struct ModelsConfig {
 
 const fn default_voyage_dim() -> u32 {
     1024
+}
+
+const fn default_voyage_timeout_secs() -> u64 {
+    120
 }
 
 fn default_voyage_dtype() -> String {
@@ -90,6 +99,7 @@ impl Default for ModelsConfig {
             voyage_api_key: None,
             voyage_output_dimension: default_voyage_dim(),
             voyage_output_dtype: default_voyage_dtype(),
+            voyage_timeout_secs: default_voyage_timeout_secs(),
             reranker_path: None,
         }
     }
@@ -205,6 +215,28 @@ pub fn resolve_voyage_api_key(
         .filter(|s| !s.is_empty())
         .or_else(|| env.var("VOYAGE_API_KEY").filter(|s| !s.is_empty()))
         .or_else(|| cfg.voyage_api_key.clone().filter(|s| !s.is_empty()))
+}
+
+/// Resolve the Voyage request timeout (seconds): flag > `VOYAGE_TIMEOUT_SECS` env > config.
+///
+/// The env var is parsed as `u64`; a non-numeric, empty, or **zero** value at
+/// any level is treated as absent and falls through. Zero is rejected because
+/// reqwest treats `timeout(0)` as an immediately-expiring deadline (which would
+/// fail every request), not "unlimited". If every source is absent/zero, the
+/// built-in default (`default_voyage_timeout_secs`, 120s) is used.
+pub fn resolve_voyage_timeout_secs(
+    flag: Option<u64>,
+    cfg: &ModelsConfig,
+    env: &impl ConfigEnv,
+) -> u64 {
+    flag.filter(|&n| n > 0)
+        .or_else(|| {
+            env.var("VOYAGE_TIMEOUT_SECS")
+                .and_then(|s| s.parse::<u64>().ok())
+                .filter(|&n| n > 0)
+        })
+        .or_else(|| (cfg.voyage_timeout_secs > 0).then_some(cfg.voyage_timeout_secs))
+        .unwrap_or_else(default_voyage_timeout_secs)
 }
 
 /// Resolve the reranker id with precedence flag > `MIDNIGHT_MANUAL_RERANKER` env > config.
@@ -331,6 +363,7 @@ mod tests {
         assert_eq!(m.reranker, "bge-reranker-base");
         assert_eq!(m.voyage_output_dimension, 1024);
         assert_eq!(m.voyage_output_dtype, "float");
+        assert_eq!(m.voyage_timeout_secs, 120);
         assert!(m.voyage_api_key.is_none());
         assert!(m.reranker_path.is_none());
     }
@@ -347,6 +380,7 @@ voyage_output_dtype = "float"
         assert_eq!(m.reranker, "jina-reranker-v1-turbo-en");
         assert_eq!(m.voyage_output_dimension, 1024);
         assert_eq!(m.voyage_output_dtype, "float"); // default filled in
+        assert_eq!(m.voyage_timeout_secs, 120); // default filled in
         assert!(m.voyage_api_key.is_none()); // Option default
         assert!(m.reranker_path.is_none()); // Option default
         assert!(m.cache_dir.is_none()); // Option default
@@ -376,6 +410,38 @@ voyage_output_dtype = "float"
         // All sources absent or empty → None.
         let cfg_none = ModelsConfig::default();
         assert_eq!(resolve_voyage_api_key(Some(""), &cfg_none, &env_empty), None);
+    }
+
+    #[test]
+    fn resolve_voyage_timeout_prefers_flag_then_env_then_config() {
+        let cfg = ModelsConfig {
+            voyage_timeout_secs: 90,
+            ..Default::default()
+        };
+        let env = FakeEnv::default().set("VOYAGE_TIMEOUT_SECS", "60");
+
+        assert_eq!(resolve_voyage_timeout_secs(Some(45), &cfg, &env), 45);
+        assert_eq!(resolve_voyage_timeout_secs(None, &cfg, &env), 60);
+
+        let empty = FakeEnv::default();
+        assert_eq!(resolve_voyage_timeout_secs(None, &cfg, &empty), 90);
+
+        // Non-numeric and empty env values are ignored and fall through to config.
+        let env_garbage = FakeEnv::default().set("VOYAGE_TIMEOUT_SECS", "not-a-number");
+        assert_eq!(resolve_voyage_timeout_secs(None, &cfg, &env_garbage), 90);
+        let env_empty = FakeEnv::default().set("VOYAGE_TIMEOUT_SECS", "");
+        assert_eq!(resolve_voyage_timeout_secs(None, &cfg, &env_empty), 90);
+
+        // Zero at any level is rejected (reqwest `timeout(0)` fails every
+        // request) and falls through; all-zero yields the 120s default.
+        let zero_cfg = ModelsConfig {
+            voyage_timeout_secs: 0,
+            ..Default::default()
+        };
+        assert_eq!(resolve_voyage_timeout_secs(Some(0), &zero_cfg, &empty), 120);
+        assert_eq!(resolve_voyage_timeout_secs(Some(0), &cfg, &empty), 90);
+        let env_zero = FakeEnv::default().set("VOYAGE_TIMEOUT_SECS", "0");
+        assert_eq!(resolve_voyage_timeout_secs(None, &zero_cfg, &env_zero), 120);
     }
 
     #[test]
