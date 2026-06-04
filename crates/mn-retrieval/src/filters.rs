@@ -55,7 +55,9 @@ impl<T> SetMatch<T> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SymbolMatch {
-    /// Symbol kind to match (e.g. `"circuit"`); `None` matches any kind.
+    /// Symbol kind to match — an open, chunker-derived syntactic label (e.g.
+    /// `"fn"`, `"struct"`, `"impl"`, `"method"`, `"class"`); `None` matches any
+    /// kind.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
     /// Symbol name to match; `None` matches any name.
@@ -241,15 +243,10 @@ impl SearchFilters {
         check_string_set("heading_path", &self.heading_path)?;
         check_negatable("symbol", &self.symbol)?;
         check_negatable("package", &self.package)?;
-        check_kind_enum(
-            "symbol",
-            facets::SYMBOL_KIND_VALUES,
-            self.symbol
-                .any_of
-                .iter()
-                .chain(self.symbol.none_of.iter())
-                .filter_map(|s| s.kind.as_deref()),
-        )?;
+        // `symbol.kind` is intentionally NOT validated against a fixed enum: it
+        // is an open, chunker-derived syntactic vocabulary (e.g. `impl`,
+        // `method`, `class`, `trait`, ...), like `language`/`tags`. Only
+        // `package.kind` is closed (DB `CHECK (kind IN (...))`).
         check_kind_enum(
             "package",
             facets::PACKAGE_KIND_VALUES,
@@ -578,34 +575,23 @@ mod tests {
     }
 
     #[test]
-    fn rejects_invalid_symbol_kind() {
-        let f = SearchFilters {
-            symbol: SetMatch {
-                any_of: vec![SymbolMatch {
-                    kind: Some("banana".into()),
-                    name: None,
-                }],
-                none_of: vec![],
-            },
-            ..Default::default()
-        };
-        let err = f.validate().unwrap_err();
-        assert_eq!(err.facet, "symbol");
-        assert!(err.message.contains("banana"));
-    }
-
-    #[test]
-    fn accepts_valid_symbol_kind_and_name_only() {
+    fn accepts_arbitrary_symbol_kind() {
+        // symbol.kind is open (chunker-derived syntactic vocabulary), so any
+        // kind — including ones not in any fixed list — validates.
         let f = SearchFilters {
             symbol: SetMatch {
                 any_of: vec![
                     SymbolMatch {
-                        kind: Some("circuit".into()),
-                        name: Some("deployContract".into()),
+                        kind: Some("impl".into()),
+                        name: Some("Foo".into()),
+                    },
+                    SymbolMatch {
+                        kind: Some("method".into()),
+                        name: None,
                     },
                     SymbolMatch {
                         kind: None,
-                        name: Some("foo".into()),
+                        name: Some("bar".into()),
                     },
                 ],
                 none_of: vec![],

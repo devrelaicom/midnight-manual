@@ -235,9 +235,9 @@ fn search_input_schema() -> serde_json::Value {
                     "verified":   { "type": "boolean" },
                     "deprecated": { "type": "boolean" },
                     "symbol": { "type": "object", "properties": { "any_of": { "type": "array", "items": {
-                        "type": "object", "properties": { "kind": { "type": "string", "enum": facets::SYMBOL_KIND_VALUES }, "name": { "type": "string" } },
+                        "type": "object", "properties": { "kind": { "type": "string" }, "name": { "type": "string" } },
                         "additionalProperties": false } }, "none_of": { "type": "array", "items": {
-                        "type": "object", "properties": { "kind": { "type": "string", "enum": facets::SYMBOL_KIND_VALUES }, "name": { "type": "string" } },
+                        "type": "object", "properties": { "kind": { "type": "string" }, "name": { "type": "string" } },
                         "additionalProperties": false } } }, "additionalProperties": false },
                     "package": { "type": "object", "properties": { "any_of": { "type": "array", "items": {
                         "type": "object", "required": ["kind","name"], "properties": { "kind": { "type": "string", "enum": facets::PACKAGE_KIND_VALUES }, "name": { "type": "string" } },

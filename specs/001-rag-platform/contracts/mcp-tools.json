@@ -117,7 +117,7 @@
                     "type": "object",
                     "additionalProperties": false,
                     "properties": {
-                      "kind": { "type": "string", "enum": ["fn", "struct", "circuit", "witness", "ledger", "module", "enum"] },
+                      "kind": { "type": "string" },
                       "name": { "type": "string" }
                     }
                   } },
@@ -125,7 +125,7 @@
                     "type": "object",
                     "additionalProperties": false,
                     "properties": {
-                      "kind": { "type": "string", "enum": ["fn", "struct", "circuit", "witness", "ledger", "module", "enum"] },
+                      "kind": { "type": "string" },
                       "name": { "type": "string" }
                     }
                   } }

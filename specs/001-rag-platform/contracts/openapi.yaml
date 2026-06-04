@@ -1004,7 +1004,7 @@ components:
           additionalProperties: false
           description: >-
             Symbol set-match over `{kind?, name?}` elements (both optional;
-            `kind` is a closed enum, `name` is open).
+            `kind` and `name` are both open/chunker-derived).
           properties:
             any_of:
               type: array
@@ -1080,7 +1080,12 @@ components:
       additionalProperties: false
       description: One `symbol` element. Both fields optional; absent means "any".
       properties:
-        kind: { type: string, enum: [fn, struct, circuit, witness, ledger, module, enum] }
+        kind:
+          type: string
+          description: >-
+            Open, chunker-derived syntactic kind (e.g. `fn`, `struct`, `impl`,
+            `method`, `class`, `trait`, `interface`, `module`, `enum`, ...). Not
+            a closed enum — values come from the corpus, like `language`/`tags`.
         name: { type: string }
 
     PackageMatch:

@@ -65,10 +65,6 @@ pub const CONTENT_TYPE_VALUES: &[&str] = &[
     "readme",
     "other",
 ];
-/// `symbol.kind` is a small closed set even though `symbol.name` is open.
-pub const SYMBOL_KIND_VALUES: &[&str] = &[
-    "fn", "struct", "circuit", "witness", "ledger", "module", "enum",
-];
 /// `package.kind` is closed even though `package.name` is open.
 pub const PACKAGE_KIND_VALUES: &[&str] = &["rust", "npm", "compact", "other"];
 
