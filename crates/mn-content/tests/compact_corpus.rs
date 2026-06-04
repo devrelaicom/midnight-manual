@@ -20,10 +20,15 @@ fn fixture(name: &str) -> String {
 #[test]
 fn counter_has_symbol_chunks_and_no_package() {
     let src = fixture("counter.compact");
-    let chunks = CompactChunker.chunk(&src, &ChunkerConfig::default()).unwrap();
+    let chunks = CompactChunker
+        .chunk(&src, &ChunkerConfig::default())
+        .unwrap();
     assert!(chunks.iter().all(|c| !c.fallback_used), "counter must parse cleanly");
     assert!(
-        chunks.iter().any(|c| c.symbol_path.iter().any(|s| s.kind == "circuit" && s.name == "increment")),
+        chunks.iter().any(|c| c
+            .symbol_path
+            .iter()
+            .any(|s| s.kind == "circuit" && s.name == "increment")),
         "expected [circuit increment]"
     );
     // module-less file → no package
@@ -34,7 +39,10 @@ fn counter_has_symbol_chunks_and_no_package() {
 fn module_file_tags_package_and_nested_symbols() {
     let src = fixture("module_wpp.compact");
     // small budget forces per-item chunks so the module-nested path appears
-    let cfg = ChunkerConfig { max_tokens: 24, ..ChunkerConfig::default() };
+    let cfg = ChunkerConfig {
+        max_tokens: 24,
+        ..ChunkerConfig::default()
+    };
     let chunks = CompactChunker.chunk(&src, &cfg).unwrap();
     assert!(chunks.iter().all(|c| !c.fallback_used), "module_wpp must parse cleanly");
 
@@ -46,7 +54,9 @@ fn module_file_tags_package_and_nested_symbols() {
     // a chunk inside M carries the module prefix
     assert!(
         chunks.iter().any(|c| {
-            c.symbol_path.iter().any(|s| s.kind == "module" && s.name == "M")
+            c.symbol_path
+                .iter()
+                .any(|s| s.kind == "module" && s.name == "M")
                 && c.symbol_path.iter().any(|s| s.kind == "circuit")
         }),
         "expected a module-nested circuit chunk: {:?}",
@@ -55,7 +65,9 @@ fn module_file_tags_package_and_nested_symbols() {
     // a top-level circuit outside M has no module prefix
     assert!(
         chunks.iter().any(|c| {
-            c.symbol_path.iter().any(|s| s.kind == "circuit" && s.name == "gary")
+            c.symbol_path
+                .iter()
+                .any(|s| s.kind == "circuit" && s.name == "gary")
                 && !c.symbol_path.iter().any(|s| s.kind == "module")
         }),
         "expected top-level [circuit gary] with no module prefix"
@@ -65,7 +77,12 @@ fn module_file_tags_package_and_nested_symbols() {
 #[test]
 fn two_modules_leave_package_untagged() {
     let src = fixture("two_modules.compact");
-    let chunks = CompactChunker.chunk(&src, &ChunkerConfig::default()).unwrap();
+    let chunks = CompactChunker
+        .chunk(&src, &ChunkerConfig::default())
+        .unwrap();
     assert!(chunks.iter().all(|c| !c.fallback_used), "two_modules must parse cleanly");
-    assert!(mn_content::detect_compact_package(&src).is_none(), "multi-module → no package (P1)");
+    assert!(
+        mn_content::detect_compact_package(&src).is_none(),
+        "multi-module → no package (P1)"
+    );
 }

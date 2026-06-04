@@ -165,13 +165,19 @@ pub fn detect_module_package(body: &str) -> Option<PackageRef> {
     let mut names = file.items().filter_map(|item| match item {
         Item::ModuleDef(m) => {
             let n = token_text(m.name());
-            if n.is_empty() { None } else { Some(n) }
+            if n.is_empty() {
+                None
+            } else {
+                Some(n)
+            }
         }
         _ => None,
     });
     let first = names.next()?;
     if names.next().is_some() {
-        tracing::debug!("compact file declares multiple top-level modules; package left untagged (P1)");
+        tracing::debug!(
+            "compact file declares multiple top-level modules; package left untagged (P1)"
+        );
         return None;
     }
     Some(PackageRef {
@@ -290,7 +296,9 @@ mod tests {
 
     #[test]
     fn parses_and_emits_a_chunk() {
-        let chunks = CompactChunker.chunk(COUNTER, &ChunkerConfig::default()).unwrap();
+        let chunks = CompactChunker
+            .chunk(COUNTER, &ChunkerConfig::default())
+            .unwrap();
         assert!(!chunks.is_empty());
         assert!(chunks.iter().all(|c| !c.fallback_used));
         // chunks reconstruct the bytes they claim
@@ -301,7 +309,10 @@ mod tests {
 
     #[test]
     fn empty_input_yields_no_chunks() {
-        assert!(CompactChunker.chunk("   \n\t", &ChunkerConfig::default()).unwrap().is_empty());
+        assert!(CompactChunker
+            .chunk("   \n\t", &ChunkerConfig::default())
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -309,7 +320,9 @@ mod tests {
         // Non-Compact junk: each non-ASCII glyph lexes to an ERROR token, so
         // error bytes dominate → catastrophic fallback.
         let src = "🔥🔥🔥 ❌❌❌ ¡¡¡¡ §§§§ ".repeat(60);
-        let chunks = CompactChunker.chunk(&src, &ChunkerConfig::default()).unwrap();
+        let chunks = CompactChunker
+            .chunk(&src, &ChunkerConfig::default())
+            .unwrap();
         assert!(chunks.iter().any(|c| c.fallback_used), "garbage must fall back");
     }
 
@@ -319,26 +332,35 @@ mod tests {
         // (not ERROR tokens), so this exercises the parser-recovery path that the
         // emoji fixture (lexer ERROR tokens) does not.
         let src = "foo bar baz 123 qux wibble wobble 456 zzz plugh ".repeat(40);
-        let chunks = CompactChunker.chunk(&src, &ChunkerConfig::default()).unwrap();
+        let chunks = CompactChunker
+            .chunk(&src, &ChunkerConfig::default())
+            .unwrap();
         assert!(chunks.iter().any(|c| c.fallback_used), "token-soup garbage must fall back");
     }
 
     #[test]
     fn valid_compact_does_not_fall_back() {
-        let chunks = CompactChunker.chunk(COUNTER, &ChunkerConfig::default()).unwrap();
+        let chunks = CompactChunker
+            .chunk(COUNTER, &ChunkerConfig::default())
+            .unwrap();
         assert!(chunks.iter().all(|c| !c.fallback_used));
     }
 
     #[test]
     fn small_siblings_pack_into_one_chunk() {
         // Whole file fits the default 400-token budget → a single chunk.
-        let chunks = CompactChunker.chunk(COUNTER, &ChunkerConfig::default()).unwrap();
+        let chunks = CompactChunker
+            .chunk(COUNTER, &ChunkerConfig::default())
+            .unwrap();
         assert_eq!(chunks.len(), 1);
     }
 
     #[test]
     fn tiny_budget_splits_into_multiple_chunks() {
-        let cfg = ChunkerConfig { max_tokens: 8, ..ChunkerConfig::default() };
+        let cfg = ChunkerConfig {
+            max_tokens: 8,
+            ..ChunkerConfig::default()
+        };
         let chunks = CompactChunker.chunk(COUNTER, &cfg).unwrap();
         assert!(chunks.len() >= 2, "tiny budget should split: got {}", chunks.len());
         // sorted + non-overlapping
@@ -354,15 +376,22 @@ mod tests {
 
     fn seg(chunks: &[Chunk], kind: &str, name: &str) -> bool {
         chunks.iter().any(|c| {
-            c.symbol_path.iter().any(|s| s.kind == kind && s.name == name)
+            c.symbol_path
+                .iter()
+                .any(|s| s.kind == kind && s.name == name)
         })
     }
 
     #[test]
     fn top_level_circuit_and_ledger_symbol_paths() {
-        let chunks = CompactChunker.chunk(COUNTER, &ChunkerConfig::default()).unwrap();
-        assert!(seg(&chunks, "circuit", "increment"), "missing [circuit increment]: {:?}",
-            chunks.iter().map(|c| &c.symbol_path).collect::<Vec<_>>());
+        let chunks = CompactChunker
+            .chunk(COUNTER, &ChunkerConfig::default())
+            .unwrap();
+        assert!(
+            seg(&chunks, "circuit", "increment"),
+            "missing [circuit increment]: {:?}",
+            chunks.iter().map(|c| &c.symbol_path).collect::<Vec<_>>()
+        );
         assert!(seg(&chunks, "ledger", "round"), "missing [ledger round]");
     }
 
@@ -370,24 +399,37 @@ mod tests {
     fn preamble_only_start_recovers_symbol() {
         // The whole file is one chunk; its start byte sits in `import` preamble,
         // so the path must be recovered from the first named item inside it.
-        let chunks = CompactChunker.chunk(COUNTER, &ChunkerConfig::default()).unwrap();
+        let chunks = CompactChunker
+            .chunk(COUNTER, &ChunkerConfig::default())
+            .unwrap();
         assert_eq!(chunks.len(), 1);
         assert!(!chunks[0].symbol_path.is_empty(), "single-chunk file must record a symbol_path");
     }
 
-    const MODULE_NEST: &str = "module M {\n  export circuit brad(a: Field): Field {\n    return a;\n  }\n}\n";
+    const MODULE_NEST: &str =
+        "module M {\n  export circuit brad(a: Field): Field {\n    return a;\n  }\n}\n";
 
     #[test]
     fn module_nested_circuit_has_module_prefix() {
-        let cfg = ChunkerConfig { max_tokens: 8, ..ChunkerConfig::default() };
+        let cfg = ChunkerConfig {
+            max_tokens: 8,
+            ..ChunkerConfig::default()
+        };
         let chunks = CompactChunker.chunk(MODULE_NEST, &cfg).unwrap();
         // some chunk inside M carries both [module M] and [circuit brad]
         let nested = chunks.iter().any(|c| {
-            c.symbol_path.iter().any(|s| s.kind == "module" && s.name == "M")
-                && c.symbol_path.iter().any(|s| s.kind == "circuit" && s.name == "brad")
+            c.symbol_path
+                .iter()
+                .any(|s| s.kind == "module" && s.name == "M")
+                && c.symbol_path
+                    .iter()
+                    .any(|s| s.kind == "circuit" && s.name == "brad")
         });
-        assert!(nested, "expected module-nested path: {:?}",
-            chunks.iter().map(|c| &c.symbol_path).collect::<Vec<_>>());
+        assert!(
+            nested,
+            "expected module-nested path: {:?}",
+            chunks.iter().map(|c| &c.symbol_path).collect::<Vec<_>>()
+        );
     }
 
     use proptest::prelude::*;
