@@ -303,7 +303,7 @@ pub async fn run_with_paths(
 
     // Resolve mode + filters from the granular flags (or --filter-json) and
     // fail fast on an invalid filter before any further work.
-    let (mode, filters) = build_filters(&args);
+    let (mode, filters) = build_filters(&args)?;
     validate_filters(&filters)?;
 
     let queries: Vec<QueryPair> = texts
@@ -391,18 +391,26 @@ async fn resolve_client_embedding_model(embedding_model: &str, server_url: &str)
 /// returning it alongside the resolved `mode`.
 ///
 /// `--filter-json` is mutually exclusive with the granular flags (enforced at
-/// clap parse time); when present it is parsed directly, falling back to an
-/// empty filter on a malformed document (the subsequent `validate()` then
-/// surfaces nothing to reject — an empty filter is always valid). With no
-/// filter flags at all this yields `SearchFilters::default()` (so `is_empty()`
-/// holds) and the clap-default `mode` of `"hybrid"`.
-fn build_filters(args: &Args) -> (String, mn_retrieval::filters::SearchFilters) {
+/// clap parse time); when present it is parsed directly and a malformed document
+/// is a hard error — including a misspelled facet, which `SearchFilters`'
+/// `deny_unknown_fields` rejects rather than silently dropping. A present-but-
+/// unparseable `--ingested-after` / `--ingested-before` is likewise an error;
+/// an absent date stays `None`. With no filter flags at all this yields
+/// `SearchFilters::default()` (so `is_empty()` holds) and the clap-default
+/// `mode` of `"hybrid"`.
+///
+/// # Errors
+///
+/// Returns `anyhow::Error` on malformed `--filter-json` or an unparseable
+/// `--ingested-after` / `--ingested-before` date.
+fn build_filters(args: &Args) -> Result<(String, mn_retrieval::filters::SearchFilters)> {
     use mn_retrieval::filters::{
         NumericRange, SearchFilters, SetMatch, SymbolMatch, TemporalRange,
     };
     if let Some(js) = &args.filter_json {
-        let f: SearchFilters = serde_json::from_str(js).unwrap_or_default();
-        return (args.mode.clone(), f);
+        let f: SearchFilters = serde_json::from_str(js)
+            .context("parse --filter-json (see `mnm facets` for the filter shape)")?;
+        return Ok((args.mode.clone(), f));
     }
     let set = |any_of: &[String], none_of: &[String]| SetMatch {
         any_of: any_of.to_vec(),
@@ -427,16 +435,22 @@ fn build_filters(args: &Args) -> (String, mn_retrieval::filters::SearchFilters) 
             }
         })
         .collect();
-    let parse_date = |s: &Option<String>| {
-        s.as_deref().and_then(|d| {
-            time::Date::parse(d, &time::format_description::well_known::Iso8601::DATE).ok()
-        })
+    let parse_date = |s: &Option<String>| -> Result<Option<time::Date>> {
+        s.as_deref()
+            .map(|d| {
+                time::Date::parse(d, &time::format_description::well_known::Iso8601::DATE)
+                    .with_context(|| format!("invalid ISO date `{d}` (expected YYYY-MM-DD)"))
+            })
+            .transpose()
     };
-    let ingested =
-        (args.ingested_after.is_some() || args.ingested_before.is_some()).then(|| TemporalRange {
-            after: parse_date(&args.ingested_after),
-            before: parse_date(&args.ingested_before),
-        });
+    let ingested = if args.ingested_after.is_some() || args.ingested_before.is_some() {
+        Some(TemporalRange {
+            after: parse_date(&args.ingested_after)?,
+            before: parse_date(&args.ingested_before)?,
+        })
+    } else {
+        None
+    };
     let token_count =
         (args.min_tokens.is_some() || args.max_tokens.is_some()).then_some(NumericRange {
             min: args.min_tokens,
@@ -459,7 +473,7 @@ fn build_filters(args: &Args) -> (String, mn_retrieval::filters::SearchFilters) 
         token_count,
         ..Default::default()
     };
-    (args.mode.clone(), f)
+    Ok((args.mode.clone(), f))
 }
 
 /// Client-side fail-fast filter validation. Maps a [`mn_retrieval::filters::FilterError`]
@@ -1445,7 +1459,7 @@ mod tests {
             "--min-tokens",
             "50",
         ]);
-        let (mode, filters) = build_filters(&p.inner);
+        let (mode, filters) = build_filters(&p.inner).expect("valid flags");
         assert_eq!(mode, "fts");
         assert_eq!(filters.kind.any_of, vec!["code".to_owned()]);
         assert_eq!(filters.language.none_of, vec!["typescript".to_owned()]);
@@ -1453,5 +1467,19 @@ mod tests {
         assert_eq!(filters.symbol.any_of[0].name.as_deref(), Some("deployContract"));
         assert_eq!(filters.deprecated, Some(false));
         assert_eq!(filters.token_count.unwrap().min, Some(50));
+    }
+
+    #[test]
+    fn build_filters_rejects_bad_filter_json_and_dates() {
+        use clap::Parser as _;
+        #[derive(clap::Parser)]
+        struct Probe {
+            #[command(flatten)]
+            inner: Args,
+        }
+        let bad_json = Probe::parse_from(["search", "q", "--filter-json", "{ not valid json"]);
+        assert!(build_filters(&bad_json.inner).is_err());
+        let bad_date = Probe::parse_from(["search", "q", "--ingested-after", "not-a-date"]);
+        assert!(build_filters(&bad_date.inner).is_err());
     }
 }

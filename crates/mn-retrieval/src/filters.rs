@@ -241,6 +241,24 @@ impl SearchFilters {
         check_string_set("heading_path", &self.heading_path)?;
         check_negatable("symbol", &self.symbol)?;
         check_negatable("package", &self.package)?;
+        check_kind_enum(
+            "symbol",
+            facets::SYMBOL_KIND_VALUES,
+            self.symbol
+                .any_of
+                .iter()
+                .chain(self.symbol.none_of.iter())
+                .filter_map(|s| s.kind.as_deref()),
+        )?;
+        check_kind_enum(
+            "package",
+            facets::PACKAGE_KIND_VALUES,
+            self.package
+                .any_of
+                .iter()
+                .chain(self.package.none_of.iter())
+                .map(|p| p.kind.as_str()),
+        )?;
         // language_target / sdk_dependency: not negatable + semver parseable.
         check_negatable("language_target", &self.language_target)?;
         check_negatable("sdk_dependency", &self.sdk_dependency)?;
@@ -320,6 +338,23 @@ fn check_negatable<T>(key: &str, set: &SetMatch<T>) -> Result<(), FilterError> {
     let desc = facets::lookup(key).expect("registry key");
     if !desc.negatable && !set.none_of.is_empty() {
         return Err(FilterError::new(key, format!("`{key}` does not support `none_of`")));
+    }
+    Ok(())
+}
+
+/// Reject any element `kind` not in a facet's closed sub-enum (e.g. `symbol.kind`).
+fn check_kind_enum<'a>(
+    facet: &str,
+    allowed: &[&str],
+    kinds: impl Iterator<Item = &'a str>,
+) -> Result<(), FilterError> {
+    for k in kinds {
+        if !allowed.contains(&k) {
+            return Err(FilterError::new(
+                facet,
+                format!("`{k}` is not a valid `{facet}.kind` (allowed: {})", allowed.join(", ")),
+            ));
+        }
     }
     Ok(())
 }
@@ -540,5 +575,59 @@ mod tests {
             ..Default::default()
         };
         assert!(f.validate().is_ok());
+    }
+
+    #[test]
+    fn rejects_invalid_symbol_kind() {
+        let f = SearchFilters {
+            symbol: SetMatch {
+                any_of: vec![SymbolMatch {
+                    kind: Some("banana".into()),
+                    name: None,
+                }],
+                none_of: vec![],
+            },
+            ..Default::default()
+        };
+        let err = f.validate().unwrap_err();
+        assert_eq!(err.facet, "symbol");
+        assert!(err.message.contains("banana"));
+    }
+
+    #[test]
+    fn accepts_valid_symbol_kind_and_name_only() {
+        let f = SearchFilters {
+            symbol: SetMatch {
+                any_of: vec![
+                    SymbolMatch {
+                        kind: Some("circuit".into()),
+                        name: Some("deployContract".into()),
+                    },
+                    SymbolMatch {
+                        kind: None,
+                        name: Some("foo".into()),
+                    },
+                ],
+                none_of: vec![],
+            },
+            ..Default::default()
+        };
+        assert!(f.validate().is_ok());
+    }
+
+    #[test]
+    fn rejects_invalid_package_kind() {
+        let f = SearchFilters {
+            package: SetMatch {
+                any_of: vec![PackageMatch {
+                    kind: "pypi".into(),
+                    name: "x".into(),
+                }],
+                none_of: vec![],
+            },
+            ..Default::default()
+        };
+        let err = f.validate().unwrap_err();
+        assert_eq!(err.facet, "package");
     }
 }
