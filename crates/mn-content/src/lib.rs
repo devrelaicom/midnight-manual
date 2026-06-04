@@ -17,5 +17,26 @@ pub mod markdown;
 pub mod package;
 pub mod tokens;
 
+/// Detect Compact module-based package membership from file contents.
+///
+/// Returns `None` when the `compact` feature is disabled, or when the file
+/// declares zero or multiple top-level modules (see [`code::compact`]).
+// When the `compact` feature is off, the body reduces to `None` and clippy
+// flags this as const-able; with the feature on it calls a non-const parser,
+// so it cannot be `const`. Allow the feature-gated false positive.
+#[allow(clippy::missing_const_for_fn)]
+#[must_use]
+pub fn detect_compact_package(body: &str) -> Option<mn_core::types::PackageRef> {
+    #[cfg(feature = "compact")]
+    {
+        crate::code::compact::detect_module_package(body)
+    }
+    #[cfg(not(feature = "compact"))]
+    {
+        let _ = body;
+        None
+    }
+}
+
 /// Crate version stamped at build time.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

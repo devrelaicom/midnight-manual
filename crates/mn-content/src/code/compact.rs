@@ -9,7 +9,7 @@ use std::ops::Range;
 
 use compactp_ast::{AstNode, Item, SourceFile};
 use compactp_syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
-use mn_core::types::SymbolSegment;
+use mn_core::types::{PackageRef, SymbolSegment};
 
 use crate::chunk::{Chunk, ChunkError, Chunker, ChunkerConfig};
 use crate::code::line_window::LineWindowChunker;
@@ -149,6 +149,38 @@ fn error_bytes(root: &SyntaxNode) -> usize {
     total
 }
 
+/// Detect the Compact package for a file: a single top-level `module <Name>`.
+///
+/// Zero modules → `None` (the common case for application contracts). Multiple
+/// top-level modules → `None` with a debug log (per-chunk multi-module tagging
+/// is deferred; see the design doc, Decision 4 / P1).
+#[must_use]
+pub fn detect_module_package(body: &str) -> Option<PackageRef> {
+    if body.trim().is_empty() {
+        return None;
+    }
+    let parsed = compactp_parser::parse(body);
+    let root = SyntaxNode::new_root(parsed.green);
+    let file = SourceFile::cast(root)?;
+    let mut names = file.items().filter_map(|item| match item {
+        Item::ModuleDef(m) => {
+            let n = token_text(m.name());
+            if n.is_empty() { None } else { Some(n) }
+        }
+        _ => None,
+    });
+    let first = names.next()?;
+    if names.next().is_some() {
+        tracing::debug!("compact file declares multiple top-level modules; package left untagged (P1)");
+        return None;
+    }
+    Some(PackageRef {
+        kind: "compact".to_string(),
+        name: first,
+        manifest_path: None,
+    })
+}
+
 /// Map a CST node to a symbol segment if it is a named Compact item.
 /// Preamble items (pragma/include/import/export) contribute no segment.
 fn item_segment(node: &SyntaxNode) -> Option<SymbolSegment> {
@@ -233,6 +265,28 @@ mod tests {
     use crate::chunk::{Chunker, ChunkerConfig};
 
     const COUNTER: &str = "import CompactStandardLibrary;\n\nexport ledger round: Counter;\n\nexport circuit increment(): [] {\n  round.increment(1);\n}\n";
+
+    const TWO_MODULES: &str =
+        "module A {\n  export ledger a: Field;\n}\n\nmodule B {\n  export ledger b: Field;\n}\n";
+
+    #[test]
+    fn one_module_detected_as_package() {
+        let src = "module M {\n  export ledger b: Field;\n}\n";
+        let pkg = detect_module_package(src).expect("one module → package");
+        assert_eq!(pkg.kind, "compact");
+        assert_eq!(pkg.name, "M");
+        assert_eq!(pkg.manifest_path, None);
+    }
+
+    #[test]
+    fn no_module_is_none() {
+        assert!(detect_module_package(COUNTER).is_none());
+    }
+
+    #[test]
+    fn multiple_modules_is_none() {
+        assert!(detect_module_package(TWO_MODULES).is_none());
+    }
 
     #[test]
     fn parses_and_emits_a_chunk() {
