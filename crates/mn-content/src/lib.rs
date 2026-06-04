@@ -1,8 +1,8 @@
 //! `mn-content` — Markdown / code chunking and package detection for midnight-manual.
 //!
-//! Phase-3 lands the Markdown side: heading-based chunker with fallback windowing,
-//! frontmatter parser, manifest loader, content-hash. The tree-sitter code
-//! chunkers and Compact module scanner land in Phase 6.
+//! Markdown (heading-based), code (tree-sitter per language; Compact via the
+//! `compactp` parser behind the `compact` feature), and a line-window fallback,
+//! plus frontmatter, manifest loading, content-hash, and package detection.
 
 #![doc(html_root_url = "https://docs.rs/mn-content/0.1.0")]
 
