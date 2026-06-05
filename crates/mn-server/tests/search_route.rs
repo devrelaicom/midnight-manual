@@ -914,7 +914,7 @@ async fn version_match_boost_applies_with_filter() {
             "vector": unit_vector(0.314),
             "client_embedding_model": "voyage-code-3@1",
             "limit": 50,
-            "filters": { "language_target": { "name": "compact", "version_constraint_satisfies": "0.31" } },
+            "filters": { "language_target": { "any_of": [{ "name": "compact", "version_satisfies": "0.31" }] } },
         }),
     )
     .await;
@@ -1033,7 +1033,12 @@ async fn scalar_filters_include_and_exclude() {
 
     // Matching values include the chunk.
     assert!(contains_chunk(
-        &run_filtered(&h.pool, &token, serde_json::json!({ "attribution": ["foundation"] })).await,
+        &run_filtered(
+            &h.pool,
+            &token,
+            serde_json::json!({ "attribution": { "any_of": ["foundation"] } })
+        )
+        .await,
         chunk
     ));
     assert!(contains_chunk(
@@ -1041,18 +1046,24 @@ async fn scalar_filters_include_and_exclude() {
         chunk
     ));
     assert!(contains_chunk(
-        &run_filtered(&h.pool, &token, serde_json::json!({ "content_type": ["tutorial"] })).await,
+        &run_filtered(
+            &h.pool,
+            &token,
+            serde_json::json!({ "content_type": { "any_of": ["tutorial"] } })
+        )
+        .await,
         chunk
     ));
     assert!(contains_chunk(
-        &run_filtered(&h.pool, &token, serde_json::json!({ "source_slug": [slug] })).await,
+        &run_filtered(&h.pool, &token, serde_json::json!({ "source_slug": { "any_of": [slug] } }))
+            .await,
         chunk
     ));
     assert!(contains_chunk(
         &run_filtered(
             &h.pool,
             &token,
-            serde_json::json!({ "package": [{ "kind": "rust", "name": pkg }] })
+            serde_json::json!({ "package": { "any_of": [{ "kind": "rust", "name": pkg }] } })
         )
         .await,
         chunk
@@ -1063,7 +1074,7 @@ async fn scalar_filters_include_and_exclude() {
         &run_filtered(
             &h.pool,
             &token,
-            serde_json::json!({ "attribution": ["partner", "community"] })
+            serde_json::json!({ "attribution": { "any_of": ["partner", "community"] } })
         )
         .await,
         chunk
@@ -1073,19 +1084,28 @@ async fn scalar_filters_include_and_exclude() {
         chunk
     ));
     assert!(!contains_chunk(
-        &run_filtered(&h.pool, &token, serde_json::json!({ "content_type": ["doc"] })).await,
-        chunk
-    ));
-    assert!(!contains_chunk(
-        &run_filtered(&h.pool, &token, serde_json::json!({ "source_slug": ["some-other-slug"] }))
-            .await,
+        &run_filtered(
+            &h.pool,
+            &token,
+            serde_json::json!({ "content_type": { "any_of": ["doc"] } })
+        )
+        .await,
         chunk
     ));
     assert!(!contains_chunk(
         &run_filtered(
             &h.pool,
             &token,
-            serde_json::json!({ "package": [{ "kind": "rust", "name": "nonexistent-pkg" }] })
+            serde_json::json!({ "source_slug": { "any_of": ["some-other-slug"] } })
+        )
+        .await,
+        chunk
+    ));
+    assert!(!contains_chunk(
+        &run_filtered(
+            &h.pool,
+            &token,
+            serde_json::json!({ "package": { "any_of": [{ "kind": "rust", "name": "nonexistent-pkg" }] } })
         )
         .await,
         chunk
@@ -1101,7 +1121,7 @@ async fn and_across_keys_excludes_on_any_miss() {
     let v = run_filtered(
         &h.pool,
         &token,
-        serde_json::json!({ "attribution": ["foundation"], "content_type": ["doc"] }),
+        serde_json::json!({ "attribution": { "any_of": ["foundation"] }, "content_type": { "any_of": ["doc"] } }),
     )
     .await;
     assert!(!contains_chunk(&v, chunk), "AND: a single failing key must exclude");
@@ -1109,28 +1129,28 @@ async fn and_across_keys_excludes_on_any_miss() {
 
 #[tokio::test]
 async fn semver_filters_language_target_and_sdk_dependency() {
-    // Acceptance #11 / FR-033: version_constraint_satisfies is evaluated
-    // server-side for language_target and sdk_dependency.
+    // Acceptance #11 / FR-033: version_satisfies is evaluated server-side for
+    // language_target and sdk_dependency.
     let h = common::boot().await;
     let (chunk, _slug, _pkg, token) = seed_filter_fixture(&h.pool).await;
 
     // language_target: chunk targets compact >=0.23.
-    assert!(contains_chunk(&run_filtered(&h.pool, &token, serde_json::json!({ "language_target": { "name": "compact", "version_constraint_satisfies": "0.31" } })).await, chunk));
-    assert!(!contains_chunk(&run_filtered(&h.pool, &token, serde_json::json!({ "language_target": { "name": "compact", "version_constraint_satisfies": "0.10" } })).await, chunk));
+    assert!(contains_chunk(&run_filtered(&h.pool, &token, serde_json::json!({ "language_target": { "any_of": [{ "name": "compact", "version_satisfies": "0.31" }] } })).await, chunk));
+    assert!(!contains_chunk(&run_filtered(&h.pool, &token, serde_json::json!({ "language_target": { "any_of": [{ "name": "compact", "version_satisfies": "0.10" }] } })).await, chunk));
     // name mismatch excludes.
     assert!(!contains_chunk(
         &run_filtered(
             &h.pool,
             &token,
-            serde_json::json!({ "language_target": { "name": "rust" } })
+            serde_json::json!({ "language_target": { "any_of": [{ "name": "rust" }] } })
         )
         .await,
         chunk
     ));
 
     // sdk_dependency: chunk declares npm @midnight-ntwrk/midnight-js >=1.0.0.
-    assert!(contains_chunk(&run_filtered(&h.pool, &token, serde_json::json!({ "sdk_dependency": [{ "kind": "npm", "name": "@midnight-ntwrk/midnight-js", "version_constraint_satisfies": "1.4.0" }] })).await, chunk));
-    assert!(!contains_chunk(&run_filtered(&h.pool, &token, serde_json::json!({ "sdk_dependency": [{ "kind": "npm", "name": "@midnight-ntwrk/midnight-js", "version_constraint_satisfies": "0.9.0" }] })).await, chunk));
+    assert!(contains_chunk(&run_filtered(&h.pool, &token, serde_json::json!({ "sdk_dependency": { "any_of": [{ "kind": "npm", "name": "@midnight-ntwrk/midnight-js", "version_satisfies": "1.4.0" }] } })).await, chunk));
+    assert!(!contains_chunk(&run_filtered(&h.pool, &token, serde_json::json!({ "sdk_dependency": { "any_of": [{ "kind": "npm", "name": "@midnight-ntwrk/midnight-js", "version_satisfies": "0.9.0" }] } })).await, chunk));
 }
 
 #[tokio::test]

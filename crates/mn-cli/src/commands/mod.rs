@@ -5,6 +5,7 @@ pub mod chunks;
 pub mod config;
 pub mod doctor;
 pub mod documents;
+pub mod facets;
 pub mod ingest;
 pub mod keys;
 pub mod login;

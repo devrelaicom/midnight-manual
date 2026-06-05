@@ -39,8 +39,9 @@ pub struct SearchRequest {
     pub client_embedding_model: String,
     /// Max results to return from the cloud (cloud caps at 100).
     pub limit: u32,
-    /// Filter spec passed through verbatim. The MCP tool's input schema mirrors
-    /// the cloud's, so callers can pass arbitrary filter JSON.
+    /// Per-facet filter spec. The MCP tool validates this at the boundary
+    /// (deserialize into `mn_retrieval::filters::SearchFilters` + `.validate()`)
+    /// before forwarding, so the cloud receives a registry-conformant object.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub filters: Option<serde_json::Value>,
     /// Cloud-side ordering key. When reranking locally, the MCP server asks for
@@ -49,6 +50,9 @@ pub struct SearchRequest {
     /// (US6). `None` lets the cloud apply its default (`confidence`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sort_by: Option<&'static str>,
+    /// Query mode forwarded to the cloud (`hybrid` | `vector` | `fts`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<&'static str>,
 }
 
 /// Errors the cloud client can produce.
@@ -324,6 +328,14 @@ impl CloudClient {
     ) -> Result<serde_json::Value, CloudError> {
         let path = format!("/v1/documents/{id}/chunks?from={from}&limit={limit}");
         self.get_json(&path).await
+    }
+
+    /// `GET /v1/facets` — the corpus's filterable facets + corpus-derived values.
+    ///
+    /// # Errors
+    /// Propagates any [`CloudError`] from the transport / status mapping.
+    pub async fn get_facets(&self) -> Result<serde_json::Value, CloudError> {
+        self.get_json("/v1/facets").await
     }
 
     async fn get_json(&self, path: &str) -> Result<serde_json::Value, CloudError> {

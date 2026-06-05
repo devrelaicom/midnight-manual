@@ -10,6 +10,7 @@
 
 #![doc(html_root_url = "https://docs.rs/mn-retrieval/0.1.0")]
 
+pub mod facets;
 pub mod filters;
 pub mod rrf;
 

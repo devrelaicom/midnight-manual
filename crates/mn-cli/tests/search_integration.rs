@@ -25,6 +25,7 @@ fn make_request(query: &str, limit: u32) -> SearchRequest {
         }],
         client_embedding_model: "bge-base-en-v1.5@1".to_owned(),
         limit,
+        mode: "hybrid".to_owned(),
         filters: SearchFilters::default(),
         // Non-rerank path: omitted on the wire (skip_serializing_if).
         sort_by: None,
@@ -102,6 +103,7 @@ async fn multi_query_request_sends_all_pairs() {
         ],
         client_embedding_model: "bge-base-en-v1.5@1".to_owned(),
         limit: 10,
+        mode: "hybrid".to_owned(),
         filters: SearchFilters::default(),
         sort_by: None,
     };

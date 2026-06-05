@@ -66,6 +66,10 @@ const MAX_QUERIES: usize = 10;
 const RERANK_FETCH: u32 = 50;
 
 /// Args for `mnm search`.
+// A clap `Args` struct naturally accumulates one bool per boolean flag
+// (`--queries-stdin`, `--rerank`, `--no-deprecated`, `--verified`); these are
+// independent CLI switches, not a state enum, so the >3-bools lint doesn't apply.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, ClapArgs)]
 pub struct Args {
     /// The primary query string. Required unless `--queries-stdin` is set.
@@ -106,6 +110,83 @@ pub struct Args {
     /// `--rerank` is set.
     #[arg(long)]
     pub reranker: Option<String>,
+
+    /// Query mode: hybrid (default), vector, or fts.
+    #[arg(long, default_value = "hybrid", value_parser = ["hybrid", "vector", "fts"])]
+    pub mode: String,
+
+    /// Restrict to these chunk kinds (markdown|code|plaintext). Repeatable.
+    #[arg(long = "kind")]
+    pub kind: Vec<String>,
+
+    /// Restrict to these programming languages. Repeatable.
+    #[arg(long = "language")]
+    pub language: Vec<String>,
+
+    /// Exclude these languages. Repeatable.
+    #[arg(long = "exclude-language")]
+    pub exclude_language: Vec<String>,
+
+    /// Restrict to these tags. Repeatable.
+    #[arg(long = "tag")]
+    pub tag: Vec<String>,
+
+    /// Exclude these tags. Repeatable.
+    #[arg(long = "exclude-tag")]
+    pub exclude_tag: Vec<String>,
+
+    /// Match symbols as `kind:name` (either side optional, e.g. `circuit:` or
+    /// `:deployContract`). Repeatable.
+    #[arg(long = "symbol")]
+    pub symbol: Vec<String>,
+
+    /// Restrict to these source slugs. Repeatable.
+    #[arg(long = "source")]
+    pub source: Vec<String>,
+
+    /// Restrict to these content types. Repeatable.
+    #[arg(long = "content-type")]
+    pub content_type: Vec<String>,
+
+    /// Restrict to these attributions. Repeatable.
+    #[arg(long = "attribution")]
+    pub attribution: Vec<String>,
+
+    /// Exclude deprecated content.
+    #[arg(long = "no-deprecated")]
+    pub no_deprecated: bool,
+
+    /// Restrict to verified content.
+    #[arg(long = "verified")]
+    pub verified: bool,
+
+    /// Only chunks ingested on/after this ISO date (YYYY-MM-DD).
+    #[arg(long = "ingested-after")]
+    pub ingested_after: Option<String>,
+
+    /// Only chunks ingested on/before this ISO date (YYYY-MM-DD).
+    #[arg(long = "ingested-before")]
+    pub ingested_before: Option<String>,
+
+    /// Minimum chunk token count.
+    #[arg(long = "min-tokens")]
+    pub min_tokens: Option<i64>,
+
+    /// Maximum chunk token count.
+    #[arg(long = "max-tokens")]
+    pub max_tokens: Option<i64>,
+
+    /// Full filter object as JSON (mutually exclusive with the granular filter
+    /// flags).
+    #[arg(
+        long = "filter-json",
+        conflicts_with_all = [
+            "kind", "language", "exclude_language", "tag", "exclude_tag", "symbol",
+            "source", "content_type", "attribution", "no_deprecated", "verified",
+            "ingested_after", "ingested_before", "min_tokens", "max_tokens",
+        ]
+    )]
+    pub filter_json: Option<String>,
 }
 
 /// Dispatch.
@@ -217,25 +298,27 @@ pub async fn run_with_paths(
         ));
     }
 
-    // Resolve the corpus wire id. When the sentinel "auto" is present, fetch
-    // the active model from the server so the wire id always matches the
-    // active corpus model. If the caller supplied an explicit
-    // --embedding-model override, honour it directly and skip the round-trip.
-    let client_embedding_model = if args.embedding_model == DEFAULT_EMBEDDING_MODEL {
-        let active = crate::commands::models::fetch_active(server_url)
-            .await
-            .context("resolve active corpus model")?;
-        format!("{}@{}", active.name, active.revision)
-    } else {
-        args.embedding_model.clone()
-    };
+    let client_embedding_model =
+        resolve_client_embedding_model(&args.embedding_model, server_url).await?;
+
+    // Resolve mode + filters from the granular flags (or --filter-json) and
+    // fail fast on an invalid filter before any further work.
+    let (mode, filters) = build_filters(&args)?;
+    validate_filters(&filters)?;
 
     let queries: Vec<QueryPair> = texts
         .into_iter()
         .zip(vectors)
         .map(|(text, vector)| QueryPair { text, vector })
         .collect();
-    let request = build_search_request(queries, client_embedding_model, args.limit, args.rerank);
+    let request = build_search_request(
+        queries,
+        client_embedding_model,
+        args.limit,
+        args.rerank,
+        mode,
+        filters,
+    );
 
     // Resolve the env-dependent rerank selection up front (synchronously) into
     // owned data. The `ConfigEnv` trait carries no `Sync` guarantee, so threading
@@ -284,6 +367,134 @@ pub async fn run_with_paths(
     result
 }
 
+/// Resolve the embedding-model wire id sent with the search request. When the
+/// sentinel [`DEFAULT_EMBEDDING_MODEL`] (`"auto"`) is in effect, fetch the
+/// corpus's active model from `GET /v1/models/active` so the wire id always
+/// matches the active corpus model; an explicit `--embedding-model` override is
+/// honoured verbatim and skips the round-trip.
+///
+/// # Errors
+///
+/// Returns `anyhow::Error` when the active-model fetch fails.
+async fn resolve_client_embedding_model(embedding_model: &str, server_url: &str) -> Result<String> {
+    if embedding_model == DEFAULT_EMBEDDING_MODEL {
+        let active = crate::commands::models::fetch_active(server_url)
+            .await
+            .context("resolve active corpus model")?;
+        Ok(format!("{}@{}", active.name, active.revision))
+    } else {
+        Ok(embedding_model.to_owned())
+    }
+}
+
+/// Map the granular filter flags (or `--filter-json`) into a [`SearchFilters`],
+/// returning it alongside the resolved `mode`.
+///
+/// `--filter-json` is mutually exclusive with the granular flags (enforced at
+/// clap parse time); when present it is parsed directly and a malformed document
+/// is a hard error — including a misspelled facet, which `SearchFilters`'
+/// `deny_unknown_fields` rejects rather than silently dropping. A present-but-
+/// unparseable `--ingested-after` / `--ingested-before` is likewise an error;
+/// an absent date stays `None`. With no filter flags at all this yields
+/// `SearchFilters::default()` (so `is_empty()` holds) and the clap-default
+/// `mode` of `"hybrid"`.
+///
+/// # Errors
+///
+/// Returns `anyhow::Error` on malformed `--filter-json` or an unparseable
+/// `--ingested-after` / `--ingested-before` date.
+fn build_filters(args: &Args) -> Result<(String, mn_retrieval::filters::SearchFilters)> {
+    use mn_retrieval::filters::{
+        NumericRange, SearchFilters, SetMatch, SymbolMatch, TemporalRange,
+    };
+    if let Some(js) = &args.filter_json {
+        let f: SearchFilters = serde_json::from_str(js)
+            .context("parse --filter-json (see `mnm facets` for the filter shape)")?;
+        return Ok((args.mode.clone(), f));
+    }
+    let set = |any_of: &[String], none_of: &[String]| SetMatch {
+        any_of: any_of.to_vec(),
+        none_of: none_of.to_vec(),
+    };
+    let symbols = args
+        .symbol
+        .iter()
+        .map(|s| {
+            let (k, n) = s.split_once(':').map_or((s.as_str(), ""), |(k, n)| (k, n));
+            SymbolMatch {
+                kind: if k.is_empty() {
+                    None
+                } else {
+                    Some(k.to_owned())
+                },
+                name: if n.is_empty() {
+                    None
+                } else {
+                    Some(n.to_owned())
+                },
+            }
+        })
+        .collect();
+    let parse_date = |s: &Option<String>| -> Result<Option<time::Date>> {
+        s.as_deref()
+            .map(|d| {
+                time::Date::parse(d, &time::format_description::well_known::Iso8601::DATE)
+                    .with_context(|| format!("invalid ISO date `{d}` (expected YYYY-MM-DD)"))
+            })
+            .transpose()
+    };
+    let ingested = if args.ingested_after.is_some() || args.ingested_before.is_some() {
+        Some(TemporalRange {
+            after: parse_date(&args.ingested_after)?,
+            before: parse_date(&args.ingested_before)?,
+        })
+    } else {
+        None
+    };
+    let token_count =
+        (args.min_tokens.is_some() || args.max_tokens.is_some()).then_some(NumericRange {
+            min: args.min_tokens,
+            max: args.max_tokens,
+        });
+    let f = SearchFilters {
+        kind: set(&args.kind, &[]),
+        language: set(&args.language, &args.exclude_language),
+        tags: set(&args.tag, &args.exclude_tag),
+        source_slug: set(&args.source, &[]),
+        content_type: set(&args.content_type, &[]),
+        attribution: set(&args.attribution, &[]),
+        symbol: SetMatch {
+            any_of: symbols,
+            none_of: vec![],
+        },
+        deprecated: args.no_deprecated.then_some(false),
+        verified: args.verified.then_some(true),
+        ingested_at: ingested,
+        token_count,
+        ..Default::default()
+    };
+    Ok((args.mode.clone(), f))
+}
+
+/// Client-side fail-fast filter validation. Maps a [`mn_retrieval::filters::FilterError`]
+/// to a friendly `anyhow::Error` that names the offending facet and points at
+/// `mnm facets`, so an invalid filter is rejected before any embedding /
+/// network work (rather than surfacing as an opaque server 400).
+///
+/// # Errors
+///
+/// Returns `anyhow::Error` when `filters.validate()` reports a violation.
+fn validate_filters(filters: &mn_retrieval::filters::SearchFilters) -> Result<()> {
+    if let Err(e) = filters.validate() {
+        anyhow::bail!(
+            "invalid filter `{}`: {} (see `mnm facets` for valid facets and values)",
+            e.facet,
+            e.message
+        );
+    }
+    Ok(())
+}
+
 /// Build the outgoing `/v1/search` body, sizing the candidate pool for the
 /// chosen path.
 ///
@@ -299,6 +510,8 @@ fn build_search_request(
     client_embedding_model: String,
     limit: u32,
     rerank: bool,
+    mode: String,
+    filters: SearchFilters,
 ) -> SearchRequest {
     let (cloud_limit, sort_by) = if rerank {
         (RERANK_FETCH, Some("score".to_owned()))
@@ -309,7 +522,8 @@ fn build_search_request(
         queries,
         client_embedding_model,
         limit: cloud_limit,
-        filters: SearchFilters::default(),
+        mode,
+        filters,
         sort_by,
     }
 }
@@ -656,6 +870,9 @@ pub struct SearchRequest {
     pub client_embedding_model: String,
     /// Maximum number of results.
     pub limit: u32,
+    /// Query mode (`hybrid` | `vector` | `fts`); serialized as the `mode` key,
+    /// matching the cloud's snake_case `SearchMode` values.
+    pub mode: String,
     /// Per-result filters.
     pub filters: SearchFilters,
     /// Optional ordering hint for the candidate pool. The rerank path sets this
@@ -994,6 +1211,23 @@ mod tests {
             embedding_model: DEFAULT_EMBEDDING_MODEL.to_owned(),
             rerank: false,
             reranker: None,
+            mode: "hybrid".to_owned(),
+            kind: Vec::new(),
+            language: Vec::new(),
+            exclude_language: Vec::new(),
+            tag: Vec::new(),
+            exclude_tag: Vec::new(),
+            symbol: Vec::new(),
+            source: Vec::new(),
+            content_type: Vec::new(),
+            attribution: Vec::new(),
+            no_deprecated: false,
+            verified: false,
+            ingested_after: None,
+            ingested_before: None,
+            min_tokens: None,
+            max_tokens: None,
+            filter_json: None,
         }
     }
 
@@ -1086,7 +1320,14 @@ mod tests {
             text: "x".to_owned(),
             vector: vec![0.0],
         }];
-        let req = build_search_request(q, "voyage-code-3@1".to_owned(), 5, true);
+        let req = build_search_request(
+            q,
+            "voyage-code-3@1".to_owned(),
+            5,
+            true,
+            "hybrid".to_owned(),
+            SearchFilters::default(),
+        );
         // Caller asked for 5 but the cloud pool is widened so the reranker can
         // promote a below-cutoff candidate.
         assert_eq!(req.limit, RERANK_FETCH);
@@ -1103,7 +1344,14 @@ mod tests {
             text: "x".to_owned(),
             vector: vec![0.0],
         }];
-        let req = build_search_request(q, "voyage-code-3@1".to_owned(), 5, false);
+        let req = build_search_request(
+            q,
+            "voyage-code-3@1".to_owned(),
+            5,
+            false,
+            "hybrid".to_owned(),
+            SearchFilters::default(),
+        );
         assert_eq!(req.limit, 5);
         assert!(req.sort_by.is_none());
         // None must be OMITTED on the wire (skip_serializing_if), not null —
@@ -1182,5 +1430,56 @@ mod tests {
         ]);
         assert!(p.inner.rerank);
         assert_eq!(p.inner.reranker.as_deref(), Some("voyage-rerank-2.5-lite"));
+    }
+
+    #[test]
+    fn flags_map_to_filters_and_mode() {
+        use clap::Parser as _;
+        #[derive(clap::Parser)]
+        struct Probe {
+            #[command(flatten)]
+            inner: Args,
+        }
+        let p = Probe::parse_from([
+            "search",
+            "q",
+            "--mode",
+            "fts",
+            "--kind",
+            "code",
+            "--language",
+            "compact",
+            "--exclude-language",
+            "typescript",
+            "--tag",
+            "quickstart",
+            "--symbol",
+            "circuit:deployContract",
+            "--no-deprecated",
+            "--min-tokens",
+            "50",
+        ]);
+        let (mode, filters) = build_filters(&p.inner).expect("valid flags");
+        assert_eq!(mode, "fts");
+        assert_eq!(filters.kind.any_of, vec!["code".to_owned()]);
+        assert_eq!(filters.language.none_of, vec!["typescript".to_owned()]);
+        assert_eq!(filters.symbol.any_of[0].kind.as_deref(), Some("circuit"));
+        assert_eq!(filters.symbol.any_of[0].name.as_deref(), Some("deployContract"));
+        assert_eq!(filters.deprecated, Some(false));
+        assert_eq!(filters.token_count.unwrap().min, Some(50));
+    }
+
+    #[test]
+    fn build_filters_rejects_bad_filter_json_and_dates() {
+        use clap::Parser as _;
+        #[derive(clap::Parser)]
+        struct Probe {
+            #[command(flatten)]
+            inner: Args,
+        }
+        let bad_json = Probe::parse_from(["search", "q", "--filter-json", "{ not valid json"]);
+        assert!(build_filters(&bad_json.inner).is_err());
+        let bad_date = Probe::parse_from(["search", "q", "--ingested-after", "not-a-date"]);
+        assert!(build_filters(&bad_date.inner).is_err());
     }
 }

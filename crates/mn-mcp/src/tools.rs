@@ -34,17 +34,21 @@ use crate::server::ServerConfig;
 
 /// Build the static tool manifest sent in response to `tools/list`.
 ///
-/// All thirteen tools declared in spec.md US5 / contracts/mcp-tools.json.
+/// All fourteen tools declared in spec.md US5 / contracts/mcp-tools.json.
 /// Schemas here are kept in sync with the canonical document by way of the
 /// contract tests in `tests/`.
 #[must_use]
+// A flat manifest of `ToolDescription` literals: length is inherent to the
+// data (one entry per tool), so splitting it would hurt readability without
+// reducing any real complexity.
+#[allow(clippy::too_many_lines)]
 pub fn list() -> ToolsListResult {
     ToolsListResult {
         tools: vec![
             ToolDescription {
                 name: "search",
                 description:
-                    "Hybrid (FTS + vector) retrieval over the Midnight corpus, with optional cross-encoder reranking and trust-aware confidence scoring. Provide the single-query `{query, vector}` form, or a `queries` array of 1-10 `{text, vector}` pairs that RRF fuses across. The caller embeds each text. Rate-limit cost is max(1, distinct queries) tokens (D25).\n\nPatterns (full worked examples in docs/cookbook/query-enhancement.md):\n- hyde: send the question plus a hypothetical answer as a second query, e.g. queries=[\"<the user's question>\", \"<a 1-2 sentence hypothetical answer the agent drafts>\"]. Lifts recall when the question is short or jargon-light.\n- multi_query: send 2-3 paraphrases varying vocabulary and breadth, e.g. queries=[\"compile a contract\", \"build source into a deployable artifact\", \"smart-contract build step\"]. Helps when synonyms matter.\n- step_back: send the question plus a more abstract framing, e.g. queries=[\"why did this specific call fail?\", \"how does the platform validate calls?\"]. Helps when the question is over-specific.",
+                    "Hybrid (FTS + vector) retrieval over the Midnight corpus, with optional cross-encoder reranking and trust-aware confidence scoring. Provide the single-query `{query, vector}` form, or a `queries` array of 1-10 `{text, vector}` pairs that RRF fuses across. The caller embeds each text (except in `fts` mode). Rate-limit cost is max(1, distinct queries) tokens (D25).\n\nPatterns (full worked examples in docs/cookbook/query-enhancement.md):\n- hyde: send the question plus a hypothetical answer as a second query, e.g. queries=[\"<the user's question>\", \"<a 1-2 sentence hypothetical answer the agent drafts>\"]. Lifts recall when the question is short or jargon-light.\n- multi_query: send 2-3 paraphrases varying vocabulary and breadth, e.g. queries=[\"compile a contract\", \"build source into a deployable artifact\", \"smart-contract build step\"]. Helps when synonyms matter.\n- step_back: send the question plus a more abstract framing, e.g. queries=[\"why did this specific call fail?\", \"how does the platform validate calls?\"]. Helps when the question is over-specific.",
                 input_schema: search_input_schema(),
             },
             ToolDescription {
@@ -99,6 +103,16 @@ pub fn list() -> ToolsListResult {
                 name: "list_sources",
                 description:
                     "Enumerate the corpus's available sources so an agent can narrow filters.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false,
+                }),
+            },
+            ToolDescription {
+                name: "facets",
+                description:
+                    "List the filterable facets for `search`, their types, whether they support exclusion (none_of), and the values present in the active corpus (languages, tags, sources, packages). Call this before constructing a `filters` object to learn valid values. Closed-enum facets (kind, content_type, attribution, source_kind) carry their full value list; high-cardinality sets (tags, package) are top-N with `truncated`/`total`.",
                 input_schema: json!({
                     "type": "object",
                     "properties": {},
@@ -183,43 +197,67 @@ fn document_chunks_schema() -> serde_json::Value {
     })
 }
 
+#[allow(clippy::too_many_lines)]
 fn search_input_schema() -> serde_json::Value {
+    use mn_retrieval::facets;
+    let set_of = |values: Option<&[&str]>| {
+        let items = values.map_or_else(
+            || json!({ "type": "string" }),
+            |v| json!({ "type": "string", "enum": v }),
+        );
+        json!({
+            "type": "object",
+            "properties": { "any_of": { "type": "array", "items": items }, "none_of": { "type": "array", "items": items } },
+            "additionalProperties": false,
+        })
+    };
     json!({
         "type": "object",
         "properties": {
-            "query": {
-                "type": "string",
-                "minLength": 1,
-                "description": "Single-query convenience form (mutually exclusive with queries).",
-            },
-            "queries": {
-                "type": "array",
-                "minItems": 1,
-                "maxItems": 50,
-                "items": { "type": "string", "minLength": 1 },
-                "description": "Multi-query input for HyDE / expansion / step-back patterns.",
-            },
-            "limit": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 50,
-                "default": 10,
-                "description": "Max results returned to the caller. Capped at 50 (FR-088).",
-            },
-            "rerank": {
-                "type": "boolean",
-                "default": true,
-                "description": "Apply local cross-encoder reranking. Disable for ultra-low-latency callers.",
-            },
+            "query": { "type": "string", "minLength": 1, "description": "Single-query convenience form (mutually exclusive with queries)." },
+            "queries": { "type": "array", "minItems": 1, "maxItems": 50, "items": { "type": "string", "minLength": 1 }, "description": "Multi-query input for HyDE / expansion / step-back patterns." },
+            "limit": { "type": "integer", "minimum": 1, "maximum": 50, "default": 10, "description": "Max results returned to the caller. Capped at 50." },
+            "rerank": { "type": "boolean", "default": true, "description": "Apply local cross-encoder reranking. Disable for ultra-low-latency callers." },
+            "mode": { "type": "string", "enum": ["hybrid", "vector", "fts"], "default": "hybrid",
+                      "description": "fts skips embedding entirely (lowest latency); vector is semantic-only; hybrid (default) fuses both." },
             "filters": {
                 "type": "object",
-                "description": "Filter spec forwarded verbatim to the cloud /v1/search endpoint.",
-            },
+                "additionalProperties": false,
+                "properties": {
+                    "kind":         set_of(Some(facets::KIND_VALUES)),
+                    "source_kind":  set_of(Some(facets::SOURCE_KIND_VALUES)),
+                    "attribution":  set_of(Some(facets::ATTRIBUTION_VALUES)),
+                    "content_type": set_of(Some(facets::CONTENT_TYPE_VALUES)),
+                    "language":     set_of(None),
+                    "tags":         set_of(None),
+                    "source_slug":  set_of(None),
+                    "heading_path": set_of(None),
+                    "verified":   { "type": "boolean" },
+                    "deprecated": { "type": "boolean" },
+                    "symbol": { "type": "object", "properties": { "any_of": { "type": "array", "items": {
+                        "type": "object", "properties": { "kind": { "type": "string" }, "name": { "type": "string" } },
+                        "additionalProperties": false } }, "none_of": { "type": "array", "items": {
+                        "type": "object", "properties": { "kind": { "type": "string" }, "name": { "type": "string" } },
+                        "additionalProperties": false } } }, "additionalProperties": false },
+                    "package": { "type": "object", "properties": { "any_of": { "type": "array", "items": {
+                        "type": "object", "required": ["kind","name"], "properties": { "kind": { "type": "string", "enum": facets::PACKAGE_KIND_VALUES }, "name": { "type": "string" } },
+                        "additionalProperties": false } }, "none_of": { "type": "array", "items": {
+                        "type": "object", "required": ["kind","name"], "properties": { "kind": { "type": "string", "enum": facets::PACKAGE_KIND_VALUES }, "name": { "type": "string" } },
+                        "additionalProperties": false } } }, "additionalProperties": false },
+                    "language_target": { "type": "object", "additionalProperties": false, "properties": { "any_of": { "type": "array", "items": {
+                        "type": "object", "required": ["name"], "additionalProperties": false,
+                        "properties": { "name": { "type": "string" }, "version_satisfies": { "type": "string" } } } } } },
+                    "sdk_dependency": { "type": "object", "additionalProperties": false, "properties": { "any_of": { "type": "array", "items": {
+                        "type": "object", "required": ["kind", "name"], "additionalProperties": false,
+                        "properties": { "kind": { "type": "string" }, "name": { "type": "string" }, "version_satisfies": { "type": "string" } } } } } },
+                    "ingested_at": { "type": "object", "properties": { "after": { "type": "string", "format": "date" }, "before": { "type": "string", "format": "date" } }, "additionalProperties": false },
+                    "source_modified_at": { "type": "object", "properties": { "after": { "type": "string", "format": "date" }, "before": { "type": "string", "format": "date" } }, "additionalProperties": false },
+                    "token_count": { "type": "object", "properties": { "min": { "type": "integer" }, "max": { "type": "integer" } }, "additionalProperties": false }
+                },
+                "description": "Per-facet filters. AND across keys, OR within any_of, exclude none_of. See the `facets` tool for corpus-derived values."
+            }
         },
-        "oneOf": [
-            { "required": ["query"] },
-            { "required": ["queries"] },
-        ],
+        "oneOf": [ { "required": ["query"] }, { "required": ["queries"] } ]
     })
 }
 
@@ -524,10 +562,11 @@ const RERANK_FETCH: u32 = 50;
 
 /// Dispatch the `search` tool.
 ///
-/// Embeds each query locally, posts the resulting `{text, vector}` pairs to
-/// the cloud's `/v1/search`, optionally reranks the returned chunks against
-/// the first query, and truncates to the caller's `limit`. When rerank is on
-/// each returned result gains a `rerank_score` field.
+/// Embeds each query locally (except in `fts` mode, which skips embedding
+/// entirely), posts the resulting `{text, vector}` pairs to the cloud's
+/// `/v1/search`, optionally reranks the returned chunks against the first
+/// query, and truncates to the caller's `limit`. When rerank is on each
+/// returned result gains a `rerank_score` field.
 ///
 /// # Errors
 ///
@@ -548,24 +587,37 @@ pub async fn run_search(
     let voyage_key = mn_core::config::resolve_voyage_api_key(None, &core_cfg.models, &cfg_env);
     let rerank_sel = resolve_reranker_selection(&core_cfg.models, &cfg_env);
 
-    // Embed all queries via VoyageAI — either BYOK (direct) or through the
-    // cloud server's /v1/embeddings proxy. There is no local embedder; the only
-    // local model is the reranker (loaded lazily in `rerank_results`).
-    let vectors =
-        embed_queries(&parsed.queries, &core_cfg.models, voyage_key.as_deref(), cfg, cloud).await?;
-    let pairs: Vec<QueryPair> = parsed
-        .queries
-        .iter()
-        .zip(vectors.into_iter())
-        .map(|(text, vector)| QueryPair { text: text.clone(), vector })
-        .collect();
-
-    // Fetch the corpus's active model wire id so the search request is labelled
-    // with the canonical {name}@{revision} the server expects.
-    let client_embedding_model = cloud
-        .fetch_active_model()
-        .await
-        .map_err(|e| SearchError::Cloud(e.to_string()))?;
+    // fts mode skips embedding entirely (its whole point): send text-only query
+    // pairs with empty vectors and no model label — the cloud ignores both when
+    // mode=fts (needs_vector is false server-side). hybrid/vector embed locally
+    // (BYOK Voyage or the cloud's /v1/embeddings proxy) and label the request
+    // with the corpus's active {name}@{revision}.
+    let (pairs, client_embedding_model): (Vec<QueryPair>, String) = if parsed.mode == "fts" {
+        let pairs = parsed
+            .queries
+            .iter()
+            .map(|text| QueryPair {
+                text: text.clone(),
+                vector: Vec::new(),
+            })
+            .collect();
+        (pairs, String::new())
+    } else {
+        let vectors =
+            embed_queries(&parsed.queries, &core_cfg.models, voyage_key.as_deref(), cfg, cloud)
+                .await?;
+        let pairs = parsed
+            .queries
+            .iter()
+            .zip(vectors.into_iter())
+            .map(|(text, vector)| QueryPair { text: text.clone(), vector })
+            .collect();
+        let model = cloud
+            .fetch_active_model()
+            .await
+            .map_err(|e| SearchError::Cloud(e.to_string()))?;
+        (pairs, model)
+    };
 
     // Send to cloud. If rerank is on, ask for a fixed top-K so the reranker
     // has a useful candidate pool independent of the caller's limit.
@@ -585,6 +637,7 @@ pub async fn run_search(
         // candidates before we rerank). Pass-through (rerank=false) keeps the
         // cloud's confidence ordering.
         sort_by: if parsed.rerank { Some("score") } else { None },
+        mode: Some(parsed.mode),
     };
     let cloud_resp = match cloud.search(&req).await {
         Ok(v) => v,
@@ -694,6 +747,7 @@ struct ParsedSearchArgs {
     limit: u32,
     rerank: bool,
     filters: Option<serde_json::Value>,
+    mode: &'static str,
 }
 
 fn parse_search_args(v: &serde_json::Value) -> Result<ParsedSearchArgs, String> {
@@ -755,11 +809,31 @@ fn parse_search_args(v: &serde_json::Value) -> Result<ParsedSearchArgs, String> 
         .unwrap_or(true);
     let filters = obj.get("filters").cloned();
 
+    let mode: &'static str = match obj.get("mode") {
+        None => "hybrid",
+        Some(serde_json::Value::String(s)) => match s.as_str() {
+            "hybrid" => "hybrid",
+            "vector" => "vector",
+            "fts" => "fts",
+            other => return Err(format!("unknown mode `{other}` (expected hybrid|vector|fts)")),
+        },
+        Some(_) => return Err("`mode` must be a string".to_owned()),
+    };
+    // Validate the filters object against the registry before forwarding (fail fast).
+    if let Some(fv) = obj.get("filters") {
+        let parsed: mn_retrieval::filters::SearchFilters =
+            serde_json::from_value(fv.clone()).map_err(|e| format!("invalid filters: {e}"))?;
+        parsed
+            .validate()
+            .map_err(|e| format!("invalid filter `{}`: {}", e.facet, e.message))?;
+    }
+
     Ok(ParsedSearchArgs {
         queries,
         limit,
         rerank,
         filters,
+        mode,
     })
 }
 
@@ -1188,7 +1262,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tool_list_has_all_thirteen_tools() {
+    fn tool_list_has_all_fourteen_tools() {
         let m = list();
         let names: Vec<_> = m.tools.iter().map(|t| t.name).collect();
         for expected in [
@@ -1202,13 +1276,14 @@ mod tests {
             "get_document_full",
             "get_document_chunks",
             "list_sources",
+            "facets",
             "pull_models",
             "status",
             "install_search_skill",
         ] {
             assert!(names.contains(&expected), "missing tool: {expected}");
         }
-        assert_eq!(names.len(), 13, "expected 13 tools, got {}", names.len());
+        assert_eq!(names.len(), 14, "expected 14 tools, got {}", names.len());
     }
 
     #[test]
@@ -1279,6 +1354,19 @@ mod tests {
         let s = search_input_schema();
         assert_eq!(s["type"], "object");
         assert!(s.get("oneOf").is_some());
+    }
+
+    #[test]
+    fn parse_rejects_unknown_mode_and_bad_filter() {
+        let bad_mode = serde_json::json!({ "query": "x", "mode": "fuzzy" });
+        assert!(parse_search_args(&bad_mode).is_err());
+        let non_string_mode = serde_json::json!({ "query": "x", "mode": 5 });
+        assert!(parse_search_args(&non_string_mode).is_err());
+        let bad_filter =
+            serde_json::json!({ "query": "x", "filters": { "kind": { "any_of": ["binary"] } } });
+        assert!(parse_search_args(&bad_filter).is_err());
+        let ok = serde_json::json!({ "query": "x", "mode": "fts", "filters": { "kind": { "any_of": ["code"] } } });
+        assert!(parse_search_args(&ok).is_ok());
     }
 
     fn result_with_trust(chunk: &str, trust: f64) -> serde_json::Value {

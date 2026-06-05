@@ -185,6 +185,8 @@ pub enum McpToolName {
     GetDocumentChunks,
     /// `list_sources` tool.
     ListSources,
+    /// `facets` tool.
+    Facets,
     /// `pull_models` tool.
     PullModels,
     /// `status` tool.
@@ -210,6 +212,8 @@ pub enum CliCommandName {
     Mcp,
     /// `mnm search` (when implemented).
     Search,
+    /// `mnm facets`.
+    Facets,
     /// `mnm models` (when implemented).
     Models,
     /// `mnm login` / `mnm auth` (Phase 7).

@@ -1,11 +1,11 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "midnight-manual MCP tools",
-  "description": "MCP tool input/output schemas for the 13 tools exposed by `mnm mcp serve`. Each tool's description is treated as part of the public contract per Constitution I and FR-037. The runtime manifest lives at `crates/mn-mcp/src/tools.rs::list()`; this document mirrors it. PR #52 grew the surface from 7 to 11 tools (dropped `get_chunk_siblings`; added `get_chunk_next`, `get_chunk_prev`, `get_document`, `get_document_full`, `get_document_chunks`). PR #59 added get_chunk_neighbors; PR #64 added install_search_skill (13 tools total).",
-  "version": "1.2.0",
+  "description": "MCP tool input/output schemas for the 14 tools exposed by `mnm mcp serve`. Each tool's description is treated as part of the public contract per Constitution I and FR-037. The runtime manifest lives at `crates/mn-mcp/src/tools.rs::list()`; this document mirrors it. PR #52 grew the surface from 7 to 11 tools (dropped `get_chunk_siblings`; added `get_chunk_next`, `get_chunk_prev`, `get_document`, `get_document_full`, `get_document_chunks`). PR #59 added get_chunk_neighbors; PR #64 added install_search_skill. The search-facets / query-mode rework added the `facets` tool plus the typed per-facet `filters` schema and the `mode` enum on `search` (14 tools total).",
+  "version": "1.3.0",
   "tools": {
     "search": {
-      "description": "Hybrid (FTS + vector) retrieval over the Midnight corpus, with optional cross-encoder reranking and trust-aware confidence scoring. Provide the single-query `{query, vector}` form, or a `queries` array of 1-10 `{text, vector}` pairs that RRF fuses across. The caller embeds each text. Rate-limit cost is max(1, distinct queries) tokens (D25).\n\nPatterns (full worked examples in docs/cookbook/query-enhancement.md):\n- hyde: send the question plus a hypothetical answer as a second query, e.g. queries=[\"<the user's question>\", \"<a 1-2 sentence hypothetical answer the agent drafts>\"]. Lifts recall when the question is short or jargon-light.\n- multi_query: send 2-3 paraphrases varying vocabulary and breadth, e.g. queries=[\"compile a contract\", \"build source into a deployable artifact\", \"smart-contract build step\"]. Helps when synonyms matter.\n- step_back: send the question plus a more abstract framing, e.g. queries=[\"why did this specific call fail?\", \"how does the platform validate calls?\"]. Helps when the question is over-specific.",
+      "description": "Hybrid (FTS + vector) retrieval over the Midnight corpus, with optional cross-encoder reranking and trust-aware confidence scoring. Provide the single-query `{query, vector}` form, or a `queries` array of 1-10 `{text, vector}` pairs that RRF fuses across. The caller embeds each text (except in `fts` mode). Rate-limit cost is max(1, distinct queries) tokens (D25).\n\nPatterns (full worked examples in docs/cookbook/query-enhancement.md):\n- hyde: send the question plus a hypothetical answer as a second query, e.g. queries=[\"<the user's question>\", \"<a 1-2 sentence hypothetical answer the agent drafts>\"]. Lifts recall when the question is short or jargon-light.\n- multi_query: send 2-3 paraphrases varying vocabulary and breadth, e.g. queries=[\"compile a contract\", \"build source into a deployable artifact\", \"smart-contract build step\"]. Helps when synonyms matter.\n- step_back: send the question plus a more abstract framing, e.g. queries=[\"why did this specific call fail?\", \"how does the platform validate calls?\"]. Helps when the question is over-specific.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -26,45 +26,192 @@
             "minimum": 1,
             "maximum": 50,
             "default": 10,
-            "description": "Max results returned to the caller. Capped at 50 (FR-088)."
+            "description": "Max results returned to the caller. Capped at 50."
           },
           "rerank": {
             "type": "boolean",
             "default": true,
             "description": "Apply local cross-encoder reranking. Disable for ultra-low-latency callers."
           },
+          "mode": {
+            "type": "string",
+            "enum": ["hybrid", "vector", "fts"],
+            "default": "hybrid",
+            "description": "fts skips embedding entirely (lowest latency); vector is semantic-only; hybrid (default) fuses both."
+          },
           "filters": {
             "type": "object",
-            "description": "Filter spec forwarded verbatim to the cloud /v1/search endpoint. Same shape as cloud filters.",
             "additionalProperties": false,
             "properties": {
-              "source_slug": { "type": "array", "items": { "type": "string" } },
-              "attribution": { "type": "array", "items": { "type": "string" } },
-              "verified": { "type": "boolean" },
-              "content_type": { "type": "array", "items": { "type": "string" } },
-              "language_target": {
+              "kind": {
                 "type": "object",
+                "additionalProperties": false,
                 "properties": {
-                  "name": { "type": "string" },
-                  "version_constraint_satisfies": { "type": "string" }
+                  "any_of": { "type": "array", "items": { "type": "string", "enum": ["markdown", "code", "plaintext"] } },
+                  "none_of": { "type": "array", "items": { "type": "string", "enum": ["markdown", "code", "plaintext"] } }
                 }
               },
-              "sdk_dependency": {
+              "source_kind": {
                 "type": "object",
+                "additionalProperties": false,
                 "properties": {
-                  "kind": { "type": "string" },
-                  "name": { "type": "string" },
-                  "version_constraint_satisfies": { "type": "string" }
+                  "any_of": { "type": "array", "items": { "type": "string", "enum": ["docs_site", "code_repo", "standalone", "mixed"] } },
+                  "none_of": { "type": "array", "items": { "type": "string", "enum": ["docs_site", "code_repo", "standalone", "mixed"] } }
+                }
+              },
+              "attribution": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "any_of": { "type": "array", "items": { "type": "string", "enum": ["foundation", "partner", "third_party", "community", "unknown"] } },
+                  "none_of": { "type": "array", "items": { "type": "string", "enum": ["foundation", "partner", "third_party", "community", "unknown"] } }
+                }
+              },
+              "content_type": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "any_of": { "type": "array", "items": { "type": "string", "enum": ["doc", "tutorial", "reference", "example", "contract_source", "sdk_source", "test", "readme", "other"] } },
+                  "none_of": { "type": "array", "items": { "type": "string", "enum": ["doc", "tutorial", "reference", "example", "contract_source", "sdk_source", "test", "readme", "other"] } }
+                }
+              },
+              "language": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "any_of": { "type": "array", "items": { "type": "string" } },
+                  "none_of": { "type": "array", "items": { "type": "string" } }
+                }
+              },
+              "tags": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "any_of": { "type": "array", "items": { "type": "string" } },
+                  "none_of": { "type": "array", "items": { "type": "string" } }
+                }
+              },
+              "source_slug": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "any_of": { "type": "array", "items": { "type": "string" } },
+                  "none_of": { "type": "array", "items": { "type": "string" } }
+                }
+              },
+              "heading_path": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "any_of": { "type": "array", "items": { "type": "string" } },
+                  "none_of": { "type": "array", "items": { "type": "string" } }
+                }
+              },
+              "verified": { "type": "boolean" },
+              "deprecated": { "type": "boolean" },
+              "symbol": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "any_of": { "type": "array", "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "kind": { "type": "string" },
+                      "name": { "type": "string" }
+                    }
+                  } },
+                  "none_of": { "type": "array", "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "kind": { "type": "string" },
+                      "name": { "type": "string" }
+                    }
+                  } }
                 }
               },
               "package": {
                 "type": "object",
+                "additionalProperties": false,
                 "properties": {
-                  "kind": { "type": "string" },
-                  "name": { "type": "string" }
+                  "any_of": { "type": "array", "items": {
+                    "type": "object",
+                    "required": ["kind", "name"],
+                    "additionalProperties": false,
+                    "properties": {
+                      "kind": { "type": "string", "enum": ["rust", "npm", "compact", "other"] },
+                      "name": { "type": "string" }
+                    }
+                  } },
+                  "none_of": { "type": "array", "items": {
+                    "type": "object",
+                    "required": ["kind", "name"],
+                    "additionalProperties": false,
+                    "properties": {
+                      "kind": { "type": "string", "enum": ["rust", "npm", "compact", "other"] },
+                      "name": { "type": "string" }
+                    }
+                  } }
+                }
+              },
+              "language_target": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "any_of": { "type": "array", "items": {
+                    "type": "object",
+                    "required": ["name"],
+                    "additionalProperties": false,
+                    "properties": {
+                      "name": { "type": "string" },
+                      "version_satisfies": { "type": "string" }
+                    }
+                  } }
+                }
+              },
+              "sdk_dependency": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "any_of": { "type": "array", "items": {
+                    "type": "object",
+                    "required": ["kind", "name"],
+                    "additionalProperties": false,
+                    "properties": {
+                      "kind": { "type": "string" },
+                      "name": { "type": "string" },
+                      "version_satisfies": { "type": "string" }
+                    }
+                  } }
+                }
+              },
+              "ingested_at": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "after": { "type": "string", "format": "date" },
+                  "before": { "type": "string", "format": "date" }
+                }
+              },
+              "source_modified_at": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "after": { "type": "string", "format": "date" },
+                  "before": { "type": "string", "format": "date" }
+                }
+              },
+              "token_count": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "min": { "type": "integer" },
+                  "max": { "type": "integer" }
                 }
               }
-            }
+            },
+            "description": "Per-facet filters. AND across keys, OR within any_of, exclude none_of. See the `facets` tool for corpus-derived values."
           }
         },
         "oneOf": [
@@ -293,6 +440,41 @@
                 "display_name": { "type": "string" },
                 "kind": { "type": "string" },
                 "active_revision": { "type": "integer" }
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "facets": {
+      "description": "List the filterable facets for `search`, their types, whether they support exclusion (none_of), and the values present in the active corpus (languages, tags, sources, packages). Call this before constructing a `filters` object to learn valid values. Closed-enum facets (kind, content_type, attribution, source_kind) carry their full value list; high-cardinality sets (tags, package) are top-N with `truncated`/`total`.",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "modes": {
+            "type": "array",
+            "items": { "type": "string", "enum": ["hybrid", "vector", "fts"] }
+          },
+          "filters": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "key": { "type": "string" },
+                "type": {
+                  "type": "string",
+                  "enum": ["enum", "open_set", "object_set", "bool", "range_temporal", "range_numeric"]
+                },
+                "negatable": { "type": "boolean" },
+                "values": { "type": "array", "items": { "type": "string" } },
+                "truncated": { "type": "boolean" },
+                "total": { "type": "integer" }
               }
             }
           }

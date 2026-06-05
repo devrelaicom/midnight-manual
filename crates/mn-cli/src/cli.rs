@@ -76,6 +76,8 @@ pub enum Command {
     Doctor(commands::doctor::Args),
     /// Ad-hoc retrieval — `mnm search <query>`.
     Search(commands::search::Args),
+    /// Print the corpus's filterable facets (modes + filter keys/values).
+    Facets(commands::facets::Args),
     /// Source registry inspection.
     Sources(commands::sources::Args),
     /// Source-version inspection.
@@ -174,6 +176,7 @@ pub async fn run() -> Result<()> {
             )
             .await
         }
+        Command::Facets(args) => commands::facets::run(args, cli.server.as_deref(), cli.json).await,
         Command::Sources(args) => {
             commands::sources::run(args, cli.server.as_deref(), cli.json).await
         }
@@ -266,6 +269,7 @@ const fn cli_command_name(cmd: &Command) -> CliCommandName {
         // No dedicated `Sources` variant in the closed enum yet — emit as
         // `sources` via the dedicated CliCommandName::Sources discriminant.
         Command::Search(_) => CliCommandName::Search,
+        Command::Facets(_) => CliCommandName::Facets,
         Command::Sources(_) | Command::Versions(_) => CliCommandName::Sources,
         Command::Config(_) => CliCommandName::Config,
         Command::Mcp(_) => CliCommandName::Mcp,
