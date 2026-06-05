@@ -9,7 +9,7 @@ use serde::Serialize;
 use crate::detect::{base_dir, detect};
 use crate::error::SkillError;
 use crate::harness::{Harness, Scope};
-use crate::{skill_markdown, SkillEnv, SKILL_NAME};
+use crate::{skill_files, SkillEnv, SKILL_NAME};
 
 /// What an install did to a single harness's owned dir.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -164,31 +164,48 @@ pub fn install(
 ) -> Result<InstallReport, SkillError> {
     let base = base_dir(scope, env)?;
     let (targets, not_detected) = resolve_targets(explicit, scope, env)?;
-    let body = skill_markdown();
+    let files = skill_files();
     let mut installed = Vec::with_capacity(targets.len());
     for h in targets {
         let dir = h.skill_dir(scope, &base);
-        let file = dir.join("SKILL.md");
-        let action = match fs::read_to_string(&file) {
-            Ok(existing) if existing == body => InstallAction::Unchanged,
-            Ok(_) => {
+        let dir_existed = dir.exists();
+        let mut changed = false;
+
+        // Write every manifest file, creating parent dirs as needed.
+        for &(rel, body) in files {
+            let file = join_rel(&dir, rel);
+            if let Some(parent) = file.parent() {
+                fs::create_dir_all(parent).map_err(|source| SkillError::Io {
+                    path: parent.to_path_buf(),
+                    source,
+                })?;
+            }
+            let up_to_date = fs::read_to_string(&file)
+                .map(|c| c == body)
+                .unwrap_or(false);
+            if !up_to_date {
                 write_file(&file, body)?;
-                InstallAction::Updated
+                changed = true;
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                fs::create_dir_all(&dir)
-                    .map_err(|source| SkillError::Io { path: dir.clone(), source })?;
-                write_file(&file, body)?;
-                InstallAction::Created
-            }
-            Err(source) => {
-                return Err(SkillError::Io { path: file, source });
-            }
+        }
+
+        // Prune any file in the owned dir that the manifest does not ship.
+        if dir_existed && prune_orphans(&dir, files)? {
+            changed = true;
+        }
+
+        let action = if !dir_existed {
+            InstallAction::Created
+        } else if changed {
+            InstallAction::Updated
+        } else {
+            InstallAction::Unchanged
         };
+
         installed.push(HarnessInstall {
             harness: h.id().to_owned(),
             scope: scope.as_str().to_owned(),
-            path: file,
+            path: h.skill_file(scope, &base),
             action,
             reload_step: h.reload_step().to_owned(),
         });
@@ -208,6 +225,45 @@ fn write_file(path: &std::path::Path, body: &str) -> Result<(), SkillError> {
         path: path.to_path_buf(),
         source,
     })
+}
+
+/// Join a manifest-relative path (which uses `/` separators) onto `dir`
+/// component-by-component, so it is correct on every platform.
+fn join_rel(dir: &std::path::Path, rel: &str) -> PathBuf {
+    let mut p = dir.to_path_buf();
+    for seg in rel.split('/') {
+        p.push(seg);
+    }
+    p
+}
+
+/// Delete any regular file under `dir` whose path is not shipped by `files`.
+/// Scoped strictly to the owned skill dir; leaves directories in place. Returns
+/// `true` if anything was removed.
+fn prune_orphans(dir: &std::path::Path, files: &[(&str, &str)]) -> Result<bool, SkillError> {
+    use std::collections::HashSet;
+    let owned: HashSet<PathBuf> = files.iter().map(|&(rel, _)| join_rel(dir, rel)).collect();
+    let mut removed = false;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let entries =
+            fs::read_dir(&d).map_err(|source| SkillError::Io { path: d.clone(), source })?;
+        for entry in entries {
+            let entry = entry.map_err(|source| SkillError::Io { path: d.clone(), source })?;
+            let path = entry.path();
+            let ft = entry
+                .file_type()
+                .map_err(|source| SkillError::Io { path: path.clone(), source })?;
+            if ft.is_dir() {
+                stack.push(path);
+            } else if !owned.contains(&path) {
+                fs::remove_file(&path)
+                    .map_err(|source| SkillError::Io { path: path.clone(), source })?;
+                removed = true;
+            }
+        }
+    }
+    Ok(removed)
 }
 
 /// Remove the owned skill dir for `explicit` harnesses (or auto-detected ones)
@@ -257,7 +313,7 @@ pub fn remove(
 /// Path-resolution errors only.
 pub fn status(scope: Scope, env: &impl SkillEnv) -> Result<StatusReport, SkillError> {
     let base = base_dir(scope, env)?;
-    let body = skill_markdown();
+    let body = crate::skill_markdown();
     let harnesses = Harness::ALL
         .into_iter()
         .map(|h| {
@@ -332,7 +388,7 @@ mod tests {
 
         let again = install(None, Scope::User, &env).unwrap();
         assert_eq!(again.installed[0].action, InstallAction::Updated);
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), skill_markdown());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), crate::skill_markdown());
     }
 
     #[test]
@@ -426,6 +482,39 @@ mod tests {
         std::fs::create_dir_all(dir.join("SKILL.md")).unwrap(); // SKILL.md is a dir
         let err = install(None, Scope::User, &env).unwrap_err();
         assert!(matches!(err, SkillError::Io { .. }));
+    }
+
+    #[test]
+    fn install_writes_every_bundle_file() {
+        let (_tmp, env) = env_with_marker(Harness::ClaudeCode);
+        let report = install(None, Scope::User, &env).unwrap();
+        let dir = report.installed[0].path.parent().unwrap().to_path_buf();
+        for &(rel, body) in crate::skill_files() {
+            let mut p = dir.clone();
+            for seg in rel.split('/') {
+                p.push(seg);
+            }
+            assert!(p.exists(), "missing bundled file {rel}");
+            assert_eq!(std::fs::read_to_string(&p).unwrap(), body, "{rel} content mismatch");
+        }
+    }
+
+    #[test]
+    fn reinstall_prunes_orphans_and_reports_updated() {
+        let (_tmp, env) = env_with_marker(Harness::ClaudeCode);
+        let report = install(None, Scope::User, &env).unwrap();
+        let dir = report.installed[0].path.parent().unwrap().to_path_buf();
+        // Drop a stray file at the root and inside references/.
+        std::fs::write(dir.join("stray.md"), "junk").unwrap();
+        std::fs::write(dir.join("references").join("orphan.md"), "junk").unwrap();
+
+        let again = install(None, Scope::User, &env).unwrap();
+        assert_eq!(again.installed[0].action, InstallAction::Updated, "prune must mark Updated");
+        assert!(!dir.join("stray.md").exists(), "root orphan not pruned");
+        assert!(!dir.join("references").join("orphan.md").exists(), "nested orphan not pruned");
+        // Manifest files survive the prune.
+        assert!(dir.join("SKILL.md").exists());
+        assert!(dir.join("references").join("filters-and-modes.md").exists());
     }
 
     #[test]
