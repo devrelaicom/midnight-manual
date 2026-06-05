@@ -313,15 +313,22 @@ pub fn remove(
 /// Path-resolution errors only.
 pub fn status(scope: Scope, env: &impl SkillEnv) -> Result<StatusReport, SkillError> {
     let base = base_dir(scope, env)?;
-    let body = crate::skill_markdown();
+    let files = skill_files();
     let harnesses = Harness::ALL
         .into_iter()
         .map(|h| {
             let file = h.skill_file(scope, &base);
+            let dir = h.skill_dir(scope, &base);
             let detected = h.markers(scope, &base).iter().any(|m| m.exists());
-            let installed_content = fs::read_to_string(&file).ok();
-            let installed = installed_content.is_some();
-            let up_to_date = installed_content.as_deref() == Some(body);
+            // `installed` keys on the primary file (SKILL.md); `up_to_date`
+            // requires every bundled file to be present and byte-identical.
+            let installed = file.exists();
+            let up_to_date = installed
+                && files.iter().all(|&(rel, body)| {
+                    fs::read_to_string(join_rel(&dir, rel))
+                        .map(|got| got == body)
+                        .unwrap_or(false)
+                });
             HarnessStatus {
                 harness: h.id().to_owned(),
                 scope: scope.as_str().to_owned(),
@@ -447,6 +454,24 @@ mod tests {
             .find(|h| h.harness == "claude-code")
             .unwrap();
         assert!(cc2.installed && !cc2.up_to_date);
+    }
+
+    #[test]
+    fn status_not_up_to_date_when_a_reference_is_stale() {
+        let (_tmp, env) = env_with_marker(Harness::ClaudeCode);
+        install(None, Scope::User, &env).unwrap();
+        // Make ONLY a reference stale; SKILL.md is untouched.
+        let dir = Harness::ClaudeCode.skill_dir(Scope::User, &env.home);
+        std::fs::write(dir.join("references").join("advanced-techniques.md"), "stale").unwrap();
+
+        let st = status(Scope::User, &env).unwrap();
+        let cc = st
+            .harnesses
+            .iter()
+            .find(|h| h.harness == "claude-code")
+            .unwrap();
+        assert!(cc.installed, "SKILL.md still present → installed");
+        assert!(!cc.up_to_date, "a stale reference must make up_to_date false");
     }
 
     #[test]
