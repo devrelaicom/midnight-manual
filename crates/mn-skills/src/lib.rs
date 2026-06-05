@@ -23,12 +23,30 @@ pub use install::{
 /// requires the two to match).
 pub const SKILL_NAME: &str = "midnight-advanced-search";
 
-/// The canonical `SKILL.md` body, embedded at build time. This is the single
-/// source of truth written into every harness.
+/// The three skill files, embedded at build time, as `(relative path, body)`.
+/// This is the bundle the installer ships verbatim into every harness. `SKILL.md`
+/// is always entry 0.
+#[must_use]
+pub const fn skill_files() -> &'static [(&'static str, &'static str)] {
+    &[
+        ("SKILL.md", SKILL_MD),
+        ("references/filters-and-modes.md", REF_FILTERS_AND_MODES),
+        ("references/advanced-techniques.md", REF_ADVANCED_TECHNIQUES),
+    ]
+}
+
+/// The canonical `SKILL.md` body (bundle entry 0). Kept as a convenience for the
+/// frontmatter tests and any single-file consumer.
 #[must_use]
 pub const fn skill_markdown() -> &'static str {
-    include_str!("../assets/midnight-advanced-search/SKILL.md")
+    SKILL_MD
 }
+
+const SKILL_MD: &str = include_str!("../assets/midnight-advanced-search/SKILL.md");
+const REF_FILTERS_AND_MODES: &str =
+    include_str!("../assets/midnight-advanced-search/references/filters-and-modes.md");
+const REF_ADVANCED_TECHNIQUES: &str =
+    include_str!("../assets/midnight-advanced-search/references/advanced-techniques.md");
 
 #[cfg(test)]
 mod tests {
@@ -78,6 +96,47 @@ mod tests {
         });
         assert!(ok, "SKILL_NAME `{SKILL_NAME}` violates the open-standard name regex");
     }
+
+    #[test]
+    fn bundle_is_self_contained() {
+        // No shipped file may point an installed agent at a path that only
+        // exists in this repo. The bundle must stand alone in the user's harness.
+        for (path, body) in skill_files() {
+            assert!(
+                !body.contains("docs/cookbook/"),
+                "{path} references a repo-only path (docs/cookbook/)"
+            );
+            assert!(
+                !body.contains("in the midnight-manual repo"),
+                "{path} points the agent at the repo instead of being self-contained"
+            );
+        }
+        // SKILL.md must link both bundled references (relative paths only).
+        let skill = skill_markdown();
+        assert!(skill.contains("references/filters-and-modes.md"));
+        assert!(skill.contains("references/advanced-techniques.md"));
+    }
+
+    #[test]
+    fn manifest_is_complete() {
+        let keys: Vec<&str> = skill_files().iter().map(|(p, _)| *p).collect();
+        assert_eq!(keys[0], "SKILL.md", "SKILL.md must be bundle entry 0");
+        // Every reference SKILL.md links must be a real manifest entry.
+        let skill = skill_markdown();
+        for (path, _) in skill_files() {
+            if *path == "SKILL.md" {
+                continue;
+            }
+            assert!(skill.contains(path), "manifest ships `{path}` but SKILL.md never links it");
+        }
+    }
+
+    #[test]
+    fn skill_files_are_nonempty() {
+        for (path, body) in skill_files() {
+            assert!(!body.trim().is_empty(), "{path} is empty");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -92,10 +151,23 @@ mod catalog_drift_tests {
 
     /// The v1 facet wire keys, mirroring `mn_retrieval::facets::facets()`.
     const FACET_KEYS: &[&str] = &[
-        "attribution", "content_type", "kind", "source_kind", "source_slug",
-        "language", "tags", "heading_path", "symbol", "package", "verified",
-        "deprecated", "language_target", "sdk_dependency", "ingested_at",
-        "source_modified_at", "token_count",
+        "attribution",
+        "content_type",
+        "kind",
+        "source_kind",
+        "source_slug",
+        "language",
+        "tags",
+        "heading_path",
+        "symbol",
+        "package",
+        "verified",
+        "deprecated",
+        "language_target",
+        "sdk_dependency",
+        "ingested_at",
+        "source_modified_at",
+        "token_count",
     ];
 
     const FILTERS_AND_MODES: &str =
