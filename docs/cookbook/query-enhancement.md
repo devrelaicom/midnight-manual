@@ -160,3 +160,35 @@ The patterns compose: a HyDE answer plus two expansion paraphrases is a 4-query
 request costing 4 tokens (capped at 10 queries / request). Start with a single
 query, and reach for these only when recall on the bare question is weak — the
 `matched_queries` field tells you whether the extra queries actually contributed.
+
+---
+
+## Modes & filters
+
+Query enhancement (above) shapes *what you ask*. Two newer controls shape *how
+the server searches* and *what it searches over*:
+
+- **`mode`** — `hybrid` (default, full-text + vector), `vector` (semantic only),
+  or `fts` (full-text only, which skips embedding entirely and is the
+  lowest-latency mode for exact identifiers and error strings).
+- **`filters`** — a per-facet object: `{ "any_of": [...], "none_of": [...] }`
+  for set facets, bare bools (`verified`, `deprecated`), and `{after,before}` /
+  `{min,max}` ranges. Combination is AND across facets, OR within `any_of`. A
+  misspelled facet or invalid value returns a `400` (not a silent drop).
+
+The highest-value use is matching the reader's toolchain: pin `language_target`
+/ `sdk_dependency` with `version_satisfies`, add `"deprecated": false`, and a
+recency floor on `ingested_at` — so you retrieve current, version-matched
+material instead of stale advice.
+
+Discover the corpus's real facet values (languages, tags, sources, packages)
+with the `facets` MCP tool, or from the shell:
+
+```bash
+mnm facets
+mnm search "deployContract" --mode fts --kind code --symbol :deployContract
+```
+
+The agent-facing playbook (the `midnight-advanced-search` skill, installable via
+`mnm skills install` or the `install_search_skill` MCP tool) carries the full
+facet catalog and the advanced filter/mode techniques.
