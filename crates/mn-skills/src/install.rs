@@ -15,11 +15,13 @@ use crate::{skill_files, SkillEnv, SKILL_NAME};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InstallAction {
-    /// The skill file did not exist; it was written.
+    /// The owned skill dir did not exist; the whole bundle was written.
     Created,
-    /// The skill file existed with different content; it was overwritten.
+    /// The dir existed; at least one bundled file was (re)written, or an orphan
+    /// was pruned.
     Updated,
-    /// The skill file existed with byte-identical content; no write.
+    /// The dir existed with every bundled file byte-identical and no orphans; no
+    /// write.
     Unchanged,
 }
 
@@ -239,9 +241,20 @@ fn join_rel(dir: &std::path::Path, rel: &str) -> PathBuf {
 
 /// Delete any regular file under `dir` whose path is not shipped by `files`.
 /// Scoped strictly to the owned skill dir; leaves directories in place. Returns
-/// `true` if anything was removed.
+/// `true` if anything was removed. Leaves now-empty directories in place
+/// (harmless while the manifest always ships `references/`).
 fn prune_orphans(dir: &std::path::Path, files: &[(&str, &str)]) -> Result<bool, SkillError> {
     use std::collections::HashSet;
+    // Refuse to walk a symlinked owned dir: read_dir would follow it into
+    // foreign storage and prune files we do not own. (Subdir symlinks are
+    // already safe — file_type() below never pushes them onto the stack.)
+    let root_meta = fs::symlink_metadata(dir).map_err(|source| SkillError::Io {
+        path: dir.to_path_buf(),
+        source,
+    })?;
+    if root_meta.file_type().is_symlink() {
+        return Ok(false);
+    }
     let owned: HashSet<PathBuf> = files.iter().map(|&(rel, _)| join_rel(dir, rel)).collect();
     let mut removed = false;
     let mut stack = vec![dir.to_path_buf()];
@@ -540,6 +553,29 @@ mod tests {
         // Manifest files survive the prune.
         assert!(dir.join("SKILL.md").exists());
         assert!(dir.join("references").join("filters-and-modes.md").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prune_does_not_traverse_symlinked_skill_dir() {
+        use std::os::unix::fs::symlink;
+        let (_tmp, env) = env_with_marker(Harness::ClaudeCode);
+        // A foreign dir holding a file the manifest does NOT ship.
+        let foreign = env.home.join("foreign-notes");
+        std::fs::create_dir_all(&foreign).unwrap();
+        std::fs::write(foreign.join("keep.md"), "precious").unwrap();
+        // Make the owned skill dir a pre-existing symlink to the foreign dir.
+        let skill_dir = Harness::ClaudeCode.skill_dir(Scope::User, &env.home);
+        std::fs::create_dir_all(skill_dir.parent().unwrap()).unwrap();
+        symlink(&foreign, &skill_dir).unwrap();
+
+        // Install must not let prune traverse the symlink and delete foreign data.
+        install(None, Scope::User, &env).unwrap();
+
+        assert!(
+            foreign.join("keep.md").exists(),
+            "prune traversed a symlinked skill dir and deleted foreign data"
+        );
     }
 
     #[test]
