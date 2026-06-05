@@ -1033,7 +1033,12 @@ async fn scalar_filters_include_and_exclude() {
 
     // Matching values include the chunk.
     assert!(contains_chunk(
-        &run_filtered(&h.pool, &token, serde_json::json!({ "attribution": { "any_of": ["foundation"] } })).await,
+        &run_filtered(
+            &h.pool,
+            &token,
+            serde_json::json!({ "attribution": { "any_of": ["foundation"] } })
+        )
+        .await,
         chunk
     ));
     assert!(contains_chunk(
@@ -1041,11 +1046,17 @@ async fn scalar_filters_include_and_exclude() {
         chunk
     ));
     assert!(contains_chunk(
-        &run_filtered(&h.pool, &token, serde_json::json!({ "content_type": { "any_of": ["tutorial"] } })).await,
+        &run_filtered(
+            &h.pool,
+            &token,
+            serde_json::json!({ "content_type": { "any_of": ["tutorial"] } })
+        )
+        .await,
         chunk
     ));
     assert!(contains_chunk(
-        &run_filtered(&h.pool, &token, serde_json::json!({ "source_slug": { "any_of": [slug] } })).await,
+        &run_filtered(&h.pool, &token, serde_json::json!({ "source_slug": { "any_of": [slug] } }))
+            .await,
         chunk
     ));
     assert!(contains_chunk(
@@ -1073,12 +1084,21 @@ async fn scalar_filters_include_and_exclude() {
         chunk
     ));
     assert!(!contains_chunk(
-        &run_filtered(&h.pool, &token, serde_json::json!({ "content_type": { "any_of": ["doc"] } })).await,
+        &run_filtered(
+            &h.pool,
+            &token,
+            serde_json::json!({ "content_type": { "any_of": ["doc"] } })
+        )
+        .await,
         chunk
     ));
     assert!(!contains_chunk(
-        &run_filtered(&h.pool, &token, serde_json::json!({ "source_slug": { "any_of": ["some-other-slug"] } }))
-            .await,
+        &run_filtered(
+            &h.pool,
+            &token,
+            serde_json::json!({ "source_slug": { "any_of": ["some-other-slug"] } })
+        )
+        .await,
         chunk
     ));
     assert!(!contains_chunk(
