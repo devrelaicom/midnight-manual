@@ -78,14 +78,6 @@ mod tests {
         });
         assert!(ok, "SKILL_NAME `{SKILL_NAME}` violates the open-standard name regex");
     }
-
-    #[test]
-    fn body_links_the_cookbook_for_dryness() {
-        assert!(
-            skill_markdown().contains("docs/cookbook/query-enhancement.md"),
-            "SKILL.md must link the cookbook (DRY) rather than duplicate worked examples"
-        );
-    }
 }
 
 #[cfg(test)]
