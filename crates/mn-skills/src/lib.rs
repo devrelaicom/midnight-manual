@@ -87,3 +87,36 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod catalog_drift_tests {
+    //! Half of the registry↔docs drift guard. The other half lives in
+    //! `mn-retrieval`'s `facets.rs` (`registry_is_exactly_v1_keys`), which pins
+    //! `facets()` to this same 17-key set. If a facet is added/removed in the
+    //! registry, that test fails first; update both the registry pin and this
+    //! list, and add the row to `filters-and-modes.md`. (We assert against a
+    //! literal list rather than depending on `mn-retrieval`, which would drag
+    //! `mn-store`/sqlx into this crate's test build.)
+
+    /// The v1 facet wire keys, mirroring `mn_retrieval::facets::facets()`.
+    const FACET_KEYS: &[&str] = &[
+        "attribution", "content_type", "kind", "source_kind", "source_slug",
+        "language", "tags", "heading_path", "symbol", "package", "verified",
+        "deprecated", "language_target", "sdk_dependency", "ingested_at",
+        "source_modified_at", "token_count",
+    ];
+
+    const FILTERS_AND_MODES: &str =
+        include_str!("../assets/midnight-advanced-search/references/filters-and-modes.md");
+
+    #[test]
+    fn catalog_documents_every_facet_key() {
+        for key in FACET_KEYS {
+            let needle = format!("`{key}`");
+            assert!(
+                FILTERS_AND_MODES.contains(&needle),
+                "filters-and-modes.md is missing facet `{key}` from its catalog"
+            );
+        }
+    }
+}
