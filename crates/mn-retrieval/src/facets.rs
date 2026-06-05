@@ -163,4 +163,35 @@ mod tests {
         }
         assert!(lookup("language").unwrap().negatable, "open sets are negatable");
     }
+
+    #[test]
+    fn registry_is_exactly_v1_keys() {
+        // Pins the registry to the v1 facet set. The skill docs mirror this list
+        // in `mn-skills` (`catalog_documents_every_facet_key`). Changing the
+        // registry must be a deliberate edit here AND in
+        // `crates/mn-skills/assets/midnight-advanced-search/references/filters-and-modes.md`.
+        let mut got: Vec<&str> = facets().iter().map(|f| f.key).collect();
+        got.sort_unstable();
+        let mut want = [
+            "attribution",
+            "content_type",
+            "kind",
+            "source_kind",
+            "source_slug",
+            "language",
+            "tags",
+            "heading_path",
+            "symbol",
+            "package",
+            "verified",
+            "deprecated",
+            "language_target",
+            "sdk_dependency",
+            "ingested_at",
+            "source_modified_at",
+            "token_count",
+        ];
+        want.sort_unstable();
+        assert_eq!(got, want, "registry facet set drifted from the documented v1 catalog");
+    }
 }
