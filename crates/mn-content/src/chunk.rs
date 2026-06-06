@@ -29,6 +29,9 @@ pub struct Chunk {
 pub struct ChunkerConfig {
     /// Max chunk size in BPE tokens before splitting.
     pub max_tokens: u32,
+    /// Soft minimum chunk size in BPE tokens. Adjacent small markdown sections are
+    /// merged up to this target (never exceeding `max_tokens`). Markdown-only.
+    pub min_tokens: u32,
     /// Line-window fallback size (lines).
     pub fallback_lines: u32,
     /// Line-window fallback overlap (lines).
@@ -41,6 +44,7 @@ impl Default for ChunkerConfig {
     fn default() -> Self {
         Self {
             max_tokens: 400,
+            min_tokens: 128,
             fallback_lines: 60,
             fallback_overlap_lines: 20,
             max_file_bytes: 10 * 1024 * 1024,
@@ -78,6 +82,7 @@ mod tests {
     fn default_config_is_token_budgeted() {
         let c = ChunkerConfig::default();
         assert_eq!(c.max_tokens, 400);
+        assert_eq!(c.min_tokens, 128);
         assert_eq!(c.fallback_lines, 60);
         assert_eq!(c.fallback_overlap_lines, 20);
         assert_eq!(c.max_file_bytes, 10 * 1024 * 1024);

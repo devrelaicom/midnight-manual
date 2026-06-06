@@ -131,6 +131,10 @@ pub struct Args {
     #[arg(long, default_value_t = 400)]
     pub code_chunk_tokens: u32,
 
+    /// Soft minimum markdown chunk size in tokens (small sections are merged up to this).
+    #[arg(long, default_value_t = 128)]
+    pub md_min_tokens: u32,
+
     /// Line-window fallback size (lines).
     #[arg(long, default_value_t = 60)]
     pub code_chunk_lines: u32,
@@ -373,6 +377,7 @@ async fn run_inner(
 
     let chunker_config = mn_content::chunk::ChunkerConfig {
         max_tokens: args.code_chunk_tokens,
+        min_tokens: args.md_min_tokens,
         fallback_lines: args.code_chunk_lines,
         fallback_overlap_lines: args.code_chunk_overlap,
         max_file_bytes: args.max_file_size,

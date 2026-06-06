@@ -32,6 +32,8 @@ impl Chunker for MarkdownChunker {
             start: 0,
             end: 0,
             heading_path: Vec::new(),
+            // Preamble before the first heading has no heading depth.
+            depth: 0,
         };
         let mut stack: Vec<(HeadingLevel, String)> = Vec::new();
         let mut in_heading: Option<HeadingLevel> = None;
@@ -57,6 +59,7 @@ impl Chunker for MarkdownChunker {
                         start: range.start,
                         end: range.start,
                         heading_path: stack.iter().map(|(_, t)| t.clone()).collect(),
+                        depth: heading_depth(level),
                     };
                 }
                 Event::Text(t) if in_heading.is_some() => heading_buf.push_str(&t),
@@ -74,6 +77,9 @@ impl Chunker for MarkdownChunker {
         if current.end > current.start {
             segments.push(current);
         }
+
+        // ── Coalescing pass: merge undersized adjacent sections up to min_tokens ──
+        let segments = coalesce_segments(body, &segments, cfg);
 
         // ── Second pass: split over-large segments via token-budgeted line windows ──
         let mut chunks: Vec<Chunk> = Vec::new();
@@ -113,6 +119,79 @@ struct HeadingSegment {
     start: usize,
     end: usize,
     heading_path: Vec<String>,
+    /// Heading depth: 0 = preamble/no-heading, 1..=6 = H1..H6. Drives the
+    /// coalescing pass's "never absorb a shallower section" rule.
+    depth: u8,
+}
+
+/// Map a `pulldown_cmark::HeadingLevel` to a 1-based depth (H1 => 1 .. H6 => 6).
+///
+/// Done with an explicit match rather than `as u8` so the mapping is auditable
+/// and independent of the enum's discriminant layout.
+const fn heading_depth(level: HeadingLevel) -> u8 {
+    match level {
+        HeadingLevel::H1 => 1,
+        HeadingLevel::H2 => 2,
+        HeadingLevel::H3 => 3,
+        HeadingLevel::H4 => 4,
+        HeadingLevel::H5 => 5,
+        HeadingLevel::H6 => 6,
+    }
+}
+
+/// Level-aware coalescing pass (FR-007 small-section merge).
+///
+/// Walks the first-pass `segments` and merges adjacent undersized sections into
+/// runs that approach `cfg.min_tokens` without exceeding `cfg.max_tokens`. A run
+/// absorbs its descendants and same-level siblings but never a *shallower*
+/// section (that would pull the run up out of its subtree). A section that is
+/// already larger than `max_tokens` on its own passes through alone and is
+/// windowed later by [`token_window_split`]. The merged run keeps the FIRST
+/// segment's `heading_path` (shallowest ancestor context) and `depth`.
+fn coalesce_segments(
+    body: &str,
+    segments: &[HeadingSegment],
+    cfg: &ChunkerConfig,
+) -> Vec<HeadingSegment> {
+    let min = cfg.min_tokens;
+    let max = cfg.max_tokens;
+    let mut out: Vec<HeadingSegment> = Vec::new();
+    let mut i = 0usize;
+    while i < segments.len() {
+        let start = segments[i].start;
+        let start_depth = segments[i].depth;
+        let head_path = segments[i].heading_path.clone();
+        let mut end = segments[i].end;
+        let mut j = i + 1;
+        while j < segments.len() {
+            let next = &segments[j];
+            // Size cap: never grow past max. A single >max segment passes
+            // through alone (windowed later).
+            if crate::tokens::count(&body[start..next.end]) > max {
+                break;
+            }
+            // Structural: never absorb a segment SHALLOWER than the run anchor
+            // (don't pull the run up into an aunt/ancestor section).
+            if next.depth < start_depth {
+                break;
+            }
+            // Size floor: once the run alone is big enough, stop at this
+            // section boundary.
+            if crate::tokens::count(&body[start..end]) >= min {
+                break;
+            }
+            end = next.end;
+            j += 1;
+        }
+        out.push(HeadingSegment {
+            start,
+            end,
+            heading_path: head_path,
+            depth: start_depth,
+        });
+        i = j;
+    }
+    out
 }
 
 /// Split `text` into overlapping token-budgeted windows, growing line by line.
@@ -216,10 +295,24 @@ mod tests {
         ChunkerConfig::default()
     }
 
+    /// Coalescing-disabled config: `min_tokens == 1` means every non-empty
+    /// section already meets the soft floor, so the coalescing pass is a no-op
+    /// and the chunker emits one chunk per heading. Used by tests that assert
+    /// per-heading semantics (`heading_path`, chunk counts).
+    fn no_coalesce_cfg() -> ChunkerConfig {
+        ChunkerConfig {
+            min_tokens: 1,
+            ..ChunkerConfig::default()
+        }
+    }
+
     fn small_cfg() -> ChunkerConfig {
         // 50-token budget — small enough that a few hundred-word body splits.
+        // min_tokens=10 keeps min <= max; the single-segment docs these tests
+        // use are unaffected by coalescing either way.
         ChunkerConfig {
             max_tokens: 50,
+            min_tokens: 10,
             ..ChunkerConfig::default()
         }
     }
@@ -247,8 +340,11 @@ mod tests {
 
     #[test]
     fn nested_headings_record_path() {
+        // Under default `min_tokens` these tiny sections would coalesce into a
+        // single chunk; `no_coalesce_cfg()` keeps the per-heading semantics this
+        // test asserts (one chunk per heading + ancestor heading_path).
         let md = "# Top\n\nintro\n\n## Sub A\n\ncontent A\n\n## Sub B\n\ncontent B\n";
-        let chunks = MarkdownChunker.chunk(md, &default_cfg()).unwrap();
+        let chunks = MarkdownChunker.chunk(md, &no_coalesce_cfg()).unwrap();
         assert_eq!(chunks.len(), 3);
         // First chunk is from `# Top` heading; its path is empty (it IS Top).
         assert_eq!(chunks[1].heading_path, vec!["Top".to_string()]);
@@ -312,9 +408,148 @@ mod tests {
 
     #[test]
     fn chunk_indices_are_sequential() {
+        // `no_coalesce_cfg()` so the three tiny `# A/# B/# C` sections stay as
+        // three distinct chunks and the sequential-index contract is exercised
+        // across more than one chunk.
         let md = "# A\n\ntext\n\n# B\n\ntext\n\n# C\n\ntext\n";
+        let chunks = MarkdownChunker.chunk(md, &no_coalesce_cfg()).unwrap();
+        assert!(chunks.len() >= 2, "expected multiple chunks, got {}", chunks.len());
+        for (i, c) in chunks.iter().enumerate() {
+            assert_eq!(c.chunk_index, u32::try_from(i).unwrap());
+        }
+    }
+
+    // ── coalescing tests (the bug fix) ─────────────────────────────────────────
+
+    /// A real-sentence body so each section is small-but-not-trivial; orphan
+    /// parent heading `## Constructors` must NOT survive as its own chunk under
+    /// the default soft floor — it merges down with `### new()`.
+    #[test]
+    fn orphan_parent_heading_merges_with_child() {
+        let md = "# Counter\n\n## Constructors\n\n### new()\n\n\
+                  Creates a fresh counter initialised to zero for the caller.\n";
+        let chunks = MarkdownChunker.chunk(md, &default_cfg()).unwrap();
+
+        // No chunk is *just* the orphan parent heading.
+        assert!(
+            chunks.iter().all(|c| c.content.trim() != "## Constructors"),
+            "## Constructors should not be a standalone chunk: {:#?}",
+            chunks.iter().map(|c| c.content.trim()).collect::<Vec<_>>()
+        );
+        // The orphan heading co-occurs with its child in one merged chunk.
+        assert!(
+            chunks
+                .iter()
+                .any(|c| c.content.contains("## Constructors") && c.content.contains("new()")),
+            "## Constructors and new() should share a chunk: {:#?}",
+            chunks.iter().map(|c| c.content.trim()).collect::<Vec<_>>()
+        );
+    }
+
+    /// Tiny leaf sections (heading + one-word type) must merge — no ~6-token
+    /// heading-only chunk like a lone `#### rand`.
+    #[test]
+    fn tiny_leaf_sections_merge() {
+        let md = "## Properties\n\n#### rand\n\n`string`\n\n#### seed\n\n`number`\n";
+        let chunks = MarkdownChunker.chunk(md, &default_cfg()).unwrap();
+
+        for c in &chunks {
+            let trimmed = c.content.trim();
+            // No standalone heading-only chunk.
+            assert!(
+                !(trimmed.starts_with('#') && trimmed.lines().count() == 1),
+                "found a standalone heading-only chunk: {trimmed:?}"
+            );
+            // Nothing as tiny as the orphan leaf sections we are fixing.
+            assert!(
+                c.token_count > 8,
+                "chunk is still sub-useful ({} tokens): {trimmed:?}",
+                c.token_count
+            );
+        }
+    }
+
+    /// Flat same-level siblings (no parent wrapper) collapse into fewer chunks
+    /// than there are members.
+    #[test]
+    fn flat_sibling_members_coalesce() {
+        let md = "### alpha\n\nThe alpha member does the first thing for callers.\n\n\
+                  ### beta\n\nThe beta member does the second thing for callers.\n\n\
+                  ### gamma\n\nThe gamma member does the third thing for callers.\n\n\
+                  ### delta\n\nThe delta member does the fourth thing for callers.\n";
+        let members = 4;
+        let chunks = MarkdownChunker.chunk(md, &default_cfg()).unwrap();
+        assert!(
+            chunks.len() < members,
+            "expected coalescing below {members} members, got {} chunks",
+            chunks.len()
+        );
+    }
+
+    /// A single section larger than `max_tokens` still splits via windowing;
+    /// every chunk is within budget or is a single over-budget line.
+    #[test]
+    fn large_single_section_still_windows() {
+        let line = "the quick brown fox jumps over the lazy dog near the river bank\n";
+        let body: String = line.repeat(30);
+        let md = format!("# Big\n\n{body}");
+        let cfg = small_cfg();
+        let chunks = MarkdownChunker.chunk(&md, &cfg).unwrap();
+        assert!(chunks.len() > 1, "oversized section must window-split");
+        for c in &chunks {
+            let single_line = c.content.trim_end().lines().count() == 1;
+            assert!(
+                c.token_count <= cfg.max_tokens || single_line,
+                "chunk token_count={} exceeds max={} and is not a single line",
+                c.token_count,
+                cfg.max_tokens
+            );
+        }
+    }
+
+    /// A merged run's `heading_path` is the FIRST segment's ancestor path. The
+    /// `## A` + `### a1` run anchors at `## A`, so its path is `["Top"]` (the H1
+    /// ancestor) — NOT `["Top", "A"]` (which would be the deeper child's path).
+    ///
+    /// A `min_tokens == 12` config is used so the `# Top` intro sentence (a dozen
+    /// words) clears the floor alone and does NOT absorb `## A`; that makes `## A`
+    /// the anchor of its own coalesced run, while the tiny `## A` and `### a1`
+    /// sections still merge with each other.
+    #[test]
+    fn merged_chunk_uses_first_segments_path() {
+        let cfg = ChunkerConfig {
+            min_tokens: 12,
+            ..ChunkerConfig::default()
+        };
+        let md = "# Top\n\nThis intro paragraph is comfortably above the soft floor on its own.\n\n\
+                  ## A\n\nshort\n\n### a1\n\nalso short\n";
+        let chunks = MarkdownChunker.chunk(md, &cfg).unwrap();
+
+        let a_chunk = chunks
+            .iter()
+            .find(|c| c.content.contains("## A"))
+            .expect("a chunk containing `## A`");
+        assert!(
+            a_chunk.content.contains("### a1"),
+            "## A should merge with ### a1: {:?}",
+            a_chunk.content
+        );
+        assert_eq!(
+            a_chunk.heading_path,
+            vec!["Top".to_string()],
+            "merged run must keep the FIRST segment's ancestor path, not the deepest"
+        );
+    }
+
+    /// Structural invariants on every emitted chunk: non-empty byte range
+    /// within bounds and sequential indices.
+    #[test]
+    fn coalesced_chunks_have_valid_offsets_and_indices() {
+        let md = "# Doc\n\n## One\n\nbody one\n\n## Two\n\nbody two\n\n## Three\n\nbody three\n";
         let chunks = MarkdownChunker.chunk(md, &default_cfg()).unwrap();
         for (i, c) in chunks.iter().enumerate() {
+            assert!(c.start_byte < c.end_byte, "start_byte >= end_byte: {c:?}");
+            assert!(c.end_byte <= md.len(), "end_byte past body len: {c:?}");
             assert_eq!(c.chunk_index, u32::try_from(i).unwrap());
         }
     }
