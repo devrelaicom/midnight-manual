@@ -461,6 +461,18 @@ mod tests {
         PlanBuilder::new("docs", SourceKind::DocsSite, "rev-1", PriorState::default())
     }
 
+    /// Builder with the markdown coalescing pass disabled (`min_tokens == 1`):
+    /// every non-empty section already meets the soft floor, so the chunker
+    /// emits one chunk per heading. Used by multi-chunk bookkeeping tests that
+    /// would otherwise see tiny sections merge into a single chunk under the
+    /// default `min_tokens`.
+    fn no_coalesce_builder() -> PlanBuilder {
+        empty_builder().with_chunker_config(ChunkerConfig {
+            min_tokens: 1,
+            ..ChunkerConfig::default()
+        })
+    }
+
     #[test]
     fn new_document_runs_chunker_and_lands_in_new_vector() {
         let mut b = empty_builder();
@@ -640,7 +652,9 @@ mod tests {
 
     #[test]
     fn chunks_carry_total_and_index_for_multi_chunk_documents() {
-        let mut b = empty_builder();
+        // Disable coalescing so the three tiny sections stay as three chunks and
+        // the total_chunks / chunk_index bookkeeping is genuinely exercised.
+        let mut b = no_coalesce_builder();
         feed(&mut b, "multi.md", "# A\n\nbody A\n\n# B\n\nbody B\n\n# C\n\nbody C\n");
         let plan = b.finalize();
         let doc = &plan.new_documents[0];
@@ -653,7 +667,9 @@ mod tests {
 
     #[test]
     fn chunk_content_hashes_are_stable_and_unique_for_distinct_content() {
-        let mut b = empty_builder();
+        // Disable coalescing so the two sections stay distinct chunks with
+        // distinct content hashes (the property under test).
+        let mut b = no_coalesce_builder();
         feed(&mut b, "h.md", "# A\n\nbody A\n\n# B\n\nbody B that differs.\n");
         let plan = b.finalize();
         let chunks = &plan.new_documents[0].chunks;

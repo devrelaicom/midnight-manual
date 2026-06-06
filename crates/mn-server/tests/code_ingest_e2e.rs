@@ -239,6 +239,7 @@ async fn code_ingest_smoke_persists_symbol_paths_and_packages() {
         batch_size: 50,
         voyage_timeout_secs: None,
         code_chunk_tokens: 400,
+        md_min_tokens: 1,
         code_chunk_lines: 60,
         code_chunk_overlap: 20,
         include: vec![],
