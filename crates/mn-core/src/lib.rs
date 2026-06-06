@@ -12,6 +12,7 @@
 pub mod auth_file;
 pub mod config;
 pub mod error;
+pub mod limits;
 pub mod model_id;
 pub mod paths;
 pub mod provenance;

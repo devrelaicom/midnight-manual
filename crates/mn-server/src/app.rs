@@ -14,10 +14,12 @@ use crate::middleware::request_id;
 
 /// Cap for inbound request bodies. The largest legitimate body today is the
 /// admin ingest `PUT .../documents` upload, which carries documents + chunk
-/// text for one batch — comfortably bounded by the CLI's batching logic but
-/// can reach several MiB on a one-shot upload of a docs site. 16 MiB gives
-/// the CLI headroom while staying well below a memory-exhaustion threshold.
-pub const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
+/// text + embedding vectors for one batch — comfortably bounded by the CLI's
+/// size-aware batching logic but can reach many MiB on a dense repo. 25 MiB
+/// gives the CLI headroom while staying well below a memory-exhaustion
+/// threshold. Sourced from [`mn_core::limits::MAX_INGEST_BODY_BYTES`] so the
+/// server cap and the CLI's batch-size target stay in lockstep.
+pub const MAX_BODY_BYTES: usize = mn_core::limits::MAX_INGEST_BODY_BYTES;
 
 /// Per-handler shared state — clonable cheaply.
 #[derive(Clone)]

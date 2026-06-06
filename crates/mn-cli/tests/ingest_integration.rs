@@ -599,6 +599,146 @@ async fn published_url_inheritance_survives_to_upload_body() {
     );
 }
 
+/// A `PUT .../documents` that returns 413 on its first hit must be auto-split
+/// by the CLI: the batch is divided into two halves, each PUT once, and the run
+/// finalizes successfully. Mirrors the happy-path harness but sequences the
+/// documents mock so the first PUT is 413 and the rest are 200.
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // full three-step flow + 413-then-200 sequencing
+async fn upload_413_is_split_and_retried() {
+    let server = MockServer::start().await;
+    let put_hits = Arc::new(Mutex::new(0_usize));
+    let abort_hit = Arc::new(Mutex::new(false));
+
+    mount_embedding_mocks(&server).await;
+
+    // Mock: GET /v1/sources/:slug — source exists.
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/v1/sources/[^/]+$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "slug": "docs",
+            "kind": "docs_site",
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path_regex(r"^/v1/admin/sources/[^/]+/ingest-runs$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ingest_run_id": "00000000-0000-0000-0000-000000000413",
+            "source_version_id": "00000000-0000-0000-0000-000000000413",
+            "source_version_revision": 1,
+        })))
+        .mount(&server)
+        .await;
+
+    // First PUT → 413 (payload too large). `up_to_n_times(1)` retires this mock
+    // after a single match so the next PUT falls through to the 200 mock below.
+    Mock::given(method("PUT"))
+        .and(path_regex(r"^/v1/admin/sources/[^/]+/ingest-runs/[^/]+/documents$"))
+        .respond_with(ResponseTemplate::new(413).set_body_string("payload too large"))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+
+    // Subsequent PUTs (the two split halves) → 200. Count them so we can assert
+    // the batch was actually split into two follow-up requests.
+    let puts = Arc::clone(&put_hits);
+    Mock::given(method("PUT"))
+        .and(path_regex(r"^/v1/admin/sources/[^/]+/ingest-runs/[^/]+/documents$"))
+        .respond_with(move |_req: &Request| {
+            *puts.lock().unwrap() += 1;
+            ResponseTemplate::new(200).set_body_json(json!({
+                "accepted": 1,
+                "carried": 0,
+                "conflicts": [],
+            }))
+        })
+        .with_priority(2)
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path_regex(r"^/v1/admin/sources/[^/]+/ingest-runs/[^/]+/finalize$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "source_version_id": "00000000-0000-0000-0000-000000000413",
+            "revision": 1,
+            "is_active": true,
+            "demoted_revision": null,
+        })))
+        .mount(&server)
+        .await;
+
+    // If the run ever aborts, flip a flag so the test fails with a clear message.
+    let abort = Arc::clone(&abort_hit);
+    Mock::given(method("POST"))
+        .and(path_regex(r"^/v1/admin/sources/[^/]+/ingest-runs/[^/]+/abort$"))
+        .respond_with(move |_req: &Request| {
+            *abort.lock().unwrap() = true;
+            ResponseTemplate::new(200)
+        })
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    // Two documents so the single packed batch (batch_size 50) splits cleanly
+    // into two halves of one document each on the 413.
+    write_file(dir.path(), "a.md", "# A\n\nBody of A.");
+    write_file(dir.path(), "b.md", "# B\n\nBody of B.");
+    let manifest_path = write_manifest(dir.path(), &["a.md", "b.md"]);
+    let auth_path = write_admin_auth(dir.path());
+
+    let args = IngestArgs {
+        manifest: manifest_path,
+        source_slug: "docs".to_owned(),
+        revision: Some("rev-413".to_owned()),
+        embedding_model: DEFAULT_EMBEDDING_MODEL.to_owned(),
+        note: None,
+        source_root: Some(dir.path().to_path_buf()),
+        dry_run: false,
+        yes: false,
+        source_base_url: None,
+        batch_size: 50,
+        voyage_timeout_secs: None,
+        code_chunk_tokens: 400,
+        md_min_tokens: 1,
+        code_chunk_lines: 60,
+        code_chunk_overlap: 20,
+        include: vec![],
+        exclude: vec![],
+        no_respect_gitignore: false,
+        disable_default_ignore_list: false,
+        max_file_size: 10 * 1024 * 1024,
+        unsafe_no_global_limit: false,
+    };
+    let telemetry = TelemetryClient::Disabled;
+
+    mn_cli::commands::ingest::run::run_with_paths(
+        args,
+        &server.uri(),
+        &auth_path,
+        None,
+        None,
+        &telemetry,
+        "0.1.0-test",
+        true,
+    )
+    .await
+    .expect("ingest run should succeed after the 413 is split and retried");
+
+    assert!(
+        !*abort_hit.lock().unwrap(),
+        "run must NOT abort — the 413 batch is split and retried, not aborted"
+    );
+    // The 413 mock consumed one PUT; the split produced two more (one per half).
+    assert_eq!(
+        *put_hits.lock().unwrap(),
+        2,
+        "the split batch must produce exactly two follow-up PUTs"
+    );
+}
+
 #[tokio::test]
 async fn manifest_missing_file_errors_before_any_http() {
     let server = MockServer::start().await;
