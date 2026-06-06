@@ -521,7 +521,8 @@ mod tests {
             min_tokens: 12,
             ..ChunkerConfig::default()
         };
-        let md = "# Top\n\nThis intro paragraph is comfortably above the soft floor on its own.\n\n\
+        let md =
+            "# Top\n\nThis intro paragraph is comfortably above the soft floor on its own.\n\n\
                   ## A\n\nshort\n\n### a1\n\nalso short\n";
         let chunks = MarkdownChunker.chunk(md, &cfg).unwrap();
 

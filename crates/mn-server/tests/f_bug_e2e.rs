@@ -254,6 +254,7 @@ async fn document_metadata_persists_to_postgres_through_full_ingest() {
         batch_size: 50,
         voyage_timeout_secs: None,
         code_chunk_tokens: 400,
+        md_min_tokens: 1,
         code_chunk_lines: 60,
         code_chunk_overlap: 20,
         include: vec![],

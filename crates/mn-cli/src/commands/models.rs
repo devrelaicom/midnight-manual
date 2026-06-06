@@ -490,6 +490,7 @@ async fn ingest_source(
         // None → resolver falls back to VOYAGE_TIMEOUT_SECS env / config / default.
         voyage_timeout_secs: None,
         code_chunk_tokens: 400,
+        md_min_tokens: 128,
         code_chunk_lines: 60,
         code_chunk_overlap: 20,
         include: Vec::new(),
