@@ -66,6 +66,13 @@ const VOYAGE_MAX_TEXTS_PER_REQUEST: usize = 250;
 /// so a sub-batch never trips the cap regardless of per-chunk size.
 const VOYAGE_MAX_TOKENS_PER_REQUEST: usize = 100_000;
 
+// Rough upload-size estimate constants. Deliberately over-estimate so batches
+// stay under the byte target; the retry-split covers any under-estimate.
+const EST_EMBED_DIM: usize = 1024; // voyage-code-3 default (Matryoshka); rough
+const EST_BYTES_PER_EMBED_FLOAT: usize = 12; // JSON float incl. comma
+const EST_PER_CHUNK_OVERHEAD: usize = 256; // hashes, paths, indices, JSON keys/braces
+const EST_PER_DOC_OVERHEAD: usize = 512; // path, kind, frontmatter, JSON keys
+
 /// Args for `mnm ingest run`.
 #[derive(Debug, ClapArgs)]
 #[allow(clippy::struct_excessive_bools)]
@@ -114,8 +121,10 @@ pub struct Args {
     #[arg(long = "source-base-url")]
     pub source_base_url: Option<String>,
 
-    /// Number of documents per upload batch (default: 25). Reduce if you hit
-    /// 413 responses from the server (each chunk carries a 1024-dim vector).
+    /// Upper bound on documents per upload batch (default: 25). Batches are
+    /// *additionally* bounded by estimated size to ~85% of the server's body
+    /// limit, and any batch that still 413s is auto-split and retried, so this
+    /// rarely needs changing — lower it only to cap peak memory per request.
     #[arg(long, default_value_t = 25)]
     pub batch_size: usize,
 
@@ -599,11 +608,12 @@ async fn run_inner(
         .collect();
 
     let batch_size = args.batch_size.max(1);
-    let batch_count = if docs.is_empty() {
-        1
-    } else {
-        docs.len().div_ceil(batch_size)
-    };
+    // Bound each batch by both a document-count ceiling and ~85% of the server's
+    // body limit (estimated). The 85% leaves headroom for the rough estimate's
+    // slack; anything that still 413s is auto-split by the upload helper.
+    let byte_target = mn_core::limits::MAX_INGEST_BODY_BYTES * 85 / 100;
+    let batches = pack_upload_batches(docs, batch_size, byte_target);
+    let batch_count = batches.len();
     let upload_url = format!(
         "{server_url}/v1/admin/sources/{slug}/ingest-runs/{id}/documents",
         slug = url_encode(&args.source_slug),
@@ -631,8 +641,8 @@ async fn run_inner(
         EmbedCtx::Byok,
     );
 
-    for (i, batch) in docs.chunks(batch_size).enumerate() {
-        let mut batch_docs = batch.to_vec();
+    for (i, batch) in batches.into_iter().enumerate() {
+        let mut batch_docs = batch;
         // Embedding is the slow per-batch step; surface it as its own phase so
         // progress consumers don't appear to hang on "uploading".
         reporter.batch(i + 1, batch_count, "embedding documents");
@@ -645,14 +655,18 @@ async fn run_inner(
             }
         }
         reporter.batch(i + 1, batch_count, "uploading documents");
-        let body = UploadDocumentsRequest {
-            documents: batch_docs,
-            batch_index: i,
+        // Embeddings are already attached above, so the split path is a pure
+        // upload concern: a 413 splits the batch and PUTs each half once.
+        let result = upload_documents_with_split(
+            &client,
+            &upload_url,
+            &token,
+            &embedding_model,
+            batch_docs,
+            i,
             batch_count,
-            embedding_model: Some(embedding_model.clone()),
-        };
-        let result: Result<UploadDocumentsResponse> =
-            put_json(&client, &upload_url, &token, &body).await;
+        )
+        .await;
         match result {
             Ok(r) => {
                 accepted += r.accepted;
@@ -759,9 +773,11 @@ fn translate_upload_error(
 ) -> anyhow::Error {
     let msg = e.to_string();
     if msg.contains("413") {
+        let mib = mn_core::limits::MAX_INGEST_BODY_BYTES / (1024 * 1024);
         return e.context(format!(
-            "batch {batch} exceeded the server payload limit; aborted run {run_id}. \
-             Re-run with --batch-size 15 (or lower) — current default is 25 docs/batch"
+            "batch {batch} still exceeded the server's {mib} MiB body limit after \
+             automatic splitting; a single document's content + embeddings is likely \
+             too large. Aborted run {run_id}."
         ));
     }
     e.context(format!(
@@ -969,6 +985,132 @@ mod plan_subbatches_tests {
     }
 }
 
+/// Rough estimate of `doc`'s serialized JSON upload size in bytes, INCLUDING the
+/// embedding vectors attached per chunk before upload (they are `None` at plan
+/// time but dominate the real payload). Intentionally approximate.
+fn estimated_upload_bytes(doc: &DocumentUpload) -> usize {
+    EST_PER_DOC_OVERHEAD
+        + doc.path.len()
+        + doc
+            .chunks
+            .iter()
+            .map(|c| {
+                c.content.len() + EST_PER_CHUNK_OVERHEAD + EST_EMBED_DIM * EST_BYTES_PER_EMBED_FLOAT
+            })
+            .sum::<usize>()
+}
+
+/// Greedily pack documents into upload batches bounded by BOTH a document-count
+/// ceiling (`max_docs`) and an estimated byte budget (`byte_target`). Always
+/// emits at least one document per batch — a single document larger than the
+/// target goes alone (and relies on the server's headroom / retry-split).
+fn pack_upload_batches(
+    docs: Vec<DocumentUpload>,
+    max_docs: usize,
+    byte_target: usize,
+) -> Vec<Vec<DocumentUpload>> {
+    let mut out = Vec::new();
+    let mut cur: Vec<DocumentUpload> = Vec::new();
+    let mut cur_bytes = 0usize;
+    for doc in docs {
+        let bytes = estimated_upload_bytes(&doc);
+        if !cur.is_empty() && (cur.len() >= max_docs || cur_bytes + bytes > byte_target) {
+            out.push(std::mem::take(&mut cur));
+            cur_bytes = 0;
+        }
+        cur_bytes += bytes;
+        cur.push(doc);
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// PUT one already-embedded batch. On HTTP 413 (payload too large), split the
+/// documents into two approximate halves and PUT each ONCE (single-level, no
+/// recursion — a half that still 413s propagates its error). `batch_index` /
+/// `batch_count` are informational (server logs only).
+async fn upload_documents_with_split(
+    client: &reqwest::Client,
+    url: &str,
+    token: &str,
+    embedding_model: &str,
+    documents: Vec<DocumentUpload>,
+    batch_index: usize,
+    batch_count: usize,
+) -> Result<UploadDocumentsResponse> {
+    let body = UploadDocumentsRequest {
+        documents,
+        batch_index: Some(batch_index),
+        batch_count: Some(batch_count),
+        embedding_model: Some(embedding_model.to_owned()),
+    };
+    match put_json::<_, UploadDocumentsResponse>(client, url, token, &body).await {
+        Ok(r) => Ok(r),
+        Err(e) if is_payload_too_large(&e) && body.documents.len() > 1 => {
+            let docs = body.documents; // recover & split (put_json only borrowed `body`)
+            let mid = docs.len() / 2; // >= 1 because len > 1
+            let mut it = docs.into_iter();
+            let first: Vec<DocumentUpload> = it.by_ref().take(mid).collect();
+            let second: Vec<DocumentUpload> = it.collect();
+            let r1 = put_documents_once(
+                client,
+                url,
+                token,
+                embedding_model,
+                first,
+                batch_index,
+                batch_count,
+            )
+            .await?;
+            let r2 = put_documents_once(
+                client,
+                url,
+                token,
+                embedding_model,
+                second,
+                batch_index,
+                batch_count,
+            )
+            .await?;
+            Ok(UploadDocumentsResponse {
+                accepted: r1.accepted + r2.accepted,
+                carried: r1.carried + r2.carried,
+                conflicts: {
+                    let mut c = r1.conflicts;
+                    c.extend(r2.conflicts);
+                    c
+                },
+            })
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Build the upload request and PUT it exactly once (no splitting).
+async fn put_documents_once(
+    client: &reqwest::Client,
+    url: &str,
+    token: &str,
+    embedding_model: &str,
+    documents: Vec<DocumentUpload>,
+    batch_index: usize,
+    batch_count: usize,
+) -> Result<UploadDocumentsResponse> {
+    let body = UploadDocumentsRequest {
+        documents,
+        batch_index: Some(batch_index),
+        batch_count: Some(batch_count),
+        embedding_model: Some(embedding_model.to_owned()),
+    };
+    put_json(client, url, token, &body).await
+}
+
+fn is_payload_too_large(e: &anyhow::Error) -> bool {
+    e.to_string().contains("413")
+}
+
 async fn post_json<I: Serialize + Sync, O: for<'de> Deserialize<'de>>(
     client: &reqwest::Client,
     url: &str,
@@ -1068,8 +1210,10 @@ struct StartIngestRunResponse {
 #[derive(Debug, Serialize, Clone)]
 struct UploadDocumentsRequest {
     documents: Vec<DocumentUpload>,
-    batch_index: usize,
-    batch_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    batch_index: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    batch_count: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     embedding_model: Option<String>,
 }
@@ -1375,6 +1519,129 @@ mod tests {
         }
     }
 
+    /// Build a `DocumentUpload` with `n` chunks each holding `content_len` bytes
+    /// of content. Path defaults to `"p"`; only the size-relevant fields matter
+    /// for the estimate/packer tests.
+    fn mk_doc(n_chunks: usize, content_len: usize) -> DocumentUpload {
+        let chunks = (0..n_chunks)
+            .map(|i| ChunkUpload {
+                chunk_index: i32::try_from(i).unwrap_or(i32::MAX),
+                total_chunks: i32::try_from(n_chunks).unwrap_or(i32::MAX),
+                content: "x".repeat(content_len),
+                content_hash: "c".into(),
+                heading_path: vec![],
+                symbol_path: vec![],
+                start_byte: 0,
+                end_byte: 0,
+                token_count: 0,
+                embedding: None,
+            })
+            .collect();
+        DocumentUpload {
+            path: "p".into(),
+            kind: DocumentKind::Markdown,
+            content_hash: "h".into(),
+            source_url: None,
+            published_url: None,
+            language: None,
+            source_modified_at: None,
+            frontmatter: None,
+            provenance: Provenance::default(),
+            char_count: 0,
+            token_count: 0,
+            package: None,
+            chunks,
+        }
+    }
+
+    #[test]
+    fn estimated_upload_bytes_empty_chunks_is_doc_overhead_plus_path() {
+        let doc = mk_doc(0, 0);
+        assert_eq!(estimated_upload_bytes(&doc), EST_PER_DOC_OVERHEAD + doc.path.len());
+    }
+
+    #[test]
+    fn estimated_upload_bytes_grows_with_chunk_count() {
+        let one = estimated_upload_bytes(&mk_doc(1, 100));
+        let two = estimated_upload_bytes(&mk_doc(2, 100));
+        let three = estimated_upload_bytes(&mk_doc(3, 100));
+        assert!(two > one, "two chunks must estimate larger than one");
+        assert!(three > two, "three chunks must estimate larger than two");
+        // Each extra chunk adds exactly the per-chunk overhead + embedding +
+        // content bytes.
+        let per_chunk = 100 + EST_PER_CHUNK_OVERHEAD + EST_EMBED_DIM * EST_BYTES_PER_EMBED_FLOAT;
+        assert_eq!(two - one, per_chunk);
+        assert_eq!(three - two, per_chunk);
+    }
+
+    #[test]
+    fn estimated_upload_bytes_grows_with_content_length() {
+        let short = estimated_upload_bytes(&mk_doc(2, 10));
+        let long = estimated_upload_bytes(&mk_doc(2, 1000));
+        assert!(long > short, "longer content must estimate larger");
+        // Two chunks, so 990 extra bytes per chunk → 1980 total.
+        assert_eq!(long - short, 2 * (1000 - 10));
+    }
+
+    #[test]
+    fn pack_upload_batches_respects_max_docs() {
+        // Tiny docs so the byte target never bites; only the doc cap should.
+        let docs: Vec<_> = (0..7).map(|_| mk_doc(0, 0)).collect();
+        let batches = pack_upload_batches(docs, 3, usize::MAX);
+        assert_eq!(batches.iter().map(Vec::len).collect::<Vec<_>>(), vec![3, 3, 1]);
+    }
+
+    #[test]
+    fn pack_upload_batches_respects_byte_target() {
+        // Each doc estimates ~ EST_PER_DOC_OVERHEAD + 1 chunk's bytes; pick a
+        // target that fits exactly two docs per batch.
+        let doc = mk_doc(1, 0);
+        let per_doc = estimated_upload_bytes(&doc);
+        let target = per_doc * 2; // exactly two fit; the third must start a new batch
+        let docs: Vec<_> = (0..5).map(|_| mk_doc(1, 0)).collect();
+        let batches = pack_upload_batches(docs, usize::MAX, target);
+        // No multi-doc batch's summed estimate may exceed the target.
+        for b in &batches {
+            let summed: usize = b.iter().map(estimated_upload_bytes).sum();
+            if b.len() > 1 {
+                assert!(summed <= target, "multi-doc batch {summed} exceeds target {target}");
+            }
+            assert!(!b.is_empty(), "no empty batches");
+        }
+        assert_eq!(batches.iter().map(Vec::len).collect::<Vec<_>>(), vec![2, 2, 1]);
+    }
+
+    #[test]
+    fn pack_upload_batches_oversized_doc_goes_alone() {
+        // A single doc whose estimate alone exceeds the target must still ship,
+        // in its own batch.
+        let big = mk_doc(50, 1000);
+        let big_bytes = estimated_upload_bytes(&big);
+        let tiny_target = big_bytes / 2; // big alone exceeds the target
+        let docs = vec![mk_doc(0, 0), big, mk_doc(0, 0)];
+        let batches = pack_upload_batches(docs, usize::MAX, tiny_target);
+        // The big doc is over target, so it neither merges forward nor pulls a
+        // neighbour in: it occupies its own batch.
+        assert!(
+            batches
+                .iter()
+                .any(|b| b.len() == 1 && b[0].chunks.len() == 50),
+            "oversized doc must occupy its own batch: {:?}",
+            batches.iter().map(Vec::len).collect::<Vec<_>>()
+        );
+        for b in &batches {
+            assert!(!b.is_empty(), "no empty batches");
+        }
+    }
+
+    #[test]
+    fn pack_upload_batches_never_emits_empty_batch() {
+        assert!(pack_upload_batches(vec![], 3, 1024).is_empty(), "no docs → no batches");
+        let batches = pack_upload_batches(vec![mk_doc(1, 0)], 3, 1024);
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].len(), 1);
+    }
+
     #[test]
     fn upload_error_preserves_server_body() {
         let original = anyhow!(
@@ -1520,8 +1787,8 @@ mod tests {
                     embedding: Some(vec![0.5_f32; 1024]),
                 }],
             }],
-            batch_index: 0,
-            batch_count: 1,
+            batch_index: Some(0),
+            batch_count: Some(1),
             embedding_model: Some("voyage-code-3@1".to_owned()),
         };
         let v: serde_json::Value = serde_json::to_value(&body).unwrap();
