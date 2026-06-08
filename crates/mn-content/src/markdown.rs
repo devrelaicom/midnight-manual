@@ -793,10 +793,14 @@ mod tests {
             "juliet",
         ];
         let mut md = String::new();
-        for m in &markers {
-            md.push_str(&format!(
-                "## Section {m}\n\nThis section {m} discusses the {m} topic in a few words for testing.\n\n"
-            ));
+        for &m in &markers {
+            md.push_str("## Section ");
+            md.push_str(m);
+            md.push_str("\n\nThis section ");
+            md.push_str(m);
+            md.push_str(" discusses the ");
+            md.push_str(m);
+            md.push_str(" topic in a few words for testing.\n\n");
         }
         let cfg = ChunkerConfig {
             max_tokens: 60,
