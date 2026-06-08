@@ -127,6 +127,12 @@ const fn max_limit() -> u32 {
     100
 }
 
+/// Whether result-set overlap dedup runs. Default on; set `MNM_SEARCH_DEDUP=0`
+/// (or `false`) to disable as an escape hatch.
+fn dedup_enabled() -> bool {
+    !matches!(std::env::var("MNM_SEARCH_DEDUP").as_deref(), Ok("0" | "false"))
+}
+
 /// Response body shape.
 #[derive(Debug, Serialize)]
 pub struct SearchResponse {
@@ -188,6 +194,9 @@ pub struct SearchMetadata {
     /// How many input queries were dropped as duplicates before retrieval
     /// (EC-90). Duplicates do not inflate the rate-limit cost.
     pub deduplicated_count: usize,
+    /// How many results were dropped as fully-overlapping duplicates of a
+    /// higher-ranked chunk from the same document (rolling-window dedup).
+    pub overlap_dropped_count: usize,
     /// How many candidates were dropped for falling below `min_confidence`
     /// before the limit was applied (US6 acceptance #10).
     pub filtered_by_confidence: usize,
@@ -565,6 +574,8 @@ async fn search(
             source_version_id: row.source_version_id,
             chunk_index: row.chunk_index,
             total_chunks: row.total_chunks,
+            start_byte: row.start_byte,
+            end_byte: row.end_byte,
             created_at: row.created_at,
             rrf_score,
             vector_similarity,
@@ -580,9 +591,15 @@ async fn search(
     scored.retain(|c| c.score.confidence >= min_confidence);
     let filtered_by_confidence = before - scored.len();
 
-    // Sort by the requested key, then truncate (#9). The sort is stable, so
-    // the fused (RRF) order breaks ties.
+    // Sort by the requested key (#9), then dedup overlapping same-document
+    // windows over the FULL candidate set, then truncate — so dropping a
+    // duplicate does not shrink the result page below `limit`.
     sort_candidates(&mut scored, req.sort_by);
+    let (mut scored, dedup_stats) = if dedup_enabled() {
+        mn_retrieval::dedup::trim_overlaps(scored)
+    } else {
+        (scored, mn_retrieval::dedup::DedupStats::default())
+    };
     scored.truncate(limit as usize);
 
     let results: Vec<SearchResult> = scored
@@ -596,6 +613,7 @@ async fn search(
             per_query,
             total_candidates,
             deduplicated_count,
+            overlap_dropped_count: dedup_stats.dropped,
             filtered_by_confidence,
             sort_by: req.sort_by,
         },
@@ -611,6 +629,8 @@ struct ScoredCandidate {
     source_version_id: Uuid,
     chunk_index: i32,
     total_chunks: i32,
+    start_byte: i32,
+    end_byte: i32,
     created_at: OffsetDateTime,
     rrf_score: f64,
     vector_similarity: f64,
@@ -649,6 +669,24 @@ impl ScoredCandidate {
     }
 }
 
+impl mn_retrieval::dedup::OverlapItem for ScoredCandidate {
+    type Key = Uuid;
+    fn document_key(&self) -> Uuid {
+        self.document_id
+    }
+    fn byte_range(&self) -> (usize, usize) {
+        let s = usize::try_from(self.start_byte).unwrap_or(0);
+        let e = usize::try_from(self.end_byte).unwrap_or(0);
+        (s, e.max(s))
+    }
+    fn content(&self) -> &str {
+        &self.content
+    }
+    fn set_content(&mut self, content: String) {
+        self.content = content;
+    }
+}
+
 /// Sort candidates in place by the requested key, descending. `total_cmp`
 /// gives a strict total order even with NaN; the sort is stable so equal keys
 /// keep their fused (RRF) order.
@@ -682,6 +720,8 @@ struct ScoringRow {
     source_version_id: Uuid,
     chunk_index: i32,
     total_chunks: i32,
+    start_byte: i32,
+    end_byte: i32,
     created_at: OffsetDateTime,
     provenance: Provenance,
     source_modified_at: Option<OffsetDateTime>,
@@ -704,7 +744,7 @@ async fn fetch_scoring_rows(
     }
     let rows = sqlx::query(
         "SELECT chunk.id, chunk.document_id, chunk.source_version_id, chunk.chunk_index, \
-                chunk.total_chunks, chunk.content, chunk.created_at, \
+                chunk.total_chunks, chunk.start_byte, chunk.end_byte, chunk.content, chunk.created_at, \
                 d.provenance AS provenance, d.source_modified_at AS source_modified_at, \
                 sv.ingested_at AS ingested_at \
          FROM chunk \
@@ -729,6 +769,8 @@ async fn fetch_scoring_rows(
                 source_version_id: r.try_get("source_version_id")?,
                 chunk_index: r.try_get("chunk_index")?,
                 total_chunks: r.try_get("total_chunks")?,
+                start_byte: r.try_get("start_byte")?,
+                end_byte: r.try_get("end_byte")?,
                 created_at: r.try_get("created_at")?,
                 provenance,
                 source_modified_at: r.try_get("source_modified_at")?,
