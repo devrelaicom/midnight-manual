@@ -197,6 +197,9 @@ pub struct SearchMetadata {
     /// How many results were dropped as fully-overlapping duplicates of a
     /// higher-ranked chunk from the same document (rolling-window dedup).
     pub overlap_dropped_count: usize,
+    /// How many results had overlapping text trimmed out (with an `…` elision
+    /// marker) against a higher-ranked same-document chunk (rolling-window dedup).
+    pub overlap_trimmed_count: usize,
     /// How many candidates were dropped for falling below `min_confidence`
     /// before the limit was applied (US6 acceptance #10).
     pub filtered_by_confidence: usize,
@@ -593,7 +596,10 @@ async fn search(
 
     // Sort by the requested key (#9), then dedup overlapping same-document
     // windows over the FULL candidate set, then truncate — so dropping a
-    // duplicate does not shrink the result page below `limit`.
+    // duplicate does not shrink the result page below `limit`. Dedup keeps the
+    // first-seen (best-ranked) chunk's bytes, so it assumes a quality-descending
+    // sort; every current `SortBy` variant is "higher = better". A future
+    // recency/ascending sort would need to dedup before sorting instead.
     sort_candidates(&mut scored, req.sort_by);
     let (mut scored, dedup_stats) = if dedup_enabled() {
         mn_retrieval::dedup::trim_overlaps(scored)
@@ -614,6 +620,7 @@ async fn search(
             total_candidates,
             deduplicated_count,
             overlap_dropped_count: dedup_stats.dropped,
+            overlap_trimmed_count: dedup_stats.trimmed,
             filtered_by_confidence,
             sort_by: req.sort_by,
         },
