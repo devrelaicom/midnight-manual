@@ -45,6 +45,7 @@ impl Chunker for CSharpChunker {
             cfg,
             &tree_sitter_c_sharp::LANGUAGE.into(),
             csharp_kind_table(),
+            "//",
         )
     }
 }

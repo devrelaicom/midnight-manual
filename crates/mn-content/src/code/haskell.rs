@@ -40,6 +40,7 @@ impl Chunker for HaskellChunker {
             cfg,
             &tree_sitter_haskell::LANGUAGE.into(),
             haskell_kind_table(),
+            "--",
         )
     }
 }

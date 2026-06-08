@@ -81,6 +81,7 @@ pub(crate) fn run_tree_sitter(
     cfg: &ChunkerConfig,
     language: &tree_sitter::Language,
     table: KindTable,
+    line_comment: &'static str,
 ) -> Result<Vec<Chunk>, crate::chunk::ChunkError> {
     use crate::chunk::Chunker as _;
 
@@ -145,6 +146,33 @@ pub(crate) fn run_tree_sitter(
 
     // Pass A: fold tiny same-scope fragments together.
     let mut chunks = coalesce_code(body, &chunks, cfg);
+
+    // Pass B: prepend an enclosing-symbol breadcrumb to interior chunks of a
+    // split symbol (those that do not open the symbol they sit inside). Skipped
+    // for languages without a line comment (`line_comment == ""`).
+    if !line_comment.is_empty() {
+        for c in &mut chunks {
+            let headers = symbols::enclosing_symbol_headers(&tree, body, c.start_byte, table);
+            let interior: Vec<&str> = headers
+                .iter()
+                .filter(|(node_start, _)| *node_start < c.start_byte)
+                .map(|(_, line)| line.as_str())
+                .filter(|l| !l.is_empty())
+                .collect();
+            if interior.is_empty() {
+                continue;
+            }
+            // The breadcrumb intentionally makes `content` longer than
+            // `body[start..end]` (byte range is left pointing at the real slice;
+            // downstream dedup only trims byte-aligned content). It may also nudge
+            // an already-budget-sized interior chunk a little past `max_tokens` —
+            // `max_tokens` is a soft budget for code, and the embedder tolerates
+            // it. Do not "fix" either by re-syncing bytes or re-splitting here.
+            let crumb = format!("{} {} … (continued)\n", line_comment, interior.join(" > "));
+            c.content = format!("{crumb}{}", c.content);
+            c.token_count = crate::tokens::count(&c.content);
+        }
+    }
 
     // Assign sequential chunk indices after all transforms.
     for (i, c) in chunks.iter_mut().enumerate() {

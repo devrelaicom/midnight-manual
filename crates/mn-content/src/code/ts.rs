@@ -56,7 +56,7 @@ impl Chunker for TypeScriptChunker {
         } else {
             tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()
         };
-        crate::code::run_tree_sitter(body, cfg, &lang, ts_kind_table())
+        crate::code::run_tree_sitter(body, cfg, &lang, ts_kind_table(), "//")
     }
 }
 
@@ -89,5 +89,34 @@ mod tests {
             .unwrap();
         assert!(!chunks.is_empty());
         assert!(chunks.iter().all(|c| !c.fallback_used));
+    }
+
+    #[test]
+    fn split_symbol_interior_chunk_gets_breadcrumb() {
+        use std::fmt::Write as _;
+
+        // Force a split with a tiny budget so the function body spans >1 chunk.
+        let mut src = String::from("function big(x: number): number {\n");
+        for i in 0..40 {
+            writeln!(src, "  const v{i} = x + {i};").unwrap();
+        }
+        src.push_str("  return x;\n}\n");
+        let cfg = ChunkerConfig {
+            max_tokens: 40,
+            ..ChunkerConfig::default()
+        };
+        let chunks = TypeScriptChunker { tsx: false }.chunk(&src, &cfg).unwrap();
+        assert!(!chunks[0].content.starts_with("//"));
+        assert!(
+            chunks
+                .iter()
+                .skip(1)
+                .any(|c| c.content.starts_with("// function big(x: number): number")),
+            "an interior chunk should carry the wrapper breadcrumb: {:#?}",
+            chunks
+                .iter()
+                .map(|c| c.content.lines().next().unwrap_or(""))
+                .collect::<Vec<_>>()
+        );
     }
 }

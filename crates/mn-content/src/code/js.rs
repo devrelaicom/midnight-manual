@@ -37,6 +37,7 @@ impl Chunker for JavaScriptChunker {
             cfg,
             &tree_sitter_javascript::LANGUAGE.into(),
             js_kind_table(),
+            "//",
         )
     }
 }

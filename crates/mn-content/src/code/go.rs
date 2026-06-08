@@ -30,7 +30,13 @@ pub struct GoChunker;
 
 impl Chunker for GoChunker {
     fn chunk(&self, body: &str, cfg: &ChunkerConfig) -> Result<Vec<Chunk>, ChunkError> {
-        crate::code::run_tree_sitter(body, cfg, &tree_sitter_go::LANGUAGE.into(), go_kind_table())
+        crate::code::run_tree_sitter(
+            body,
+            cfg,
+            &tree_sitter_go::LANGUAGE.into(),
+            go_kind_table(),
+            "//",
+        )
     }
 }
 

@@ -23,6 +23,7 @@ impl Chunker for BashChunker {
             cfg,
             &tree_sitter_bash::LANGUAGE.into(),
             bash_kind_table(),
+            "#",
         )
     }
 }

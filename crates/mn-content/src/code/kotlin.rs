@@ -35,6 +35,7 @@ impl Chunker for KotlinChunker {
             cfg,
             &tree_sitter_kotlin_ng::LANGUAGE.into(),
             kotlin_kind_table(),
+            "//",
         )
     }
 }

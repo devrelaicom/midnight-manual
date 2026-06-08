@@ -35,6 +35,7 @@ impl Chunker for JavaChunker {
             cfg,
             &tree_sitter_java::LANGUAGE.into(),
             java_kind_table(),
+            "//",
         )
     }
 }

@@ -42,7 +42,7 @@ pub struct SchemeChunker;
 
 impl Chunker for SchemeChunker {
     fn chunk(&self, body: &str, cfg: &ChunkerConfig) -> Result<Vec<Chunk>, ChunkError> {
-        crate::code::run_tree_sitter(body, cfg, &LANGUAGE.into(), scheme_kind_table())
+        crate::code::run_tree_sitter(body, cfg, &LANGUAGE.into(), scheme_kind_table(), ";")
     }
 }
 

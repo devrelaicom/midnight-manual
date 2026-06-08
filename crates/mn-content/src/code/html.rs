@@ -29,6 +29,7 @@ impl Chunker for HtmlChunker {
             cfg,
             &tree_sitter_html::LANGUAGE.into(),
             html_kind_table(),
+            "",
         )
     }
 }
