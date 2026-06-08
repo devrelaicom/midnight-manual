@@ -394,6 +394,116 @@ fn push_trimmed(region: &str, units: &mut Vec<Range<usize>>, start: usize, end: 
     }
 }
 
+/// `round(pct * max)` as a token count.
+// Caller lands in Task 4 (rolling-window chunker wiring); exercised by unit
+// tests in the meantime. Budgets are coarse token counts: sub-token precision is
+// irrelevant (`cast_precision_loss` on `u32 -> f32`) and the value is clamped
+// non-negative before the narrowing cast (`cast_possible_truncation` /
+// `cast_sign_loss` on `f32 -> u32`), so all three pedantic cast lints are allowed.
+#[allow(
+    dead_code,
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
+fn pct_tokens(pct: f32, max: u32) -> u32 {
+    (pct * max as f32).round().max(0.0) as u32
+}
+
+/// Grow one side of the window by whole sentence units (ordered nearest-core
+/// first) until `limit` tokens or the side is exhausted, never letting the
+/// window exceed `cap`. Updates `ws`/`we`/`idx` in place.
+// Caller lands in Task 4 (rolling-window chunker wiring); exercised by unit
+// tests in the meantime. The 8 params reflect the in-place mutation design
+// (window bounds + per-side cursor passed `&mut`); collapsing them into a struct
+// would obscure the call sites more than it helps.
+#[allow(dead_code, clippy::too_many_arguments)]
+fn grow_side(
+    body: &str,
+    units: &[Range<usize>],
+    idx: &mut usize,
+    before: bool,
+    ws: &mut usize,
+    we: &mut usize,
+    limit: u32,
+    cap: u32,
+) {
+    loop {
+        if crate::tokens::count(&body[*ws..*we]) >= limit {
+            break;
+        }
+        let Some(r) = units.get(*idx) else { break };
+        let (nws, nwe) = if before { (r.start, *we) } else { (*ws, r.end) };
+        if crate::tokens::count(&body[nws..nwe]) > cap {
+            break; // atomic unit would breach the cap → stop this side
+        }
+        *ws = nws;
+        *we = nwe;
+        *idx += 1;
+    }
+}
+
+/// Expand the core byte range `[core_start, core_end)` with surrounding sentence
+/// context per the rolling-window policy. Returns the (possibly unchanged)
+/// expanded byte range. Smaller side first to the switch point, then the larger
+/// side to the target; budgets in BPE tokens.
+// Caller lands in Task 4 (rolling-window chunker wiring); exercised by unit
+// tests in the meantime.
+#[allow(dead_code)]
+fn expand_window(
+    body: &str,
+    core_start: usize,
+    core_end: usize,
+    cfg: &ChunkerConfig,
+) -> (usize, usize) {
+    let max = cfg.max_tokens;
+    let switch = pct_tokens(cfg.window_switch_pct, max);
+    let target = pct_tokens(cfg.window_target_pct, max);
+    let cap = pct_tokens(cfg.window_cap_pct, max);
+    debug_assert!(switch <= target && target <= cap);
+
+    if crate::tokens::count(&body[core_start..core_end]) >= target {
+        return (core_start, core_end);
+    }
+
+    // `before` nearest-core first = reverse document order; `after` already is.
+    let before: Vec<Range<usize>> = segment_sentences(&body[..core_start])
+        .into_iter()
+        .rev()
+        .collect();
+    let after: Vec<Range<usize>> = segment_sentences(&body[core_end..])
+        .into_iter()
+        .map(|r| (core_end + r.start)..(core_end + r.end))
+        .collect();
+
+    let before_avail = crate::tokens::count(&body[..core_start]);
+    let after_avail = crate::tokens::count(&body[core_end..]);
+    let smaller_is_before = before_avail <= after_avail;
+
+    let mut ws = core_start;
+    let mut we = core_end;
+    let mut bi = 0usize;
+    let mut ai = 0usize;
+
+    let core_tokens = crate::tokens::count(&body[core_start..core_end]);
+    // Phase 1: smaller side to the switch point (skipped when core ≥ switch).
+    if core_tokens < switch {
+        if smaller_is_before {
+            grow_side(body, &before, &mut bi, true, &mut ws, &mut we, switch, cap);
+        } else {
+            grow_side(body, &after, &mut ai, false, &mut ws, &mut we, switch, cap);
+        }
+    }
+    // Phase 2: the larger side to the target.
+    if smaller_is_before {
+        grow_side(body, &after, &mut ai, false, &mut ws, &mut we, target, cap);
+    } else {
+        grow_side(body, &before, &mut bi, true, &mut ws, &mut we, target, cap);
+    }
+
+    (ws, we)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -663,6 +773,45 @@ mod tests {
             assert!(c.end_byte <= md.len(), "end_byte past body len: {c:?}");
             assert_eq!(c.chunk_index, u32::try_from(i).unwrap());
         }
+    }
+
+    // ── rolling-window expansion tests ─────────────────────────────────────────
+
+    fn window_cfg() -> ChunkerConfig {
+        ChunkerConfig {
+            max_tokens: 60,
+            min_tokens: 1,
+            ..ChunkerConfig::default()
+        }
+    }
+
+    #[test]
+    fn expand_grows_both_sides_when_centered() {
+        let s = "alpha beta gamma delta. ".repeat(40);
+        let body = s.as_str();
+        let core_start = body.len() / 2;
+        let core_end = (core_start + 20).min(body.len());
+        let (ws, we) = expand_window(body, core_start, core_end, &window_cfg());
+        assert!(ws < core_start, "should pull `before` context");
+        assert!(we > core_end, "should pull `after` context");
+        assert!(crate::tokens::count(&body[ws..we]) <= 60, "must not exceed the cap");
+    }
+
+    #[test]
+    fn expand_is_noop_when_core_already_at_target() {
+        let body = "one two three four five. ".repeat(40);
+        let big_end = body.len();
+        let (ws, we) = expand_window(&body, 0, big_end, &window_cfg());
+        assert_eq!((ws, we), (0, big_end));
+    }
+
+    #[test]
+    fn expand_at_document_start_only_grows_forward() {
+        let body = "aa bb cc dd ee ff. ".repeat(40);
+        let core_end = 18.min(body.len());
+        let (ws, we) = expand_window(&body, 0, core_end, &window_cfg());
+        assert_eq!(ws, 0, "no `before` text available at doc start");
+        assert!(we > core_end, "must still grow forward");
     }
 
     #[test]
