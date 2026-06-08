@@ -12,6 +12,8 @@
 //! Tokenization uses the real BPE tokenizer via `crate::tokens::count` so
 //! chunk-size gating matches what the embedder actually sees.
 
+use std::ops::Range;
+
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag};
 
 use crate::chunk::{Chunk, ChunkError, Chunker, ChunkerConfig};
@@ -284,6 +286,114 @@ fn token_window_split(
     out
 }
 
+/// Split `region` into sentence-granular byte ranges (offsets relative to the
+/// start of `region`, usable directly as `&region[range]`).
+///
+/// Prose splits on `.`/`!`/`?` followed by whitespace or end-of-input, and at
+/// blank-line (paragraph) breaks. Fenced code blocks (```` ``` ````/`~~~`) and
+/// runs of table lines (`|…`) are emitted whole — never split. Whitespace-only
+/// spans are dropped; returned ranges are in document order.
+// Wired into the rolling-window expansion in a later task; exercised by unit
+// tests in the meantime.
+#[allow(dead_code)]
+fn segment_sentences(region: &str) -> Vec<Range<usize>> {
+    let bytes = region.as_bytes();
+    let n = region.len();
+    let mut units: Vec<Range<usize>> = Vec::new();
+    let mut unit_start = 0usize;
+    let mut i = 0usize;
+
+    while i < n {
+        let line_start = i;
+        let line_end = region[i..].find('\n').map_or(n, |o| i + o);
+        let next_line = if line_end < n { line_end + 1 } else { n };
+        let trimmed = region[line_start..line_end].trim_start();
+
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            push_trimmed(region, &mut units, unit_start, line_start);
+            let fence = if trimmed.starts_with("```") {
+                "```"
+            } else {
+                "~~~"
+            };
+            let mut j = next_line;
+            let block_end = loop {
+                if j >= n {
+                    break n;
+                }
+                let jl_end = region[j..].find('\n').map_or(n, |o| j + o);
+                if region[j..jl_end].trim_start().starts_with(fence) {
+                    break jl_end;
+                }
+                j = if jl_end < n { jl_end + 1 } else { n };
+            };
+            units.push(line_start..block_end);
+            i = if block_end < n { block_end + 1 } else { n };
+            unit_start = i;
+            continue;
+        }
+
+        if trimmed.starts_with('|') {
+            push_trimmed(region, &mut units, unit_start, line_start);
+            let mut end = line_end;
+            let mut k = next_line;
+            while k < n {
+                let kl_end = region[k..].find('\n').map_or(n, |o| k + o);
+                if region[k..kl_end].trim_start().starts_with('|') {
+                    end = kl_end;
+                    k = if kl_end < n { kl_end + 1 } else { n };
+                } else {
+                    break;
+                }
+            }
+            units.push(line_start..end);
+            i = if end < n { end + 1 } else { n };
+            unit_start = i;
+            continue;
+        }
+
+        if trimmed.is_empty() {
+            push_trimmed(region, &mut units, unit_start, line_start);
+            i = next_line;
+            unit_start = i;
+            continue;
+        }
+
+        // Prose line: split on sentence terminators (ASCII bytes, so multibyte
+        // UTF-8 is never matched mid-codepoint).
+        let mut p = line_start;
+        while p < line_end {
+            let b = bytes[p];
+            if (b == b'.' || b == b'!' || b == b'?')
+                && (p + 1 >= line_end || bytes[p + 1].is_ascii_whitespace())
+            {
+                push_trimmed(region, &mut units, unit_start, p + 1);
+                unit_start = p + 1;
+            }
+            p += 1;
+        }
+        i = next_line;
+    }
+    push_trimmed(region, &mut units, unit_start, n);
+    units
+}
+
+/// Push `[start, end)` with surrounding whitespace trimmed off; skip if empty.
+// Used only by `segment_sentences` for now; both land in the rolling-window
+// expansion in a later task.
+#[allow(dead_code)]
+fn push_trimmed(region: &str, units: &mut Vec<Range<usize>>, start: usize, end: usize) {
+    if start >= end || end > region.len() {
+        return;
+    }
+    let slice = &region[start..end];
+    let s = start + (slice.len() - slice.trim_start().len());
+    let e = end - (slice.len() - slice.trim_end().len());
+    if s < e {
+        units.push(s..e);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -553,5 +663,55 @@ mod tests {
             assert!(c.end_byte <= md.len(), "end_byte past body len: {c:?}");
             assert_eq!(c.chunk_index, u32::try_from(i).unwrap());
         }
+    }
+
+    #[test]
+    fn segments_prose_into_sentences() {
+        let r = "First one. Second two! Third three?";
+        let units: Vec<&str> = segment_sentences(r).iter().map(|x| &r[x.clone()]).collect();
+        assert_eq!(units, vec!["First one.", "Second two!", "Third three?"]);
+    }
+
+    #[test]
+    fn fenced_code_block_is_one_atomic_unit() {
+        let r = "Intro line.\n\n```rust\nfn a() {}\nfn b() {}\n```\n\nOutro line.";
+        let units: Vec<&str> = segment_sentences(r).iter().map(|x| &r[x.clone()]).collect();
+        assert!(units
+            .iter()
+            .any(|u| u.starts_with("```rust") && u.contains("fn b() {}")));
+        assert!(units.contains(&"Intro line."));
+        assert!(units.contains(&"Outro line."));
+    }
+
+    #[test]
+    fn table_rows_group_into_one_unit() {
+        let r = "Before.\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\nAfter.";
+        let units: Vec<&str> = segment_sentences(r).iter().map(|x| &r[x.clone()]).collect();
+        assert!(units
+            .iter()
+            .any(|u| u.starts_with("| a | b |") && u.contains("| 1 | 2 |")));
+    }
+
+    #[test]
+    fn empty_region_yields_no_units() {
+        assert!(segment_sentences("   \n\n  ").is_empty());
+    }
+
+    #[test]
+    fn unterminated_fence_consumes_to_eof() {
+        // A fence with no closing ``` must be emitted whole to EOF, with no
+        // tail loss — pins the EOF-consumption branch.
+        let r = "Before.\n\n```rust\nfn a() {}\nfn b() {}";
+        let units: Vec<&str> = segment_sentences(r).iter().map(|x| &r[x.clone()]).collect();
+        assert_eq!(units, vec!["Before.", "```rust\nfn a() {}\nfn b() {}"]);
+    }
+
+    #[test]
+    fn multibyte_terminators_do_not_split_or_panic() {
+        // Full-width 。 is multibyte and must NOT split (only ASCII .!? do);
+        // pins UTF-8 boundary safety against a mid-codepoint slice panic.
+        let r = "これは。テスト。Done.";
+        let units: Vec<&str> = segment_sentences(r).iter().map(|x| &r[x.clone()]).collect();
+        assert_eq!(units, vec!["これは。テスト。Done."]);
     }
 }
