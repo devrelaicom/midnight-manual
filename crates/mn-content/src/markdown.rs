@@ -91,13 +91,16 @@ impl Chunker for MarkdownChunker {
                 continue;
             }
             if crate::tokens::count(text) <= cfg.max_tokens {
+                // Expand the core section with a surrounding sentence window.
+                let (ws, we) = expand_window(body, seg.start, seg.end, cfg);
+                let content = &body[ws..we];
                 chunks.push(Chunk {
-                    content: text.to_owned(),
+                    content: content.to_owned(),
                     heading_path: seg.heading_path.clone(),
                     symbol_path: Vec::new(),
-                    start_byte: seg.start,
-                    end_byte: seg.end,
-                    token_count: crate::tokens::count(text),
+                    start_byte: ws,
+                    end_byte: we,
+                    token_count: crate::tokens::count(content),
                     chunk_index: 0, // filled in below
                     fallback_used: false,
                 });
@@ -293,9 +296,6 @@ fn token_window_split(
 /// blank-line (paragraph) breaks. Fenced code blocks (```` ``` ````/`~~~`) and
 /// runs of table lines (`|…`) are emitted whole — never split. Whitespace-only
 /// spans are dropped; returned ranges are in document order.
-// Wired into the rolling-window expansion in a later task; exercised by unit
-// tests in the meantime.
-#[allow(dead_code)]
 fn segment_sentences(region: &str) -> Vec<Range<usize>> {
     let bytes = region.as_bytes();
     let n = region.len();
@@ -379,9 +379,6 @@ fn segment_sentences(region: &str) -> Vec<Range<usize>> {
 }
 
 /// Push `[start, end)` with surrounding whitespace trimmed off; skip if empty.
-// Used only by `segment_sentences` for now; both land in the rolling-window
-// expansion in a later task.
-#[allow(dead_code)]
 fn push_trimmed(region: &str, units: &mut Vec<Range<usize>>, start: usize, end: usize) {
     if start >= end || end > region.len() {
         return;
@@ -395,13 +392,11 @@ fn push_trimmed(region: &str, units: &mut Vec<Range<usize>>, start: usize, end: 
 }
 
 /// `round(pct * max)` as a token count.
-// Caller lands in Task 4 (rolling-window chunker wiring); exercised by unit
-// tests in the meantime. Budgets are coarse token counts: sub-token precision is
-// irrelevant (`cast_precision_loss` on `u32 -> f32`) and the value is clamped
-// non-negative before the narrowing cast (`cast_possible_truncation` /
-// `cast_sign_loss` on `f32 -> u32`), so all three pedantic cast lints are allowed.
+// Budgets are coarse token counts: sub-token precision is irrelevant
+// (`cast_precision_loss` on `u32 -> f32`) and the value is clamped non-negative
+// before the narrowing cast (`cast_possible_truncation` / `cast_sign_loss` on
+// `f32 -> u32`), so all three pedantic cast lints are allowed.
 #[allow(
-    dead_code,
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss
@@ -413,11 +408,10 @@ fn pct_tokens(pct: f32, max: u32) -> u32 {
 /// Grow one side of the window by whole sentence units (ordered nearest-core
 /// first) until `limit` tokens or the side is exhausted, never letting the
 /// window exceed `cap`. Updates `ws`/`we`/`idx` in place.
-// Caller lands in Task 4 (rolling-window chunker wiring); exercised by unit
-// tests in the meantime. The 8 params reflect the in-place mutation design
-// (window bounds + per-side cursor passed `&mut`); collapsing them into a struct
-// would obscure the call sites more than it helps.
-#[allow(dead_code, clippy::too_many_arguments)]
+// The 8 params reflect the in-place mutation design (window bounds + per-side
+// cursor passed `&mut`); collapsing them into a struct would obscure the call
+// sites more than it helps.
+#[allow(clippy::too_many_arguments)]
 fn grow_side(
     body: &str,
     units: &[Range<usize>],
@@ -447,9 +441,6 @@ fn grow_side(
 /// context per the rolling-window policy. Returns the (possibly unchanged)
 /// expanded byte range. Smaller side first to the switch point, then the larger
 /// side to the target; budgets in BPE tokens.
-// Caller lands in Task 4 (rolling-window chunker wiring); exercised by unit
-// tests in the meantime.
-#[allow(dead_code)]
 fn expand_window(
     body: &str,
     core_start: usize,
@@ -746,10 +737,14 @@ mod tests {
                   ## A\n\nshort\n\n### a1\n\nalso short\n";
         let chunks = MarkdownChunker.chunk(md, &cfg).unwrap();
 
+        // The rolling window can pad several chunks with neighbouring text, so
+        // `## A` may appear in more than one chunk's `content`. Locate the run
+        // anchored at `## A` by the property under test — its ancestor path is
+        // the H1 `Top`, NOT the preamble path `[]` carried by the `# Top` run.
         let a_chunk = chunks
             .iter()
-            .find(|c| c.content.contains("## A"))
-            .expect("a chunk containing `## A`");
+            .find(|c| c.heading_path == ["Top"] && c.content.contains("## A"))
+            .expect("a chunk anchored at `## A` with ancestor path [\"Top\"]");
         assert!(
             a_chunk.content.contains("### a1"),
             "## A should merge with ### a1: {:?}",
@@ -782,6 +777,51 @@ mod tests {
             max_tokens: 60,
             min_tokens: 1,
             ..ChunkerConfig::default()
+        }
+    }
+
+    #[test]
+    fn windowed_chunk_spans_neighbours_but_stays_bounded() {
+        // Ten headed sections, coalescing OFF (min_tokens=1) so each section is
+        // its own core, and the doc is far larger than the cap. This genuinely
+        // exercises `expand_window`: WITHOUT windowing each chunk holds only its
+        // own section (no cross-section co-occurrence), so the first assertion
+        // would fail. WITH windowing a core pulls in adjacent sections — but the
+        // cap keeps the window local, so no chunk spans the whole document.
+        let markers = [
+            "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india",
+            "juliet",
+        ];
+        let mut md = String::new();
+        for m in &markers {
+            md.push_str(&format!(
+                "## Section {m}\n\nThis section {m} discusses the {m} topic in a few words for testing.\n\n"
+            ));
+        }
+        let cfg = ChunkerConfig {
+            max_tokens: 60,
+            min_tokens: 1,
+            ..ChunkerConfig::default()
+        };
+        let chunks = MarkdownChunker.chunk(&md, &cfg).unwrap();
+
+        // Windowing produced at least one chunk spanning `echo` + an immediate
+        // neighbour — impossible without the rolling window under min_tokens=1.
+        assert!(
+            chunks.iter().any(|c| c.content.contains("echo")
+                && (c.content.contains("delta") || c.content.contains("foxtrot"))),
+            "expected a windowed chunk spanning echo + a neighbour: {:#?}",
+            chunks.iter().map(|c| c.content.trim()).collect::<Vec<_>>()
+        );
+        // ...but the cap keeps the window local: no chunk spans the whole doc.
+        assert!(
+            chunks
+                .iter()
+                .all(|c| !(c.content.contains("alpha") && c.content.contains("juliet"))),
+            "window must be bounded by the cap, not the entire document"
+        );
+        for c in &chunks {
+            assert!(c.token_count <= cfg.max_tokens, "chunk over cap: {}", c.token_count);
         }
     }
 
