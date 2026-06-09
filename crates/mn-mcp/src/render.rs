@@ -112,6 +112,7 @@ pub fn project_search(envelope: Value, reranker_used: Option<&str>) -> ToolOutco
     let corpus_model = envelope
         .get("corpus_embedding_model")
         .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
         .map(str::to_owned);
     let results = envelope
         .get("results")
@@ -382,6 +383,34 @@ mod tests {
         let sc = r.structured_content.unwrap();
         assert_eq!(sc["results"][0], 1);
         assert_eq!(sc["next_actions"][0]["tool"], "get_chunk");
+    }
+
+    #[test]
+    fn confidence_bucket_thresholds() {
+        assert_eq!(super::confidence_bucket(0.85), "high");
+        assert_eq!(super::confidence_bucket(0.84), "medium");
+        assert_eq!(super::confidence_bucket(0.70), "medium");
+        assert_eq!(super::confidence_bucket(0.69), "low");
+        assert_eq!(super::confidence_bucket(0.50), "low");
+        assert_eq!(super::confidence_bucket(0.49), "very_low");
+        assert_eq!(super::confidence_bucket(0.0),  "very_low");
+    }
+
+    #[test]
+    fn project_search_empty_results() {
+        let envelope = json!({
+            "corpus_embedding_model": "",
+            "results": [],
+            "search_metadata": { "filtered_by_confidence": 2, "deduplicated_count": 0 }
+        });
+        let o = super::project_search(envelope, None);
+        assert!(o.summary.contains("0 matches"));
+        assert!(!o.summary.contains("corpus . "));   // empty model must not leak into summary
+        assert!(o.next_actions.is_empty());
+        let t = o.telemetry.unwrap();
+        assert_eq!(t.result_count, 0);
+        assert!(t.top_confidence_bucket.is_none());
+        assert!(t.corpus_model.is_none());           // "" treated as absent
     }
 
     #[test]
