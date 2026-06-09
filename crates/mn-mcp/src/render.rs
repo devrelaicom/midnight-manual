@@ -136,9 +136,17 @@ pub fn project_search(envelope: Value, reranker_used: Option<&str>) -> ToolOutco
     let filtered = envelope
         .pointer("/search_metadata/filtered_by_confidence")
         .and_then(Value::as_u64);
-    let deduped = envelope
-        .pointer("/search_metadata/deduplicated_count")
-        .and_then(Value::as_u64);
+    let deduped = envelope.get("search_metadata").map(|m| {
+        let dropped = m
+            .get("overlap_dropped_count")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let trimmed = m
+            .get("overlap_trimmed_count")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        dropped + trimmed
+    });
 
     // Trimmed: per-result essentials, scoring stripped.
     let trimmed_results: Vec<Value> = results
@@ -955,5 +963,21 @@ mod tests {
         let o = super::project_install(env);
         assert!(o.summary.contains('1')); // 1 harness
         assert!(o.summary.contains("user")); // scope
+    }
+
+    #[test]
+    fn project_search_telemetry_dedup_uses_overlap_counts() {
+        let env = json!({
+            "corpus_embedding_model": "voyage-code-3@1",
+            "results": [{ "chunk_id": "a", "document_id": "b", "source_path": "p",
+                          "source_display_name": "S", "heading_path": [], "content": "c",
+                          "scores": { "confidence": 0.9, "confidence_factors": { "attribution": "foundation" } } }],
+            "search_metadata": { "filtered_by_confidence": 1, "deduplicated_count": 0,
+                                 "overlap_dropped_count": 3, "overlap_trimmed_count": 2 }
+        });
+        let o = super::project_search(env, None);
+        let t = o.telemetry.unwrap();
+        assert_eq!(t.filtered_by_confidence, Some(1));
+        assert_eq!(t.deduplicated_count, Some(5)); // overlap_dropped(3) + overlap_trimmed(2), NOT input-dedup(0)
     }
 }

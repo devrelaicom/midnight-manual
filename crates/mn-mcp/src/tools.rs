@@ -55,7 +55,7 @@ pub fn list() -> ToolsListResult {
             ToolDescription {
                 name: "get_chunk",
                 description:
-                    "Fetch one chunk by id. Returns the chunk row (id, content, chunk_index, total_chunks, content_hash, embedding_model_id, heading_path, symbol_path, start_byte, end_byte, token_count, status, created_at, document_id, source_version_id, node_id) plus a small `document` sub-object (id, source_path, published_url, source_url, language, kind, provenance) and a `source` sub-object (slug). For the chunk's parent chain call get_chunk_parents; for adjacent chunks call get_chunk_next/get_chunk_prev.",
+                    "Fetch one chunk by id. Returns the chunk row (id, content, chunk_index, total_chunks, content_hash, embedding_model_id, heading_path, symbol_path, start_byte, end_byte, token_count, status, created_at, document_id, source_version_id, node_id) plus a small `document` sub-object (id, source_path, published_url, source_url, language, kind, provenance) and a `source` sub-object (slug + display_name). For the chunk's parent chain call get_chunk_parents; for adjacent chunks call get_chunk_next/get_chunk_prev.",
                 input_schema: id_only_schema(),
                 output_schema: Some(crate::schemas::chunk_output_schema()),
             },
@@ -97,7 +97,7 @@ pub fn list() -> ToolsListResult {
             ToolDescription {
                 name: "get_document_full",
                 description:
-                    "Complete document: every overview field except chunk_ids, plus a `chunks` array with each chunk's `{chunk_id, chunk_index, content, heading_path, token_count}` inline (no per-chunk document/source sub-objects). Capped at 500 ready chunks. For documents over the cap the call fails with a structured `too_many_chunks` error (see error.data.next_tool); fall back to get_document_chunks.",
+                    "Complete document: every overview field except chunk_ids, plus a `chunks` array with each chunk's `{chunk_id, chunk_index, content, heading_path, token_count}` inline (no per-chunk document/source sub-objects). Capped at 500 ready chunks. For documents over the cap the call returns an `isError` result with `structuredContent.error` (code `TOO_MANY_CHUNKS`, with `chunk_count`/`cap`/`hint`) and `next_actions` pointing at `get_document_chunks`; fall back to get_document_chunks.",
                 input_schema: id_only_schema(),
                 output_schema: Some(crate::schemas::document_output_schema()),
             },
