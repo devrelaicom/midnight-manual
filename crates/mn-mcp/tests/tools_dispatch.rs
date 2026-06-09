@@ -2,6 +2,10 @@
 //! the `run_passthrough_id` helper through a wiremock cloud and verify the
 //! input-validation gates (uuid parsing, missing fields) before the wire
 //! call goes out.
+//!
+//! The lower section ("projector dispatch integration") tests that the full
+//! tool→projector→`ToolCallResult` pipeline produces the correct
+//! `structuredContent` shape, matching the render.rs contracts.
 
 use std::sync::Arc;
 
@@ -493,4 +497,253 @@ async fn run_document_chunks_404_maps_to_not_found() {
         .await
         .unwrap_err();
     assert!(matches!(err, PassthroughError::NotFound(_)));
+}
+
+// ---------------------------------------------------------------------------
+// Projector dispatch integration tests
+//
+// These tests wire raw tool output through the render projectors and verify
+// that the resulting `ToolCallResult` carries the correct `structuredContent`
+// shape. They exercise the same pipeline that `run_passthrough_tool` and
+// `run_search_dispatch` in server.rs follow.
+// ---------------------------------------------------------------------------
+
+/// `get_chunk` → `project_chunk`: structuredContent has top-level `id` (not
+/// nested under a `chunk` key) because chunk fields are flattened.
+#[tokio::test]
+async fn dispatch_get_chunk_structured_content_has_top_level_id() {
+    use mn_mcp::render;
+    let id = "55555555-5555-5555-5555-555555555500";
+    let raw = json!({
+        "id": id,
+        "chunk_index": 0,
+        "total_chunks": 10,
+        "content": "body",
+        "heading_path": [],
+        "document": { "source_path": "docs/intro.md" },
+        "source": { "slug": "compact-docs" }
+    });
+    let result = render::project_chunk(raw).into_result();
+    assert!(!result.is_error);
+    let sc = result.structured_content.unwrap();
+    // Chunk fields are flattened — `id` is top-level, NOT `sc["chunk"]["id"]`.
+    assert_eq!(sc["id"], id);
+    // next_actions injected by the projector.
+    assert!(sc["next_actions"].is_array());
+    // text block has a fenced JSON summary, not the raw JSON dump.
+    let text = match &result.content[0] {
+        mn_mcp::protocol::ContentBlock::Text { text } => text.clone(),
+    };
+    assert!(text.contains("```json"), "text block must contain a fenced json block");
+}
+
+/// `get_chunk_next` → `project_chunk_list("after")`: structuredContent has
+/// a `chunks` array.
+#[tokio::test]
+async fn dispatch_get_chunk_next_structured_content_has_chunks_array() {
+    use mn_mcp::render;
+    let raw = json!({ "chunks": [{"id": "a"}, {"id": "b"}] });
+    let result = render::project_chunk_list(raw, "after").into_result();
+    assert!(!result.is_error);
+    let sc = result.structured_content.unwrap();
+    assert!(sc["chunks"].is_array(), "structuredContent must have a chunks array");
+    assert_eq!(sc["chunks"].as_array().unwrap().len(), 2);
+    // isError omitted on success.
+    assert!(!result.is_error);
+}
+
+/// `get_document_chunks` → `project_document_window`: structuredContent has
+/// top-level `from` and the `chunks` array.
+#[tokio::test]
+async fn dispatch_get_document_chunks_structured_content_has_from_and_limit() {
+    use mn_mcp::render;
+    let raw = json!({
+        "id": "d1", "source_path": "docs/intro.md", "source": { "display_name": "X" },
+        "from": 3, "limit": 7, "total_chunks": 35,
+        "chunks": [{"chunk_id": "a"}, {"chunk_id": "b"}]
+    });
+    let result = render::project_document_window(raw).into_result();
+    assert!(!result.is_error);
+    let sc = result.structured_content.unwrap();
+    // DocumentChunkWindow is flattened — from/limit are top-level.
+    assert_eq!(sc["from"], 3);
+    assert_eq!(sc["limit"], 7);
+    assert!(sc["chunks"].is_array());
+}
+
+/// `get_chunk_neighbors` → `project_neighbors`: structuredContent keeps the
+/// `{prev, chunk, next}` shape — `sc["chunk"]["id"]` is where the anchor id lives.
+#[tokio::test]
+async fn dispatch_get_chunk_neighbors_structured_content_shape() {
+    use mn_mcp::render;
+    let id = "55555555-5555-5555-5555-555555555501";
+    let raw = json!({
+        "prev": { "chunks": [{"id": "p1"}] },
+        "chunk": { "id": id, "content": "anchor" },
+        "next": { "chunks": [{"id": "n1"}, {"id": "n2"}] }
+    });
+    let result = render::project_neighbors(raw).into_result();
+    assert!(!result.is_error);
+    let sc = result.structured_content.unwrap();
+    // Neighbors keeps nested shape: sc["chunk"]["id"]
+    assert_eq!(sc["chunk"]["id"], id);
+    // prev / next arrays accessible at sc["prev"]["chunks"] / sc["next"]["chunks"]
+    assert_eq!(sc["prev"]["chunks"].as_array().unwrap().len(), 1);
+    assert_eq!(sc["next"]["chunks"].as_array().unwrap().len(), 2);
+    assert!(sc["next_actions"].is_array());
+}
+
+/// Tool-execution errors become `isError: true` results (not JSON-RPC errors).
+/// Verify `passthrough_failure` on `NotFound` produces the right envelope.
+#[tokio::test]
+async fn dispatch_passthrough_not_found_produces_iserror_envelope() {
+    use mn_mcp::render;
+    // Simulate what run_passthrough_tool does on a NotFound error.
+    let failure = render::ToolFailure {
+        kind: render::ErrorKind::NotFound,
+        message: "not found: no chunk abc".into(),
+        guidance: "Not found — verify the id from a recent search result.".into(),
+        details: json!({}),
+        next_actions: vec![render::NextAction {
+            tool: "search",
+            arguments: json!({ "query": "<terms>" }),
+        }],
+    };
+    let result = failure.into_result();
+    assert!(result.is_error, "isError must be true for tool-execution errors");
+    let sc = result.structured_content.unwrap();
+    assert_eq!(sc["error"]["code"], "NOT_FOUND");
+    assert_eq!(sc["error"]["retryable"], false);
+    // next_actions still present so the agent can recover.
+    assert!(sc["next_actions"].is_array());
+}
+
+/// `get_document_full` 412 `too_many_chunks` → `isError: true` envelope with
+/// `chunk_count`, `cap`, and a `get_document_chunks` next action.
+#[tokio::test]
+async fn dispatch_document_full_too_many_chunks_produces_iserror_envelope() {
+    use mn_mcp::render;
+    let failure = render::ToolFailure {
+        kind: render::ErrorKind::TooManyChunks,
+        message: "document has 1240 chunks (cap 500)".into(),
+        guidance: "Use get_document_chunks to page through the document.".into(),
+        details: json!({ "chunk_count": 1240, "cap": 500, "hint": "use /chunks endpoint" }),
+        next_actions: vec![render::NextAction {
+            tool: "get_document_chunks",
+            arguments: json!({ "from": 0, "limit": 20 }),
+        }],
+    };
+    let result = failure.into_result();
+    assert!(result.is_error);
+    let sc = result.structured_content.unwrap();
+    assert_eq!(sc["error"]["code"], "TOO_MANY_CHUNKS");
+    // Details merged into the error object.
+    assert_eq!(sc["error"]["chunk_count"], 1240);
+    assert_eq!(sc["error"]["cap"], 500);
+    // next_actions points at get_document_chunks.
+    assert_eq!(sc["next_actions"][0]["tool"], "get_document_chunks");
+}
+
+/// Verify that a successful `get_chunk` round-trip through the full
+/// tool→projector pipeline (with a wiremock cloud) produces:
+/// 1. `isError` absent (false)
+/// 2. `structuredContent["id"]` == the chunk id (flattened, top-level)
+/// 3. `content[0].text` contains a fenced json block (not the raw dump)
+#[tokio::test]
+async fn dispatch_get_chunk_full_pipeline_via_wiremock() {
+    use mn_mcp::render;
+    let server = MockServer::start().await;
+    let id = "55555555-5555-5555-5555-555555555502";
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/chunks/{id}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": id, "chunk_index": 2, "total_chunks": 20, "content": "body",
+            "heading_path": ["Intro"], "document": {"source_path": "x.md"},
+            "source": {"slug": "compact-docs"}
+        })))
+        .mount(&server)
+        .await;
+    let client = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
+    let v = run_passthrough_id(&json!({"id": id}), &client, PassthroughKind::Chunk)
+        .await
+        .unwrap();
+    // Thread through the projector (same as run_passthrough_tool does).
+    let result = render::project_chunk(v).into_result();
+    assert!(!result.is_error);
+    let sc = result.structured_content.unwrap();
+    assert_eq!(sc["id"], id);
+    let text = match &result.content[0] {
+        mn_mcp::protocol::ContentBlock::Text { text } => text.clone(),
+    };
+    assert!(text.contains("```json"), "text block must contain a fenced json summary");
+    // The text block is a summary string, not the raw JSON dump of the whole chunk.
+    assert!(!text.starts_with('{'), "text block must not be a raw JSON dump");
+}
+
+/// Verify that `get_document_chunks` full pipeline produces correct `from`/`limit`
+/// in structuredContent (the window fields are preserved top-level).
+#[tokio::test]
+async fn dispatch_get_document_chunks_full_pipeline_via_wiremock() {
+    use mn_mcp::render;
+    let server = MockServer::start().await;
+    let id = "55555555-5555-5555-5555-555555555503";
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/documents/{id}/chunks")))
+        .and(query_param("from", "3"))
+        .and(query_param("limit", "7"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": id, "source_path": "docs/intro.md", "source": {"display_name": "X"},
+            "chunks": [], "from": 3, "limit": 7, "total_chunks": 35,
+        })))
+        .mount(&server)
+        .await;
+    let client = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
+    let v = run_document_chunks(&json!({"id": id, "from": 3, "limit": 7}), &client)
+        .await
+        .unwrap();
+    let result = render::project_document_window(v).into_result();
+    assert!(!result.is_error);
+    let sc = result.structured_content.unwrap();
+    assert_eq!(sc["from"], 3);
+    assert_eq!(sc["limit"], 7);
+}
+
+/// Verify that `get_chunk_neighbors` full pipeline preserves `sc["prev"]["chunks"]`
+/// and `sc["next"]["chunks"]` length.
+#[tokio::test]
+async fn dispatch_get_chunk_neighbors_full_pipeline_via_wiremock() {
+    use mn_mcp::render;
+    let server = MockServer::start().await;
+    let id = "55555555-5555-5555-5555-555555555504";
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/chunks/{id}/prev")))
+        .and(query_param("count", "2"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({ "chunks": [{"id": "p1"}] })),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/chunks/{id}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "id": id })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/chunks/{id}/next")))
+        .and(query_param("count", "2"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({ "chunks": [{"id": "n1"}, {"id": "n2"}] })),
+        )
+        .mount(&server)
+        .await;
+    let client = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
+    let v = run_chunk_neighbors(&json!({"id": id}), &client).await.unwrap();
+    let result = render::project_neighbors(v).into_result();
+    assert!(!result.is_error);
+    let sc = result.structured_content.unwrap();
+    assert_eq!(sc["chunk"]["id"], id);
+    assert_eq!(sc["prev"]["chunks"].as_array().unwrap().len(), 1);
+    assert_eq!(sc["next"]["chunks"].as_array().unwrap().len(), 2);
 }

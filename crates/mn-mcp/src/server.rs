@@ -13,13 +13,14 @@ use mn_telemetry::{Event, TelemetryClient};
 use tokio::io::{stdin, stdout, Stdin, Stdout};
 use tracing::{debug, info, warn};
 
-use crate::cloud_client::{CloudClient, CloudError};
+use crate::cloud_client::CloudClient;
 use crate::prompts;
 use crate::protocol::{
-    ContentBlock, ErrorCode, Incoming, InitializeResult, JsonRpcError, PromptGetParams,
-    PromptsCapability, RequestId, Response, ServerCapabilities, ServerInfo, ToolCallParams,
-    ToolCallResult, ToolsCapability, JSONRPC, MCP_PROTOCOL_VERSION,
+    ErrorCode, Incoming, InitializeResult, PromptGetParams, PromptsCapability, RequestId, Response,
+    ServerCapabilities, ServerInfo, ToolCallParams, ToolCallResult, ToolsCapability,
+    MCP_PROTOCOL_VERSION,
 };
+use crate::render::{ErrorKind, NextAction, ToolFailure};
 use crate::tools;
 use crate::transport::{FrameReader, FrameWriter};
 
@@ -217,9 +218,85 @@ async fn handle_request(req: crate::protocol::Request, state: &ServerState) -> V
     serde_json::to_vec(&response).expect("serialize response")
 }
 
+// ---------------------------------------------------------------------------
+// Tool dispatch carrier types
+// ---------------------------------------------------------------------------
+
+/// Carrier from the per-tool dispatch back to the telemetry-aware caller.
+struct ToolResponse {
+    result: ToolCallResult,
+    telemetry: Option<crate::render::SearchTelemetry>,
+    outcome: Outcome,
+}
+
+/// Coarse telemetry outcome for a passthrough error (computed before the error is consumed).
+const fn passthrough_outcome(e: &tools::PassthroughError) -> Outcome {
+    match e {
+        tools::PassthroughError::InvalidInput(_) => Outcome::InvalidInput,
+        _ => Outcome::Error,
+    }
+}
+
+fn cloud_failure(e: &crate::cloud_client::CloudError) -> ToolFailure {
+    use crate::cloud_client::CloudError;
+    match e {
+        CloudError::NotFound(msg) => ToolFailure {
+            kind: ErrorKind::NotFound,
+            message: format!("not found: {msg}"),
+            guidance: "Resource not found — verify the id from a recent search result.".into(),
+            details: serde_json::Value::Null,
+            next_actions: vec![NextAction {
+                tool: "search",
+                arguments: serde_json::json!({ "query": "<terms>" }),
+            }],
+        },
+        other => ToolFailure::simple(
+            ErrorKind::CloudError,
+            other.to_string(),
+            "Upstream call failed; retry shortly.",
+        ),
+    }
+}
+
+fn passthrough_failure(e: tools::PassthroughError) -> ToolFailure {
+    use serde_json::json;
+    match e {
+        tools::PassthroughError::InvalidInput(msg) => {
+            ToolFailure::simple(ErrorKind::InvalidInput, msg.clone(), msg)
+        }
+        tools::PassthroughError::NotFound(msg) => ToolFailure {
+            kind: ErrorKind::NotFound,
+            message: format!("not found: {msg}"),
+            guidance: "Not found — verify the id from a recent search result.".into(),
+            details: json!({}),
+            next_actions: vec![NextAction {
+                tool: "search",
+                arguments: json!({ "query": "<terms>" }),
+            }],
+        },
+        tools::PassthroughError::TooManyChunks { chunk_count, cap, hint } => ToolFailure {
+            kind: ErrorKind::TooManyChunks,
+            message: format!("document has {chunk_count} chunks (cap {cap})"),
+            guidance: hint.clone(),
+            details: json!({ "chunk_count": chunk_count, "cap": cap, "hint": hint }),
+            next_actions: vec![NextAction {
+                tool: "get_document_chunks",
+                arguments: json!({ "from": 0, "limit": 20 }),
+            }],
+        },
+        tools::PassthroughError::Cloud(msg) => {
+            ToolFailure::simple(ErrorKind::CloudError, msg, "Upstream call failed; retry shortly.")
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// dispatch_tool (top-level, emits telemetry)
+// ---------------------------------------------------------------------------
+
 async fn dispatch_tool(id: RequestId, params: ToolCallParams, state: &ServerState) -> Response {
     let started = Instant::now();
-    let tool_name_for_event = tool_name_for_event(&params.name);
+    let name_for_event = tool_name_for_event(&params.name);
     // `rerank` is only meaningful to the `search` tool; for everything else
     // the field doesn't exist in the schema, so the telemetry value is false.
     // Search's own default is `true` (see parse_search_args), so an absent
@@ -230,18 +307,24 @@ async fn dispatch_tool(id: RequestId, params: ToolCallParams, state: &ServerStat
             .get("rerank")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(true);
-    let response = dispatch_tool_inner(id, params, state).await;
+
+    let (response, telemetry, outcome) =
+        match dispatch_tool_inner(id.clone(), params, state).await {
+            Ok(tr) => (
+                Response::success(
+                    id,
+                    serde_json::to_value(tr.result).expect("serialize result"),
+                ),
+                tr.telemetry,
+                tr.outcome,
+            ),
+            Err(resp) => (resp, None, Outcome::Error),
+        };
+
     let latency_ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
     state.tools_served.fetch_add(1, Ordering::Relaxed);
-    if let Some(name) = tool_name_for_event {
-        let outcome = if response.error.is_some() {
-            Outcome::Error
-        } else {
-            Outcome::Ok
-        };
-        // We don't have access to the typed result count here without
-        // re-parsing; the search tool exposes it on its own. Default to 0
-        // for non-search tools — the spec lists result_count as 0 for those.
+    if let Some(name) = name_for_event {
+        let t = telemetry.unwrap_or_default();
         state
             .telemetry
             .emit(Event::new(
@@ -250,17 +333,17 @@ async fn dispatch_tool(id: RequestId, params: ToolCallParams, state: &ServerStat
                 EventPayload::McpToolCall {
                     tool_name: name,
                     latency_ms,
-                    result_count: 0,
+                    result_count: t.result_count,
                     model_state: ModelState::Missing,
                     rerank_on,
                     outcome,
-                    corpus_model: None,
-                    reranker_used: None,
-                    top_confidence: None,
-                    top_attribution: None,
-                    top_source: None,
-                    filtered_by_confidence: None,
-                    deduplicated_count: None,
+                    corpus_model: t.corpus_model,
+                    reranker_used: t.reranker_used,
+                    top_confidence: t.top_confidence_bucket.map(str::to_owned),
+                    top_attribution: t.top_attribution,
+                    top_source: t.top_source,
+                    filtered_by_confidence: t.filtered_by_confidence,
+                    deduplicated_count: t.deduplicated_count,
                 },
             ))
             .await;
@@ -288,21 +371,52 @@ fn tool_name_for_event(name: &str) -> Option<McpToolName> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// dispatch_tool_inner: routes each tool name to its handler
+// ---------------------------------------------------------------------------
+
+/// Route a tool call to its handler, returning a `ToolResponse` on success or
+/// a JSON-RPC `Response` (protocol fault) on unknown tool.
+///
+/// Every tool-execution error (bad input, cloud failure, etc.) becomes an
+/// `isError: true` `ToolCallResult` inside `Ok(ToolResponse)` — JSON-RPC
+/// errors are reserved for protocol faults only.
 async fn dispatch_tool_inner(
     id: RequestId,
     params: ToolCallParams,
     state: &ServerState,
-) -> Response {
-    let outcome = match params.name.as_str() {
+) -> Result<ToolResponse, Response> {
+    use crate::render;
+
+    let ok = |result: ToolCallResult, telemetry| ToolResponse {
+        result,
+        telemetry,
+        outcome: Outcome::Ok,
+    };
+    let err = |result: ToolCallResult, outcome| ToolResponse { result, telemetry: None, outcome };
+
+    Ok(match params.name.as_str() {
         "status" => {
             let out = tools::run_status(Some(&state.cfg.cache_dir));
-            Ok(serde_json::to_string(&out).unwrap_or_else(|e| format!("serialize status: {e}")))
+            let v = serde_json::to_value(out).unwrap_or(serde_json::Value::Null);
+            ok(render::project_status(v).into_result(), None)
         }
-        "pull_models" => tools::run_pull_models(state.cfg.cache_dir.clone())
-            .await
-            .map(|out| serde_json::to_string(&out).unwrap_or_else(|e| format!("serialize: {e}")))
-            .map_err(|msg| Response::err(id.clone(), ErrorCode::ToolFailed, msg)),
-        "search" => run_search_dispatch(&id, &params, state).await,
+        "pull_models" => match tools::run_pull_models(state.cfg.cache_dir.clone()).await {
+            Ok(out) => {
+                let v = serde_json::to_value(out).unwrap_or(serde_json::Value::Null);
+                ok(render::project_pull_models(v).into_result(), None)
+            }
+            Err(msg) => err(
+                ToolFailure::simple(
+                    ErrorKind::ModelLoadFailed,
+                    msg,
+                    "Model download failed; retry pull_models.",
+                )
+                .into_result(),
+                Outcome::Error,
+            ),
+        },
+        "search" => return Ok(run_search_dispatch(&params, state).await),
         "get_chunk"
         | "get_chunk_next"
         | "get_chunk_prev"
@@ -310,238 +424,262 @@ async fn dispatch_tool_inner(
         | "get_chunk_parents"
         | "get_document"
         | "get_document_full"
-        | "get_document_chunks" => run_passthrough_tool(&id, &params, state).await,
+        | "get_document_chunks" => return Ok(run_passthrough_tool(&params, state).await),
         "list_sources" => match state.cloud.list_sources().await {
-            Ok(v) => Ok(v.to_string()),
-            Err(CloudError::NotFound(msg)) => {
-                Err(Response::err(id.clone(), ErrorCode::ToolFailed, format!("not found: {msg}")))
-            }
-            Err(e) => Err(Response::err(id.clone(), ErrorCode::ToolFailed, e.to_string())),
+            Ok(v) => ok(render::project_sources(v).into_result(), None),
+            Err(e) => err(cloud_failure(&e).into_result(), Outcome::Error),
         },
         "facets" => match state.cloud.get_facets().await {
-            Ok(v) => Ok(v.to_string()),
-            Err(e) => Err(Response::err(id.clone(), ErrorCode::ToolFailed, e.to_string())),
+            Ok(v) => ok(render::project_facets(v).into_result(), None),
+            Err(e) => err(cloud_failure(&e).into_result(), Outcome::Error),
         },
         "install_search_skill" => match tools::run_install_search_skill(&params.arguments) {
-            Ok(text) => Ok(text),
-            Err((code, msg)) => Err(Response::err(id.clone(), code, msg)),
+            Ok(text) => {
+                let v = serde_json::from_str::<serde_json::Value>(&text)
+                    .unwrap_or_else(|_| serde_json::json!({ "message": text }));
+                ok(render::project_install(v).into_result(), None)
+            }
+            Err((_, msg)) => err(
+                ToolFailure::simple(ErrorKind::InstallFailed, msg.clone(), msg).into_result(),
+                Outcome::InvalidInput,
+            ),
         },
         other => {
-            return Response::err(id, ErrorCode::ToolNotFound, format!("unknown tool: {other}"));
+            return Err(Response::err(
+                id,
+                ErrorCode::ToolNotFound,
+                format!("unknown tool: {other}"),
+            ));
         }
-    };
-    match outcome {
-        Ok(result_text) => {
-            let result = ToolCallResult {
-                content: vec![ContentBlock::Text { text: result_text }],
-                structured_content: None,
-                is_error: false,
-            };
-            Response::success(id, serde_json::to_value(result).expect("serialize result"))
-        }
-        Err(resp) => resp,
-    }
+    })
 }
 
-async fn run_search_dispatch(
-    id: &RequestId,
-    params: &ToolCallParams,
-    state: &ServerState,
-) -> Result<String, Response> {
+// ---------------------------------------------------------------------------
+// run_search_dispatch
+// ---------------------------------------------------------------------------
+
+async fn run_search_dispatch(params: &ToolCallParams, state: &ServerState) -> ToolResponse {
+    use crate::render::{self, ToolFailure};
+
+    let rerank_on = params
+        .arguments
+        .get("rerank")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true);
+    // Best-effort reranker name for telemetry. Use the well-known constant —
+    // the constant is what `run_status` and `pull_models` also report, so it's
+    // the most accurate single-process value we have.
+    let reranker_name: Option<String> =
+        if rerank_on { Some(mn_embedding::RERANKER_MODEL_NAME.to_string()) } else { None };
+
     match tools::run_search(&params.arguments, &state.cfg, &state.cloud).await {
-        Ok(out) => Ok(out.to_string()),
-        Err(tools::SearchError::InvalidInput(msg)) => {
-            Err(Response::err(id.clone(), ErrorCode::InvalidParams, msg))
+        Ok(envelope) => {
+            let outcome = render::project_search(envelope, reranker_name.as_deref());
+            let telemetry = outcome.telemetry.clone();
+            ToolResponse { result: outcome.into_result(), telemetry, outcome: Outcome::Ok }
         }
+        Err(tools::SearchError::InvalidInput(msg)) => ToolResponse {
+            result: ToolFailure::simple(ErrorKind::InvalidInput, msg.clone(), msg).into_result(),
+            telemetry: None,
+            outcome: Outcome::InvalidInput,
+        },
         Err(tools::SearchError::Mismatch {
             corpus_model,
             client_model,
             message,
             remediation,
-        }) => Err(mismatch_response(
-            id.clone(),
-            &corpus_model,
-            &client_model,
-            &message,
-            &remediation,
-        )),
-        Err(tools::SearchError::Cloud(msg)) => {
-            Err(Response::err(id.clone(), ErrorCode::ToolFailed, msg))
-        }
+        }) => ToolResponse {
+            result: ToolFailure {
+                kind: ErrorKind::EmbeddingModelMismatch,
+                message,
+                guidance: remediation.clone(),
+                details: serde_json::json!({
+                    "corpus_model": corpus_model,
+                    "client_model": client_model,
+                    "remediation": remediation,
+                }),
+                next_actions: vec![NextAction {
+                    tool: "pull_models",
+                    arguments: serde_json::json!({}),
+                }],
+            }
+            .into_result(),
+            telemetry: None,
+            outcome: Outcome::Error,
+        },
+        Err(tools::SearchError::Cloud(msg)) => ToolResponse {
+            result: ToolFailure::simple(
+                ErrorKind::CloudError,
+                msg,
+                "Search failed upstream; retry shortly.",
+            )
+            .into_result(),
+            telemetry: None,
+            outcome: Outcome::Error,
+        },
     }
 }
 
-/// Dispatch any of the eight chunk/document passthrough tools. Pairs the
-/// per-tool future with the right `TooManyChunksPolicy`, then defers the
-/// shared error translation to [`run_passthrough`].
-///
-/// Returns `Err(Response::ToolNotFound)` for an unknown name; callers should
-/// have already routed those out, but the safety net keeps the function
-/// total.
-async fn run_passthrough_tool(
-    id: &RequestId,
-    params: &ToolCallParams,
-    state: &ServerState,
-) -> Result<String, Response> {
+// ---------------------------------------------------------------------------
+// run_passthrough_tool: eight chunk/document tools via projectors
+// ---------------------------------------------------------------------------
+
+#[allow(clippy::too_many_lines)]
+async fn run_passthrough_tool(params: &ToolCallParams, state: &ServerState) -> ToolResponse {
+    use crate::render;
     let cloud = &state.cloud;
     let args = &params.arguments;
+
+    // Inline each arm to avoid macro/closure type-inference fights.
     match params.name.as_str() {
         "get_chunk" => {
-            let fut = tools::run_passthrough_id(args, cloud, tools::PassthroughKind::Chunk);
-            run_passthrough(id, fut, TooManyChunksPolicy::Structured).await
+            match tools::run_passthrough_id(args, cloud, tools::PassthroughKind::Chunk).await {
+                Ok(v) => ToolResponse {
+                    result: render::project_chunk(v).into_result(),
+                    telemetry: None,
+                    outcome: Outcome::Ok,
+                },
+                Err(e) => {
+                    let outcome = passthrough_outcome(&e);
+                    ToolResponse {
+                        result: passthrough_failure(e).into_result(),
+                        telemetry: None,
+                        outcome,
+                    }
+                }
+            }
         }
         "get_chunk_next" => {
-            let fut = tools::run_chunk_nav(args, cloud, tools::ChunkNavDirection::Next);
-            let policy =
-                TooManyChunksPolicy::Unreachable("unexpected too_many_chunks on /next or /prev");
-            run_passthrough(id, fut, policy).await
+            match tools::run_chunk_nav(args, cloud, tools::ChunkNavDirection::Next).await {
+                Ok(v) => ToolResponse {
+                    result: render::project_chunk_list(v, "after").into_result(),
+                    telemetry: None,
+                    outcome: Outcome::Ok,
+                },
+                Err(e) => {
+                    let outcome = passthrough_outcome(&e);
+                    ToolResponse {
+                        result: passthrough_failure(e).into_result(),
+                        telemetry: None,
+                        outcome,
+                    }
+                }
+            }
         }
         "get_chunk_prev" => {
-            let fut = tools::run_chunk_nav(args, cloud, tools::ChunkNavDirection::Prev);
-            let policy =
-                TooManyChunksPolicy::Unreachable("unexpected too_many_chunks on /next or /prev");
-            run_passthrough(id, fut, policy).await
+            match tools::run_chunk_nav(args, cloud, tools::ChunkNavDirection::Prev).await {
+                Ok(v) => ToolResponse {
+                    result: render::project_chunk_list(v, "before").into_result(),
+                    telemetry: None,
+                    outcome: Outcome::Ok,
+                },
+                Err(e) => {
+                    let outcome = passthrough_outcome(&e);
+                    ToolResponse {
+                        result: passthrough_failure(e).into_result(),
+                        telemetry: None,
+                        outcome,
+                    }
+                }
+            }
         }
         "get_chunk_neighbors" => {
-            let fut = tools::run_chunk_neighbors(args, cloud);
-            let policy =
-                TooManyChunksPolicy::Unreachable("unexpected too_many_chunks on /neighbors");
-            run_passthrough(id, fut, policy).await
+            match tools::run_chunk_neighbors(args, cloud).await {
+                Ok(v) => ToolResponse {
+                    result: render::project_neighbors(v).into_result(),
+                    telemetry: None,
+                    outcome: Outcome::Ok,
+                },
+                Err(e) => {
+                    let outcome = passthrough_outcome(&e);
+                    ToolResponse {
+                        result: passthrough_failure(e).into_result(),
+                        telemetry: None,
+                        outcome,
+                    }
+                }
+            }
         }
         "get_chunk_parents" => {
-            let fut = tools::run_passthrough_id(args, cloud, tools::PassthroughKind::Parents);
-            run_passthrough(id, fut, TooManyChunksPolicy::Structured).await
+            match tools::run_passthrough_id(args, cloud, tools::PassthroughKind::Parents).await {
+                Ok(v) => ToolResponse {
+                    result: render::project_parents(v).into_result(),
+                    telemetry: None,
+                    outcome: Outcome::Ok,
+                },
+                Err(e) => {
+                    let outcome = passthrough_outcome(&e);
+                    ToolResponse {
+                        result: passthrough_failure(e).into_result(),
+                        telemetry: None,
+                        outcome,
+                    }
+                }
+            }
         }
         "get_document" => {
-            let fut = tools::run_passthrough_id(args, cloud, tools::PassthroughKind::Document);
-            run_passthrough(id, fut, TooManyChunksPolicy::Structured).await
+            match tools::run_passthrough_id(args, cloud, tools::PassthroughKind::Document).await {
+                Ok(v) => ToolResponse {
+                    result: render::project_document_overview(v).into_result(),
+                    telemetry: None,
+                    outcome: Outcome::Ok,
+                },
+                Err(e) => {
+                    let outcome = passthrough_outcome(&e);
+                    ToolResponse {
+                        result: passthrough_failure(e).into_result(),
+                        telemetry: None,
+                        outcome,
+                    }
+                }
+            }
         }
         "get_document_full" => {
-            let fut = tools::run_passthrough_id(args, cloud, tools::PassthroughKind::DocumentFull);
-            run_passthrough(id, fut, TooManyChunksPolicy::Structured).await
+            match tools::run_passthrough_id(args, cloud, tools::PassthroughKind::DocumentFull)
+                .await
+            {
+                Ok(v) => ToolResponse {
+                    result: render::project_document_full(v).into_result(),
+                    telemetry: None,
+                    outcome: Outcome::Ok,
+                },
+                Err(e) => {
+                    let outcome = passthrough_outcome(&e);
+                    ToolResponse {
+                        result: passthrough_failure(e).into_result(),
+                        telemetry: None,
+                        outcome,
+                    }
+                }
+            }
         }
         "get_document_chunks" => {
-            let fut = tools::run_document_chunks(args, cloud);
-            let policy =
-                TooManyChunksPolicy::Unreachable("unexpected too_many_chunks on /chunks window");
-            run_passthrough(id, fut, policy).await
-        }
-        other => Err(Response::err(
-            id.clone(),
-            ErrorCode::ToolNotFound,
-            format!("unknown passthrough tool: {other}"),
-        )),
-    }
-}
-
-/// How a given tool dispatch should handle a `PassthroughError::TooManyChunks`
-/// from the cloud.
-///
-/// Only the `/v1/documents/:id/full` endpoint actually emits 412
-/// `too_many_chunks` (it's the one tool that can return an arbitrarily large
-/// body). Every other passthrough tool exhaustively matches the variant so
-/// the compiler catches additions, but a 412 there would be a cloud-side bug.
-#[derive(Debug, Clone, Copy)]
-enum TooManyChunksPolicy {
-    /// Translate to a structured JSON-RPC error with `chunk_count` / `cap` /
-    /// `hint` in `data` so an AI client can render a "use get_document_chunks"
-    /// remediation. Used by `get_document_full` (and harmlessly by the other
-    /// id-only tools, which never trigger it).
-    Structured,
-    /// Translate to a plain `ToolFailed` error with the given message. Used by
-    /// the navigation / window tools where 412 is not reachable from the
-    /// cloud surface; the static message names the offending endpoint to make
-    /// future regressions obvious in logs.
-    Unreachable(&'static str),
-}
-
-/// Single dispatch helper for every tool that returns
-/// `Result<serde_json::Value, PassthroughError>`. Awaits the per-tool future,
-/// serialises the success body to a JSON string, and translates each error
-/// variant to the matching JSON-RPC response.
-async fn run_passthrough<F>(
-    id: &RequestId,
-    fut: F,
-    too_many: TooManyChunksPolicy,
-) -> Result<String, Response>
-where
-    F: std::future::Future<Output = Result<serde_json::Value, tools::PassthroughError>>,
-{
-    match fut.await {
-        Ok(v) => Ok(v.to_string()),
-        Err(tools::PassthroughError::InvalidInput(msg)) => {
-            Err(Response::err(id.clone(), ErrorCode::InvalidParams, msg))
-        }
-        Err(tools::PassthroughError::NotFound(msg)) => {
-            Err(Response::err(id.clone(), ErrorCode::ToolFailed, format!("not found: {msg}")))
-        }
-        Err(tools::PassthroughError::TooManyChunks { chunk_count, cap, hint }) => match too_many {
-            TooManyChunksPolicy::Structured => {
-                Err(too_many_chunks_response(id.clone(), chunk_count, cap, &hint))
+            match tools::run_document_chunks(args, cloud).await {
+                Ok(v) => ToolResponse {
+                    result: render::project_document_window(v).into_result(),
+                    telemetry: None,
+                    outcome: Outcome::Ok,
+                },
+                Err(e) => {
+                    let outcome = passthrough_outcome(&e);
+                    ToolResponse {
+                        result: passthrough_failure(e).into_result(),
+                        telemetry: None,
+                        outcome,
+                    }
+                }
             }
-            TooManyChunksPolicy::Unreachable(msg) => {
-                Err(Response::err(id.clone(), ErrorCode::ToolFailed, msg.to_owned()))
-            }
+        }
+        other => ToolResponse {
+            result: ToolFailure::simple(
+                ErrorKind::InvalidInput,
+                format!("unknown passthrough tool: {other}"),
+                "internal routing error",
+            )
+            .into_result(),
+            telemetry: None,
+            outcome: Outcome::Error,
         },
-        Err(tools::PassthroughError::Cloud(msg)) => {
-            Err(Response::err(id.clone(), ErrorCode::ToolFailed, msg))
-        }
-    }
-}
-
-/// Build a JSON-RPC error response for the cloud's 409 embedding-model
-/// mismatch, putting the corpus + client model in the `data` field so an AI
-/// client can render a structured remediation (US5 acceptance #6).
-fn mismatch_response(
-    id: RequestId,
-    corpus_model: &str,
-    client_model: &str,
-    message: &str,
-    remediation: &str,
-) -> Response {
-    let data = serde_json::json!({
-        "kind": "embedding_model_mismatch",
-        "corpus_model": corpus_model,
-        "client_model": client_model,
-        "remediation": remediation,
-        "next_tool": "pull_models",
-    });
-    Response {
-        jsonrpc: JSONRPC,
-        id,
-        result: None,
-        error: Some(JsonRpcError {
-            code: ErrorCode::ToolFailed as i32,
-            message: if message.is_empty() {
-                format!("embedding model mismatch: corpus={corpus_model} client={client_model}")
-            } else {
-                message.to_owned()
-            },
-            data: Some(data),
-        }),
-    }
-}
-
-/// Build a JSON-RPC error response for the cloud's 412 `too_many_chunks`
-/// body, putting the count + cap + hint in the `data` field so an AI client
-/// can render a structured remediation (next_tool = "get_document_chunks").
-fn too_many_chunks_response(id: RequestId, chunk_count: u32, cap: u32, hint: &str) -> Response {
-    let data = serde_json::json!({
-        "kind": "too_many_chunks",
-        "chunk_count": chunk_count,
-        "cap": cap,
-        "hint": hint,
-        "next_tool": "get_document_chunks",
-    });
-    Response {
-        jsonrpc: JSONRPC,
-        id,
-        result: None,
-        error: Some(JsonRpcError {
-            code: ErrorCode::ToolFailed as i32,
-            message: format!("document has {chunk_count} chunks (cap {cap})"),
-            data: Some(data),
-        }),
     }
 }
 
