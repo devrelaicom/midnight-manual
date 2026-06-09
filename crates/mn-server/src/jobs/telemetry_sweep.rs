@@ -6,15 +6,20 @@
 //! actually removed — if the DELETE fails, the rollup rolls back too.
 //!
 //! Retention is configurable via `MIDNIGHT_MANUAL_TELEMETRY_RAW_RETENTION_DAYS`
-//! (default 7). Aggregate rows are retained indefinitely.
+//! (default 90; raised from FR-110's documented default of 7 — the
+//! `telemetry_search_daily` rollup preserves the signal long-term, and 90 days
+//! of raw rows provides a useful granular window). Aggregate rows are retained
+//! indefinitely.
 
 use std::time::Duration;
 
 use sqlx::PgPool;
 
-/// Default retention window for raw telemetry rows, matching the spec
-/// (FR-110). Configurable per-run via `ServerConfig::telemetry_raw_retention_days`.
-pub const DEFAULT_RETENTION_DAYS: i64 = 7;
+/// Default retention window for raw telemetry rows. Configurable per-run via
+/// `ServerConfig::telemetry_raw_retention_days`. Raised from FR-110's documented
+/// default of 7 to 90: the `telemetry_search_daily` rollup preserves the signal
+/// long-term, and 90 days of raw rows provides a useful granular window.
+pub const DEFAULT_RETENTION_DAYS: i64 = 90;
 
 /// How often the sweep job ticks at runtime. One hour is fine for v1 —
 /// retention is per-day, not per-minute, and a missed sweep window cannot
