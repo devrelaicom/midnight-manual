@@ -816,6 +816,7 @@ async fn fetch_scoring_rows(
         let id: Uuid = r.try_get("id")?;
         let provenance_json: serde_json::Value = r.try_get("provenance")?;
         let provenance: Provenance = serde_json::from_value(provenance_json).unwrap_or_default();
+        // symbol_path is JSONB [{kind,name}] (unlike heading_path's native text[]); the wire breadcrumb only needs the name strings, so kind is intentionally dropped.
         let symbol_json: serde_json::Value =
             r.try_get("symbol_path").unwrap_or(serde_json::Value::Null);
         let symbol_path: Vec<String> = symbol_json
@@ -1472,5 +1473,22 @@ mod tests {
         assert_eq!(r.source_path, "docs/intro.md");
         assert_eq!(r.source_display_name, "Compact Docs");
         assert_eq!(r.heading_path, vec!["Compiling".to_string(), "Witnesses".to_string()]);
+    }
+
+    #[test]
+    fn symbol_path_name_extraction_skips_malformed() {
+        let json = serde_json::json!([
+            {"kind": "impl", "name": "Foo"},
+            {"kind": "fn",   "name": "bar"},
+            {},            // no "name"
+            {"kind": "fn"} // "name" missing
+        ]);
+        let names: Vec<String> = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|s| s.get("name").and_then(|n| n.as_str()).map(str::to_owned))
+            .collect();
+        assert_eq!(names, vec!["Foo".to_string(), "bar".to_string()]);
     }
 }
