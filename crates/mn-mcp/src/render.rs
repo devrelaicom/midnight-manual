@@ -234,6 +234,114 @@ pub fn project_search(envelope: Value, reranker_used: Option<&str>) -> ToolOutco
     }
 }
 
+/// `get_chunk`: single chunk-with-context. Chunk fields are top-level (flattened);
+/// `document`/`source` are nested summary objects.
+pub fn project_chunk(env: Value) -> ToolOutcome {
+    let id = env.get("id").and_then(Value::as_str).unwrap_or("?").to_owned();
+    let path = env.pointer("/document/source_path").and_then(Value::as_str).unwrap_or("(unknown)");
+    let heading = env.get("heading_path").and_then(Value::as_array)
+        .map(|h| h.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" › "))
+        .filter(|s| !s.is_empty());
+    let idx = env.get("chunk_index").and_then(Value::as_i64);
+    let total = env.get("total_chunks").and_then(Value::as_i64);
+    let where_ = heading.map_or_else(|| path.to_owned(), |h| format!("{path} › {h}"));
+    let pos = match (idx, total) {
+        (Some(i), Some(t)) => format!(" (idx {i}/{t})"),
+        _ => String::new(),
+    };
+    let summary = format!("Chunk {id} — {where_}{pos}.");
+    let trimmed = json!({ "chunk_id": id, "source_path": path });
+    let next_actions = vec![
+        NextAction { tool: "get_chunk_next", arguments: json!({ "id": id }) },
+        NextAction { tool: "get_chunk_prev", arguments: json!({ "id": id }) },
+        NextAction { tool: "get_chunk_neighbors", arguments: json!({ "id": id }) },
+        NextAction { tool: "get_chunk_parents", arguments: json!({ "id": id }) },
+    ];
+    ToolOutcome::new(summary, env, trimmed, next_actions)
+}
+
+/// `get_chunk_next` / `get_chunk_prev`: `{ chunks: [ChunkWithContext,..] }`. `direction` = "after"/"before".
+pub fn project_chunk_list(env: Value, direction: &str) -> ToolOutcome {
+    let n = env.get("chunks").and_then(Value::as_array).map_or(0, Vec::len);
+    let first = env.pointer("/chunks/0/id").and_then(Value::as_str).unwrap_or("?");
+    let summary = format!("{n} chunk(s) {direction} the anchor (first: {first}).");
+    let trimmed = json!({ "count": n });
+    ToolOutcome::new(summary, env, trimmed, vec![])
+}
+
+/// `get_chunk_neighbors`: `{ prev: {chunks:[..]}, chunk: <ChunkWithContext>, next: {chunks:[..]} }`.
+pub fn project_neighbors(env: Value) -> ToolOutcome {
+    let prev = env.pointer("/prev/chunks").and_then(Value::as_array).map_or(0, Vec::len);
+    let next = env.pointer("/next/chunks").and_then(Value::as_array).map_or(0, Vec::len);
+    let id = env.pointer("/chunk/id").and_then(Value::as_str).unwrap_or("?").to_owned();
+    let doc_id = env.pointer("/chunk/document_id").and_then(Value::as_str).map(str::to_owned);
+    let summary = format!("{} neighbor(s) around {id} ({prev} before, {next} after).", prev + next);
+    let trimmed = json!({ "prev": prev, "next": next });
+    let next_actions = doc_id
+        .map(|d| vec![NextAction { tool: "get_document", arguments: json!({ "id": d }) }])
+        .unwrap_or_default();
+    ToolOutcome::new(summary, env, trimmed, next_actions)
+}
+
+/// `get_chunk_parents`: a top-level JSON ARRAY of ancestor nodes. Wrap as an object so
+/// `structured` stays an object (for next_actions injection + outputSchema).
+// `env` is consumed by the `json!` macro (ownership move); a reference would require an
+// extra clone, so suppress the false-positive lint.
+#[allow(clippy::needless_pass_by_value)]
+pub fn project_parents(env: Value) -> ToolOutcome {
+    let names: Vec<String> = env.as_array()
+        .map(|a| a.iter().filter_map(|node| node.get("name").and_then(Value::as_str).map(str::to_owned)).collect())
+        .unwrap_or_default();
+    let n = names.len();
+    let summary = format!("{n} ancestor node(s): {}.", names.join(" / "));
+    let trimmed = json!({ "count": n, "names": names });
+    let structured = json!({ "parents": env });
+    ToolOutcome::new(summary, structured, trimmed, vec![])
+}
+
+/// `get_document` (DocumentOverview): Document flattened to top level; `source` nested; `chunk_ids` array.
+pub fn project_document_overview(env: Value) -> ToolOutcome {
+    let path = env.get("source_path").and_then(Value::as_str).unwrap_or("(unknown)");
+    let name = env.pointer("/source/display_name").and_then(Value::as_str).unwrap_or("");
+    let id = env.get("id").and_then(Value::as_str).unwrap_or("?").to_owned();
+    let n = env.get("chunk_ids").and_then(Value::as_array).map_or(0, Vec::len);
+    let summary = format!("{path} ({name}): {n} chunks.");
+    let trimmed = json!({ "source_path": path, "chunk_count": n });
+    let next_actions = vec![
+        NextAction { tool: "get_document_full", arguments: json!({ "id": id }) },
+        NextAction { tool: "get_document_chunks", arguments: json!({ "id": id }) },
+    ];
+    ToolOutcome::new(summary, env, trimmed, next_actions)
+}
+
+/// `get_document_full` (DocumentFull): Document flattened; `chunks` inline.
+pub fn project_document_full(env: Value) -> ToolOutcome {
+    let path = env.get("source_path").and_then(Value::as_str).unwrap_or("(unknown)");
+    let chunks = env.get("chunks").and_then(Value::as_array);
+    let n = chunks.map_or(0, Vec::len);
+    let chars: usize = chunks
+        .map_or(0, |c| c.iter().filter_map(|x| x.get("content").and_then(Value::as_str)).map(str::len).sum());
+    let summary = format!("Full {path}: {n} chunks (~{chars} chars).");
+    let trimmed = json!({ "source_path": path, "chunk_count": n, "char_count": chars });
+    ToolOutcome::new(summary, env, trimmed, vec![])
+}
+
+/// `get_document_chunks` (DocumentChunkWindow): Document flattened; window meta top-level.
+pub fn project_document_window(env: Value) -> ToolOutcome {
+    let path = env.get("source_path").and_then(Value::as_str).unwrap_or("(unknown)").to_owned();
+    let id = env.get("id").and_then(Value::as_str).unwrap_or("?").to_owned();
+    let from = env.get("from").and_then(Value::as_u64).unwrap_or(0);
+    let n = u64::try_from(env.get("chunks").and_then(Value::as_array).map_or(0, Vec::len)).unwrap_or(0);
+    let total = env.get("total_chunks").and_then(Value::as_u64).unwrap_or(0);
+    let to = from + n;
+    let summary = format!("Chunks {from}..{to} of {path} (of {total}).");
+    let trimmed = json!({ "source_path": path, "from": from, "to": to, "total_chunks": total });
+    let next_actions = vec![
+        NextAction { tool: "get_document_chunks", arguments: json!({ "id": id, "from": to }) },
+    ];
+    ToolOutcome::new(summary, env, trimmed, next_actions)
+}
+
 /// Closed set of tool-execution error kinds.
 #[derive(Debug, Clone, Copy)]
 pub enum ErrorKind {
@@ -421,5 +529,62 @@ mod tests {
         let sc = r.structured_content.unwrap();
         assert_eq!(sc["error"]["code"], "NOT_FOUND");
         assert_eq!(sc["error"]["retryable"], false);
+    }
+
+    #[test]
+    fn project_chunk_summary() {
+        let env = json!({
+            "id": "c1", "chunk_index": 4, "total_chunks": 35, "content": "body",
+            "heading_path": ["A", "B"],
+            "document": { "source_path": "docs/intro.md" },
+            "source": { "display_name": "Compact Docs" }
+        });
+        let o = super::project_chunk(env);
+        assert!(o.summary.contains("docs/intro.md"));
+        assert!(o.summary.contains('4')); // chunk index
+        assert_eq!(o.next_actions.iter().filter(|a| a.tool == "get_chunk_next").count(), 1);
+    }
+
+    #[test]
+    fn project_chunk_list_counts() {
+        let env = json!({ "chunks": [ { "id": "a" }, { "id": "b" } ] });
+        let o = super::project_chunk_list(env, "after");
+        assert!(o.summary.contains('2'));
+        assert_eq!(o.trimmed["count"], 2);
+    }
+
+    #[test]
+    fn project_parents_wraps_array_as_object() {
+        let env = json!([ { "name": "Group A" }, { "name": "Doc B" } ]);
+        let o = super::project_parents(env);
+        assert!(o.summary.contains("Group A"));
+        // structured must be an OBJECT (array wrapped) so next_actions injection + outputSchema hold
+        assert!(o.structured.is_object());
+        assert!(o.structured["parents"].is_array());
+    }
+
+    #[test]
+    fn project_document_overview_summary() {
+        let env = json!({
+            "id": "d1", "source_path": "docs/intro.md",
+            "source": { "display_name": "Compact Docs" },
+            "chunk_ids": ["a", "b", "c"]
+        });
+        let o = super::project_document_overview(env);
+        assert!(o.summary.contains("docs/intro.md"));
+        assert!(o.summary.contains('3'));
+        assert!(o.next_actions.iter().any(|a| a.tool == "get_document_full"));
+    }
+
+    #[test]
+    fn project_document_window_range() {
+        let env = json!({
+            "id": "d1", "source_path": "docs/intro.md", "source": {"display_name":"X"},
+            "from": 3, "limit": 7, "total_chunks": 35,
+            "chunks": [ {"chunk_id":"a"}, {"chunk_id":"b"} ]
+        });
+        let o = super::project_document_window(env);
+        assert!(o.summary.contains("3..5")); // from=3, +2 returned
+        assert_eq!(o.trimmed["total_chunks"], 35);
     }
 }
