@@ -262,11 +262,23 @@ pub fn project_chunk(env: Value) -> ToolOutcome {
 
 /// `get_chunk_next` / `get_chunk_prev`: `{ chunks: [ChunkWithContext,..] }`. `direction` = "after"/"before".
 pub fn project_chunk_list(env: Value, direction: &str) -> ToolOutcome {
-    let n = env.get("chunks").and_then(Value::as_array).map_or(0, Vec::len);
-    let first = env.pointer("/chunks/0/id").and_then(Value::as_str).unwrap_or("?");
-    let summary = format!("{n} chunk(s) {direction} the anchor (first: {first}).");
-    let trimmed = json!({ "count": n });
-    ToolOutcome::new(summary, env, trimmed, vec![])
+    let chunks_len = env.get("chunks").and_then(Value::as_array).map_or(0, Vec::len);
+    let trimmed = json!({ "count": chunks_len });
+    if chunks_len == 0 {
+        return ToolOutcome::new(format!("No more chunks {direction} the anchor."), env, trimmed, vec![]);
+    }
+    let first = env.pointer("/chunks/0/id").and_then(Value::as_str).unwrap_or("?").to_owned();
+    // Page from the boundary chunk in the same direction.
+    let (page_tool, page_anchor) = if direction == "after" {
+        let last_idx = chunks_len - 1;
+        let last = env.pointer(&format!("/chunks/{last_idx}/id")).and_then(Value::as_str).unwrap_or("?").to_owned();
+        ("get_chunk_next", last)
+    } else {
+        ("get_chunk_prev", first.clone())
+    };
+    let summary = format!("{chunks_len} chunk(s) {direction} the anchor (first: {first}).");
+    let next_actions = vec![NextAction { tool: page_tool, arguments: json!({ "id": page_anchor }) }];
+    ToolOutcome::new(summary, env, trimmed, next_actions)
 }
 
 /// `get_chunk_neighbors`: `{ prev: {chunks:[..]}, chunk: <ChunkWithContext>, next: {chunks:[..]} }`.
@@ -323,7 +335,11 @@ pub fn project_document_full(env: Value) -> ToolOutcome {
         .map_or(0, |c| c.iter().filter_map(|x| x.get("content").and_then(Value::as_str)).map(str::len).sum());
     let summary = format!("Full {path}: {n} chunks (~{chars} chars).");
     let trimmed = json!({ "source_path": path, "chunk_count": n, "char_count": chars });
-    ToolOutcome::new(summary, env, trimmed, vec![])
+    // Compute next_actions before env is moved into ToolOutcome::new.
+    let next_actions = env.get("id").and_then(Value::as_str)
+        .map(|id| vec![NextAction { tool: "get_document", arguments: json!({ "id": id }) }])
+        .unwrap_or_default();
+    ToolOutcome::new(summary, env, trimmed, next_actions)
 }
 
 /// `get_document_chunks` (DocumentChunkWindow): Document flattened; window meta top-level.
@@ -336,9 +352,11 @@ pub fn project_document_window(env: Value) -> ToolOutcome {
     let to = from + n;
     let summary = format!("Chunks {from}..{to} of {path} (of {total}).");
     let trimmed = json!({ "source_path": path, "from": from, "to": to, "total_chunks": total });
-    let next_actions = vec![
-        NextAction { tool: "get_document_chunks", arguments: json!({ "id": id, "from": to }) },
-    ];
+    let next_actions = if to < total {
+        vec![NextAction { tool: "get_document_chunks", arguments: json!({ "id": id, "from": to }) }]
+    } else {
+        vec![]
+    };
     ToolOutcome::new(summary, env, trimmed, next_actions)
 }
 
@@ -586,5 +604,42 @@ mod tests {
         let o = super::project_document_window(env);
         assert!(o.summary.contains("3..5")); // from=3, +2 returned
         assert_eq!(o.trimmed["total_chunks"], 35);
+        // to=5 < total=35 → should still have a next action
+        assert!(!o.next_actions.is_empty());
+    }
+
+    #[test]
+    fn project_chunk_list_empty_has_no_next_action() {
+        let o = super::project_chunk_list(json!({ "chunks": [] }), "after");
+        assert!(o.summary.contains("No more chunks"));
+        assert!(o.next_actions.is_empty());
+    }
+
+    #[test]
+    fn project_chunk_list_pages_in_direction() {
+        let env = json!({ "chunks": [ { "id": "a" }, { "id": "b" } ] });
+        let after = super::project_chunk_list(env.clone(), "after");
+        assert_eq!(after.next_actions[0].tool, "get_chunk_next");
+        assert_eq!(after.next_actions[0].arguments["id"], "b"); // last
+        let before = super::project_chunk_list(env, "before");
+        assert_eq!(before.next_actions[0].tool, "get_chunk_prev");
+        assert_eq!(before.next_actions[0].arguments["id"], "a"); // first
+    }
+
+    #[test]
+    fn project_document_window_no_action_at_end() {
+        // from=33, 2 returned -> to=35 == total -> no next action
+        let env = json!({ "id":"d1","source_path":"x","source":{"display_name":"X"},
+            "from":33,"limit":7,"total_chunks":35,"chunks":[{"chunk_id":"a"},{"chunk_id":"b"}] });
+        let o = super::project_document_window(env);
+        assert!(o.next_actions.is_empty());
+    }
+
+    #[test]
+    fn project_document_full_has_overview_backlink() {
+        let env = json!({ "id":"d1","source_path":"x","source":{"display_name":"X"},
+            "chunks":[{"content":"abc"}] });
+        let o = super::project_document_full(env);
+        assert!(o.next_actions.iter().any(|a| a.tool == "get_document" && a.arguments["id"] == "d1"));
     }
 }
