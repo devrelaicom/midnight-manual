@@ -360,6 +360,75 @@ pub fn project_document_window(env: Value) -> ToolOutcome {
     ToolOutcome::new(summary, env, trimmed, next_actions)
 }
 
+/// `list_sources`: a top-level JSON ARRAY of source objects. Wrap as an object for structured.
+// `env` is consumed by `json!({ "sources": env })` (ownership move); a reference would require
+// an extra clone, so suppress the false-positive lint — same pattern as `project_parents`.
+#[allow(clippy::needless_pass_by_value)]
+pub fn project_sources(env: Value) -> ToolOutcome {
+    let names: Vec<String> = env.as_array()
+        .map(|a| a.iter().filter_map(|s| {
+            s.get("display_name").and_then(Value::as_str)
+                .or_else(|| s.get("slug").and_then(Value::as_str))
+                .map(str::to_owned)
+        }).collect())
+        .unwrap_or_default();
+    let n = names.len();
+    let summary = format!("{n} sources: {}.", names.join(", "));
+    let trimmed = json!({ "count": n, "sources": names });
+    let structured = json!({ "sources": env });
+    ToolOutcome::new(summary, structured, trimmed, vec![
+        NextAction { tool: "search", arguments: json!({ "query": "<terms>" }) },
+    ])
+}
+
+/// `facets`: `{ modes:[..], filters:[ {key, type, ..}, .. ] }`. Dimensions are `filters[].key`.
+pub fn project_facets(env: Value) -> ToolOutcome {
+    let keys: Vec<String> = env.get("filters").and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(|f| f.get("key").and_then(Value::as_str).map(str::to_owned)).collect())
+        .unwrap_or_default();
+    let summary = format!("{} facet dimension(s): {}.", keys.len(), keys.join(", "));
+    let trimmed = json!({ "dimensions": keys });
+    ToolOutcome::new(summary, env, trimmed, vec![
+        NextAction { tool: "search", arguments: json!({ "query": "<terms>", "filters": {} }) },
+    ])
+}
+
+/// `status` (StatusOutput as JSON).
+pub fn project_status(env: Value) -> ToolOutcome {
+    let reranker = env.get("reranker").and_then(Value::as_str).unwrap_or("?");
+    let state = env.get("model_state").and_then(Value::as_str).unwrap_or("?");
+    let ver = env.get("server_version").and_then(Value::as_str).unwrap_or("?");
+    let summary = format!("Server {ver}; reranker {reranker}; model state {state}.");
+    let next = if state == "ready" {
+        vec![]
+    } else {
+        vec![NextAction { tool: "pull_models", arguments: json!({}) }]
+    };
+    let trimmed = json!({ "server_version": ver, "reranker": reranker, "model_state": state });
+    ToolOutcome::new(summary, env, trimmed, next)
+}
+
+/// `pull_models` (PullModelsOutput as JSON).
+pub fn project_pull_models(env: Value) -> ToolOutcome {
+    let reranker = env.get("reranker").and_then(Value::as_str).unwrap_or("?");
+    let loaded = env.get("reranker_loaded").and_then(Value::as_bool).unwrap_or(false);
+    let summary = format!("Models pulled. Reranker {reranker} {}.", if loaded { "ready" } else { "not loaded" });
+    let trimmed = json!({ "reranker": reranker, "reranker_loaded": loaded });
+    ToolOutcome::new(summary, env, trimmed, vec![
+        NextAction { tool: "status", arguments: json!({}) },
+    ])
+}
+
+/// `install_search_skill` (InstallReport as JSON).
+pub fn project_install(env: Value) -> ToolOutcome {
+    let scope = env.get("scope").and_then(Value::as_str).unwrap_or("user");
+    let skill = env.get("skill_name").and_then(Value::as_str).unwrap_or("search");
+    let installed = env.get("installed").and_then(Value::as_array).map_or(0, Vec::len);
+    let summary = format!("Installed `{skill}` skill for {installed} harness(es) (scope: {scope}).");
+    let trimmed = json!({ "skill_name": skill, "scope": scope, "installed_count": installed });
+    ToolOutcome::new(summary, env, trimmed, vec![])
+}
+
 /// Closed set of tool-execution error kinds.
 #[derive(Debug, Clone, Copy)]
 pub enum ErrorKind {
@@ -641,5 +710,49 @@ mod tests {
             "chunks":[{"content":"abc"}] });
         let o = super::project_document_full(env);
         assert!(o.next_actions.iter().any(|a| a.tool == "get_document" && a.arguments["id"] == "d1"));
+    }
+
+    #[test]
+    fn project_sources_lists_names() {
+        let env = json!([
+            { "slug": "compact-docs", "display_name": "Compact Docs" },
+            { "slug": "midnight-js", "display_name": "Midnight JS" }
+        ]);
+        let o = super::project_sources(env);
+        assert!(o.summary.contains("2 sources"));
+        assert!(o.summary.contains("Compact Docs"));
+        assert!(o.structured.is_object());          // array wrapped
+        assert!(o.structured["sources"].is_array());
+        assert!(o.next_actions.iter().any(|a| a.tool == "search"));
+    }
+
+    #[test]
+    fn project_facets_lists_dimensions() {
+        let env = json!({ "modes": ["hybrid"], "filters": [
+            { "key": "language", "type": "open_set" },
+            { "key": "source", "type": "open_set" }
+        ]});
+        let o = super::project_facets(env);
+        assert!(o.summary.contains("language"));
+        assert!(o.summary.contains("source"));
+        assert_eq!(o.trimmed["dimensions"], json!(["language", "source"]));
+    }
+
+    #[test]
+    fn project_status_reports_state() {
+        let env = json!({ "server_version": "0.1.0", "reranker": "bge-reranker-base",
+                          "model_state": "missing", "cache_dir": null });
+        let o = super::project_status(env);
+        assert!(o.summary.to_lowercase().contains("reranker"));
+        assert!(o.next_actions.iter().any(|a| a.tool == "pull_models")); // state != ready
+    }
+
+    #[test]
+    fn project_install_summary() {
+        let env = json!({ "skill_name": "search", "scope": "user",
+                          "installed": [ {"harness":"claude-code"} ], "not_detected": [] });
+        let o = super::project_install(env);
+        assert!(o.summary.contains('1'));     // 1 harness
+        assert!(o.summary.contains("user"));  // scope
     }
 }
