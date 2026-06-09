@@ -15,11 +15,17 @@ fn search_structured_conforms_to_output_schema() {
         "search_metadata": { "filtered_by_confidence": 0, "deduplicated_count": 0 }
     });
     let result = mn_mcp::render::project_search(env, None).into_result();
-    let sc = result.structured_content.as_ref().expect("structuredContent present");
+    let sc = result
+        .structured_content
+        .as_ref()
+        .expect("structuredContent present");
 
     let schema = mn_mcp::schemas::search_output_schema();
     let compiled = JSONSchema::compile(&schema).expect("schema compiles");
-    assert!(compiled.is_valid(sc), "search structuredContent must conform to its outputSchema");
+    assert!(
+        compiled.is_valid(sc),
+        "search structuredContent must conform to its outputSchema"
+    );
 
     // text block = summary + fenced json, not an isError
     let text = match &result.content[0] {
@@ -38,17 +44,38 @@ fn all_passthrough_projectors_conform_to_passthrough_schema() {
         "heading_path": [], "document": { "source_path": "docs/x.md" }, "source": { "display_name": "S" }
     });
     let cases: Vec<(serde_json::Value, serde_json::Value)> = vec![
-        (mn_mcp::render::project_chunk(chunk_env).into_result().structured_content.unwrap(),
-         mn_mcp::schemas::chunk_output_schema()),
-        (mn_mcp::render::project_sources(serde_json::json!([{ "slug": "s", "display_name": "S" }]))
-            .into_result().structured_content.unwrap(),
-         mn_mcp::schemas::sources_output_schema()),
-        (mn_mcp::render::project_status(serde_json::json!({ "server_version":"0","reranker":"r","model_state":"ready" }))
-            .into_result().structured_content.unwrap(),
-         mn_mcp::schemas::status_output_schema()),
-        (mn_mcp::render::project_parents(serde_json::json!([{ "name": "G" }]))
-            .into_result().structured_content.unwrap(),
-         mn_mcp::schemas::parents_output_schema()),
+        (
+            mn_mcp::render::project_chunk(chunk_env)
+                .into_result()
+                .structured_content
+                .unwrap(),
+            mn_mcp::schemas::chunk_output_schema(),
+        ),
+        (
+            mn_mcp::render::project_sources(
+                serde_json::json!([{ "slug": "s", "display_name": "S" }]),
+            )
+            .into_result()
+            .structured_content
+            .unwrap(),
+            mn_mcp::schemas::sources_output_schema(),
+        ),
+        (
+            mn_mcp::render::project_status(
+                serde_json::json!({ "server_version":"0","reranker":"r","model_state":"ready" }),
+            )
+            .into_result()
+            .structured_content
+            .unwrap(),
+            mn_mcp::schemas::status_output_schema(),
+        ),
+        (
+            mn_mcp::render::project_parents(serde_json::json!([{ "name": "G" }]))
+                .into_result()
+                .structured_content
+                .unwrap(),
+            mn_mcp::schemas::parents_output_schema(),
+        ),
     ];
     for (sc, schema) in cases {
         assert!(sc.is_object(), "structuredContent must be an object: {sc}");
@@ -60,7 +87,9 @@ fn all_passthrough_projectors_conform_to_passthrough_schema() {
 #[test]
 fn failure_is_iserror_with_error_code() {
     let f = mn_mcp::render::ToolFailure::simple(
-        mn_mcp::render::ErrorKind::NotFound, "no chunk x", "Verify the id from a recent search.",
+        mn_mcp::render::ErrorKind::NotFound,
+        "no chunk x",
+        "Verify the id from a recent search.",
     );
     let result = f.into_result();
     assert!(result.is_error);

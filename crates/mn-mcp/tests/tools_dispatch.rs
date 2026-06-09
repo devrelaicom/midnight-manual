@@ -792,9 +792,12 @@ async fn dispatch_search_mismatch_produces_iserror_envelope() {
 
     // Extract mismatch fields — same as run_search_dispatch in server.rs.
     let (corpus_model, message, remediation) = match err {
-        SearchError::Mismatch { corpus_model, message, remediation, .. } => {
-            (corpus_model, message, remediation)
-        }
+        SearchError::Mismatch {
+            corpus_model,
+            message,
+            remediation,
+            ..
+        } => (corpus_model, message, remediation),
         other => panic!("expected SearchError::Mismatch, got {other:?}"),
     };
 
@@ -833,10 +836,7 @@ async fn dispatch_get_chunk_neighbors_full_pipeline_via_wiremock() {
     Mock::given(method("GET"))
         .and(path(format!("/v1/chunks/{id}/prev")))
         .and(query_param("count", "2"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(json!({ "chunks": [{"id": "p1"}] })),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "chunks": [{"id": "p1"}] })))
         .mount(&server)
         .await;
     Mock::given(method("GET"))
@@ -854,7 +854,9 @@ async fn dispatch_get_chunk_neighbors_full_pipeline_via_wiremock() {
         .mount(&server)
         .await;
     let client = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
-    let v = run_chunk_neighbors(&json!({"id": id}), &client).await.unwrap();
+    let v = run_chunk_neighbors(&json!({"id": id}), &client)
+        .await
+        .unwrap();
     let result = render::project_neighbors(v).into_result();
     assert!(!result.is_error);
     let sc = result.structured_content.unwrap();

@@ -308,18 +308,15 @@ async fn dispatch_tool(id: RequestId, params: ToolCallParams, state: &ServerStat
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(true);
 
-    let (response, telemetry, outcome) =
-        match dispatch_tool_inner(id.clone(), params, state).await {
-            Ok(tr) => (
-                Response::success(
-                    id,
-                    serde_json::to_value(tr.result).expect("serialize result"),
-                ),
-                tr.telemetry,
-                tr.outcome,
-            ),
-            Err(resp) => (resp, None, Outcome::Error),
-        };
+    let (response, telemetry, outcome) = match dispatch_tool_inner(id.clone(), params, state).await
+    {
+        Ok(tr) => (
+            Response::success(id, serde_json::to_value(tr.result).expect("serialize result")),
+            tr.telemetry,
+            tr.outcome,
+        ),
+        Err(resp) => (resp, None, Outcome::Error),
+    };
 
     let latency_ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
     state.tools_served.fetch_add(1, Ordering::Relaxed);
@@ -393,7 +390,11 @@ async fn dispatch_tool_inner(
         telemetry,
         outcome: Outcome::Ok,
     };
-    let err = |result: ToolCallResult, outcome| ToolResponse { result, telemetry: None, outcome };
+    let err = |result: ToolCallResult, outcome| ToolResponse {
+        result,
+        telemetry: None,
+        outcome,
+    };
 
     Ok(match params.name.as_str() {
         "status" => {
@@ -476,14 +477,21 @@ async fn run_search_dispatch(params: &ToolCallParams, state: &ServerState) -> To
     // Best-effort reranker name for telemetry. Use the well-known constant —
     // the constant is what `run_status` and `pull_models` also report, so it's
     // the most accurate single-process value we have.
-    let reranker_name: Option<String> =
-        if rerank_on { Some(mn_embedding::RERANKER_MODEL_NAME.to_string()) } else { None };
+    let reranker_name: Option<String> = if rerank_on {
+        Some(mn_embedding::RERANKER_MODEL_NAME.to_string())
+    } else {
+        None
+    };
 
     match tools::run_search(&params.arguments, &state.cfg, &state.cloud).await {
         Ok(envelope) => {
             let outcome = render::project_search(envelope, reranker_name.as_deref());
             let telemetry = outcome.telemetry.clone();
-            ToolResponse { result: outcome.into_result(), telemetry, outcome: Outcome::Ok }
+            ToolResponse {
+                result: outcome.into_result(),
+                telemetry,
+                outcome: Outcome::Ok,
+            }
         }
         Err(tools::SearchError::InvalidInput(msg)) => ToolResponse {
             result: ToolFailure::simple(ErrorKind::InvalidInput, msg.clone(), msg).into_result(),
@@ -590,23 +598,21 @@ async fn run_passthrough_tool(params: &ToolCallParams, state: &ServerState) -> T
                 }
             }
         }
-        "get_chunk_neighbors" => {
-            match tools::run_chunk_neighbors(args, cloud).await {
-                Ok(v) => ToolResponse {
-                    result: render::project_neighbors(v).into_result(),
+        "get_chunk_neighbors" => match tools::run_chunk_neighbors(args, cloud).await {
+            Ok(v) => ToolResponse {
+                result: render::project_neighbors(v).into_result(),
+                telemetry: None,
+                outcome: Outcome::Ok,
+            },
+            Err(e) => {
+                let outcome = passthrough_outcome(&e);
+                ToolResponse {
+                    result: passthrough_failure(e).into_result(),
                     telemetry: None,
-                    outcome: Outcome::Ok,
-                },
-                Err(e) => {
-                    let outcome = passthrough_outcome(&e);
-                    ToolResponse {
-                        result: passthrough_failure(e).into_result(),
-                        telemetry: None,
-                        outcome,
-                    }
+                    outcome,
                 }
             }
-        }
+        },
         "get_chunk_parents" => {
             match tools::run_passthrough_id(args, cloud, tools::PassthroughKind::Parents).await {
                 Ok(v) => ToolResponse {
@@ -642,8 +648,7 @@ async fn run_passthrough_tool(params: &ToolCallParams, state: &ServerState) -> T
             }
         }
         "get_document_full" => {
-            match tools::run_passthrough_id(args, cloud, tools::PassthroughKind::DocumentFull)
-                .await
+            match tools::run_passthrough_id(args, cloud, tools::PassthroughKind::DocumentFull).await
             {
                 Ok(v) => ToolResponse {
                     result: render::project_document_full(v).into_result(),
@@ -660,23 +665,21 @@ async fn run_passthrough_tool(params: &ToolCallParams, state: &ServerState) -> T
                 }
             }
         }
-        "get_document_chunks" => {
-            match tools::run_document_chunks(args, cloud).await {
-                Ok(v) => ToolResponse {
-                    result: render::project_document_window(v).into_result(),
+        "get_document_chunks" => match tools::run_document_chunks(args, cloud).await {
+            Ok(v) => ToolResponse {
+                result: render::project_document_window(v).into_result(),
+                telemetry: None,
+                outcome: Outcome::Ok,
+            },
+            Err(e) => {
+                let outcome = passthrough_outcome(&e);
+                ToolResponse {
+                    result: passthrough_failure(e).into_result(),
                     telemetry: None,
-                    outcome: Outcome::Ok,
-                },
-                Err(e) => {
-                    let outcome = passthrough_outcome(&e);
-                    ToolResponse {
-                        result: passthrough_failure(e).into_result(),
-                        telemetry: None,
-                        outcome,
-                    }
+                    outcome,
                 }
             }
-        }
+        },
         other => ToolResponse {
             result: ToolFailure::simple(
                 ErrorKind::InvalidInput,

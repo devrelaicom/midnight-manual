@@ -64,8 +64,19 @@ pub struct ToolOutcome {
 
 impl ToolOutcome {
     /// Convenience constructor for non-search tools (no telemetry facts).
-    pub const fn new(summary: String, structured: Value, trimmed: Value, next_actions: Vec<NextAction>) -> Self {
-        Self { summary, structured, trimmed, next_actions, telemetry: None }
+    pub const fn new(
+        summary: String,
+        structured: Value,
+        trimmed: Value,
+        next_actions: Vec<NextAction>,
+    ) -> Self {
+        Self {
+            summary,
+            structured,
+            trimmed,
+            next_actions,
+            telemetry: None,
+        }
     }
 
     /// Render into the wire `ToolCallResult`.
@@ -76,7 +87,9 @@ impl ToolOutcome {
         }
         let trimmed = serde_json::to_string(&self.trimmed).unwrap_or_else(|_| "{}".to_owned());
         ToolCallResult {
-            content: vec![ContentBlock::Text { text: format!("{}\n\n```json\n{trimmed}\n```", self.summary) }],
+            content: vec![ContentBlock::Text {
+                text: format!("{}\n\n```json\n{trimmed}\n```", self.summary),
+            }],
             structured_content: Some(structured),
             is_error: false,
         }
@@ -164,24 +177,20 @@ pub fn project_search(envelope: Value, reranker_used: Option<&str>) -> ToolOutco
                         .join(" › ")
                 })
                 .filter(|s| !s.is_empty());
-            let attr = str_field(t, &["scores", "confidence_factors", "attribution"])
-                .unwrap_or("unknown");
+            let attr =
+                str_field(t, &["scores", "confidence_factors", "attribution"]).unwrap_or("unknown");
             let conf = t
                 .pointer("/scores/confidence")
                 .and_then(Value::as_f64)
                 .unwrap_or(0.0);
             let chunk_id = t.get("chunk_id").and_then(Value::as_str).unwrap_or("?");
             let model = corpus_model.as_deref().unwrap_or("?");
-            let where_ =
-                heading.map_or_else(|| path.to_owned(), |h| format!("{path} › {h}"));
+            let where_ = heading.map_or_else(|| path.to_owned(), |h| format!("{path} › {h}"));
             format!(
                 "Search: {result_count} matches, corpus {model}. Top: {where_} [{attr} · {conf:.2}] chunk {chunk_id} — fetch with get_chunk."
             )
         }
-        None => format!(
-            "Search: 0 matches, corpus {}.",
-            corpus_model.as_deref().unwrap_or("?")
-        ),
+        None => format!("Search: 0 matches, corpus {}.", corpus_model.as_deref().unwrap_or("?")),
     };
 
     // next_actions from the top result.
@@ -219,8 +228,7 @@ pub fn project_search(envelope: Value, reranker_used: Option<&str>) -> ToolOutco
                 .and_then(Value::as_str)
                 .map(str::to_owned)
         }),
-        filtered_by_confidence: filtered
-            .map(|n| u32::try_from(n).unwrap_or(u32::MAX)),
+        filtered_by_confidence: filtered.map(|n| u32::try_from(n).unwrap_or(u32::MAX)),
         deduplicated_count: deduped.map(|n| u32::try_from(n).unwrap_or(u32::MAX)),
         result_count,
     };
@@ -237,10 +245,24 @@ pub fn project_search(envelope: Value, reranker_used: Option<&str>) -> ToolOutco
 /// `get_chunk`: single chunk-with-context. Chunk fields are top-level (flattened);
 /// `document`/`source` are nested summary objects.
 pub fn project_chunk(env: Value) -> ToolOutcome {
-    let id = env.get("id").and_then(Value::as_str).unwrap_or("?").to_owned();
-    let path = env.pointer("/document/source_path").and_then(Value::as_str).unwrap_or("(unknown)");
-    let heading = env.get("heading_path").and_then(Value::as_array)
-        .map(|h| h.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" › "))
+    let id = env
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("?")
+        .to_owned();
+    let path = env
+        .pointer("/document/source_path")
+        .and_then(Value::as_str)
+        .unwrap_or("(unknown)");
+    let heading = env
+        .get("heading_path")
+        .and_then(Value::as_array)
+        .map(|h| {
+            h.iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(" › ")
+        })
         .filter(|s| !s.is_empty());
     let idx = env.get("chunk_index").and_then(Value::as_i64);
     let total = env.get("total_chunks").and_then(Value::as_i64);
@@ -252,45 +274,94 @@ pub fn project_chunk(env: Value) -> ToolOutcome {
     let summary = format!("Chunk {id} — {where_}{pos}.");
     let trimmed = json!({ "chunk_id": id, "source_path": path });
     let next_actions = vec![
-        NextAction { tool: "get_chunk_next", arguments: json!({ "id": id }) },
-        NextAction { tool: "get_chunk_prev", arguments: json!({ "id": id }) },
-        NextAction { tool: "get_chunk_neighbors", arguments: json!({ "id": id }) },
-        NextAction { tool: "get_chunk_parents", arguments: json!({ "id": id }) },
+        NextAction {
+            tool: "get_chunk_next",
+            arguments: json!({ "id": id }),
+        },
+        NextAction {
+            tool: "get_chunk_prev",
+            arguments: json!({ "id": id }),
+        },
+        NextAction {
+            tool: "get_chunk_neighbors",
+            arguments: json!({ "id": id }),
+        },
+        NextAction {
+            tool: "get_chunk_parents",
+            arguments: json!({ "id": id }),
+        },
     ];
     ToolOutcome::new(summary, env, trimmed, next_actions)
 }
 
 /// `get_chunk_next` / `get_chunk_prev`: `{ chunks: [ChunkWithContext,..] }`. `direction` = "after"/"before".
 pub fn project_chunk_list(env: Value, direction: &str) -> ToolOutcome {
-    let chunks_len = env.get("chunks").and_then(Value::as_array).map_or(0, Vec::len);
+    let chunks_len = env
+        .get("chunks")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
     let trimmed = json!({ "count": chunks_len });
     if chunks_len == 0 {
-        return ToolOutcome::new(format!("No more chunks {direction} the anchor."), env, trimmed, vec![]);
+        return ToolOutcome::new(
+            format!("No more chunks {direction} the anchor."),
+            env,
+            trimmed,
+            vec![],
+        );
     }
-    let first = env.pointer("/chunks/0/id").and_then(Value::as_str).unwrap_or("?").to_owned();
+    let first = env
+        .pointer("/chunks/0/id")
+        .and_then(Value::as_str)
+        .unwrap_or("?")
+        .to_owned();
     // Page from the boundary chunk in the same direction.
     let (page_tool, page_anchor) = if direction == "after" {
         let last_idx = chunks_len - 1;
-        let last = env.pointer(&format!("/chunks/{last_idx}/id")).and_then(Value::as_str).unwrap_or("?").to_owned();
+        let last = env
+            .pointer(&format!("/chunks/{last_idx}/id"))
+            .and_then(Value::as_str)
+            .unwrap_or("?")
+            .to_owned();
         ("get_chunk_next", last)
     } else {
         ("get_chunk_prev", first.clone())
     };
     let summary = format!("{chunks_len} chunk(s) {direction} the anchor (first: {first}).");
-    let next_actions = vec![NextAction { tool: page_tool, arguments: json!({ "id": page_anchor }) }];
+    let next_actions = vec![NextAction {
+        tool: page_tool,
+        arguments: json!({ "id": page_anchor }),
+    }];
     ToolOutcome::new(summary, env, trimmed, next_actions)
 }
 
 /// `get_chunk_neighbors`: `{ prev: {chunks:[..]}, chunk: <ChunkWithContext>, next: {chunks:[..]} }`.
 pub fn project_neighbors(env: Value) -> ToolOutcome {
-    let prev = env.pointer("/prev/chunks").and_then(Value::as_array).map_or(0, Vec::len);
-    let next = env.pointer("/next/chunks").and_then(Value::as_array).map_or(0, Vec::len);
-    let id = env.pointer("/chunk/id").and_then(Value::as_str).unwrap_or("?").to_owned();
-    let doc_id = env.pointer("/chunk/document_id").and_then(Value::as_str).map(str::to_owned);
+    let prev = env
+        .pointer("/prev/chunks")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let next = env
+        .pointer("/next/chunks")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let id = env
+        .pointer("/chunk/id")
+        .and_then(Value::as_str)
+        .unwrap_or("?")
+        .to_owned();
+    let doc_id = env
+        .pointer("/chunk/document_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
     let summary = format!("{} neighbor(s) around {id} ({prev} before, {next} after).", prev + next);
     let trimmed = json!({ "prev": prev, "next": next });
     let next_actions = doc_id
-        .map(|d| vec![NextAction { tool: "get_document", arguments: json!({ "id": d }) }])
+        .map(|d| {
+            vec![NextAction {
+                tool: "get_document",
+                arguments: json!({ "id": d }),
+            }]
+        })
         .unwrap_or_default();
     ToolOutcome::new(summary, env, trimmed, next_actions)
 }
@@ -301,8 +372,13 @@ pub fn project_neighbors(env: Value) -> ToolOutcome {
 // extra clone, so suppress the false-positive lint.
 #[allow(clippy::needless_pass_by_value)]
 pub fn project_parents(env: Value) -> ToolOutcome {
-    let names: Vec<String> = env.as_array()
-        .map(|a| a.iter().filter_map(|node| node.get("name").and_then(Value::as_str).map(str::to_owned)).collect())
+    let names: Vec<String> = env
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|node| node.get("name").and_then(Value::as_str).map(str::to_owned))
+                .collect()
+        })
         .unwrap_or_default();
     let n = names.len();
     let summary = format!("{n} ancestor node(s): {}.", names.join(" / "));
@@ -313,47 +389,96 @@ pub fn project_parents(env: Value) -> ToolOutcome {
 
 /// `get_document` (DocumentOverview): Document flattened to top level; `source` nested; `chunk_ids` array.
 pub fn project_document_overview(env: Value) -> ToolOutcome {
-    let path = env.get("source_path").and_then(Value::as_str).unwrap_or("(unknown)");
-    let name = env.pointer("/source/display_name").and_then(Value::as_str).unwrap_or("");
-    let id = env.get("id").and_then(Value::as_str).unwrap_or("?").to_owned();
-    let n = env.get("chunk_ids").and_then(Value::as_array).map_or(0, Vec::len);
+    let path = env
+        .get("source_path")
+        .and_then(Value::as_str)
+        .unwrap_or("(unknown)");
+    let name = env
+        .pointer("/source/display_name")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let id = env
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("?")
+        .to_owned();
+    let n = env
+        .get("chunk_ids")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
     let summary = format!("{path} ({name}): {n} chunks.");
     let trimmed = json!({ "source_path": path, "chunk_count": n });
     let next_actions = vec![
-        NextAction { tool: "get_document_full", arguments: json!({ "id": id }) },
-        NextAction { tool: "get_document_chunks", arguments: json!({ "id": id }) },
+        NextAction {
+            tool: "get_document_full",
+            arguments: json!({ "id": id }),
+        },
+        NextAction {
+            tool: "get_document_chunks",
+            arguments: json!({ "id": id }),
+        },
     ];
     ToolOutcome::new(summary, env, trimmed, next_actions)
 }
 
 /// `get_document_full` (DocumentFull): Document flattened; `chunks` inline.
 pub fn project_document_full(env: Value) -> ToolOutcome {
-    let path = env.get("source_path").and_then(Value::as_str).unwrap_or("(unknown)");
+    let path = env
+        .get("source_path")
+        .and_then(Value::as_str)
+        .unwrap_or("(unknown)");
     let chunks = env.get("chunks").and_then(Value::as_array);
     let n = chunks.map_or(0, Vec::len);
-    let chars: usize = chunks
-        .map_or(0, |c| c.iter().filter_map(|x| x.get("content").and_then(Value::as_str)).map(str::len).sum());
+    let chars: usize = chunks.map_or(0, |c| {
+        c.iter()
+            .filter_map(|x| x.get("content").and_then(Value::as_str))
+            .map(str::len)
+            .sum()
+    });
     let summary = format!("Full {path}: {n} chunks (~{chars} chars).");
     let trimmed = json!({ "source_path": path, "chunk_count": n, "char_count": chars });
     // Compute next_actions before env is moved into ToolOutcome::new.
-    let next_actions = env.get("id").and_then(Value::as_str)
-        .map(|id| vec![NextAction { tool: "get_document", arguments: json!({ "id": id }) }])
+    let next_actions = env
+        .get("id")
+        .and_then(Value::as_str)
+        .map(|id| {
+            vec![NextAction {
+                tool: "get_document",
+                arguments: json!({ "id": id }),
+            }]
+        })
         .unwrap_or_default();
     ToolOutcome::new(summary, env, trimmed, next_actions)
 }
 
 /// `get_document_chunks` (DocumentChunkWindow): Document flattened; window meta top-level.
 pub fn project_document_window(env: Value) -> ToolOutcome {
-    let path = env.get("source_path").and_then(Value::as_str).unwrap_or("(unknown)").to_owned();
-    let id = env.get("id").and_then(Value::as_str).unwrap_or("?").to_owned();
+    let path = env
+        .get("source_path")
+        .and_then(Value::as_str)
+        .unwrap_or("(unknown)")
+        .to_owned();
+    let id = env
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("?")
+        .to_owned();
     let from = env.get("from").and_then(Value::as_u64).unwrap_or(0);
-    let n = u64::try_from(env.get("chunks").and_then(Value::as_array).map_or(0, Vec::len)).unwrap_or(0);
+    let n = u64::try_from(
+        env.get("chunks")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len),
+    )
+    .unwrap_or(0);
     let total = env.get("total_chunks").and_then(Value::as_u64).unwrap_or(0);
     let to = from + n;
     let summary = format!("Chunks {from}..{to} of {path} (of {total}).");
     let trimmed = json!({ "source_path": path, "from": from, "to": to, "total_chunks": total });
     let next_actions = if to < total {
-        vec![NextAction { tool: "get_document_chunks", arguments: json!({ "id": id, "from": to }) }]
+        vec![NextAction {
+            tool: "get_document_chunks",
+            arguments: json!({ "id": id, "from": to }),
+        }]
     } else {
         vec![]
     };
@@ -365,44 +490,77 @@ pub fn project_document_window(env: Value) -> ToolOutcome {
 // an extra clone, so suppress the false-positive lint — same pattern as `project_parents`.
 #[allow(clippy::needless_pass_by_value)]
 pub fn project_sources(env: Value) -> ToolOutcome {
-    let names: Vec<String> = env.as_array()
-        .map(|a| a.iter().filter_map(|s| {
-            s.get("display_name").and_then(Value::as_str)
-                .or_else(|| s.get("slug").and_then(Value::as_str))
-                .map(str::to_owned)
-        }).collect())
+    let names: Vec<String> = env
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|s| {
+                    s.get("display_name")
+                        .and_then(Value::as_str)
+                        .or_else(|| s.get("slug").and_then(Value::as_str))
+                        .map(str::to_owned)
+                })
+                .collect()
+        })
         .unwrap_or_default();
     let n = names.len();
     let summary = format!("{n} sources: {}.", names.join(", "));
     let trimmed = json!({ "count": n, "sources": names });
     let structured = json!({ "sources": env });
-    ToolOutcome::new(summary, structured, trimmed, vec![
-        NextAction { tool: "search", arguments: json!({ "query": "<terms>" }) },
-    ])
+    ToolOutcome::new(
+        summary,
+        structured,
+        trimmed,
+        vec![NextAction {
+            tool: "search",
+            arguments: json!({ "query": "<terms>" }),
+        }],
+    )
 }
 
 /// `facets`: `{ modes:[..], filters:[ {key, type, ..}, .. ] }`. Dimensions are `filters[].key`.
 pub fn project_facets(env: Value) -> ToolOutcome {
-    let keys: Vec<String> = env.get("filters").and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(|f| f.get("key").and_then(Value::as_str).map(str::to_owned)).collect())
+    let keys: Vec<String> = env
+        .get("filters")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|f| f.get("key").and_then(Value::as_str).map(str::to_owned))
+                .collect()
+        })
         .unwrap_or_default();
     let summary = format!("{} facet dimension(s): {}.", keys.len(), keys.join(", "));
     let trimmed = json!({ "dimensions": keys });
-    ToolOutcome::new(summary, env, trimmed, vec![
-        NextAction { tool: "search", arguments: json!({ "query": "<terms>", "filters": {} }) },
-    ])
+    ToolOutcome::new(
+        summary,
+        env,
+        trimmed,
+        vec![NextAction {
+            tool: "search",
+            arguments: json!({ "query": "<terms>", "filters": {} }),
+        }],
+    )
 }
 
 /// `status` (StatusOutput as JSON).
 pub fn project_status(env: Value) -> ToolOutcome {
     let reranker = env.get("reranker").and_then(Value::as_str).unwrap_or("?");
-    let state = env.get("model_state").and_then(Value::as_str).unwrap_or("?");
-    let ver = env.get("server_version").and_then(Value::as_str).unwrap_or("?");
+    let state = env
+        .get("model_state")
+        .and_then(Value::as_str)
+        .unwrap_or("?");
+    let ver = env
+        .get("server_version")
+        .and_then(Value::as_str)
+        .unwrap_or("?");
     let summary = format!("Server {ver}; reranker {reranker}; model state {state}.");
     let next = if state == "ready" {
         vec![]
     } else {
-        vec![NextAction { tool: "pull_models", arguments: json!({}) }]
+        vec![NextAction {
+            tool: "pull_models",
+            arguments: json!({}),
+        }]
     };
     let trimmed = json!({ "server_version": ver, "reranker": reranker, "model_state": state });
     ToolOutcome::new(summary, env, trimmed, next)
@@ -411,20 +569,39 @@ pub fn project_status(env: Value) -> ToolOutcome {
 /// `pull_models` (PullModelsOutput as JSON).
 pub fn project_pull_models(env: Value) -> ToolOutcome {
     let reranker = env.get("reranker").and_then(Value::as_str).unwrap_or("?");
-    let loaded = env.get("reranker_loaded").and_then(Value::as_bool).unwrap_or(false);
-    let summary = format!("Models pulled. Reranker {reranker} {}.", if loaded { "ready" } else { "not loaded" });
+    let loaded = env
+        .get("reranker_loaded")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let summary = format!(
+        "Models pulled. Reranker {reranker} {}.",
+        if loaded { "ready" } else { "not loaded" }
+    );
     let trimmed = json!({ "reranker": reranker, "reranker_loaded": loaded });
-    ToolOutcome::new(summary, env, trimmed, vec![
-        NextAction { tool: "status", arguments: json!({}) },
-    ])
+    ToolOutcome::new(
+        summary,
+        env,
+        trimmed,
+        vec![NextAction {
+            tool: "status",
+            arguments: json!({}),
+        }],
+    )
 }
 
 /// `install_search_skill` (InstallReport as JSON).
 pub fn project_install(env: Value) -> ToolOutcome {
     let scope = env.get("scope").and_then(Value::as_str).unwrap_or("user");
-    let skill = env.get("skill_name").and_then(Value::as_str).unwrap_or("search");
-    let installed = env.get("installed").and_then(Value::as_array).map_or(0, Vec::len);
-    let summary = format!("Installed `{skill}` skill for {installed} harness(es) (scope: {scope}).");
+    let skill = env
+        .get("skill_name")
+        .and_then(Value::as_str)
+        .unwrap_or("search");
+    let installed = env
+        .get("installed")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let summary =
+        format!("Installed `{skill}` skill for {installed} harness(es) (scope: {scope}).");
     let trimmed = json!({ "skill_name": skill, "scope": scope, "installed_count": installed });
     ToolOutcome::new(summary, env, trimmed, vec![])
 }
@@ -488,7 +665,11 @@ pub struct ToolFailure {
 
 impl ToolFailure {
     /// Minimal failure with no extra details and no next actions.
-    pub fn simple(kind: ErrorKind, message: impl Into<String>, guidance: impl Into<String>) -> Self {
+    pub fn simple(
+        kind: ErrorKind,
+        message: impl Into<String>,
+        guidance: impl Into<String>,
+    ) -> Self {
         Self {
             kind,
             message: message.into(),
@@ -514,10 +695,13 @@ impl ToolFailure {
             "error": error,
             "next_actions": next_actions_value(&self.next_actions),
         });
-        let trimmed = json!({ "error": { "code": self.kind.code(), "retryable": self.kind.retryable() } });
+        let trimmed =
+            json!({ "error": { "code": self.kind.code(), "retryable": self.kind.retryable() } });
         let trimmed = serde_json::to_string(&trimmed).unwrap_or_else(|_| "{}".to_owned());
         ToolCallResult {
-            content: vec![ContentBlock::Text { text: format!("{}\n\n```json\n{trimmed}\n```", self.guidance) }],
+            content: vec![ContentBlock::Text {
+                text: format!("{}\n\n```json\n{trimmed}\n```", self.guidance),
+            }],
             structured_content: Some(structured),
             is_error: true,
         }
@@ -567,11 +751,16 @@ mod tests {
             "Found 1.".into(),
             json!({ "results": [1] }),
             json!({ "match_count": 1 }),
-            vec![NextAction { tool: "get_chunk", arguments: json!({ "id": "abc" }) }],
+            vec![NextAction {
+                tool: "get_chunk",
+                arguments: json!({ "id": "abc" }),
+            }],
         );
         let r = o.into_result();
         assert!(!r.is_error);
-        let text = match &r.content[0] { ContentBlock::Text { text } => text };
+        let text = match &r.content[0] {
+            ContentBlock::Text { text } => text,
+        };
         assert!(text.starts_with("Found 1.\n\n```json\n"));
         assert!(text.contains("\"match_count\":1"));
         let sc = r.structured_content.unwrap();
@@ -587,7 +776,7 @@ mod tests {
         assert_eq!(super::confidence_bucket(0.69), "low");
         assert_eq!(super::confidence_bucket(0.50), "low");
         assert_eq!(super::confidence_bucket(0.49), "very_low");
-        assert_eq!(super::confidence_bucket(0.0),  "very_low");
+        assert_eq!(super::confidence_bucket(0.0), "very_low");
     }
 
     #[test]
@@ -599,17 +788,21 @@ mod tests {
         });
         let o = super::project_search(envelope, None);
         assert!(o.summary.contains("0 matches"));
-        assert!(!o.summary.contains("corpus . "));   // empty model must not leak into summary
+        assert!(!o.summary.contains("corpus . ")); // empty model must not leak into summary
         assert!(o.next_actions.is_empty());
         let t = o.telemetry.unwrap();
         assert_eq!(t.result_count, 0);
         assert!(t.top_confidence_bucket.is_none());
-        assert!(t.corpus_model.is_none());           // "" treated as absent
+        assert!(t.corpus_model.is_none()); // "" treated as absent
     }
 
     #[test]
     fn failure_renders_iserror_with_envelope() {
-        let f = ToolFailure::simple(ErrorKind::NotFound, "no chunk abc", "Verify the id from a recent search.");
+        let f = ToolFailure::simple(
+            ErrorKind::NotFound,
+            "no chunk abc",
+            "Verify the id from a recent search.",
+        );
         let r = f.into_result();
         assert!(r.is_error);
         let sc = r.structured_content.unwrap();
@@ -628,7 +821,13 @@ mod tests {
         let o = super::project_chunk(env);
         assert!(o.summary.contains("docs/intro.md"));
         assert!(o.summary.contains('4')); // chunk index
-        assert_eq!(o.next_actions.iter().filter(|a| a.tool == "get_chunk_next").count(), 1);
+        assert_eq!(
+            o.next_actions
+                .iter()
+                .filter(|a| a.tool == "get_chunk_next")
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -708,7 +907,10 @@ mod tests {
         let env = json!({ "id":"d1","source_path":"x","source":{"display_name":"X"},
             "chunks":[{"content":"abc"}] });
         let o = super::project_document_full(env);
-        assert!(o.next_actions.iter().any(|a| a.tool == "get_document" && a.arguments["id"] == "d1"));
+        assert!(o
+            .next_actions
+            .iter()
+            .any(|a| a.tool == "get_document" && a.arguments["id"] == "d1"));
     }
 
     #[test]
@@ -720,7 +922,7 @@ mod tests {
         let o = super::project_sources(env);
         assert!(o.summary.contains("2 sources"));
         assert!(o.summary.contains("Compact Docs"));
-        assert!(o.structured.is_object());          // array wrapped
+        assert!(o.structured.is_object()); // array wrapped
         assert!(o.structured["sources"].is_array());
         assert!(o.next_actions.iter().any(|a| a.tool == "search"));
     }
@@ -751,7 +953,7 @@ mod tests {
         let env = json!({ "skill_name": "search", "scope": "user",
                           "installed": [ {"harness":"claude-code"} ], "not_detected": [] });
         let o = super::project_install(env);
-        assert!(o.summary.contains('1'));     // 1 harness
-        assert!(o.summary.contains("user"));  // scope
+        assert!(o.summary.contains('1')); // 1 harness
+        assert!(o.summary.contains("user")); // scope
     }
 }
