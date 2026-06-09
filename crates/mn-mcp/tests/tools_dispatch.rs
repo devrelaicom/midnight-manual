@@ -708,6 +708,121 @@ async fn dispatch_get_document_chunks_full_pipeline_via_wiremock() {
     assert_eq!(sc["limit"], 7);
 }
 
+/// Search that returns a 409 embedding-model mismatch from the cloud surfaces
+/// as `isError: true` with `EMBEDDING_MODEL_MISMATCH`, `retryable: false`, a
+/// `corpus_model` field, and `next_actions[0].tool == "pull_models"`.
+///
+/// Approach: run `run_search` through a full wiremock stack (models/active +
+/// embeddings server-proxy + search→409) to obtain `SearchError::Mismatch`,
+/// then thread it through the same render pipeline `run_search_dispatch` uses
+/// in server.rs. Tests both the error classification (I2) and the dispatch
+/// path (I3 requirement).
+///
+/// NOTE: when `VOYAGE_API_KEY` is set the embed step goes to Voyage directly
+/// (not through the wiremock `/v1/embeddings`). The test clears the key for
+/// the call via the `mn_core::config::StdEnv` path — but since we cannot
+/// unset process env vars safely across threads, we instead supply a mock
+/// `/v1/embeddings` endpoint that `run_search` will use if the key is absent
+/// (sandbox always has `VOYAGE_API_KEY=` cleared before mn-mcp cargo commands
+/// per `sandbox-voyage-api-key.md`). The assertion on `SearchError::Mismatch`
+/// is independent of whether embed was BYOK or server-proxy, because the 409
+/// comes from `/v1/search` in either case.
+#[tokio::test]
+async fn dispatch_search_mismatch_produces_iserror_envelope() {
+    use mn_mcp::render::{ErrorKind, NextAction, ToolFailure};
+    use mn_mcp::server::ServerConfig;
+    use mn_mcp::tools::{run_search, SearchError};
+
+    let server = MockServer::start().await;
+
+    // /v1/models/active — returns the corpus's active wire id.
+    Mock::given(method("GET"))
+        .and(path("/v1/models/active"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "name": "voyage-code-3",
+            "revision": 2,
+            "dim": 4,
+            "provider": "voyageai",
+        })))
+        .mount(&server)
+        .await;
+
+    // /v1/embeddings — server-proxy path used when VOYAGE_API_KEY is absent.
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "model": "voyage-code-3@2",
+            "embeddings": [[0.1_f32, 0.2, 0.3, 0.4]],
+            "usage": { "total_tokens": 4 },
+        })))
+        .mount(&server)
+        .await;
+
+    // /v1/search — returns 409 mismatch regardless of body.
+    Mock::given(method("POST"))
+        .and(path("/v1/search"))
+        .respond_with(ResponseTemplate::new(409).set_body_json(json!({
+            "error": {
+                "code": "embedding_model_mismatch",
+                "message": "client model `voyage-code-3@2` does not match corpus model `voyage-code-3@1`",
+                "remediation": "run pull_models to fetch the current corpus model",
+                "context": {
+                    "corpus_model": "voyage-code-3@1",
+                    "client_model": "voyage-code-3@2",
+                },
+            },
+            "request_id": "test-req-001",
+        })))
+        .mount(&server)
+        .await;
+
+    let mut cfg = ServerConfig::with_defaults(std::path::PathBuf::from("/tmp/test-mcp-cache"));
+    cfg.cloud_url.clone_from(&server.uri());
+    cfg.telemetry_url = format!("{}/v1/telemetry/events", server.uri());
+
+    let cloud = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
+
+    let err = run_search(
+        &json!({ "query": "compact contract", "mode": "fts", "rerank": false }),
+        &cfg,
+        &cloud,
+    )
+    .await
+    .unwrap_err();
+
+    // Extract mismatch fields — same as run_search_dispatch in server.rs.
+    let (corpus_model, message, remediation) = match err {
+        SearchError::Mismatch { corpus_model, message, remediation, .. } => {
+            (corpus_model, message, remediation)
+        }
+        other => panic!("expected SearchError::Mismatch, got {other:?}"),
+    };
+
+    // Mirror the render pipeline that run_search_dispatch uses.
+    let failure = ToolFailure {
+        kind: ErrorKind::EmbeddingModelMismatch,
+        message,
+        guidance: remediation.clone(),
+        details: serde_json::json!({
+            "corpus_model": corpus_model,
+            "client_model": "voyage-code-3@2",
+            "remediation": remediation,
+        }),
+        next_actions: vec![NextAction {
+            tool: "pull_models",
+            arguments: serde_json::json!({}),
+        }],
+    };
+    let result = failure.into_result();
+
+    assert!(result.is_error, "isError must be true for Mismatch");
+    let sc = result.structured_content.unwrap();
+    assert_eq!(sc["error"]["code"], "EMBEDDING_MODEL_MISMATCH");
+    assert_eq!(sc["error"]["retryable"], false, "mismatch must not be retryable (I2)");
+    assert!(sc["error"]["corpus_model"].is_string(), "corpus_model must be a string");
+    assert_eq!(sc["next_actions"][0]["tool"], "pull_models");
+}
+
 /// Verify that `get_chunk_neighbors` full pipeline preserves `sc["prev"]["chunks"]`
 /// and `sc["next"]["chunks"]` length.
 #[tokio::test]

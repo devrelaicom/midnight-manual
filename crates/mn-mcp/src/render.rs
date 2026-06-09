@@ -462,13 +462,12 @@ impl ErrorKind {
     }
     const fn retryable(self) -> bool {
         match self {
-            Self::NotFound => false,
-            Self::InvalidInput
-            | Self::EmbeddingModelMismatch
-            | Self::TooManyChunks
-            | Self::CloudError
-            | Self::ModelLoadFailed
-            | Self::InstallFailed => true,
+            // Permanent for an identical retry — recovery requires the next_action.
+            Self::NotFound | Self::EmbeddingModelMismatch | Self::TooManyChunks => false,
+            // Transient or fixable-and-retry.
+            Self::InvalidInput | Self::CloudError | Self::ModelLoadFailed | Self::InstallFailed => {
+                true
+            }
         }
     }
 }

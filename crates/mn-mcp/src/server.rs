@@ -439,10 +439,17 @@ async fn dispatch_tool_inner(
                     .unwrap_or_else(|_| serde_json::json!({ "message": text }));
                 ok(render::project_install(v).into_result(), None)
             }
-            Err((_, msg)) => err(
-                ToolFailure::simple(ErrorKind::InstallFailed, msg.clone(), msg).into_result(),
-                Outcome::InvalidInput,
-            ),
+            Err((code, msg)) => {
+                let outcome = if code == crate::protocol::ErrorCode::InvalidParams {
+                    Outcome::InvalidInput
+                } else {
+                    Outcome::Error
+                };
+                err(
+                    ToolFailure::simple(ErrorKind::InstallFailed, msg.clone(), msg).into_result(),
+                    outcome,
+                )
+            }
         },
         other => {
             return Err(Response::err(

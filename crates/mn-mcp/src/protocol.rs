@@ -119,7 +119,7 @@ pub struct JsonRpcError {
 }
 
 /// JSON-RPC standard error codes plus MCP-extension space.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
 pub enum ErrorCode {
     /// Parse error (invalid JSON).
