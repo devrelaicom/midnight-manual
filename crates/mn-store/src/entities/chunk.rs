@@ -43,8 +43,10 @@ pub struct DocumentSummary {
 /// Source subset bundled into chunk read responses.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceSummary {
-    /// Source slug (human-readable unique identifier).
+    /// URL-safe stable handle, e.g. `compact-docs`.
     pub slug: String,
+    /// Human-readable name, e.g. `Compact Docs`.
+    pub display_name: String,
 }
 
 /// Chunk + bundled document + source context returned by the navigation
@@ -329,7 +331,7 @@ pub async fn list_next(pool: &PgPool, anchor: Uuid, count: usize) -> Result<Vec<
             d.source_path AS d_source_path, d.published_url AS d_published_url, \
             d.source_url AS d_source_url, d.language AS d_language, d.kind AS d_kind, \
             d.provenance AS d_provenance, \
-            s.slug AS s_slug \
+            s.slug AS s_slug, s.display_name AS s_display_name \
          FROM chunk c \
          JOIN document d ON c.document_id = d.id \
          JOIN source_version sv ON c.source_version_id = sv.id \
@@ -367,7 +369,7 @@ pub async fn list_prev(pool: &PgPool, anchor: Uuid, count: usize) -> Result<Vec<
             d.source_path AS d_source_path, d.published_url AS d_published_url, \
             d.source_url AS d_source_url, d.language AS d_language, d.kind AS d_kind, \
             d.provenance AS d_provenance, \
-            s.slug AS s_slug \
+            s.slug AS s_slug, s.display_name AS s_display_name \
          FROM chunk c \
          JOIN document d ON c.document_id = d.id \
          JOIN source_version sv ON c.source_version_id = sv.id \
@@ -402,7 +404,7 @@ pub async fn get_with_context(pool: &PgPool, id: Uuid) -> Result<ChunkWithContex
             d.source_path AS d_source_path, d.published_url AS d_published_url, \
             d.source_url AS d_source_url, d.language AS d_language, d.kind AS d_kind, \
             d.provenance AS d_provenance, \
-            s.slug AS s_slug \
+            s.slug AS s_slug, s.display_name AS s_display_name \
          FROM chunk c \
          JOIN document d ON c.document_id = d.id \
          JOIN source_version sv ON c.source_version_id = sv.id \
@@ -442,8 +444,9 @@ struct ChunkWithContextRow {
     d_language: Option<String>,
     d_kind: String,
     d_provenance: serde_json::Value,
-    // 1 source column:
+    // 2 source columns:
     s_slug: String,
+    s_display_name: String,
 }
 
 impl TryFrom<ChunkWithContextRow> for ChunkWithContext {
@@ -486,7 +489,7 @@ impl TryFrom<ChunkWithContextRow> for ChunkWithContext {
                 kind: doc_kind,
                 provenance: r.d_provenance,
             },
-            source: SourceSummary { slug: r.s_slug },
+            source: SourceSummary { slug: r.s_slug, display_name: r.s_display_name },
         })
     }
 }

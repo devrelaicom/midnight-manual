@@ -108,8 +108,8 @@ pub async fn get_by_id(pool: &PgPool, id: Uuid) -> Result<Document> {
 /// Returns `StoreError::NotFound` if no document has that id.
 pub async fn get_overview(pool: &PgPool, id: Uuid) -> Result<DocumentOverview> {
     let document = get_by_id(pool, id).await?;
-    let source_slug = sqlx::query_scalar::<_, String>(
-        "SELECT s.slug FROM source s \
+    let (source_slug, source_display_name) = sqlx::query_as::<_, (String, String)>(
+        "SELECT s.slug, s.display_name FROM source s \
          JOIN source_version sv ON sv.source_id = s.id \
          WHERE sv.id = $1",
     )
@@ -126,7 +126,10 @@ pub async fn get_overview(pool: &PgPool, id: Uuid) -> Result<DocumentOverview> {
     .await?;
     Ok(DocumentOverview {
         document,
-        source: crate::entities::chunk::SourceSummary { slug: source_slug },
+        source: crate::entities::chunk::SourceSummary {
+            slug: source_slug,
+            display_name: source_display_name,
+        },
         chunk_ids,
     })
 }
@@ -150,8 +153,8 @@ pub async fn get_full(pool: &PgPool, id: Uuid, cap: usize) -> Result<FullResult>
     if count_usize > cap {
         return Ok(FullResult::TooManyChunks { count: count_usize, cap });
     }
-    let source_slug = sqlx::query_scalar::<_, String>(
-        "SELECT s.slug FROM source s \
+    let (source_slug, source_display_name) = sqlx::query_as::<_, (String, String)>(
+        "SELECT s.slug, s.display_name FROM source s \
          JOIN source_version sv ON sv.source_id = s.id \
          WHERE sv.id = $1",
     )
@@ -178,7 +181,10 @@ pub async fn get_full(pool: &PgPool, id: Uuid, cap: usize) -> Result<FullResult>
     .collect();
     Ok(FullResult::Document(Box::new(DocumentFull {
         document,
-        source: crate::entities::chunk::SourceSummary { slug: source_slug },
+        source: crate::entities::chunk::SourceSummary {
+            slug: source_slug,
+            display_name: source_display_name,
+        },
         chunks,
     })))
 }
@@ -200,8 +206,8 @@ pub async fn list_chunks_window(
 ) -> Result<DocumentChunkWindow> {
     let limit = limit.clamp(1, 100);
     let document = get_by_id(pool, id).await?;
-    let source_slug = sqlx::query_scalar::<_, String>(
-        "SELECT s.slug FROM source s \
+    let (source_slug, source_display_name) = sqlx::query_as::<_, (String, String)>(
+        "SELECT s.slug, s.display_name FROM source s \
          JOIN source_version sv ON sv.source_id = s.id \
          WHERE sv.id = $1",
     )
@@ -237,7 +243,10 @@ pub async fn list_chunks_window(
     .collect();
     Ok(DocumentChunkWindow {
         document,
-        source: crate::entities::chunk::SourceSummary { slug: source_slug },
+        source: crate::entities::chunk::SourceSummary {
+            slug: source_slug,
+            display_name: source_display_name,
+        },
         chunks,
         from,
         limit,
