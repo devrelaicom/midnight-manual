@@ -327,6 +327,7 @@ async fn dispatch_tool_inner(
         Ok(result_text) => {
             let result = ToolCallResult {
                 content: vec![ContentBlock::Text { text: result_text }],
+                structured_content: None,
                 is_error: false,
             };
             Response::success(id, serde_json::to_value(result).expect("serialize result"))

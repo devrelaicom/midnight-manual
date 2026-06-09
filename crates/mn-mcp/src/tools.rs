@@ -50,54 +50,63 @@ pub fn list() -> ToolsListResult {
                 description:
                     "Hybrid (FTS + vector) retrieval over the Midnight corpus, with optional cross-encoder reranking and trust-aware confidence scoring. Provide the single-query `{query, vector}` form, or a `queries` array of 1-10 `{text, vector}` pairs that RRF fuses across. The caller embeds each text (except in `fts` mode). Rate-limit cost is max(1, distinct queries) tokens (D25).\n\nPatterns (full worked examples in docs/cookbook/query-enhancement.md):\n- hyde: send the question plus a hypothetical answer as a second query, e.g. queries=[\"<the user's question>\", \"<a 1-2 sentence hypothetical answer the agent drafts>\"]. Lifts recall when the question is short or jargon-light.\n- multi_query: send 2-3 paraphrases varying vocabulary and breadth, e.g. queries=[\"compile a contract\", \"build source into a deployable artifact\", \"smart-contract build step\"]. Helps when synonyms matter.\n- step_back: send the question plus a more abstract framing, e.g. queries=[\"why did this specific call fail?\", \"how does the platform validate calls?\"]. Helps when the question is over-specific.",
                 input_schema: search_input_schema(),
+                output_schema: None,
             },
             ToolDescription {
                 name: "get_chunk",
                 description:
                     "Fetch one chunk by id. Returns the chunk row (id, content, chunk_index, total_chunks, content_hash, embedding_model_id, heading_path, symbol_path, start_byte, end_byte, token_count, status, created_at, document_id, source_version_id, node_id) plus a small `document` sub-object (id, source_path, published_url, source_url, language, kind, provenance) and a `source` sub-object (slug). For the chunk's parent chain call get_chunk_parents; for adjacent chunks call get_chunk_next/get_chunk_prev.",
                 input_schema: id_only_schema(),
+                output_schema: None,
             },
             ToolDescription {
                 name: "get_chunk_next",
                 description:
                     "Fetch up to `count` chunks immediately following the given chunk in chunk_index order, scoped to the same document. Returns `{chunks: ChunkWithContext[]}` sorted ascending. Returns `{chunks: []}` (not 404) when called on the last chunk. `embed_failed` chunks are skipped, so the returned chunk_index sequence may have gaps. count defaults to 5 and must be in [1, 100]; out-of-range values are rejected as InvalidParams before the call reaches the cloud.",
                 input_schema: chunk_nav_schema(),
+                output_schema: None,
             },
             ToolDescription {
                 name: "get_chunk_prev",
                 description:
                     "Fetch up to `count` chunks immediately preceding the given chunk in chunk_index order, scoped to the same document. Returns `{chunks: ChunkWithContext[]}` sorted ascending (reading order). Returns `{chunks: []}` (not 404) when called on the first chunk. `embed_failed` chunks are skipped, so the returned chunk_index sequence may have gaps. count defaults to 5 and must be in [1, 100]; out-of-range values are rejected as InvalidParams before the call reaches the cloud.",
                 input_schema: chunk_nav_schema(),
+                output_schema: None,
             },
             ToolDescription {
                 name: "get_chunk_neighbors",
                 description:
                     "Bundle `get_chunk_prev` + `get_chunk` + `get_chunk_next` in one round-trip. Returns `{prev: {chunks: ChunkWithContext[]}, chunk: ChunkWithContext, next: {chunks: ChunkWithContext[]}}` where `prev`/`next` are the same envelopes the standalone tools return (so an empty corpus edge yields `chunks: []`, not 404). The three cloud calls are issued in parallel, so latency is roughly that of the slowest leg. `count` defaults to 2 (chunks on each side) and must be in [1, 100]; out-of-range values are rejected as InvalidParams before any wire call. A 404 on the anchor chunk surfaces the same not-found envelope a plain `get_chunk` would.",
                 input_schema: chunk_neighbors_schema(),
+                output_schema: None,
             },
             ToolDescription {
                 name: "get_chunk_parents",
                 description:
                     "Walk the parent chain from a chunk up to its source-version root. Returns nodes from immediate parent to root.",
                 input_schema: id_only_schema(),
+                output_schema: None,
             },
             ToolDescription {
                 name: "get_document",
                 description:
                     "Document overview: metadata (id, source_version_id, node_id, source_path, published_url, source_url, language, kind, content_hash, char_count, token_count, source_modified_at, created_at, frontmatter, provenance, package_id), the source `{slug}`, and an ordered `chunk_ids` array of every ready chunk. No chunk bodies. Use get_document_full for inline bodies or get_document_chunks for a windowed slice.",
                 input_schema: id_only_schema(),
+                output_schema: None,
             },
             ToolDescription {
                 name: "get_document_full",
                 description:
                     "Complete document: every overview field except chunk_ids, plus a `chunks` array with each chunk's `{chunk_id, chunk_index, content, heading_path, token_count}` inline (no per-chunk document/source sub-objects). Capped at 500 ready chunks. For documents over the cap the call fails with a structured `too_many_chunks` error (see error.data.next_tool); fall back to get_document_chunks.",
                 input_schema: id_only_schema(),
+                output_schema: None,
             },
             ToolDescription {
                 name: "get_document_chunks",
                 description:
                     "Position-windowed chunk slice of a document. Returns `{chunks: ChunkBody[], from, limit, total_chunks}`. from defaults to 0 (must be >= 0); limit defaults to 20 and must be in [1, 100]. Out-of-range values are rejected as InvalidParams before the call reaches the cloud. `from` past the end returns `chunks: []` with accurate `total_chunks` (not 404). Use to page through documents larger than get_document_full's 500-chunk cap or to read a known offset.",
                 input_schema: document_chunks_schema(),
+                output_schema: None,
             },
             ToolDescription {
                 name: "list_sources",
@@ -108,6 +117,7 @@ pub fn list() -> ToolsListResult {
                     "properties": {},
                     "additionalProperties": false,
                 }),
+                output_schema: None,
             },
             ToolDescription {
                 name: "facets",
@@ -118,6 +128,7 @@ pub fn list() -> ToolsListResult {
                     "properties": {},
                     "additionalProperties": false,
                 }),
+                output_schema: None,
             },
             ToolDescription {
                 name: "pull_models",
@@ -128,6 +139,7 @@ pub fn list() -> ToolsListResult {
                     "properties": {},
                     "additionalProperties": false,
                 }),
+                output_schema: None,
             },
             ToolDescription {
                 name: "status",
@@ -138,12 +150,14 @@ pub fn list() -> ToolsListResult {
                     "properties": {},
                     "additionalProperties": false,
                 }),
+                output_schema: None,
             },
             ToolDescription {
                 name: "install_search_skill",
                 description:
                     "Install the midnight-advanced-search Agent Skill (a persistent retrieval playbook) into the user's AI harness(es). Writes the same SKILL.md to each detected harness's native skills directory; re-running updates in place. Returns, per harness, the scope, the exact path written, the action (created/updated/unchanged), and the reload step to relay to the user. Optional `harness` (subset of claude-code/codex/opencode/cursor) forces specific targets; omit to auto-detect. Optional `scope` is user (default) or project.",
                 input_schema: install_search_skill_schema(),
+                output_schema: None,
             },
         ],
     }
