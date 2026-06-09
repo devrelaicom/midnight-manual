@@ -1207,6 +1207,13 @@ components:
           properties:
             prev_chunk_id: { type: string, format: uuid, nullable: true }
             next_chunk_id: { type: string, format: uuid, nullable: true }
+        source_slug: { type: string }
+        source_display_name: { type: string }
+        source_path: { type: string, description: "Source-relative document path, e.g. docs/intro.md" }
+        published_url: { type: string, nullable: true }
+        source_url: { type: string, nullable: true }
+        heading_path: { type: array, items: { type: string } }
+        symbol_path: { type: array, items: { type: string } }
         scores:
           type: object
           description: >-
