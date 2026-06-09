@@ -112,6 +112,34 @@ async fn noop_client_serialization_does_not_leak_canary() {
 }
 
 #[test]
+fn mcp_tool_call_search_fields_do_not_leak_canary() {
+    use mn_telemetry::events::{McpToolName, Outcome};
+    // A canary value is referenced here to document intent — it must NOT flow into any field.
+    let _ = CANARY_STRINGS[0].value;
+    let event = Event::new(
+        Component::Mcp,
+        "0.1.0",
+        EventPayload::McpToolCall {
+            tool_name: McpToolName::Search,
+            latency_ms: 5,
+            result_count: 1,
+            model_state: ModelState::Ready,
+            rerank_on: true,
+            outcome: Outcome::Ok,
+            corpus_model: Some("voyage-code-3@1".into()),
+            reranker_used: Some("bge-reranker-base".into()),
+            top_confidence: Some("high".into()),
+            top_attribution: Some("foundation".into()),
+            top_source: Some("Compact Docs".into()),
+            filtered_by_confidence: Some(0),
+            deduplicated_count: Some(0),
+        },
+    );
+    let wire = serde_json::to_string(&event).expect("serialize");
+    canary::assert_no_canary_in(&wire);
+}
+
+#[test]
 fn current_log_output_does_not_contain_canaries() {
     // The aspirational form of FR-112 will drive every endpoint and tool
     // here with canary-laden inputs; in Phase 8a we have no telemetry call
