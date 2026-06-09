@@ -47,3 +47,6 @@ discovery/.claude/
 # Hero illustration drafts (exploration renders + clean frames; source material for the
 # rotation video, kept locally but not committed). The chosen frame lives at site/img/hero-server.jpg.
 site/img/draft/
+
+# stray local compiled test artifacts
+/test_constfn_call*
