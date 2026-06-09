@@ -69,6 +69,33 @@ pub async fn sweep_once(pool: &PgPool, retention_days: i64) -> Result<SweepStats
     .await?
     .rows_affected();
 
+    // Dimensional rollup: preserve retrieval-quality dimensions for expired
+    // search events past raw retention. Missing fields coalesce to '' so the
+    // primary key is always satisfiable.
+    sqlx::query(
+        "WITH expired_search AS (
+             SELECT received_at::date AS day,
+                    COALESCE(fields->>'corpus_model', '') AS corpus_model,
+                    COALESCE(fields->>'top_attribution', '') AS attribution,
+                    COALESCE(fields->>'reranker_used', '') AS reranker,
+                    COALESCE(fields->>'top_source', '') AS top_source,
+                    COALESCE(fields->>'top_confidence', '') AS confidence_bucket,
+                    COUNT(*)::bigint AS c
+             FROM telemetry_event_raw
+             WHERE received_at < now() - make_interval(days => $1::int)
+               AND event_type = 'mcp_tool_call'
+               AND fields->>'tool_name' = 'search'
+             GROUP BY 1, 2, 3, 4, 5, 6
+         )
+         INSERT INTO telemetry_search_daily (day, corpus_model, attribution, reranker, top_source, confidence_bucket, count)
+         SELECT day, corpus_model, attribution, reranker, top_source, confidence_bucket, c FROM expired_search
+         ON CONFLICT (day, corpus_model, attribution, reranker, top_source, confidence_bucket)
+         DO UPDATE SET count = telemetry_search_daily.count + EXCLUDED.count",
+    )
+    .bind(retention_days)
+    .execute(&mut *tx)
+    .await?;
+
     // Delete: ensure the WHERE clause is bit-for-bit identical to the CTE
     // predicate above so a row can't slip between the two queries.
     let deleted: u64 = sqlx::query(
