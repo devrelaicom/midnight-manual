@@ -83,6 +83,156 @@ impl ToolOutcome {
     }
 }
 
+/// Map a confidence in [0,1] to a coarse bucket label (telemetry-safe; never the raw float).
+fn confidence_bucket(c: f64) -> &'static str {
+    if c >= 0.85 {
+        "high"
+    } else if c >= 0.7 {
+        "medium"
+    } else if c >= 0.5 {
+        "low"
+    } else {
+        "very_low"
+    }
+}
+
+/// Walk `v` along `path`, returning the final `str` value if every segment exists and is a string.
+fn str_field<'a>(v: &'a Value, path: &[&str]) -> Option<&'a str> {
+    let mut cur = v;
+    for p in path {
+        cur = cur.get(p)?;
+    }
+    cur.as_str()
+}
+
+/// Project the cloud search envelope. `reranker_used` is the local reranker name when local
+/// rerank ran, else `None`.
+#[allow(clippy::too_many_lines, clippy::option_if_let_else)]
+pub fn project_search(envelope: Value, reranker_used: Option<&str>) -> ToolOutcome {
+    let corpus_model = envelope
+        .get("corpus_embedding_model")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let results = envelope
+        .get("results")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let result_count = u32::try_from(results.len()).unwrap_or(u32::MAX);
+    let filtered = envelope
+        .pointer("/search_metadata/filtered_by_confidence")
+        .and_then(Value::as_u64);
+    let deduped = envelope
+        .pointer("/search_metadata/deduplicated_count")
+        .and_then(Value::as_u64);
+
+    // Trimmed: per-result essentials, scoring stripped.
+    let trimmed_results: Vec<Value> = results
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            json!({
+                "rank": i + 1,
+                "chunk_id": r.get("chunk_id").cloned().unwrap_or(Value::Null),
+                "document_id": r.get("document_id").cloned().unwrap_or(Value::Null),
+                "source_path": r.get("source_path").cloned().unwrap_or(Value::Null),
+                "source_display_name": r.get("source_display_name").cloned().unwrap_or(Value::Null),
+                "heading_path": r.get("heading_path").cloned().unwrap_or(json!([])),
+                "confidence": r.pointer("/scores/confidence").cloned().unwrap_or(Value::Null),
+                "attribution": str_field(r, &["scores", "confidence_factors", "attribution"]).unwrap_or(""),
+                "content": r.get("content").cloned().unwrap_or(Value::Null),
+            })
+        })
+        .collect();
+
+    // Summary from the top result.
+    let top = results.first();
+    let summary = match top {
+        Some(t) => {
+            let path = t
+                .get("source_path")
+                .and_then(Value::as_str)
+                .unwrap_or("(unknown)");
+            let heading = t
+                .get("heading_path")
+                .and_then(Value::as_array)
+                .map(|h| {
+                    h.iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(" › ")
+                })
+                .filter(|s| !s.is_empty());
+            let attr = str_field(t, &["scores", "confidence_factors", "attribution"])
+                .unwrap_or("unknown");
+            let conf = t
+                .pointer("/scores/confidence")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0);
+            let chunk_id = t.get("chunk_id").and_then(Value::as_str).unwrap_or("?");
+            let model = corpus_model.as_deref().unwrap_or("?");
+            let where_ =
+                heading.map_or_else(|| path.to_owned(), |h| format!("{path} › {h}"));
+            format!(
+                "Search: {result_count} matches, corpus {model}. Top: {where_} [{attr} · {conf:.2}] chunk {chunk_id} — fetch with get_chunk."
+            )
+        }
+        None => format!(
+            "Search: 0 matches, corpus {}.",
+            corpus_model.as_deref().unwrap_or("?")
+        ),
+    };
+
+    // next_actions from the top result.
+    let next_actions = top
+        .map(|t| {
+            let mut v = Vec::new();
+            if let Some(id) = t.get("chunk_id").and_then(Value::as_str) {
+                v.push(NextAction {
+                    tool: "get_chunk",
+                    arguments: json!({ "id": id }),
+                });
+            }
+            if let Some(id) = t.get("document_id").and_then(Value::as_str) {
+                v.push(NextAction {
+                    tool: "get_document",
+                    arguments: json!({ "id": id }),
+                });
+            }
+            v
+        })
+        .unwrap_or_default();
+
+    // Telemetry facts.
+    let telemetry = SearchTelemetry {
+        corpus_model,
+        reranker_used: reranker_used.map(str::to_owned),
+        top_confidence_bucket: top
+            .and_then(|t| t.pointer("/scores/confidence").and_then(Value::as_f64))
+            .map(confidence_bucket),
+        top_attribution: top.and_then(|t| {
+            str_field(t, &["scores", "confidence_factors", "attribution"]).map(str::to_owned)
+        }),
+        top_source: top.and_then(|t| {
+            t.get("source_display_name")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        }),
+        filtered_by_confidence: filtered
+            .map(|n| u32::try_from(n).unwrap_or(u32::MAX)),
+        deduplicated_count: deduped.map(|n| u32::try_from(n).unwrap_or(u32::MAX)),
+        result_count,
+    };
+
+    ToolOutcome {
+        summary,
+        structured: envelope,
+        trimmed: json!({ "results": trimmed_results, "match_count": result_count }),
+        next_actions,
+        telemetry: Some(telemetry),
+    }
+}
+
 /// Closed set of tool-execution error kinds.
 #[derive(Debug, Clone, Copy)]
 pub enum ErrorKind {
@@ -182,6 +332,39 @@ impl ToolFailure {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample_search_envelope() -> Value {
+        json!({
+            "corpus_embedding_model": "voyage-code-3@1",
+            "results": [{
+                "chunk_id": "1f39", "document_id": "7d5c",
+                "source_slug": "compact-docs", "source_display_name": "Compact Docs",
+                "source_path": "docs/intro.md", "heading_path": ["Compiling", "Witnesses"],
+                "symbol_path": [], "content": "withVacantWitnesses ...",
+                "scores": { "confidence": 0.81, "trust_score": 1.0,
+                            "confidence_factors": { "attribution": "foundation", "verified": true } }
+            }],
+            "search_metadata": { "filtered_by_confidence": 0, "deduplicated_count": 0 }
+        })
+    }
+
+    #[test]
+    fn project_search_summary_and_telemetry() {
+        let o = super::project_search(sample_search_envelope(), Some("bge-reranker-base"));
+        assert!(o.summary.contains("docs/intro.md"));
+        assert!(o.summary.contains("Compact Docs") || o.summary.contains("foundation"));
+        assert!(o.trimmed["results"][0].get("scores").is_none());
+        assert_eq!(o.trimmed["results"][0]["source_path"], "docs/intro.md");
+        assert!(o.structured["results"][0].get("scores").is_some());
+        assert_eq!(o.next_actions[0].tool, "get_chunk");
+        assert_eq!(o.next_actions[0].arguments["id"], "1f39");
+        let t = o.telemetry.unwrap();
+        assert_eq!(t.result_count, 1);
+        assert_eq!(t.corpus_model.as_deref(), Some("voyage-code-3@1"));
+        assert_eq!(t.top_attribution.as_deref(), Some("foundation"));
+        assert_eq!(t.top_source.as_deref(), Some("Compact Docs"));
+        assert_eq!(t.reranker_used.as_deref(), Some("bge-reranker-base"));
+    }
 
     #[test]
     fn outcome_renders_summary_then_fenced_json_and_structured() {
