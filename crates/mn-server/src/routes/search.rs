@@ -1271,7 +1271,7 @@ fn date_to_dt(d: time::Date) -> time::OffsetDateTime {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_queries, QueryPair, SearchMode, SearchRequest, ScoredCandidate, SortBy};
+    use super::{normalize_queries, QueryPair, ScoredCandidate, SearchMode, SearchRequest, SortBy};
     use mn_core::provenance::Attribution;
     use mn_core::scoring::{ConfidenceFactors, RelevanceSource, ScoreResult};
     use mn_retrieval::filters::{NumericRange, SearchFilters, SetMatch};

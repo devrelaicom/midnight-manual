@@ -489,7 +489,10 @@ impl TryFrom<ChunkWithContextRow> for ChunkWithContext {
                 kind: doc_kind,
                 provenance: r.d_provenance,
             },
-            source: SourceSummary { slug: r.s_slug, display_name: r.s_display_name },
+            source: SourceSummary {
+                slug: r.s_slug,
+                display_name: r.s_display_name,
+            },
         })
     }
 }
