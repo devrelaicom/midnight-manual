@@ -1,13 +1,11 @@
 -- 0005 — telemetry schema (Story 11, D27).
 --
 -- telemetry_event_raw is auto-deleted after MIDNIGHT_MANUAL_TELEMETRY_RAW_RETENTION_DAYS
--- (default 90; raised from FR-110's documented default of 7 — the
--- telemetry_search_daily rollup preserves the signal long-term, and 90 days of
--- raw rows provides a useful granular window) via the sweep job in mn-server.
--- telemetry_aggregate_daily is retained indefinitely.
+-- (default 7; FR-110) via the sweep job in mn-server. telemetry_aggregate_daily
+-- is retained indefinitely.
 
 -- ============================================================================
--- telemetry_event_raw: per-event rows, rolling 90-day retention (default)
+-- telemetry_event_raw: per-event rows, rolling 7-day retention
 -- ============================================================================
 CREATE TABLE telemetry_event_raw (
     id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
