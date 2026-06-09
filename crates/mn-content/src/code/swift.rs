@@ -42,6 +42,7 @@ impl Chunker for SwiftChunker {
             cfg,
             &tree_sitter_swift::LANGUAGE.into(),
             swift_kind_table(),
+            "//",
         )
     }
 }

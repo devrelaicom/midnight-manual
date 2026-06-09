@@ -30,6 +30,7 @@ impl Chunker for PythonChunker {
             cfg,
             &tree_sitter_python::LANGUAGE.into(),
             python_kind_table(),
+            "#",
         )
     }
 }

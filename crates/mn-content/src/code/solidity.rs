@@ -40,6 +40,7 @@ impl Chunker for SolidityChunker {
             cfg,
             &tree_sitter_solidity::LANGUAGE.into(),
             solidity_kind_table(),
+            "//",
         )
     }
 }

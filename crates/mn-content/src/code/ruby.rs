@@ -40,6 +40,7 @@ impl Chunker for RubyChunker {
             cfg,
             &tree_sitter_ruby::LANGUAGE.into(),
             ruby_kind_table(),
+            "#",
         )
     }
 }

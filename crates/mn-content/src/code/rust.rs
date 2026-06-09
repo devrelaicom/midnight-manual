@@ -50,6 +50,7 @@ impl Chunker for RustChunker {
             cfg,
             &tree_sitter_rust::LANGUAGE.into(),
             rust_kind_table(),
+            "//",
         )
     }
 }
@@ -102,5 +103,28 @@ mod tests {
         let src = "fn broken( { { { unterminated\n".repeat(40);
         let chunks = RustChunker.chunk(&src, &ChunkerConfig::default()).unwrap();
         assert!(chunks.iter().any(|c| c.fallback_used));
+    }
+
+    #[test]
+    fn split_fn_interior_chunk_gets_breadcrumb() {
+        use std::fmt::Write as _;
+
+        let mut src = String::from("fn big(x: i32) -> i32 {\n");
+        for i in 0..60 {
+            writeln!(src, "    let v{i} = x + {i};").unwrap();
+        }
+        src.push_str("    x\n}\n");
+        let cfg = ChunkerConfig {
+            max_tokens: 40,
+            ..ChunkerConfig::default()
+        };
+        let chunks = RustChunker.chunk(&src, &cfg).unwrap();
+        assert!(
+            chunks
+                .iter()
+                .skip(1)
+                .any(|c| c.content.starts_with("// fn big(x: i32) -> i32")),
+            "an interior chunk should carry the wrapper breadcrumb"
+        );
     }
 }

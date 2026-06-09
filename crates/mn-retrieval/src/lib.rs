@@ -3,6 +3,7 @@
 //! Phase-4 lands the pure-logic core:
 //! - [`rrf`] — Reciprocal Rank Fusion with the canonical k=60 constant.
 //! - [`filters`] — typed shape for `POST /v1/search` filters with serde JSON round-tripping.
+//! - [`dedup`] — result-set overlap dedup over same-document chunk windows.
 //!
 //! The actual hybrid SQL (FTS + pgvector) lives next door in mn-server's query
 //! handlers; this crate keeps the pure functions on their own so they can be
@@ -10,6 +11,7 @@
 
 #![doc(html_root_url = "https://docs.rs/mn-retrieval/0.1.0")]
 
+pub mod dedup;
 pub mod facets;
 pub mod filters;
 pub mod rrf;

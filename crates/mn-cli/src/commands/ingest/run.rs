@@ -140,8 +140,9 @@ pub struct Args {
     #[arg(long, default_value_t = 400)]
     pub code_chunk_tokens: u32,
 
-    /// Soft minimum markdown chunk size in tokens (small sections are merged up to this).
-    #[arg(long, default_value_t = 128)]
+    /// Soft minimum markdown chunk size in tokens (small sections are merged up
+    /// to this; ~70% of the code-chunk budget).
+    #[arg(long, default_value_t = 280)]
     pub md_min_tokens: u32,
 
     /// Line-window fallback size (lines).
@@ -390,6 +391,7 @@ async fn run_inner(
         fallback_lines: args.code_chunk_lines,
         fallback_overlap_lines: args.code_chunk_overlap,
         max_file_bytes: args.max_file_size,
+        ..mn_content::chunk::ChunkerConfig::default()
     };
     let mut builder =
         PlanBuilder::new(&args.source_slug, SourceKind::DocsSite, &revision, PriorState::default())

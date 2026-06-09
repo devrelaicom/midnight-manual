@@ -28,6 +28,7 @@ impl Chunker for YamlChunker {
             cfg,
             &tree_sitter_yaml::LANGUAGE.into(),
             yaml_kind_table(),
+            "#",
         )
     }
 }

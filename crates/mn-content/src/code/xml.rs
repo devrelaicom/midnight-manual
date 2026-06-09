@@ -29,6 +29,7 @@ impl Chunker for XmlChunker {
             cfg,
             &tree_sitter_xml::LANGUAGE_XML.into(),
             xml_kind_table(),
+            "",
         )
     }
 }

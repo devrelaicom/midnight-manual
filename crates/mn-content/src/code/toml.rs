@@ -37,6 +37,7 @@ impl Chunker for TomlChunker {
             cfg,
             &tree_sitter_toml_ng::LANGUAGE.into(),
             toml_kind_table(),
+            "#",
         )
     }
 }

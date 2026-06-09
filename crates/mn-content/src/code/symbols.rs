@@ -101,6 +101,52 @@ pub fn first_symbol_start(
     }
 }
 
+/// Enclosing in-table symbol headers for the node at `byte_offset`, outermost
+/// first.
+///
+/// Each entry is `(node_start_byte, first_line)` where `first_line` is the
+/// symbol's opening source line — trimmed, with a trailing `{` removed.
+///
+/// Mirrors [`symbol_path_at`]'s descent but captures node geometry, so callers
+/// can tell which symbols a chunk *opens* (`node_start == chunk start`) from
+/// those it is merely *inside* (`node_start < chunk start`).
+#[must_use]
+pub fn enclosing_symbol_headers(
+    tree: &tree_sitter::Tree,
+    src: &str,
+    byte_offset: usize,
+    table: KindTable,
+) -> Vec<(usize, String)> {
+    let mut headers = Vec::new();
+    let mut node = tree.root_node();
+    loop {
+        if table.iter().any(|e| e.node_kind == node.kind()) {
+            let start = node.start_byte();
+            let line_end = src[start..].find('\n').map_or(src.len(), |off| start + off);
+            let first_line = src
+                .get(start..line_end)
+                .unwrap_or_default()
+                .trim()
+                .trim_end_matches('{')
+                .trim_end()
+                .to_string();
+            headers.push((start, first_line));
+        }
+        let next = {
+            let mut cursor = node.walk();
+            let found = node
+                .named_children(&mut cursor)
+                .find(|c| c.start_byte() <= byte_offset && byte_offset < c.end_byte());
+            found
+        };
+        match next {
+            Some(child) => node = child,
+            None => break,
+        }
+    }
+    headers
+}
+
 fn node_name(node: tree_sitter::Node<'_>, src: &str, field: Option<&str>) -> Option<String> {
     let n = if let Some(f) = field {
         node.child_by_field_name(f)?
@@ -150,5 +196,22 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![("impl", "Foo"), ("fn", "bar")]
         );
+    }
+
+    #[test]
+    fn enclosing_headers_capture_signature_lines() {
+        let src = "namespace Big {\n  function big(x: number): number {\n    return x;\n  }\n}\n";
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
+            .unwrap();
+        let tree = parser.parse(src, None).unwrap();
+        let off = src.find("return x").unwrap();
+        let table = crate::code::ts::ts_kind_table();
+        let headers = enclosing_symbol_headers(&tree, src, off, table);
+        let lines: Vec<&str> = headers.iter().map(|(_, l)| l.as_str()).collect();
+        assert_eq!(lines, vec!["namespace Big", "function big(x: number): number"]);
+        // Outermost first; node_start strictly ascending and < the offset.
+        assert!(headers[0].0 < headers[1].0 && headers[1].0 < off);
     }
 }

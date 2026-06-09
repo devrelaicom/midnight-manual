@@ -12,6 +12,8 @@
 //! Tokenization uses the real BPE tokenizer via `crate::tokens::count` so
 //! chunk-size gating matches what the embedder actually sees.
 
+use std::ops::Range;
+
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag};
 
 use crate::chunk::{Chunk, ChunkError, Chunker, ChunkerConfig};
@@ -89,13 +91,16 @@ impl Chunker for MarkdownChunker {
                 continue;
             }
             if crate::tokens::count(text) <= cfg.max_tokens {
+                // Expand the core section with a surrounding sentence window.
+                let (ws, we) = expand_window(body, seg.start, seg.end, cfg);
+                let content = &body[ws..we];
                 chunks.push(Chunk {
-                    content: text.to_owned(),
+                    content: content.to_owned(),
                     heading_path: seg.heading_path.clone(),
                     symbol_path: Vec::new(),
-                    start_byte: seg.start,
-                    end_byte: seg.end,
-                    token_count: crate::tokens::count(text),
+                    start_byte: ws,
+                    end_byte: we,
+                    token_count: crate::tokens::count(content),
                     chunk_index: 0, // filled in below
                     fallback_used: false,
                 });
@@ -282,6 +287,212 @@ fn token_window_split(
     }
 
     out
+}
+
+/// Split `region` into sentence-granular byte ranges (offsets relative to the
+/// start of `region`, usable directly as `&region[range]`).
+///
+/// Prose splits on `.`/`!`/`?` followed by whitespace or end-of-input, and at
+/// blank-line (paragraph) breaks. Fenced code blocks (```` ``` ````/`~~~`) and
+/// runs of table lines (`|…`) are emitted whole — never split. Whitespace-only
+/// spans are dropped; returned ranges are in document order.
+fn segment_sentences(region: &str) -> Vec<Range<usize>> {
+    let bytes = region.as_bytes();
+    let n = region.len();
+    let mut units: Vec<Range<usize>> = Vec::new();
+    let mut unit_start = 0usize;
+    let mut i = 0usize;
+
+    while i < n {
+        let line_start = i;
+        let line_end = region[i..].find('\n').map_or(n, |o| i + o);
+        let next_line = if line_end < n { line_end + 1 } else { n };
+        let trimmed = region[line_start..line_end].trim_start();
+
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            push_trimmed(region, &mut units, unit_start, line_start);
+            let fence = if trimmed.starts_with("```") {
+                "```"
+            } else {
+                "~~~"
+            };
+            let mut j = next_line;
+            let block_end = loop {
+                if j >= n {
+                    break n;
+                }
+                let jl_end = region[j..].find('\n').map_or(n, |o| j + o);
+                if region[j..jl_end].trim_start().starts_with(fence) {
+                    break jl_end;
+                }
+                j = if jl_end < n { jl_end + 1 } else { n };
+            };
+            units.push(line_start..block_end);
+            i = if block_end < n { block_end + 1 } else { n };
+            unit_start = i;
+            continue;
+        }
+
+        if trimmed.starts_with('|') {
+            push_trimmed(region, &mut units, unit_start, line_start);
+            let mut end = line_end;
+            let mut k = next_line;
+            while k < n {
+                let kl_end = region[k..].find('\n').map_or(n, |o| k + o);
+                if region[k..kl_end].trim_start().starts_with('|') {
+                    end = kl_end;
+                    k = if kl_end < n { kl_end + 1 } else { n };
+                } else {
+                    break;
+                }
+            }
+            units.push(line_start..end);
+            i = if end < n { end + 1 } else { n };
+            unit_start = i;
+            continue;
+        }
+
+        if trimmed.is_empty() {
+            push_trimmed(region, &mut units, unit_start, line_start);
+            i = next_line;
+            unit_start = i;
+            continue;
+        }
+
+        // Prose line: split on sentence terminators (ASCII bytes, so multibyte
+        // UTF-8 is never matched mid-codepoint).
+        let mut p = line_start;
+        while p < line_end {
+            let b = bytes[p];
+            if (b == b'.' || b == b'!' || b == b'?')
+                && (p + 1 >= line_end || bytes[p + 1].is_ascii_whitespace())
+            {
+                push_trimmed(region, &mut units, unit_start, p + 1);
+                unit_start = p + 1;
+            }
+            p += 1;
+        }
+        i = next_line;
+    }
+    push_trimmed(region, &mut units, unit_start, n);
+    units
+}
+
+/// Push `[start, end)` with surrounding whitespace trimmed off; skip if empty.
+fn push_trimmed(region: &str, units: &mut Vec<Range<usize>>, start: usize, end: usize) {
+    if start >= end || end > region.len() {
+        return;
+    }
+    let slice = &region[start..end];
+    let s = start + (slice.len() - slice.trim_start().len());
+    let e = end - (slice.len() - slice.trim_end().len());
+    if s < e {
+        units.push(s..e);
+    }
+}
+
+/// `round(pct * max)` as a token count.
+// Budgets are coarse token counts: sub-token precision is irrelevant
+// (`cast_precision_loss` on `u32 -> f32`) and the value is clamped non-negative
+// before the narrowing cast (`cast_possible_truncation` / `cast_sign_loss` on
+// `f32 -> u32`), so all three pedantic cast lints are allowed.
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
+fn pct_tokens(pct: f32, max: u32) -> u32 {
+    (pct * max as f32).round().max(0.0) as u32
+}
+
+/// Grow one side of the window by whole sentence units (ordered nearest-core
+/// first) until `limit` tokens or the side is exhausted, never letting the
+/// window exceed `cap`. Updates `ws`/`we`/`idx` in place.
+// The 8 params reflect the in-place mutation design (window bounds + per-side
+// cursor passed `&mut`); collapsing them into a struct would obscure the call
+// sites more than it helps.
+#[allow(clippy::too_many_arguments)]
+fn grow_side(
+    body: &str,
+    units: &[Range<usize>],
+    idx: &mut usize,
+    before: bool,
+    ws: &mut usize,
+    we: &mut usize,
+    limit: u32,
+    cap: u32,
+) {
+    loop {
+        if crate::tokens::count(&body[*ws..*we]) >= limit {
+            break;
+        }
+        let Some(r) = units.get(*idx) else { break };
+        let (nws, nwe) = if before { (r.start, *we) } else { (*ws, r.end) };
+        if crate::tokens::count(&body[nws..nwe]) > cap {
+            break; // atomic unit would breach the cap → stop this side
+        }
+        *ws = nws;
+        *we = nwe;
+        *idx += 1;
+    }
+}
+
+/// Expand the core byte range `[core_start, core_end)` with surrounding sentence
+/// context per the rolling-window policy. Returns the (possibly unchanged)
+/// expanded byte range. Smaller side first to the switch point, then the larger
+/// side to the target; budgets in BPE tokens.
+fn expand_window(
+    body: &str,
+    core_start: usize,
+    core_end: usize,
+    cfg: &ChunkerConfig,
+) -> (usize, usize) {
+    let max = cfg.max_tokens;
+    let switch = pct_tokens(cfg.window_switch_pct, max);
+    let target = pct_tokens(cfg.window_target_pct, max);
+    let cap = pct_tokens(cfg.window_cap_pct, max);
+    debug_assert!(switch <= target && target <= cap);
+
+    if crate::tokens::count(&body[core_start..core_end]) >= target {
+        return (core_start, core_end);
+    }
+
+    // `before` nearest-core first = reverse document order; `after` already is.
+    let before: Vec<Range<usize>> = segment_sentences(&body[..core_start])
+        .into_iter()
+        .rev()
+        .collect();
+    let after: Vec<Range<usize>> = segment_sentences(&body[core_end..])
+        .into_iter()
+        .map(|r| (core_end + r.start)..(core_end + r.end))
+        .collect();
+
+    let before_avail = crate::tokens::count(&body[..core_start]);
+    let after_avail = crate::tokens::count(&body[core_end..]);
+    let smaller_is_before = before_avail <= after_avail;
+
+    let mut ws = core_start;
+    let mut we = core_end;
+    let mut bi = 0usize;
+    let mut ai = 0usize;
+
+    let core_tokens = crate::tokens::count(&body[core_start..core_end]);
+    // Phase 1: smaller side to the switch point (skipped when core ≥ switch).
+    if core_tokens < switch {
+        if smaller_is_before {
+            grow_side(body, &before, &mut bi, true, &mut ws, &mut we, switch, cap);
+        } else {
+            grow_side(body, &after, &mut ai, false, &mut ws, &mut we, switch, cap);
+        }
+    }
+    // Phase 2: the larger side to the target.
+    if smaller_is_before {
+        grow_side(body, &after, &mut ai, false, &mut ws, &mut we, target, cap);
+    } else {
+        grow_side(body, &before, &mut bi, true, &mut ws, &mut we, target, cap);
+    }
+
+    (ws, we)
 }
 
 #[cfg(test)]
@@ -526,10 +737,14 @@ mod tests {
                   ## A\n\nshort\n\n### a1\n\nalso short\n";
         let chunks = MarkdownChunker.chunk(md, &cfg).unwrap();
 
+        // The rolling window can pad several chunks with neighbouring text, so
+        // `## A` may appear in more than one chunk's `content`. Locate the run
+        // anchored at `## A` by the property under test — its ancestor path is
+        // the H1 `Top`, NOT the preamble path `[]` carried by the `# Top` run.
         let a_chunk = chunks
             .iter()
-            .find(|c| c.content.contains("## A"))
-            .expect("a chunk containing `## A`");
+            .find(|c| c.heading_path == ["Top"] && c.content.contains("## A"))
+            .expect("a chunk anchored at `## A` with ancestor path [\"Top\"]");
         assert!(
             a_chunk.content.contains("### a1"),
             "## A should merge with ### a1: {:?}",
@@ -553,5 +768,143 @@ mod tests {
             assert!(c.end_byte <= md.len(), "end_byte past body len: {c:?}");
             assert_eq!(c.chunk_index, u32::try_from(i).unwrap());
         }
+    }
+
+    // ── rolling-window expansion tests ─────────────────────────────────────────
+
+    fn window_cfg() -> ChunkerConfig {
+        ChunkerConfig {
+            max_tokens: 60,
+            min_tokens: 1,
+            ..ChunkerConfig::default()
+        }
+    }
+
+    #[test]
+    fn windowed_chunk_spans_neighbours_but_stays_bounded() {
+        // Ten headed sections, coalescing OFF (min_tokens=1) so each section is
+        // its own core, and the doc is far larger than the cap. This genuinely
+        // exercises `expand_window`: WITHOUT windowing each chunk holds only its
+        // own section (no cross-section co-occurrence), so the first assertion
+        // would fail. WITH windowing a core pulls in adjacent sections — but the
+        // cap keeps the window local, so no chunk spans the whole document.
+        let markers = [
+            "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india",
+            "juliet",
+        ];
+        let mut md = String::new();
+        for &m in &markers {
+            md.push_str("## Section ");
+            md.push_str(m);
+            md.push_str("\n\nThis section ");
+            md.push_str(m);
+            md.push_str(" discusses the ");
+            md.push_str(m);
+            md.push_str(" topic in a few words for testing.\n\n");
+        }
+        let cfg = ChunkerConfig {
+            max_tokens: 60,
+            min_tokens: 1,
+            ..ChunkerConfig::default()
+        };
+        let chunks = MarkdownChunker.chunk(&md, &cfg).unwrap();
+
+        // Windowing produced at least one chunk spanning `echo` + an immediate
+        // neighbour — impossible without the rolling window under min_tokens=1.
+        assert!(
+            chunks.iter().any(|c| c.content.contains("echo")
+                && (c.content.contains("delta") || c.content.contains("foxtrot"))),
+            "expected a windowed chunk spanning echo + a neighbour: {:#?}",
+            chunks.iter().map(|c| c.content.trim()).collect::<Vec<_>>()
+        );
+        // ...but the cap keeps the window local: no chunk spans the whole doc.
+        assert!(
+            chunks
+                .iter()
+                .all(|c| !(c.content.contains("alpha") && c.content.contains("juliet"))),
+            "window must be bounded by the cap, not the entire document"
+        );
+        for c in &chunks {
+            assert!(c.token_count <= cfg.max_tokens, "chunk over cap: {}", c.token_count);
+        }
+    }
+
+    #[test]
+    fn expand_grows_both_sides_when_centered() {
+        let s = "alpha beta gamma delta. ".repeat(40);
+        let body = s.as_str();
+        let core_start = body.len() / 2;
+        let core_end = (core_start + 20).min(body.len());
+        let (ws, we) = expand_window(body, core_start, core_end, &window_cfg());
+        assert!(ws < core_start, "should pull `before` context");
+        assert!(we > core_end, "should pull `after` context");
+        assert!(crate::tokens::count(&body[ws..we]) <= 60, "must not exceed the cap");
+    }
+
+    #[test]
+    fn expand_is_noop_when_core_already_at_target() {
+        let body = "one two three four five. ".repeat(40);
+        let big_end = body.len();
+        let (ws, we) = expand_window(&body, 0, big_end, &window_cfg());
+        assert_eq!((ws, we), (0, big_end));
+    }
+
+    #[test]
+    fn expand_at_document_start_only_grows_forward() {
+        let body = "aa bb cc dd ee ff. ".repeat(40);
+        let core_end = 18.min(body.len());
+        let (ws, we) = expand_window(&body, 0, core_end, &window_cfg());
+        assert_eq!(ws, 0, "no `before` text available at doc start");
+        assert!(we > core_end, "must still grow forward");
+    }
+
+    #[test]
+    fn segments_prose_into_sentences() {
+        let r = "First one. Second two! Third three?";
+        let units: Vec<&str> = segment_sentences(r).iter().map(|x| &r[x.clone()]).collect();
+        assert_eq!(units, vec!["First one.", "Second two!", "Third three?"]);
+    }
+
+    #[test]
+    fn fenced_code_block_is_one_atomic_unit() {
+        let r = "Intro line.\n\n```rust\nfn a() {}\nfn b() {}\n```\n\nOutro line.";
+        let units: Vec<&str> = segment_sentences(r).iter().map(|x| &r[x.clone()]).collect();
+        assert!(units
+            .iter()
+            .any(|u| u.starts_with("```rust") && u.contains("fn b() {}")));
+        assert!(units.contains(&"Intro line."));
+        assert!(units.contains(&"Outro line."));
+    }
+
+    #[test]
+    fn table_rows_group_into_one_unit() {
+        let r = "Before.\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\nAfter.";
+        let units: Vec<&str> = segment_sentences(r).iter().map(|x| &r[x.clone()]).collect();
+        assert!(units
+            .iter()
+            .any(|u| u.starts_with("| a | b |") && u.contains("| 1 | 2 |")));
+    }
+
+    #[test]
+    fn empty_region_yields_no_units() {
+        assert!(segment_sentences("   \n\n  ").is_empty());
+    }
+
+    #[test]
+    fn unterminated_fence_consumes_to_eof() {
+        // A fence with no closing ``` must be emitted whole to EOF, with no
+        // tail loss — pins the EOF-consumption branch.
+        let r = "Before.\n\n```rust\nfn a() {}\nfn b() {}";
+        let units: Vec<&str> = segment_sentences(r).iter().map(|x| &r[x.clone()]).collect();
+        assert_eq!(units, vec!["Before.", "```rust\nfn a() {}\nfn b() {}"]);
+    }
+
+    #[test]
+    fn multibyte_terminators_do_not_split_or_panic() {
+        // Full-width 。 is multibyte and must NOT split (only ASCII .!? do);
+        // pins UTF-8 boundary safety against a mid-codepoint slice panic.
+        let r = "これは。テスト。Done.";
+        let units: Vec<&str> = segment_sentences(r).iter().map(|x| &r[x.clone()]).collect();
+        assert_eq!(units, vec!["これは。テスト。Done."]);
     }
 }

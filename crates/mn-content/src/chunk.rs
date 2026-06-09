@@ -29,9 +29,20 @@ pub struct Chunk {
 pub struct ChunkerConfig {
     /// Max chunk size in BPE tokens before splitting.
     pub max_tokens: u32,
-    /// Soft minimum chunk size in BPE tokens. Adjacent small markdown sections are
-    /// merged up to this target (never exceeding `max_tokens`). Markdown-only.
+    /// Soft minimum chunk size in BPE tokens — the markdown coalescing target
+    /// AND the core-body floor (~70% of `max_tokens`) the rolling window pads
+    /// out from. Adjacent small markdown sections merge up to this. Markdown-only.
     pub min_tokens: u32,
+    /// Rolling-window: fill the smaller side up to this fraction of `max_tokens`
+    /// before switching sides. Markdown-only.
+    pub window_switch_pct: f32,
+    /// Rolling-window: final fill target, as a fraction of `max_tokens`.
+    pub window_target_pct: f32,
+    /// Rolling-window: hard cap, as a fraction of `max_tokens` (never exceeded).
+    pub window_cap_pct: f32,
+    /// Code coalescing floor in BPE tokens: adjacent same-scope code chunks merge
+    /// up to this. Code-only.
+    pub code_min_tokens: u32,
     /// Line-window fallback size (lines).
     pub fallback_lines: u32,
     /// Line-window fallback overlap (lines).
@@ -44,7 +55,11 @@ impl Default for ChunkerConfig {
     fn default() -> Self {
         Self {
             max_tokens: 400,
-            min_tokens: 128,
+            min_tokens: 280,
+            window_switch_pct: 0.80,
+            window_target_pct: 0.90,
+            window_cap_pct: 1.00,
+            code_min_tokens: 64,
             fallback_lines: 60,
             fallback_overlap_lines: 20,
             max_file_bytes: 10 * 1024 * 1024,
@@ -82,7 +97,13 @@ mod tests {
     fn default_config_is_token_budgeted() {
         let c = ChunkerConfig::default();
         assert_eq!(c.max_tokens, 400);
-        assert_eq!(c.min_tokens, 128);
+        assert_eq!(c.min_tokens, 280);
+        // Bit-exact comparison: these are literal default constants, and
+        // `clippy::float_cmp` (denied in CI) rejects `==` on floats.
+        assert_eq!(c.window_switch_pct.to_bits(), 0.80_f32.to_bits());
+        assert_eq!(c.window_target_pct.to_bits(), 0.90_f32.to_bits());
+        assert_eq!(c.window_cap_pct.to_bits(), 1.00_f32.to_bits());
+        assert_eq!(c.code_min_tokens, 64);
         assert_eq!(c.fallback_lines, 60);
         assert_eq!(c.fallback_overlap_lines, 20);
         assert_eq!(c.max_file_bytes, 10 * 1024 * 1024);
