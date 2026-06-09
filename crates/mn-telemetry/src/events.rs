@@ -88,6 +88,27 @@ pub enum EventPayload {
         rerank_on: bool,
         /// Coarse outcome.
         outcome: Outcome,
+        /// Corpus embedding model id (search only).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        corpus_model: Option<String>,
+        /// Reranker that actually ran (search only; `None` when rerank was off).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reranker_used: Option<String>,
+        /// Coarse confidence bucket of the top result (search only).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        top_confidence: Option<String>,
+        /// Attribution tier of the top result (search only).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        top_attribution: Option<String>,
+        /// Display name of the top result's source (search only).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        top_source: Option<String>,
+        /// Count dropped below the confidence threshold (search only).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filtered_by_confidence: Option<u32>,
+        /// Count removed by dedup (search only).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        deduplicated_count: Option<u32>,
     },
     /// One top-level CLI subcommand completed.
     CliCommand {
@@ -290,6 +311,13 @@ mod tests {
                     model_state: ModelState::Ready,
                     rerank_on: true,
                     outcome: Outcome::Ok,
+                    corpus_model: None,
+                    reranker_used: None,
+                    top_confidence: None,
+                    top_attribution: None,
+                    top_source: None,
+                    filtered_by_confidence: None,
+                    deduplicated_count: None,
                 },
                 "mcp_tool_call",
             ),
@@ -388,5 +416,56 @@ mod tests {
         .with_request_id("req-abc");
         let v = serde_json::to_value(&e).unwrap();
         assert_eq!(v["request_id"], "req-abc");
+    }
+
+    #[test]
+    fn mcp_tool_call_serializes_new_search_fields() {
+        let e = Event::new(
+            Component::Mcp,
+            "0.1.0",
+            EventPayload::McpToolCall {
+                tool_name: McpToolName::Search,
+                latency_ms: 12,
+                result_count: 3,
+                model_state: ModelState::Ready,
+                rerank_on: true,
+                outcome: Outcome::Ok,
+                corpus_model: Some("voyage-code-3@1".into()),
+                reranker_used: Some("bge-reranker-base".into()),
+                top_confidence: Some("high".into()),
+                top_attribution: Some("foundation".into()),
+                top_source: Some("Compact Docs".into()),
+                filtered_by_confidence: Some(0),
+                deduplicated_count: Some(0),
+            },
+        );
+        let v = serde_json::to_value(&e).unwrap();
+        assert_eq!(v["payload"]["corpus_model"], "voyage-code-3@1");
+        assert_eq!(v["payload"]["top_source"], "Compact Docs");
+    }
+
+    #[test]
+    fn mcp_tool_call_omits_absent_search_fields_for_other_tools() {
+        let e = Event::new(
+            Component::Mcp,
+            "0.1.0",
+            EventPayload::McpToolCall {
+                tool_name: McpToolName::GetChunk,
+                latency_ms: 1,
+                result_count: 0,
+                model_state: ModelState::Missing,
+                rerank_on: false,
+                outcome: Outcome::Ok,
+                corpus_model: None,
+                reranker_used: None,
+                top_confidence: None,
+                top_attribution: None,
+                top_source: None,
+                filtered_by_confidence: None,
+                deduplicated_count: None,
+            },
+        );
+        let v = serde_json::to_value(&e).unwrap();
+        assert!(v["payload"].get("corpus_model").is_none());
     }
 }

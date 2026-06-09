@@ -254,6 +254,13 @@ async fn dispatch_tool(id: RequestId, params: ToolCallParams, state: &ServerStat
                     model_state: ModelState::Missing,
                     rerank_on,
                     outcome,
+                    corpus_model: None,
+                    reranker_used: None,
+                    top_confidence: None,
+                    top_attribution: None,
+                    top_source: None,
+                    filtered_by_confidence: None,
+                    deduplicated_count: None,
                 },
             ))
             .await;
