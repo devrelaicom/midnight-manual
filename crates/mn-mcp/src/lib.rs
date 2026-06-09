@@ -28,6 +28,7 @@ pub mod cloud_client;
 pub mod prompts;
 pub mod protocol;
 pub mod render;
+pub mod schemas;
 pub mod server;
 pub mod tools;
 pub mod transport;
