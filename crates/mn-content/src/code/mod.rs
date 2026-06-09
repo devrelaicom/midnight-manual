@@ -194,7 +194,7 @@ fn common_prefix_len(a: &[SymbolSegment], b: &[SymbolSegment]) -> usize {
 /// their following sibling/child while leaving distinct top-level symbols (no
 /// shared named scope) separate. Merged runs keep the FIRST chunk's
 /// `symbol_path` and span `[first.start, last.end)`.
-fn coalesce_code(body: &str, chunks: &[Chunk], cfg: &ChunkerConfig) -> Vec<Chunk> {
+pub(crate) fn coalesce_code(body: &str, chunks: &[Chunk], cfg: &ChunkerConfig) -> Vec<Chunk> {
     let min = cfg.code_min_tokens;
     let max = cfg.max_tokens;
     let mut out: Vec<Chunk> = Vec::new();

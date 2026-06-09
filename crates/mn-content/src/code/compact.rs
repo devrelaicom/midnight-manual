@@ -45,7 +45,6 @@ impl Chunker for CompactChunker {
             if content.trim().is_empty() {
                 continue;
             }
-            let idx = u32::try_from(chunks.len()).unwrap_or(u32::MAX);
             chunks.push(Chunk {
                 token_count: crate::tokens::count(&content),
                 symbol_path: symbol_path_for(&root, r.start, r.end),
@@ -53,12 +52,41 @@ impl Chunker for CompactChunker {
                 heading_path: Vec::new(),
                 start_byte: r.start,
                 end_byte: r.end,
-                chunk_index: idx,
+                chunk_index: 0,
                 fallback_used: false,
             });
         }
         if chunks.is_empty() {
             return LineWindowChunker.chunk(body, cfg);
+        }
+
+        // Pass A: fold tiny same-scope fragments (shared with the tree-sitter path).
+        let mut chunks = crate::code::coalesce_code(body, &chunks, cfg);
+
+        // Pass B: prepend an enclosing-symbol breadcrumb to interior chunks of a
+        // split symbol (those that do not open the symbol they sit inside).
+        for c in &mut chunks {
+            let headers = enclosing_symbol_headers(&root, body, c.start_byte);
+            let interior: Vec<&str> = headers
+                .iter()
+                .filter(|(node_start, _)| *node_start < c.start_byte)
+                .map(|(_, line)| line.as_str())
+                .filter(|l| !l.is_empty())
+                .collect();
+            if interior.is_empty() {
+                continue;
+            }
+            // Intentional content/byte divergence (same as the tree-sitter path):
+            // the breadcrumb makes `content` longer than `body[start..end]` and may
+            // nudge an interior chunk slightly past `max_tokens` (soft budget for code).
+            let crumb = format!("// {} … (continued)\n", interior.join(" > "));
+            c.content = format!("{crumb}{}", c.content);
+            c.token_count = crate::tokens::count(&c.content);
+        }
+
+        // Renumber after all transforms.
+        for (i, c) in chunks.iter_mut().enumerate() {
+            c.chunk_index = u32::try_from(i).unwrap_or(u32::MAX);
         }
         Ok(chunks)
     }
@@ -234,6 +262,51 @@ fn symbol_path_at(root: &SyntaxNode, offset: usize) -> Vec<SymbolSegment> {
     path
 }
 
+/// Enclosing named-item headers for the item at `offset`, outermost first.
+/// Each entry is `(header_start_byte, first_line)` with the line trimmed and a
+/// trailing `{` removed — the Compact-CST analogue of the tree-sitter
+/// `enclosing_symbol_headers`. Lets the breadcrumb pass tell which items a chunk
+/// is *inside* (`header_start < chunk start`) from the one it *opens* (`==`).
+///
+/// Unlike tree-sitter, rowan attaches leading whitespace/newline trivia to the
+/// FRONT of an item node, so `text_range().start()` points at that trivia, not
+/// the item's first real token. We advance past the leading whitespace before
+/// reading the header line, so the recorded byte and the captured line both
+/// reflect where the item's signature actually begins.
+fn enclosing_symbol_headers(root: &SyntaxNode, body: &str, offset: usize) -> Vec<(usize, String)> {
+    let mut headers = Vec::new();
+    let mut node = root.clone();
+    loop {
+        if item_segment(&node).is_some() {
+            let raw_start = usize::from(node.text_range().start());
+            let lead = body[raw_start..]
+                .find(|ch: char| !ch.is_whitespace())
+                .unwrap_or(0);
+            let start = raw_start + lead;
+            let line_end = body[start..]
+                .find('\n')
+                .map_or(body.len(), |off| start + off);
+            let first_line = body
+                .get(start..line_end)
+                .unwrap_or_default()
+                .trim()
+                .trim_end_matches('{')
+                .trim_end()
+                .to_string();
+            headers.push((start, first_line));
+        }
+        let next = node.children().find(|c| {
+            let r = c.text_range();
+            usize::from(r.start()) <= offset && offset < usize::from(r.end())
+        });
+        match next {
+            Some(c) => node = c,
+            None => break,
+        }
+    }
+    headers
+}
+
 /// Segments for every top-level named item beginning in `[start, end)`, in
 /// source order. Used to recover a path for a chunk that opens with preamble
 /// and may span several sibling items (e.g. a whole-file single chunk).
@@ -301,9 +374,12 @@ mod tests {
             .unwrap();
         assert!(!chunks.is_empty());
         assert!(chunks.iter().all(|c| !c.fallback_used));
-        // chunks reconstruct the bytes they claim
+        // chunks reconstruct the bytes they claim (a breadcrumb may prefix them)
         for c in &chunks {
-            assert_eq!(c.content, COUNTER[c.start_byte..c.end_byte]);
+            assert!(
+                c.content.ends_with(&COUNTER[c.start_byte..c.end_byte]),
+                "chunk content must end with its source slice"
+            );
         }
     }
 
@@ -367,9 +443,12 @@ mod tests {
         for w in chunks.windows(2) {
             assert!(w[0].end_byte <= w[1].start_byte);
         }
-        // byte-accurate
+        // byte-accurate (a breadcrumb may prefix the content)
         for c in &chunks {
-            assert_eq!(c.content, COUNTER[c.start_byte..c.end_byte]);
+            assert!(
+                c.content.ends_with(&COUNTER[c.start_byte..c.end_byte]),
+                "chunk content must end with its source slice"
+            );
         }
         assert!(chunks.iter().all(|c| !c.fallback_used));
     }
@@ -432,6 +511,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn split_compact_symbol_interior_chunk_gets_breadcrumb() {
+        // Tiny budget splits the nested circuit body across chunks; an interior
+        // chunk must carry the enclosing module/circuit signature as a `//`
+        // breadcrumb (Compact gets the same wrapper-context treatment as the
+        // tree-sitter languages).
+        let cfg = ChunkerConfig {
+            max_tokens: 8,
+            ..ChunkerConfig::default()
+        };
+        let chunks = CompactChunker.chunk(MODULE_NEST, &cfg).unwrap();
+        assert!(
+            chunks
+                .iter()
+                .any(|c| c.content.starts_with("//") && c.content.contains("circuit brad")),
+            "an interior chunk should carry the wrapper breadcrumb: {:#?}",
+            chunks
+                .iter()
+                .map(|c| c.content.lines().next().unwrap_or(""))
+                .collect::<Vec<_>>()
+        );
+    }
+
     use proptest::prelude::*;
 
     proptest! {
@@ -451,9 +553,9 @@ mod tests {
             for w in chunks.windows(2) {
                 prop_assert!(w[0].end_byte <= w[1].start_byte);
             }
-            // byte-accurate
+            // byte-accurate (a breadcrumb may prefix the content)
             for c in &chunks {
-                prop_assert_eq!(&c.content, &src[c.start_byte..c.end_byte]);
+                prop_assert!(c.content.ends_with(&src[c.start_byte..c.end_byte]));
             }
             // every non-whitespace byte is covered by some chunk
             for (i, b) in src.bytes().enumerate() {
