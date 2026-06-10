@@ -4,12 +4,13 @@ description: >-
   Advanced retrieval playbook for the Midnight Network documentation corpus.
   Use whenever searching, researching, or answering questions about Midnight,
   Compact, the Midnight SDK, or the corpus exposed by the midnight-manual MCP
-  server (search, facets, get_chunk*, get_document*, list_sources). Teaches
-  query modes (hybrid/vector/fts), per-facet filters with discovery and
-  fail-fast recovery, version- and freshness-matched retrieval to avoid stale
-  answers, plus HyDE, multi-query, step-back, symbol-aware code search, and
-  trust-weighted selection — so you find authoritative, version-matched answers
-  instead of firing one naive query.
+  server (search, advanced_search, facets, get_chunks, get_document,
+  list_sources). Teaches query modes (hybrid/vector/fts), multi-query fusion
+  with advanced_search, per-facet filters with discovery and fail-fast
+  recovery, version- and freshness-matched retrieval to avoid stale answers,
+  plus HyDE, multi-query, step-back, symbol-aware code search, and
+  trust-weighted selection — so you find authoritative, version-matched
+  answers instead of firing one naive query.
 metadata:
   source: midnight-manual
 ---
@@ -23,27 +24,62 @@ playbook for using it like a researcher.
 
 ## The tools you have
 
-- `search` — retrieval. Pass a single `query`, or a `queries` array (1–10) the
-  server fuses with Reciprocal Rank Fusion (k=60). Optional `mode`
-  (`hybrid` default | `vector` | `fts`), `rerank` (default on), and a typed
-  per-facet `filters` object. Every result carries `trust_score`, `confidence`,
-  `confidence_factors`, and `scores.matched_queries`.
-- `facets` — list the filterable facets, their types, whether they negate, and
-  the values present in the live corpus. **Call this before building `filters`.**
-- `get_chunk`, `get_chunk_next`, `get_chunk_prev`, `get_chunk_neighbors`,
-  `get_chunk_parents` — read around a hit in reading order, or walk up its
-  heading / structure tree.
-- `get_document`, `get_document_chunks` — pull a document's overview (chunk
-  skeleton: ids, positions, token counts) or a windowed slice of chunk bodies.
-- `list_sources` — enumerate corpus sources.
+Thirteen tools, four groups:
+
+**Search**
+- `search` — quick lookups: `{query, mode?, limit?}` and nothing else. One
+  query string, always reranked, no filters. Use when one plain question will
+  do.
+- `advanced_search` — the full-control surface and this skill's main subject:
+  `{queries: [1–10 strings], mode?, limit?, rerank? (default true), filters?}`.
+  Multi-query fusion (HyDE, expansion, step-back; RRF k=60), per-facet
+  filters, and the rerank toggle all live here. One query = a one-element
+  array.
+
+**Chunk reads**
+- `get_chunks` — fetch chunk bodies by id: `{ids: [1–20 uuids]}`. Feed it
+  `chunk_id` values straight from search results, and batch the top hits into
+  ONE call instead of fetching them one at a time. One id = a one-element
+  array.
+- `get_chunk_next` / `get_chunk_prev` — continue reading after / before a
+  chunk in reading order (`{id, count?}`).
+- `get_chunk_neighbors` — both sides of a hit in one call (`{id, count?}`).
+- `get_chunk_parents` — where a chunk sits in its source's structure:
+  `{parents: [{id, name, kind, document_id?}…], source}`. The document-kind
+  parent carries the `document_id` you can hand to `get_document`.
+
+**Document reads**
+- `get_document` — a document's metadata plus an ordered chunk *skeleton*
+  (ids, positions, token counts — no bodies). Size up a document before
+  reading it.
+- `get_document_chunks` — read the bodies window by window:
+  `{id, from?, limit?}`. There is no document-size cap; just page through.
+
+**Corpus discovery & diagnostics**
+- `list_sources` — paginated source catalog: `{cursor?, limit?,
+  created_after?, created_before?, kind?, retired?}` →
+  `{sources, total, next_cursor}`. Use it for `source_slug` values and to see
+  what material exists.
+- `facets` — call with no args for the filter-dimension overview (open-set
+  dimensions show value samples plus exact totals); call with
+  `{facet, cursor?, limit?}` to page the full value list of `source_slug` /
+  `language` / `tags` / `package`. **Call this before building `filters`.**
+- `status` — cloud reachability, auth identity + permission level, both limit
+  families (request rate, and embedding-token hourly/daily windows), Voyage
+  key validity, and reranker state. Call it when searches fail or error.
+- `install_search_skill` — (re)install this skill into the user's harness(es).
+
+There is no model-pulling step: the reranker loads lazily on the first
+reranked search (expect a one-time delay), and `status` reports its state.
 
 For the exact filter shapes, the full facet catalog, and mode semantics, read
 `references/filters-and-modes.md`. For combined recipes, read
 `references/advanced-techniques.md`.
 
-**Cost (D25):** a `search` call costs `max(1, distinct queries)` rate-limit
-tokens. Filters are free, and `mode` changes work/latency, not token cost —
-`fts` skips embedding entirely. Fan out deliberately, not reflexively.
+**Cost (D25):** an `advanced_search` call costs one rate-limit token per
+distinct query in `queries` (basic `search` is always one token). Filters are
+free, and `mode` changes work/latency, not token cost — `fts` skips embedding
+entirely. Fan out deliberately, not reflexively.
 
 ## Default loop
 
@@ -52,11 +88,14 @@ tokens. Filters are free, and `mode` changes work/latency, not token cost —
    `filters`.
 2. Pick a `mode` for the question shape (see *Pick a mode*).
 3. Formulate 1–3 queries with the techniques below — no more than the question
-   needs.
-4. `search` with your filters.
-5. Rank results by `trust_score` and `confidence_factors`; read the top few.
+   needs. One plain question → `search`; anything multi-query, filtered, or
+   rerank-tuned → `advanced_search`.
+4. Search.
+5. Rank results by `trust_score` and `confidence_factors`; batch-read the top
+   few with one `get_chunks` call.
 6. If a hit is promising but partial, navigate (`get_chunk_next` /
-   `get_chunk_parents` / `get_document_chunks`) instead of re-searching blindly.
+   `get_chunk_parents` / `get_document` → `get_document_chunks`) instead of
+   re-searching blindly.
 7. Refine with terms you just learned and search again. Stop when the top
    results converge and are version-matched.
 
@@ -72,7 +111,8 @@ tokens. Filters are free, and `mode` changes work/latency, not token cost —
 ## Match the user's version & freshness
 
 The corpus spans versions and eras; an unfiltered hit may be for the wrong
-toolchain. To avoid stale, confidently-wrong answers:
+toolchain. To avoid stale, confidently-wrong answers, use `advanced_search`
+filters:
 
 - Pin to the user's toolchain with `version_satisfies` on `language_target` /
   `sdk_dependency` (e.g. `{ "name": "compact", "version_satisfies": ">=0.23" }`
@@ -86,19 +126,25 @@ technique B in `references/advanced-techniques.md` for the staleness-diff move.
 
 ## Filter for precision, and self-correct
 
-Filters are per-facet: `{ "any_of": [...], "none_of": [...] }` for sets, bare
-bools, and `{after,before}` / `{min,max}` ranges. AND across facets, OR within
-`any_of`, exclude `none_of`.
+Filters live only on `advanced_search` and are per-facet:
+`{ "any_of": [...], "none_of": [...] }` for sets, bare bools, and
+`{after,before}` / `{min,max}` ranges. AND across facets, OR within `any_of`,
+exclude `none_of`.
 
 - **Discover before you filter.** A value that isn't in the corpus returns an
   empty set that masquerades as "no answer". `facets` shows what's really there.
-- **Recover from a 400.** A bad facet key/value returns a `400` with a
-  remediation pointing back at `facets`. Loop: read it → `facets` → fix → retry.
+- **Recover from a rejected filter.** A bad facet key/value is rejected
+  immediately with an error naming the offending facet. Loop: read it →
+  `facets` → fix → retry.
 - **Filter ladder.** Start tight; if results are too few, relax ONE facet at a
   time (least-load-bearing first — usually recency, then `verified`, then
   version) until results appear.
 
 ## Query techniques
+
+All multi-query patterns go through `advanced_search` (`queries` is an array
+even for one query). The reranker anchors on the FIRST query, so put the most
+user-facing formulation first.
 
 ### HyDE — when the question is short or jargon-light
 Draft a 1–2 sentence hypothetical answer and send it as an extra query beside
@@ -125,8 +171,9 @@ Scope with `filters.symbol` (`{kind?, name?}`) + `filters.kind: code`, ideally i
 vocabulary — discover the kinds from results, don't assume them.
 
 ### Retrieve-read-retrieve — when the first pass is close but partial
-Broad search → read the best hit and its neighbours → harvest precise terms →
-search again with them. Iterate; this is how you converge.
+Broad search → batch-read the best hits (`get_chunks`) and their neighbours →
+harvest precise terms → search again with them. Iterate; this is how you
+converge.
 
 ### Trust-weighted selection — always
 Prefer higher `trust_score`. Read `confidence_factors` (attribution,
@@ -139,17 +186,28 @@ question, pull from each, compare, and surface disagreement (noting which is
 more authoritative / version-matched) rather than silently picking one. See
 technique D (differential search) for the filtered version of this.
 
-## Reading the diagnostics
+## Reading results
 
-`search_metadata.per_query` reports per-query FTS / vector candidates and
-latency; each result's `scores.matched_queries` lists which of your queries
-pulled it in. Use them to see which formulation is working and drop the rest. In
-`fts` mode only the full-text half runs, so vector candidate counts are absent.
+- Every tool result carries `suggested_next_actions` — entries of
+  `{description, tool?, arguments?}`. They are suggestions, not required next
+  steps; trust the descriptions when deciding what (if anything) to run. An
+  entry without a `tool` is an action for the USER (e.g. restart the harness)
+  — relay it, don't attempt it.
+- `search_metadata.total_candidates` signals recall: a low count means the
+  corpus barely matched your wording — broaden with the multi-query techniques
+  above before concluding "no answer".
+- `search_metadata.per_query` reports per-query FTS / vector candidates and
+  latency; each `advanced_search` result's `scores.matched_queries` lists which
+  of your queries pulled it in. Use them to see which formulation is working
+  and drop the rest. In `fts` mode only the full-text half runs, so vector
+  candidate counts are absent.
 
 ## Going deeper
 
 - `references/filters-and-modes.md` — exact filter shapes, the full 17-facet
-  catalog, mode semantics, the validation/error catalog, and the `mnm` CLI flags.
+  catalog, mode semantics, `facets` / `list_sources` pagination, the
+  validation/error catalog, and the `mnm` CLI flags.
 - `references/advanced-techniques.md` — mode-tiered cost escalation,
   version+freshness precision, the discovery/self-correction loop and filter
-  ladder, and trust-stratified / differential / symbol-anchored recipes.
+  ladder, trust-stratified / differential / symbol-anchored recipes, and
+  efficient deep reading.
