@@ -170,8 +170,12 @@ async fn get_parents(
             return error::service_unavailable("chunk lookup failed", rid);
         }
     };
-    match node::parent_chain(&state.pool, parent_chunk.chunk.node_id).await {
-        Ok(chain) => Json(chain).into_response(),
+    match node::parent_chain_with_documents(&state.pool, parent_chunk.chunk.node_id).await {
+        Ok(chain) => Json(serde_json::json!({
+            "parents": chain,
+            "source": parent_chunk.source,
+        }))
+        .into_response(),
         Err(e) => {
             tracing::warn!(request_id = rid, error = %e, "parent_chain failed");
             error::service_unavailable("parent-chain lookup failed", rid)
