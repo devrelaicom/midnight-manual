@@ -346,12 +346,9 @@ async fn dispatch_tool(id: RequestId, params: ToolCallParams, state: &ServerStat
 
 fn tool_name_for_event(name: &str) -> Option<McpToolName> {
     match name {
-        // TODO(task 21): map advanced_search to a dedicated
-        // McpToolName::AdvancedSearch variant once the telemetry schema grows one.
-        "search" | "advanced_search" => Some(McpToolName::Search),
-        // TODO(task 21): dedicated GetChunks variant once the telemetry schema
-        // grows one (interim mapping, same approach as advanced_search above).
-        "get_chunks" => Some(McpToolName::GetChunk),
+        "search" => Some(McpToolName::Search),
+        "advanced_search" => Some(McpToolName::AdvancedSearch),
+        "get_chunks" => Some(McpToolName::GetChunks),
         "get_chunk_next" => Some(McpToolName::GetChunkNext),
         "get_chunk_prev" => Some(McpToolName::GetChunkPrev),
         "get_chunk_neighbors" => Some(McpToolName::GetChunkNeighbors),

@@ -188,8 +188,10 @@ impl EventPayload {
 pub enum McpToolName {
     /// `search` tool.
     Search,
-    /// `get_chunk` tool.
-    GetChunk,
+    /// `advanced_search` tool.
+    AdvancedSearch,
+    /// `get_chunks` tool.
+    GetChunks,
     /// `get_chunk_next` tool.
     GetChunkNext,
     /// `get_chunk_prev` tool.
@@ -221,6 +223,8 @@ pub enum CliCommandName {
     Version,
     /// `mnm doctor`
     Doctor,
+    /// `mnm status`
+    Status,
     /// `mnm config` (any sub).
     Config,
     /// `mnm sources` (any sub).
@@ -370,6 +374,26 @@ mod tests {
             serde_json::to_value(CliCommandName::Sources).unwrap(),
             serde_json::Value::String("sources".into())
         );
+        assert_eq!(
+            serde_json::to_value(CliCommandName::Status).unwrap(),
+            serde_json::Value::String("status".into())
+        );
+    }
+
+    #[test]
+    fn mcp_tool_name_serializes_snake_case() {
+        assert_eq!(
+            serde_json::to_value(McpToolName::AdvancedSearch).unwrap(),
+            serde_json::Value::String("advanced_search".into())
+        );
+        assert_eq!(
+            serde_json::to_value(McpToolName::GetChunks).unwrap(),
+            serde_json::Value::String("get_chunks".into())
+        );
+        assert_eq!(
+            serde_json::to_value(McpToolName::InstallSearchSkill).unwrap(),
+            serde_json::Value::String("install_search_skill".into())
+        );
     }
 
     #[test]
@@ -446,7 +470,7 @@ mod tests {
             Component::Mcp,
             "0.1.0",
             EventPayload::McpToolCall {
-                tool_name: McpToolName::GetChunk,
+                tool_name: McpToolName::GetChunks,
                 latency_ms: 1,
                 result_count: 0,
                 model_state: ModelState::Missing,

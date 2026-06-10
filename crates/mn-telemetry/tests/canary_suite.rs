@@ -140,6 +140,79 @@ fn mcp_tool_call_search_fields_do_not_leak_canary() {
 }
 
 #[test]
+fn mcp_tool_call_advanced_search_fields_do_not_leak_canary() {
+    use mn_telemetry::events::{McpToolName, Outcome};
+    // A canary value is referenced here to document intent — it must NOT flow into any field.
+    let _ = CANARY_STRINGS[0].value;
+    let event = Event::new(
+        Component::Mcp,
+        "0.1.0",
+        EventPayload::McpToolCall {
+            tool_name: McpToolName::AdvancedSearch,
+            latency_ms: 5,
+            result_count: 1,
+            model_state: ModelState::Ready,
+            rerank_on: true,
+            outcome: Outcome::Ok,
+            corpus_model: Some("voyage-code-3@1".into()),
+            reranker_used: Some("bge-reranker-base".into()),
+            top_confidence: Some("high".into()),
+            top_attribution: Some("foundation".into()),
+            top_source: Some("Compact Docs".into()),
+            filtered_by_confidence: Some(0),
+            deduplicated_count: Some(0),
+        },
+    );
+    let v = serde_json::to_value(&event).expect("serialize");
+    assert_eq!(v["payload"]["tool_name"], "advanced_search");
+    let wire = serde_json::to_string(&event).expect("serialize");
+    canary::assert_no_canary_in(&wire);
+}
+
+#[test]
+fn mcp_tool_call_get_chunks_fields_do_not_leak_canary() {
+    use mn_telemetry::events::{McpToolName, Outcome};
+    // A canary value is referenced here to document intent — it must NOT flow into any field.
+    let _ = CANARY_STRINGS[0].value;
+    let event = Event::new(
+        Component::Mcp,
+        "0.1.0",
+        EventPayload::McpToolCall {
+            tool_name: McpToolName::GetChunks,
+            latency_ms: 5,
+            result_count: 3,
+            model_state: ModelState::Ready,
+            rerank_on: false,
+            outcome: Outcome::Ok,
+            corpus_model: None,
+            reranker_used: None,
+            top_confidence: None,
+            top_attribution: None,
+            top_source: None,
+            filtered_by_confidence: None,
+            deduplicated_count: None,
+        },
+    );
+    let v = serde_json::to_value(&event).expect("serialize");
+    assert_eq!(v["payload"]["tool_name"], "get_chunks");
+    // Non-search tools must not carry the free-text retrieval-quality fields.
+    for field in [
+        "corpus_model",
+        "reranker_used",
+        "top_confidence",
+        "top_attribution",
+        "top_source",
+    ] {
+        assert!(
+            v["payload"].get(field).is_none(),
+            "get_chunks event must not carry free-text field {field}"
+        );
+    }
+    let wire = serde_json::to_string(&event).expect("serialize");
+    canary::assert_no_canary_in(&wire);
+}
+
+#[test]
 fn current_log_output_does_not_contain_canaries() {
     // The aspirational form of FR-112 will drive every endpoint and tool
     // here with canary-laden inputs; in Phase 8a we have no telemetry call

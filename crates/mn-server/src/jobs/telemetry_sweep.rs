@@ -89,7 +89,7 @@ pub async fn sweep_once(pool: &PgPool, retention_days: i64) -> Result<SweepStats
              FROM telemetry_event_raw
              WHERE received_at < now() - make_interval(days => $1::int)
                AND event_type = 'mcp_tool_call'
-               AND fields->>'tool_name' = 'search'
+               AND fields->>'tool_name' IN ('search', 'advanced_search')
              GROUP BY 1, 2, 3, 4, 5, 6
          )
          INSERT INTO telemetry_search_daily (day, corpus_model, attribution, reranker, top_source, confidence_bucket, count)
