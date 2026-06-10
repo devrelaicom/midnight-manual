@@ -249,6 +249,7 @@ pub fn build_with_limiter(
 
     Ok(Router::new()
         .merge(crate::routes::health::router())
+        .merge(crate::routes::me::router())
         .merge(crate::routes::sources::router())
         .merge(crate::routes::models::router())
         .merge(crate::routes::search::router())
