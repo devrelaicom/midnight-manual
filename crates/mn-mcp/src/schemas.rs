@@ -66,7 +66,7 @@ pub fn neighbors_output_schema() -> Value {
     passthrough_object_schema()
 }
 
-/// Output schema for `get_document` / `get_document_full` / `get_document_chunks`.
+/// Output schema for `get_document` / `get_document_chunks`.
 pub fn document_output_schema() -> Value {
     passthrough_object_schema()
 }

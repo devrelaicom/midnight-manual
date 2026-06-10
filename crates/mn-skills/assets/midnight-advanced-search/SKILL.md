@@ -33,8 +33,8 @@ playbook for using it like a researcher.
 - `get_chunk`, `get_chunk_next`, `get_chunk_prev`, `get_chunk_neighbors`,
   `get_chunk_parents` — read around a hit in reading order, or walk up its
   heading / structure tree.
-- `get_document`, `get_document_full`, `get_document_chunks` — pull a whole
-  document or a windowed slice.
+- `get_document`, `get_document_chunks` — pull a document's overview (chunk
+  skeleton: ids, positions, token counts) or a windowed slice of chunk bodies.
 - `list_sources` — enumerate corpus sources.
 
 For the exact filter shapes, the full facet catalog, and mode semantics, read
@@ -56,7 +56,7 @@ tokens. Filters are free, and `mode` changes work/latency, not token cost —
 4. `search` with your filters.
 5. Rank results by `trust_score` and `confidence_factors`; read the top few.
 6. If a hit is promising but partial, navigate (`get_chunk_next` /
-   `get_chunk_parents` / `get_document_full`) instead of re-searching blindly.
+   `get_chunk_parents` / `get_document_chunks`) instead of re-searching blindly.
 7. Refine with terms you just learned and search again. Stop when the top
    results converge and are version-matched.
 

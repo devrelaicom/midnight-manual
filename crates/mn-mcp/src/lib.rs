@@ -7,8 +7,7 @@
 //!   local rerank).
 //! - Cloud reads (pass-through): `get_chunk`, `get_chunk_next`,
 //!   `get_chunk_prev`, `get_chunk_neighbors`, `get_chunk_parents`,
-//!   `get_document`, `get_document_full`, `get_document_chunks`,
-//!   `list_sources`.
+//!   `get_document`, `get_document_chunks`, `list_sources`.
 //! - Local install: `install_search_skill` (writes the advanced-search
 //!   `SKILL.md` into the user's AI harness(es)).
 

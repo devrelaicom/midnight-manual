@@ -62,12 +62,12 @@ async fn run_passthrough_id_maps_404() {
     let server = MockServer::start().await;
     let id = "22222222-2222-2222-2222-222222222222";
     Mock::given(method("GET"))
-        .and(path(format!("/v1/documents/{id}/full")))
+        .and(path(format!("/v1/documents/{id}")))
         .respond_with(ResponseTemplate::new(404).set_body_string("missing"))
         .mount(&server)
         .await;
     let client = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
-    let err = run_passthrough_id(&json!({"id": id}), &client, PassthroughKind::DocumentFull)
+    let err = run_passthrough_id(&json!({"id": id}), &client, PassthroughKind::Document)
         .await
         .unwrap_err();
     assert!(matches!(err, PassthroughError::NotFound(_)));
@@ -87,49 +87,6 @@ async fn run_passthrough_id_hits_document_endpoint() {
         .await
         .unwrap();
     assert_eq!(v["id"], id);
-}
-
-#[tokio::test]
-async fn run_passthrough_id_hits_document_full_endpoint() {
-    let server = MockServer::start().await;
-    let id = "11111111-1111-1111-1111-111111111101";
-    Mock::given(method("GET"))
-        .and(path(format!("/v1/documents/{id}/full")))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": id, "chunks": []})))
-        .mount(&server)
-        .await;
-    let client = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
-    let v = run_passthrough_id(&json!({"id": id}), &client, PassthroughKind::DocumentFull)
-        .await
-        .unwrap();
-    assert_eq!(v["chunks"].as_array().unwrap().len(), 0);
-}
-
-#[tokio::test]
-async fn run_passthrough_id_maps_document_full_412() {
-    let server = MockServer::start().await;
-    let id = "11111111-1111-1111-1111-111111111102";
-    Mock::given(method("GET"))
-        .and(path(format!("/v1/documents/{id}/full")))
-        .respond_with(ResponseTemplate::new(412).set_body_json(json!({
-            "error": "too_many_chunks",
-            "chunk_count": 1240,
-            "cap": 500,
-            "hint": "Use GET /v1/documents/.../chunks?from=K&limit=L (default L=20)",
-        })))
-        .mount(&server)
-        .await;
-    let client = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
-    let err = run_passthrough_id(&json!({"id": id}), &client, PassthroughKind::DocumentFull)
-        .await
-        .unwrap_err();
-    match err {
-        PassthroughError::TooManyChunks { chunk_count, cap, .. } => {
-            assert_eq!(chunk_count, 1240);
-            assert_eq!(cap, 500);
-        }
-        other => panic!("expected TooManyChunks, got {other:?}"),
-    }
 }
 
 #[tokio::test]
@@ -616,32 +573,6 @@ async fn dispatch_passthrough_not_found_produces_iserror_envelope() {
     assert_eq!(sc["error"]["retryable"], false);
     // next_actions still present so the agent can recover.
     assert!(sc["next_actions"].is_array());
-}
-
-/// `get_document_full` 412 `too_many_chunks` → `isError: true` envelope with
-/// `chunk_count`, `cap`, and a `get_document_chunks` next action.
-#[tokio::test]
-async fn dispatch_document_full_too_many_chunks_produces_iserror_envelope() {
-    use mn_mcp::render;
-    let failure = render::ToolFailure {
-        kind: render::ErrorKind::TooManyChunks,
-        message: "document has 1240 chunks (cap 500)".into(),
-        guidance: "Use get_document_chunks to page through the document.".into(),
-        details: json!({ "chunk_count": 1240, "cap": 500, "hint": "use /chunks endpoint" }),
-        next_actions: vec![render::NextAction {
-            tool: "get_document_chunks",
-            arguments: json!({ "from": 0, "limit": 20 }),
-        }],
-    };
-    let result = failure.into_result();
-    assert!(result.is_error);
-    let sc = result.structured_content.unwrap();
-    assert_eq!(sc["error"]["code"], "TOO_MANY_CHUNKS");
-    // Details merged into the error object.
-    assert_eq!(sc["error"]["chunk_count"], 1240);
-    assert_eq!(sc["error"]["cap"], 500);
-    // next_actions points at get_document_chunks.
-    assert_eq!(sc["next_actions"][0]["tool"], "get_document_chunks");
 }
 
 /// Verify that a successful `get_chunk` round-trip through the full

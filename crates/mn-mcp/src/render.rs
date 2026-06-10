@@ -395,7 +395,7 @@ pub fn project_parents(env: Value) -> ToolOutcome {
     ToolOutcome::new(summary, structured, trimmed, vec![])
 }
 
-/// `get_document` (DocumentOverview): Document flattened to top level; `source` nested; `chunk_ids` array.
+/// `get_document` (DocumentOverview): Document flattened to top level; `source` nested; `chunks` skeleton array.
 pub fn project_document_overview(env: Value) -> ToolOutcome {
     let path = env
         .get("source_path")
@@ -411,51 +411,15 @@ pub fn project_document_overview(env: Value) -> ToolOutcome {
         .unwrap_or("?")
         .to_owned();
     let n = env
-        .get("chunk_ids")
+        .get("chunks")
         .and_then(Value::as_array)
         .map_or(0, Vec::len);
     let summary = format!("{path} ({name}): {n} chunks.");
     let trimmed = json!({ "source_path": path, "chunk_count": n });
-    let next_actions = vec![
-        NextAction {
-            tool: "get_document_full",
-            arguments: json!({ "id": id }),
-        },
-        NextAction {
-            tool: "get_document_chunks",
-            arguments: json!({ "id": id }),
-        },
-    ];
-    ToolOutcome::new(summary, env, trimmed, next_actions)
-}
-
-/// `get_document_full` (DocumentFull): Document flattened; `chunks` inline.
-pub fn project_document_full(env: Value) -> ToolOutcome {
-    let path = env
-        .get("source_path")
-        .and_then(Value::as_str)
-        .unwrap_or("(unknown)");
-    let chunks = env.get("chunks").and_then(Value::as_array);
-    let n = chunks.map_or(0, Vec::len);
-    let chars: usize = chunks.map_or(0, |c| {
-        c.iter()
-            .filter_map(|x| x.get("content").and_then(Value::as_str))
-            .map(str::len)
-            .sum()
-    });
-    let summary = format!("Full {path}: {n} chunks (~{chars} chars).");
-    let trimmed = json!({ "source_path": path, "chunk_count": n, "char_count": chars });
-    // Compute next_actions before env is moved into ToolOutcome::new.
-    let next_actions = env
-        .get("id")
-        .and_then(Value::as_str)
-        .map(|id| {
-            vec![NextAction {
-                tool: "get_document",
-                arguments: json!({ "id": id }),
-            }]
-        })
-        .unwrap_or_default();
+    let next_actions = vec![NextAction {
+        tool: "get_document_chunks",
+        arguments: json!({ "id": id }),
+    }];
     ToolOutcome::new(summary, env, trimmed, next_actions)
 }
 
@@ -623,8 +587,6 @@ pub enum ErrorKind {
     NotFound,
     /// The embedding model used by the corpus does not match the local model.
     EmbeddingModelMismatch,
-    /// The ingest batch exceeded the maximum allowed chunk count.
-    TooManyChunks,
     /// A transient or permanent error was returned by the cloud API.
     CloudError,
     /// The local embedding or reranker model could not be loaded.
@@ -639,7 +601,6 @@ impl ErrorKind {
             Self::InvalidInput => "INVALID_INPUT",
             Self::NotFound => "NOT_FOUND",
             Self::EmbeddingModelMismatch => "EMBEDDING_MODEL_MISMATCH",
-            Self::TooManyChunks => "TOO_MANY_CHUNKS",
             Self::CloudError => "CLOUD_ERROR",
             Self::ModelLoadFailed => "MODEL_LOAD_FAILED",
             Self::InstallFailed => "INSTALL_FAILED",
@@ -648,7 +609,7 @@ impl ErrorKind {
     const fn retryable(self) -> bool {
         match self {
             // Permanent for an identical retry — recovery requires the next_action.
-            Self::NotFound | Self::EmbeddingModelMismatch | Self::TooManyChunks => false,
+            Self::NotFound | Self::EmbeddingModelMismatch => false,
             // Transient or fixable-and-retry.
             Self::InvalidInput | Self::CloudError | Self::ModelLoadFailed | Self::InstallFailed => {
                 true
@@ -665,7 +626,7 @@ pub struct ToolFailure {
     pub message: String,
     /// Agent-facing recovery guidance placed in the `text` content block.
     pub guidance: String,
-    /// Extra fields merged into the `error` object (e.g. mismatch / too_many_chunks data).
+    /// Extra fields merged into the `error` object (e.g. mismatch data).
     pub details: Value,
     /// Suggested follow-up tool calls.
     pub next_actions: Vec<NextAction>,
@@ -861,12 +822,19 @@ mod tests {
         let env = json!({
             "id": "d1", "source_path": "docs/intro.md",
             "source": { "display_name": "Compact Docs" },
-            "chunk_ids": ["a", "b", "c"]
+            "chunks": [
+                { "id": "a", "chunk_index": 0, "token_count": 10 },
+                { "id": "b", "chunk_index": 1, "token_count": 20 },
+                { "id": "c", "chunk_index": 2, "token_count": 30 }
+            ]
         });
         let o = super::project_document_overview(env);
         assert!(o.summary.contains("docs/intro.md"));
         assert!(o.summary.contains('3'));
-        assert!(o.next_actions.iter().any(|a| a.tool == "get_document_full"));
+        assert!(o
+            .next_actions
+            .iter()
+            .any(|a| a.tool == "get_document_chunks"));
     }
 
     #[test]
@@ -908,17 +876,6 @@ mod tests {
             "from":33,"limit":7,"total_chunks":35,"chunks":[{"chunk_id":"a"},{"chunk_id":"b"}] });
         let o = super::project_document_window(env);
         assert!(o.next_actions.is_empty());
-    }
-
-    #[test]
-    fn project_document_full_has_overview_backlink() {
-        let env = json!({ "id":"d1","source_path":"x","source":{"display_name":"X"},
-            "chunks":[{"content":"abc"}] });
-        let o = super::project_document_full(env);
-        assert!(o
-            .next_actions
-            .iter()
-            .any(|a| a.tool == "get_document" && a.arguments["id"] == "d1"));
     }
 
     #[test]

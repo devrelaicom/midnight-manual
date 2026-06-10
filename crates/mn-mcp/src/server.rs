@@ -274,16 +274,6 @@ fn passthrough_failure(e: tools::PassthroughError) -> ToolFailure {
                 arguments: json!({ "query": "<terms>" }),
             }],
         },
-        tools::PassthroughError::TooManyChunks { chunk_count, cap, hint } => ToolFailure {
-            kind: ErrorKind::TooManyChunks,
-            message: format!("document has {chunk_count} chunks (cap {cap})"),
-            guidance: hint.clone(),
-            details: json!({ "chunk_count": chunk_count, "cap": cap, "hint": hint }),
-            next_actions: vec![NextAction {
-                tool: "get_document_chunks",
-                arguments: json!({ "from": 0, "limit": 20 }),
-            }],
-        },
         tools::PassthroughError::Cloud(msg) => {
             ToolFailure::simple(ErrorKind::CloudError, msg, "Upstream call failed; retry shortly.")
         }
@@ -357,7 +347,6 @@ fn tool_name_for_event(name: &str) -> Option<McpToolName> {
         "get_chunk_neighbors" => Some(McpToolName::GetChunkNeighbors),
         "get_chunk_parents" => Some(McpToolName::GetChunkParents),
         "get_document" => Some(McpToolName::GetDocument),
-        "get_document_full" => Some(McpToolName::GetDocumentFull),
         "get_document_chunks" => Some(McpToolName::GetDocumentChunks),
         "list_sources" => Some(McpToolName::ListSources),
         "facets" => Some(McpToolName::Facets),
@@ -424,7 +413,6 @@ async fn dispatch_tool_inner(
         | "get_chunk_neighbors"
         | "get_chunk_parents"
         | "get_document"
-        | "get_document_full"
         | "get_document_chunks" => return Ok(run_passthrough_tool(&params, state).await),
         "list_sources" => match state.cloud.list_sources().await {
             Ok(v) => ok(render::project_sources(v).into_result(), None),
@@ -634,24 +622,6 @@ async fn run_passthrough_tool(params: &ToolCallParams, state: &ServerState) -> T
             match tools::run_passthrough_id(args, cloud, tools::PassthroughKind::Document).await {
                 Ok(v) => ToolResponse {
                     result: render::project_document_overview(v).into_result(),
-                    telemetry: None,
-                    outcome: Outcome::Ok,
-                },
-                Err(e) => {
-                    let outcome = passthrough_outcome(&e);
-                    ToolResponse {
-                        result: passthrough_failure(e).into_result(),
-                        telemetry: None,
-                        outcome,
-                    }
-                }
-            }
-        }
-        "get_document_full" => {
-            match tools::run_passthrough_id(args, cloud, tools::PassthroughKind::DocumentFull).await
-            {
-                Ok(v) => ToolResponse {
-                    result: render::project_document_full(v).into_result(),
                     telemetry: None,
                     outcome: Outcome::Ok,
                 },

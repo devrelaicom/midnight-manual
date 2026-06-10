@@ -200,8 +200,6 @@ pub enum McpToolName {
     GetChunkParents,
     /// `get_document` tool.
     GetDocument,
-    /// `get_document_full` tool.
-    GetDocumentFull,
     /// `get_document_chunks` tool.
     GetDocumentChunks,
     /// `list_sources` tool.

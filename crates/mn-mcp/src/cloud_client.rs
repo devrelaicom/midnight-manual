@@ -79,18 +79,6 @@ pub enum CloudError {
         /// Concrete next step (cloud-provided).
         remediation: String,
     },
-    /// 412 from `/v1/documents/:id/full` — document exceeds the chunk cap.
-    /// Surfaced specially so the MCP layer can emit a typed JSON-RPC error
-    /// pointing the caller at `get_document_chunks`.
-    #[error("document too many chunks: {chunk_count} (cap {cap})")]
-    TooManyChunks {
-        /// Reported ready-chunk count for the document.
-        chunk_count: u32,
-        /// Server's configured cap (currently 500).
-        cap: u32,
-        /// Operator-facing hint from the cloud (path to the windowing endpoint).
-        hint: String,
-    },
     /// Any other non-success status — body is parsed best-effort as JSON.
     #[error("cloud status {status}: {body}")]
     Status {
@@ -279,46 +267,6 @@ impl CloudClient {
         self.get_json(&path).await
     }
 
-    /// `GET /v1/documents/:id/full`. Detects `412 Precondition Failed` and
-    /// translates the cloud's `too_many_chunks` body into
-    /// [`CloudError::TooManyChunks`]. Other non-2xx statuses fall through to
-    /// the standard [`CloudError::NotFound`] / [`CloudError::Status`] mapping.
-    pub async fn get_document_full(&self, id: &str) -> Result<serde_json::Value, CloudError> {
-        let path = format!("/v1/documents/{id}/full");
-        let url = self
-            .base
-            .join(&path)
-            .map_err(|e| CloudError::Transport(e.to_string()))?;
-        let mut rb = self.http.get(url);
-        if let Some(b) = &self.bearer {
-            rb = rb.bearer_auth(b);
-        }
-        let resp = rb
-            .send()
-            .await
-            .map_err(|e| CloudError::Transport(e.to_string()))?;
-        let status = resp.status();
-        if status.is_success() {
-            return resp
-                .json::<serde_json::Value>()
-                .await
-                .map_err(|e| CloudError::Decode(e.to_string()));
-        }
-        let body_bytes = resp.bytes().await.unwrap_or_default();
-        if status == reqwest::StatusCode::PRECONDITION_FAILED {
-            if let Some(typed) = parse_too_many_chunks(&body_bytes) {
-                return Err(typed);
-            }
-        }
-        if status == reqwest::StatusCode::NOT_FOUND {
-            return Err(CloudError::NotFound(String::from_utf8_lossy(&body_bytes).into_owned()));
-        }
-        Err(CloudError::Status {
-            status: status.as_u16(),
-            body: String::from_utf8_lossy(&body_bytes).into_owned(),
-        })
-    }
-
     /// `GET /v1/documents/:id/chunks?from=K&limit=N`.
     pub async fn get_document_chunks(
         &self,
@@ -405,25 +353,6 @@ fn parse_mismatch(body: &[u8]) -> Option<CloudError> {
     })
 }
 
-/// Parse the cloud's `{ "error": "too_many_chunks", "chunk_count": N, "cap": K, "hint": "..." }`
-/// body (from `412 Precondition Failed` on `/v1/documents/:id/full`) into
-/// [`CloudError::TooManyChunks`]. Returns `None` if the body shape doesn't
-/// match — caller falls back to [`CloudError::Status`].
-fn parse_too_many_chunks(body: &[u8]) -> Option<CloudError> {
-    let v: serde_json::Value = serde_json::from_slice(body).ok()?;
-    if v.get("error")?.as_str()? != "too_many_chunks" {
-        return None;
-    }
-    let chunk_count = u32::try_from(v.get("chunk_count")?.as_u64()?).ok()?;
-    let cap = u32::try_from(v.get("cap")?.as_u64()?).ok()?;
-    let hint = v
-        .get("hint")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("")
-        .to_owned();
-    Some(CloudError::TooManyChunks { chunk_count, cap, hint })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -466,37 +395,5 @@ mod tests {
     fn new_rejects_invalid_url() {
         let r = CloudClient::new("not-a-url", None);
         assert!(matches!(r, Err(CloudError::Transport(_))));
-    }
-
-    #[test]
-    fn parse_too_many_chunks_extracts_count_and_cap() {
-        let body = serde_json::json!({
-            "error": "too_many_chunks",
-            "chunk_count": 1240,
-            "cap": 500,
-            "hint": "Use GET /v1/documents/abc/chunks?from=K&limit=L (default L=20)",
-        })
-        .to_string();
-        let err = parse_too_many_chunks(body.as_bytes()).expect("typed too_many_chunks");
-        match err {
-            CloudError::TooManyChunks { chunk_count, cap, hint } => {
-                assert_eq!(chunk_count, 1240);
-                assert_eq!(cap, 500);
-                assert!(hint.contains("/chunks?from="));
-            }
-            other => panic!("wrong variant: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn parse_too_many_chunks_returns_none_for_unrelated_body() {
-        let body = serde_json::json!({ "error": "something_else", "chunk_count": 10 }).to_string();
-        assert!(parse_too_many_chunks(body.as_bytes()).is_none());
-    }
-
-    #[test]
-    fn parse_too_many_chunks_returns_none_for_missing_fields() {
-        let body = serde_json::json!({ "error": "too_many_chunks", "cap": 500 }).to_string();
-        assert!(parse_too_many_chunks(body.as_bytes()).is_none());
     }
 }

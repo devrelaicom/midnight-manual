@@ -108,7 +108,7 @@ pub enum Command {
     Manifest(commands::manifest::Args),
     /// Inspect chunks: show, next, prev, neighbors.
     Chunks(commands::chunks::Args),
-    /// Inspect documents: show, full, chunks.
+    /// Inspect documents: show, chunks.
     Documents(commands::documents::Args),
     /// Install the advanced-search skill into your AI harness(es).
     Skills(commands::skills::Args),

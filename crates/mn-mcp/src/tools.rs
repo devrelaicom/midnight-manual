@@ -9,7 +9,7 @@
 //!   `/v1/search`, optionally rerank with the local cross-encoder.
 //! - All other tools (`get_chunk` / `get_chunk_next` / `get_chunk_prev` /
 //!   `get_chunk_neighbors` / `get_chunk_parents` / `get_document` /
-//!   `get_document_full` / `get_document_chunks` / `list_sources`) —
+//!   `get_document_chunks` / `list_sources`) —
 //!   pass-through to the cloud's read endpoints, returning the response JSON
 //!   verbatim. `get_chunk_neighbors` is the only one that fans out to three
 //!   cloud endpoints concurrently and bundles the results.
@@ -34,7 +34,7 @@ use crate::server::ServerConfig;
 
 /// Build the static tool manifest sent in response to `tools/list`.
 ///
-/// All fourteen tools declared in spec.md US5 / contracts/mcp-tools.json.
+/// All thirteen tools declared in spec.md US5 / contracts/mcp-tools.json.
 /// Schemas here are kept in sync with the canonical document by way of the
 /// contract tests in `tests/`.
 #[must_use]
@@ -90,21 +90,14 @@ pub fn list() -> ToolsListResult {
             ToolDescription {
                 name: "get_document",
                 description:
-                    "Document overview: metadata (id, source_version_id, node_id, source_path, published_url, source_url, language, kind, content_hash, char_count, token_count, source_modified_at, created_at, frontmatter, provenance, package_id), the source `{slug}`, and an ordered `chunk_ids` array of every ready chunk. No chunk bodies. Use get_document_full for inline bodies or get_document_chunks for a windowed slice.",
-                input_schema: id_only_schema(),
-                output_schema: Some(crate::schemas::document_output_schema()),
-            },
-            ToolDescription {
-                name: "get_document_full",
-                description:
-                    "Complete document: every overview field except chunk_ids, plus a `chunks` array with each chunk's `{chunk_id, chunk_index, content, heading_path, token_count}` inline (no per-chunk document/source sub-objects). Capped at 500 ready chunks. For documents over the cap the call returns an `isError` result with `structuredContent.error` (code `TOO_MANY_CHUNKS`, with `chunk_count`/`cap`/`hint`) and `next_actions` pointing at `get_document_chunks`; fall back to get_document_chunks.",
+                    "Document overview: metadata (id, source_version_id, node_id, source_path, published_url, source_url, language, kind, content_hash, char_count, token_count, source_modified_at, created_at, frontmatter, provenance, package_id), the source `{slug}`, and an ordered `chunks` skeleton array of every ready chunk (`{id, chunk_index, token_count}`). No chunk bodies. Use get_document_chunks for bodies.",
                 input_schema: id_only_schema(),
                 output_schema: Some(crate::schemas::document_output_schema()),
             },
             ToolDescription {
                 name: "get_document_chunks",
                 description:
-                    "Position-windowed chunk slice of a document. Returns `{chunks: ChunkBody[], from, limit, total_chunks}`. from defaults to 0 (must be >= 0); limit defaults to 20 and must be in [1, 100]. Out-of-range values are rejected as InvalidParams before the call reaches the cloud. `from` past the end returns `chunks: []` with accurate `total_chunks` (not 404). Use to page through documents larger than get_document_full's 500-chunk cap or to read a known offset.",
+                    "Position-windowed chunk slice of a document. Returns `{chunks: ChunkBody[], from, limit, total_chunks}`. from defaults to 0 (must be >= 0); limit defaults to 20 and must be in [1, 100]. Out-of-range values are rejected as InvalidParams before the call reaches the cloud. `from` past the end returns `chunks: []` with accurate `total_chunks` (not 404). Use to page through a document's chunk bodies or to read a known offset.",
                 input_schema: document_chunks_schema(),
                 output_schema: Some(crate::schemas::document_output_schema()),
             },
@@ -1032,8 +1025,6 @@ pub enum PassthroughKind {
     Parents,
     /// `/v1/documents/:id`
     Document,
-    /// `/v1/documents/:id/full` (may return [`PassthroughError::TooManyChunks`]).
-    DocumentFull,
 }
 
 /// Errors for the chunk pass-through tools.
@@ -1043,15 +1034,6 @@ pub enum PassthroughError {
     InvalidInput(String),
     /// Cloud returned 404.
     NotFound(String),
-    /// Cloud returned `412 too_many_chunks` (document-full only).
-    TooManyChunks {
-        /// Reported ready-chunk count for the document.
-        chunk_count: u32,
-        /// Server's configured cap.
-        cap: u32,
-        /// Operator-facing hint from the cloud.
-        hint: String,
-    },
     /// Cloud / transport / decode failure.
     Cloud(String),
 }
@@ -1260,13 +1242,9 @@ pub async fn run_passthrough_id(
         PassthroughKind::Chunk => cloud.get_chunk(id_str).await,
         PassthroughKind::Parents => cloud.get_chunk_parents(id_str).await,
         PassthroughKind::Document => cloud.get_document(id_str).await,
-        PassthroughKind::DocumentFull => cloud.get_document_full(id_str).await,
     };
     r.map_err(|e| match e {
         CloudError::NotFound(msg) => PassthroughError::NotFound(msg),
-        CloudError::TooManyChunks { chunk_count, cap, hint } => {
-            PassthroughError::TooManyChunks { chunk_count, cap, hint }
-        }
         other => PassthroughError::Cloud(other.to_string()),
     })
 }
@@ -1276,7 +1254,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tool_list_has_all_fourteen_tools() {
+    fn tool_list_has_all_thirteen_tools() {
         let m = list();
         let names: Vec<_> = m.tools.iter().map(|t| t.name).collect();
         for expected in [
@@ -1287,7 +1265,6 @@ mod tests {
             "get_chunk_neighbors",
             "get_chunk_parents",
             "get_document",
-            "get_document_full",
             "get_document_chunks",
             "list_sources",
             "facets",
@@ -1297,7 +1274,7 @@ mod tests {
         ] {
             assert!(names.contains(&expected), "missing tool: {expected}");
         }
-        assert_eq!(names.len(), 14, "expected 14 tools, got {}", names.len());
+        assert_eq!(names.len(), 13, "expected 13 tools, got {}", names.len());
     }
 
     #[test]
@@ -1308,7 +1285,6 @@ mod tests {
             "get_chunk_prev",
             "get_chunk_neighbors",
             "get_document",
-            "get_document_full",
             "get_document_chunks",
         ] {
             let tool = m

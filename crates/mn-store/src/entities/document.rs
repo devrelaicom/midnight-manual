@@ -101,7 +101,8 @@ pub async fn get_by_id(pool: &PgPool, id: Uuid) -> Result<Document> {
     row.try_into()
 }
 
-/// Get a document overview: full document row + source slug + ordered chunk_ids.
+/// Get a document overview: full document row + source slug + ordered
+/// chunk skeletons (`{id, chunk_index, token_count}` — no bodies).
 ///
 /// # Errors
 ///
@@ -116,8 +117,8 @@ pub async fn get_overview(pool: &PgPool, id: Uuid) -> Result<DocumentOverview> {
     .bind(document.source_version_id)
     .fetch_one(pool)
     .await?;
-    let chunk_ids = sqlx::query_scalar::<_, Uuid>(
-        "SELECT id FROM chunk \
+    let chunks = sqlx::query_as::<_, ChunkSkeleton>(
+        "SELECT id, chunk_index, token_count FROM chunk \
          WHERE document_id = $1 AND status <> 'embed_failed' \
          ORDER BY chunk_index ASC",
     )
@@ -130,63 +131,8 @@ pub async fn get_overview(pool: &PgPool, id: Uuid) -> Result<DocumentOverview> {
             slug: source_slug,
             display_name: source_display_name,
         },
-        chunk_ids,
-    })
-}
-
-/// Get a complete document with every ready chunk inline, capped at `cap`.
-/// When the document has > `cap` ready chunks, returns `TooManyChunks`
-/// (the caller maps to a 412 response).
-///
-/// # Errors
-///
-/// Returns `StoreError::NotFound` if no document has that id.
-pub async fn get_full(pool: &PgPool, id: Uuid, cap: usize) -> Result<FullResult> {
-    let document = get_by_id(pool, id).await?;
-    let count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM chunk WHERE document_id = $1 AND status <> 'embed_failed'",
-    )
-    .bind(id)
-    .fetch_one(pool)
-    .await?;
-    let count_usize = usize::try_from(count).unwrap_or(0);
-    if count_usize > cap {
-        return Ok(FullResult::TooManyChunks { count: count_usize, cap });
-    }
-    let (source_slug, source_display_name) = sqlx::query_as::<_, (String, String)>(
-        "SELECT s.slug, s.display_name FROM source s \
-         JOIN source_version sv ON sv.source_id = s.id \
-         WHERE sv.id = $1",
-    )
-    .bind(document.source_version_id)
-    .fetch_one(pool)
-    .await?;
-    let chunks = sqlx::query_as::<_, ChunkBodyRow>(
-        "SELECT id AS chunk_id, chunk_index, content, heading_path, token_count \
-         FROM chunk \
-         WHERE document_id = $1 AND status <> 'embed_failed' \
-         ORDER BY chunk_index ASC",
-    )
-    .bind(id)
-    .fetch_all(pool)
-    .await?
-    .into_iter()
-    .map(|r| ChunkBody {
-        chunk_id: r.chunk_id,
-        chunk_index: r.chunk_index,
-        content: r.content,
-        heading_path: r.heading_path,
-        token_count: r.token_count,
-    })
-    .collect();
-    Ok(FullResult::Document(Box::new(DocumentFull {
-        document,
-        source: crate::entities::chunk::SourceSummary {
-            slug: source_slug,
-            display_name: source_display_name,
-        },
         chunks,
-    })))
+    })
 }
 
 /// Get a windowed slice of a document's chunks.
@@ -269,7 +215,7 @@ pub struct DocumentSummary {
 }
 
 /// Document overview returned by `GET /v1/documents/:id` — full document
-/// row + the source's slug + ordered chunk_ids. No chunk bodies.
+/// row + the source's slug + ordered chunk skeletons. No chunk bodies.
 ///
 /// Spec §1.3 of the chunk+document navigation design.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -279,11 +225,22 @@ pub struct DocumentOverview {
     pub document: Document,
     /// Source summary (slug only).
     pub source: crate::entities::chunk::SourceSummary,
-    /// Document's ready chunk IDs in chunk_index order (excluding embed_failed).
-    pub chunk_ids: Vec<Uuid>,
+    /// Ready chunk skeletons in chunk_index order (excluding embed_failed).
+    pub chunks: Vec<ChunkSkeleton>,
 }
 
-/// One chunk body in a document-full or document-window response.
+/// Per-chunk skeleton entry in a document overview: position + cost, no body.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct ChunkSkeleton {
+    /// Chunk id (feed to `GET /v1/chunks?ids=`).
+    pub id: Uuid,
+    /// Position within the document.
+    pub chunk_index: i32,
+    /// Token count of the chunk body.
+    pub token_count: i32,
+}
+
+/// One chunk body in a document-window response.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChunkBody {
     /// Chunk UUID.
@@ -296,20 +253,6 @@ pub struct ChunkBody {
     pub heading_path: Vec<String>,
     /// Best-effort token count.
     pub token_count: i32,
-}
-
-/// Complete document: metadata + every ready chunk inline.
-///
-/// Spec §1.4 of the chunk+document navigation design.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DocumentFull {
-    /// Full document row.
-    #[serde(flatten)]
-    pub document: Document,
-    /// Source summary (slug only).
-    pub source: crate::entities::chunk::SourceSummary,
-    /// Every ready chunk in chunk_index order.
-    pub chunks: Vec<ChunkBody>,
 }
 
 /// Window of chunks at offset `from` with `limit` cap.
@@ -330,21 +273,6 @@ pub struct DocumentChunkWindow {
     pub limit: usize,
     /// Total number of ready chunks in the document.
     pub total_chunks: usize,
-}
-
-/// Returned by `get_full` when the document exceeds the chunk cap, so the
-/// route can map to a 412 without paying the cost of a full chunk fetch.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FullResult {
-    /// Document with metadata + all ready chunks.
-    Document(Box<DocumentFull>),
-    /// Document exceeds cap; count and cap are reported for diagnostics.
-    TooManyChunks {
-        /// Actual number of ready chunks.
-        count: usize,
-        /// Maximum allowed chunks.
-        cap: usize,
-    },
 }
 
 /// List every document under a given `source_version`, returning the minimal
