@@ -12,8 +12,8 @@
 //! variants. The most important one is [`CloudError::EmbeddingModelMismatch`],
 //! which the cloud raises (HTTP 409) when the caller's embedder revision
 //! doesn't match the corpus's active revision (D12 / FR-038). The MCP `search`
-//! tool surfaces this as a typed MCP error so AI clients can call
-//! `pull_models` and retry.
+//! tool surfaces this as a typed MCP error carrying the cloud-provided
+//! remediation.
 
 use std::time::Duration;
 
@@ -65,7 +65,7 @@ pub enum CloudError {
     #[error("cloud not found: {0}")]
     NotFound(String),
     /// 409 embedding-model mismatch — surfaced specially so the MCP layer can
-    /// emit a typed JSON-RPC error pointing the caller at `pull_models`.
+    /// emit a typed JSON-RPC error carrying the cloud-provided remediation.
     #[error(
         "embedding model mismatch: corpus expects `{corpus_model}`, client sent `{client_model}`"
     )]

@@ -90,11 +90,6 @@ pub fn status_output_schema() -> Value {
     passthrough_object_schema()
 }
 
-/// Output schema for `pull_models`.
-pub fn pull_models_output_schema() -> Value {
-    passthrough_object_schema()
-}
-
 /// Output schema for `install_search_skill`.
 pub fn install_output_schema() -> Value {
     passthrough_object_schema()

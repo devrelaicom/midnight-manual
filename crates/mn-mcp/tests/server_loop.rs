@@ -123,9 +123,10 @@ async fn initialize_response_is_newline_framed_no_content_length() {
 #[tokio::test]
 async fn tools_list_returns_two_phase_5b_tools() {
     let list = mn_mcp::tools::list();
-    let names: Vec<_> = list.tools.iter().map(|t| t.name).collect();
-    assert!(names.contains(&"status"), "status tool must be in the manifest");
-    assert!(names.contains(&"pull_models"), "pull_models tool must be in the manifest");
+    assert!(
+        list.tools.iter().any(|t| t.name == "status"),
+        "status tool must be in the manifest"
+    );
     // Each tool must declare a valid JSON-schema input_schema.
     for tool in &list.tools {
         assert_eq!(
@@ -149,7 +150,7 @@ async fn status_tool_works_without_model_load() {
 }
 
 #[tokio::test]
-async fn tools_list_contains_all_fourteen() {
+async fn tools_list_contains_all_thirteen() {
     let list = mn_mcp::tools::list();
     let names: Vec<_> = list.tools.iter().map(|t| t.name).collect();
     for expected in [
@@ -164,13 +165,12 @@ async fn tools_list_contains_all_fourteen() {
         "get_document_chunks",
         "list_sources",
         "facets",
-        "pull_models",
         "status",
         "install_search_skill",
     ] {
         assert!(names.contains(&expected), "missing tool: {expected}");
     }
-    assert_eq!(names.len(), 14);
+    assert_eq!(names.len(), 13);
 }
 
 /// Drive `prompts/list` and `prompts/get` through the same framed-I/O harness

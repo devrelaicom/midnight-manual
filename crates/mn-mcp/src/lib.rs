@@ -1,8 +1,8 @@
 //! `mn-mcp` — MCP JSON-RPC server (stdio framing) + the retrieval tool surface.
 //!
-//! Fourteen tools across four categories:
+//! Thirteen tools across four categories:
 //!
-//! - Local-only: `status`, `pull_models`.
+//! - Local-only: `status`.
 //! - Cloud search: `search` + `advanced_search` (embed locally, post to
 //!   `/v1/search`, optional local rerank; `advanced_search` adds multi-query
 //!   fusion, facet filters, and the rerank toggle).

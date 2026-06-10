@@ -856,41 +856,11 @@ pub fn project_status(env: Value) -> ToolOutcome {
         .and_then(Value::as_str)
         .unwrap_or("?");
     let summary = format!("Server {ver}; reranker {reranker}; model state {state}.");
-    let next = if state == "ready" {
-        vec![]
-    } else {
-        vec![NextAction::call(
-            "Download the missing local models so reranking can run",
-            "pull_models",
-            json!({}),
-        )]
-    };
+    // No next action even when the model state is not `ready`: the reranker
+    // loads lazily on the first reranking `search`, so there is nothing for
+    // the caller to do up front.
     let trimmed = json!({ "server_version": ver, "reranker": reranker, "model_state": state });
-    ToolOutcome::new(summary, env, trimmed, next)
-}
-
-/// `pull_models` (PullModelsOutput as JSON).
-pub fn project_pull_models(env: Value) -> ToolOutcome {
-    let reranker = env.get("reranker").and_then(Value::as_str).unwrap_or("?");
-    let loaded = env
-        .get("reranker_loaded")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let summary = format!(
-        "Models pulled. Reranker {reranker} {}.",
-        if loaded { "ready" } else { "not loaded" }
-    );
-    let trimmed = json!({ "reranker": reranker, "reranker_loaded": loaded });
-    ToolOutcome::new(
-        summary,
-        env,
-        trimmed,
-        vec![NextAction::call(
-            "Confirm the models are now loaded and ready",
-            "status",
-            json!({}),
-        )],
-    )
+    ToolOutcome::new(summary, env, trimmed, vec![])
 }
 
 /// `install_search_skill` (InstallReport as JSON).
@@ -1734,10 +1704,9 @@ mod tests {
                           "model_state": "missing", "cache_dir": null });
         let o = super::project_status(env);
         assert!(o.summary.to_lowercase().contains("reranker"));
-        assert!(o
-            .suggested_next_actions
-            .iter()
-            .any(|a| a.tool == Some("pull_models"))); // state != ready
+        // No suggested action even with state != ready: the reranker loads
+        // lazily on the first reranking search.
+        assert!(o.suggested_next_actions.is_empty());
     }
 
     #[test]

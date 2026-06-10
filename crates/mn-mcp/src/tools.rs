@@ -1,10 +1,10 @@
 //! MCP tool registry and per-tool handlers.
 //!
-//! Fourteen tools, four categories:
+//! Thirteen tools, four categories:
 //!
-//! - `status` / `pull_models` — local-only; talk to the reranker model cache.
-//!   The corpus embedder is VoyageAI (remote), so there is no local embedder to
-//!   load here. No cloud round-trip.
+//! - `status` — local-only; reports on the reranker model cache. The corpus
+//!   embedder is VoyageAI (remote), so there is no local embedder to load
+//!   here. No cloud round-trip.
 //! - `search` / `advanced_search` — embed via VoyageAI (BYOK or server-proxy),
 //!   post to the cloud `/v1/search`, optionally rerank with the local
 //!   cross-encoder. `search` is the simple 90% surface (`{query, mode?,
@@ -22,7 +22,6 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
 
 use mn_core::scoring::normalize_rerank;
 use mn_core::scoring_policy::ScoringPolicy;
@@ -154,17 +153,6 @@ pub fn list() -> ToolsListResult {
                     "additionalProperties": false,
                 }),
                 output_schema: Some(crate::schemas::facets_output_schema()),
-            },
-            ToolDescription {
-                name: "pull_models",
-                description:
-                    "Download / load the reranker (bge-reranker-base) into the local model cache. Required on first use of `search` with reranking enabled. The corpus embedder is VoyageAI (remote — BYOK or the server's /v1/embeddings proxy), so no embedder is downloaded.",
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": false,
-                }),
-                output_schema: Some(crate::schemas::pull_models_output_schema()),
             },
             ToolDescription {
                 name: "status",
@@ -466,11 +454,10 @@ fn reranker_loaded() -> bool {
 mod markers {
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    /// Process-wide marker tracking whether *a* reranker has been loaded — the
-    /// local `bge` cross-encoder (`pull_models`) or whichever reranker the
-    /// configured catalog id selects on the first reranking `search` (local
-    /// fastembed or remote Voyage). It is a coarse "rerank capability is warm"
-    /// signal for `status`, not a model identity.
+    /// Process-wide marker tracking whether *a* reranker has been loaded —
+    /// whichever reranker the configured catalog id selects on the first
+    /// reranking `search` (local fastembed or remote Voyage). It is a coarse
+    /// "rerank capability is warm" signal for `status`, not a model identity.
     pub struct LoadedMarkers {
         reranker: AtomicBool,
     }
@@ -512,8 +499,8 @@ static LOADED_RERANKER: OnceCell<Arc<LoadedReranker>> = OnceCell::const_new();
 /// call. Subsequent calls return the cached [`Arc`] regardless of the arguments
 /// (the reranker config is read once, on the first reranking search of the
 /// process — the same single-read semantics the old `bge` singleton had). On a
-/// successful first load this also flips the `status`/`pull_models`
-/// "reranker loaded" marker.
+/// successful first load this also flips the `status` "reranker loaded"
+/// marker.
 ///
 /// `reranker_id` is the catalog id (resolved by the caller via
 /// [`mn_core::config::resolve_reranker`]); `reranker_path` backs the `custom`
@@ -555,49 +542,6 @@ pub async fn load_configured_reranker(
 }
 
 // ---------------------------------------------------------------------------
-// pull_models (local)
-// ---------------------------------------------------------------------------
-
-/// `pull_models` response payload.
-#[derive(Debug, Serialize)]
-pub struct PullModelsOutput {
-    /// Reranker model identifier. The corpus embedder is VoyageAI (remote), so
-    /// `pull_models` only fetches the reranker.
-    pub reranker: &'static str,
-    /// Whether the reranker was loaded by this call (false = cached).
-    pub reranker_loaded: bool,
-    /// Total milliseconds spent in this call.
-    pub took_ms: u128,
-}
-
-/// Dispatch the `pull_models` tool. Fetches the reranker into the local cache;
-/// the corpus embedder is VoyageAI (remote) so nothing is downloaded for it.
-/// Returns once the reranker `OnceCell` is filled.
-///
-/// # Errors
-///
-/// Returns a string error message if the reranker fails to initialize.
-pub async fn run_pull_models(cache_dir: PathBuf) -> Result<PullModelsOutput, String> {
-    let t0 = Instant::now();
-    let reranker_was_loaded = LOADED_MARKERS.load_relaxed_reranker();
-
-    // NOTE (Task 9.4): `pull_models` still pre-fetches the local `bge` reranker
-    // via the singleton. Pre-pulling the *configured* catalog reranker (e.g. a
-    // Voyage id, which has nothing to download) is intentionally out of scope
-    // here; `search` loads whatever the config selects lazily on first use.
-    reranker::global(cache_dir)
-        .await
-        .map_err(|e| format!("reranker init failed: {e}"))?;
-    LOADED_MARKERS.mark_reranker();
-
-    Ok(PullModelsOutput {
-        reranker: mn_embedding::RERANKER_MODEL_NAME,
-        reranker_loaded: !reranker_was_loaded,
-        took_ms: t0.elapsed().as_millis(),
-    })
-}
-
-// ---------------------------------------------------------------------------
 // search (cloud + local embed + optional local rerank)
 // ---------------------------------------------------------------------------
 
@@ -606,7 +550,8 @@ pub async fn run_pull_models(cache_dir: PathBuf) -> Result<PullModelsOutput, Str
 #[derive(Debug)]
 pub enum SearchError {
     /// Cloud returned an embedding-model mismatch — the JSON-RPC error layer
-    /// turns this into a typed response with `data.next_tool = "pull_models"`.
+    /// turns this into a typed `EMBEDDING_MODEL_MISMATCH` response carrying
+    /// the cloud-provided remediation.
     Mismatch {
         /// Corpus's active `{name}@{revision}`.
         corpus_model: String,
@@ -1489,7 +1434,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tool_list_has_all_fourteen_tools() {
+    fn tool_list_has_all_thirteen_tools() {
         let m = list();
         let names: Vec<_> = m.tools.iter().map(|t| t.name).collect();
         for expected in [
@@ -1504,15 +1449,17 @@ mod tests {
             "get_document_chunks",
             "list_sources",
             "facets",
-            "pull_models",
             "status",
             "install_search_skill",
         ] {
             assert!(names.contains(&expected), "missing tool: {expected}");
         }
-        assert_eq!(names.len(), 14, "expected 14 tools, got {}", names.len());
+        assert_eq!(names.len(), 13, "expected 13 tools, got {}", names.len());
         // Replaced by the batch tool in the response-format v2 work.
         assert!(!names.contains(&"get_chunk"), "get_chunk was replaced by get_chunks");
+        // Removed: the reranker loads lazily on the first reranking search,
+        // and `status` reports reranker state.
+        assert!(!names.contains(&"pull_models"), "pull_models was removed");
     }
 
     #[test]

@@ -138,7 +138,7 @@ pub enum EventPayload {
         #[serde(default)]
         failed_batch_index: Option<u32>,
     },
-    /// `mnm models pull` / `pull_models` MCP tool ran to completion.
+    /// `mnm models pull` ran to completion.
     PullModels {
         /// Whether the embedder was downloaded by this run (vs. cached).
         embedder_downloaded: bool,
@@ -206,8 +206,6 @@ pub enum McpToolName {
     ListSources,
     /// `facets` tool.
     Facets,
-    /// `pull_models` tool.
-    PullModels,
     /// `status` tool.
     Status,
     /// `install_search_skill` tool.

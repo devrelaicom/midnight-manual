@@ -936,7 +936,9 @@ async fn dispatch_get_document_chunks_full_pipeline_via_wiremock() {
 
 /// Search that returns a 409 embedding-model mismatch from the cloud surfaces
 /// as `isError: true` with `EMBEDDING_MODEL_MISMATCH`, `retryable: false`, a
-/// `corpus_model` field, and `suggested_next_actions[0].tool == "pull_models"`.
+/// `corpus_model` field, and no suggested next actions (the cloud-provided
+/// `remediation` string is the next step; there is no client-side tool that
+/// fixes a corpus-side mismatch).
 ///
 /// Approach: run `run_search` through a full wiremock stack (models/active +
 /// embeddings server-proxy + search→409) to obtain `SearchError::Mismatch`,
@@ -955,7 +957,7 @@ async fn dispatch_get_document_chunks_full_pipeline_via_wiremock() {
 /// comes from `/v1/search` in either case.
 #[tokio::test]
 async fn dispatch_search_mismatch_produces_iserror_envelope() {
-    use mn_mcp::render::{ErrorKind, NextAction, ToolFailure};
+    use mn_mcp::render::{ErrorKind, ToolFailure};
     use mn_mcp::server::ServerConfig;
     use mn_mcp::tools::{run_search, SearchError};
 
@@ -991,7 +993,7 @@ async fn dispatch_search_mismatch_produces_iserror_envelope() {
             "error": {
                 "code": "embedding_model_mismatch",
                 "message": "client model `voyage-code-3@2` does not match corpus model `voyage-code-3@1`",
-                "remediation": "run pull_models to fetch the current corpus model",
+                "remediation": "re-run the search; the client embeds with the corpus's live active model",
                 "context": {
                     "corpus_model": "voyage-code-3@1",
                     "client_model": "voyage-code-3@2",
@@ -1040,11 +1042,7 @@ async fn dispatch_search_mismatch_produces_iserror_envelope() {
             "client_model": "voyage-code-3@2",
             "remediation": remediation,
         }),
-        suggested_next_actions: vec![NextAction::call(
-            "Pull the current corpus models to resolve the mismatch",
-            "pull_models",
-            serde_json::json!({}),
-        )],
+        suggested_next_actions: vec![],
     };
     let result = failure.into_result();
 
@@ -1053,7 +1051,12 @@ async fn dispatch_search_mismatch_produces_iserror_envelope() {
     assert_eq!(sc["error"]["code"], "EMBEDDING_MODEL_MISMATCH");
     assert_eq!(sc["error"]["retryable"], false, "mismatch must not be retryable (I2)");
     assert!(sc["error"]["corpus_model"].is_string(), "corpus_model must be a string");
-    assert_eq!(sc["suggested_next_actions"][0]["tool"], "pull_models");
+    assert!(
+        sc["suggested_next_actions"]
+            .as_array()
+            .is_none_or(Vec::is_empty),
+        "mismatch must not suggest a next tool call"
+    );
 }
 
 /// Verify that `get_chunk_neighbors` full pipeline preserves `sc["prev"]["chunks"]`

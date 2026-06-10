@@ -32,8 +32,7 @@ pub struct ServerConfig {
     /// is cached here.)
     pub cache_dir: PathBuf,
     /// Base URL of the cloud server (`https://midnight-manual.midnightntwrk.expert` in
-    /// production). Tools call this for everything except `status` /
-    /// `pull_models`.
+    /// production). Tools call this for everything except `status`.
     pub cloud_url: String,
     /// Optional read-uplift bearer to forward as `Authorization: Bearer ...`
     /// on every cloud request. `None` means the MCP server is running in
@@ -360,7 +359,6 @@ fn tool_name_for_event(name: &str) -> Option<McpToolName> {
         "get_document_chunks" => Some(McpToolName::GetDocumentChunks),
         "list_sources" => Some(McpToolName::ListSources),
         "facets" => Some(McpToolName::Facets),
-        "pull_models" => Some(McpToolName::PullModels),
         "status" => Some(McpToolName::Status),
         "install_search_skill" => Some(McpToolName::InstallSearchSkill),
         _ => None,
@@ -401,21 +399,6 @@ async fn dispatch_tool_inner(
             let v = serde_json::to_value(out).unwrap_or(serde_json::Value::Null);
             ok(render::project_status(v).into_result(), None)
         }
-        "pull_models" => match tools::run_pull_models(state.cfg.cache_dir.clone()).await {
-            Ok(out) => {
-                let v = serde_json::to_value(out).unwrap_or(serde_json::Value::Null);
-                ok(render::project_pull_models(v).into_result(), None)
-            }
-            Err(msg) => err(
-                ToolFailure::simple(
-                    ErrorKind::ModelLoadFailed,
-                    msg,
-                    "Model download failed; retry pull_models.",
-                )
-                .into_result(),
-                Outcome::Error,
-            ),
-        },
         "search" | "advanced_search" => return Ok(run_search_dispatch(&params, state).await),
         "get_chunks"
         | "get_chunk_next"
@@ -487,8 +470,8 @@ async fn run_search_dispatch(params: &ToolCallParams, state: &ServerState) -> To
         }
     };
     // Best-effort reranker name for telemetry. Use the well-known constant —
-    // the constant is what `run_status` and `pull_models` also report, so it's
-    // the most accurate single-process value we have.
+    // the constant is what `run_status` also reports, so it's the most
+    // accurate single-process value we have.
     let reranker_name: Option<String> = if parsed.rerank {
         Some(mn_embedding::RERANKER_MODEL_NAME.to_string())
     } else {
@@ -525,11 +508,10 @@ async fn run_search_dispatch(params: &ToolCallParams, state: &ServerState) -> To
                     "client_model": client_model,
                     "remediation": remediation,
                 }),
-                suggested_next_actions: vec![NextAction::call(
-                    "Pull the current corpus models to resolve the mismatch",
-                    "pull_models",
-                    serde_json::json!({}),
-                )],
+                // No suggested tool call: the mismatch is corpus-side (the
+                // client embeds via the live `/v1/models/active` wire id), so
+                // the cloud-provided `remediation` string is the next step.
+                suggested_next_actions: vec![],
             }
             .into_result(),
             telemetry: None,
