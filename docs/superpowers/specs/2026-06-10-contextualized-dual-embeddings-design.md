@@ -58,6 +58,7 @@ Hard cutover: full corpus re-ingest, no back-compat shims (project is pre-1.0).
 
 - `line_window.rs`: replace 60-line/20-line-overlap windows with **token-budgeted non-overlapping windows** targeting 90% of `max_tokens`. Used for: Plaintext kind, unparseable code fallback, oversized-single-unit fallback.
 - Markdown rolling-window fallback: drop `fallback_overlap_lines=20` → 0.
+- **Markdown rolling-window context expansion is removed entirely** (`expand_window` + `segment_sentences` + the `window_switch_pct`/`window_target_pct`/`window_cap_pct` config knobs, from the 2026-06-08 chunk-context design / PR #78). It deliberately pads every chunk's byte range with neighbouring sentences — overlap by design. Contextualized embeddings subsume its purpose (document-level context now travels in the vector, not the chunk text), and "no overlap anywhere" (D3) requires its removal, not just the line-overlap knob.
 - After this change, **no chunker emits overlapping chunks**. The retrieval-side overlap-dedup pass stays (it also handles cross-version duplication) but should see near-zero same-document trims.
 
 ### 5.3 Symbol facet integrity
