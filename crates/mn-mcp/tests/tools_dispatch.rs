@@ -11,11 +11,11 @@ use std::sync::Arc;
 
 use mn_mcp::cloud_client::CloudClient;
 use mn_mcp::tools::{
-    run_chunk_nav, run_chunk_neighbors, run_document_chunks, run_get_chunks, run_passthrough_id,
-    ChunkNavDirection, PassthroughError, PassthroughKind,
+    run_chunk_nav, run_chunk_neighbors, run_document_chunks, run_get_chunks, run_list_sources,
+    run_passthrough_id, ChunkNavDirection, PassthroughError, PassthroughKind,
 };
 use serde_json::json;
-use wiremock::matchers::{method, path, query_param};
+use wiremock::matchers::{method, path, query_param, query_param_is_missing};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[tokio::test]
@@ -588,6 +588,78 @@ async fn run_document_chunks_404_maps_to_not_found() {
         .await
         .unwrap_err();
     assert!(matches!(err, PassthroughError::NotFound(_)));
+}
+
+// ---------------------------------------------------------------------------
+// run_list_sources (pagination/filter forwarding)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn run_list_sources_forwards_present_args_as_query_params() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/sources"))
+        .and(query_param("limit", "5"))
+        .and(query_param("kind", "docs_site"))
+        .and(query_param_is_missing("cursor"))
+        .and(query_param_is_missing("retired"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "sources": [{ "id": "u1", "slug": "midnight-docs", "display_name": "Midnight Docs",
+                          "kind": "docs_site" }],
+            "total": 1,
+            "next_cursor": null,
+        })))
+        .mount(&server)
+        .await;
+    let client = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
+    // JSON integer 5 must arrive as the query string "5" (not e.g. "5.0").
+    let v = run_list_sources(&json!({"limit": 5, "kind": "docs_site"}), &client)
+        .await
+        .unwrap();
+    assert_eq!(v["sources"][0]["slug"], "midnight-docs");
+}
+
+#[tokio::test]
+async fn run_list_sources_no_args_sends_no_query_params() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/sources"))
+        .and(query_param_is_missing("cursor"))
+        .and(query_param_is_missing("limit"))
+        .and(query_param_is_missing("created_after"))
+        .and(query_param_is_missing("created_before"))
+        .and(query_param_is_missing("kind"))
+        .and(query_param_is_missing("retired"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "sources": [],
+            "total": 0,
+            "next_cursor": null,
+        })))
+        .mount(&server)
+        .await;
+    let client = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
+    let v = run_list_sources(&json!({}), &client).await.unwrap();
+    assert_eq!(v["total"], 0);
+}
+
+#[tokio::test]
+async fn run_list_sources_renders_bool_arg_as_query_string() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/sources"))
+        .and(query_param("retired", "true"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "sources": [],
+            "total": 0,
+            "next_cursor": null,
+        })))
+        .mount(&server)
+        .await;
+    let client = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
+    let v = run_list_sources(&json!({"retired": true}), &client)
+        .await
+        .unwrap();
+    assert_eq!(v["total"], 0);
 }
 
 // ---------------------------------------------------------------------------

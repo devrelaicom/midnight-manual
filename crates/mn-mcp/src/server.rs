@@ -424,7 +424,7 @@ async fn dispatch_tool_inner(
         | "get_chunk_parents"
         | "get_document"
         | "get_document_chunks" => return Ok(run_passthrough_tool(&params, state).await),
-        "list_sources" => match state.cloud.list_sources(&[]).await {
+        "list_sources" => match tools::run_list_sources(&params.arguments, &state.cloud).await {
             Ok(v) => ok(render::project_sources(v).into_result(), None),
             Err(e) => err(cloud_failure(&e).into_result(), Outcome::Error),
         },

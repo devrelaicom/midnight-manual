@@ -692,38 +692,59 @@ pub fn project_document_window(env: Value) -> ToolOutcome {
     ToolOutcome::new(summary, env, trimmed, suggested_next_actions)
 }
 
-/// `list_sources`: a top-level JSON ARRAY of source objects. Wrap as an object for structured.
-// `env` is consumed by `json!({ "sources": env })` (ownership move); a reference would require
-// an extra clone, so suppress the false-positive lint.
-#[allow(clippy::needless_pass_by_value)]
+/// `list_sources`: a paginated `{ sources: [..], total, next_cursor }` envelope.
 pub fn project_sources(env: Value) -> ToolOutcome {
-    let names: Vec<String> = env
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .filter_map(|s| {
-                    s.get("display_name")
-                        .and_then(Value::as_str)
-                        .or_else(|| s.get("slug").and_then(Value::as_str))
-                        .map(str::to_owned)
-                })
-                .collect()
-        })
+    let sources = env
+        .get("sources")
+        .and_then(Value::as_array)
+        .cloned()
         .unwrap_or_default();
-    let n = names.len();
-    let summary = format!("{n} sources: {}.", names.join(", "));
-    let trimmed = json!({ "count": n, "sources": names });
-    let structured = json!({ "sources": env });
-    ToolOutcome::new(
-        summary,
-        structured,
-        trimmed,
-        vec![NextAction::call(
-            "Search the corpus, optionally filtered to one of these sources",
-            "search",
-            json!({ "query": "<terms>" }),
-        )],
-    )
+    let n = sources.len();
+    let total = env.get("total").and_then(Value::as_i64).unwrap_or_else(|| {
+        n.try_into().unwrap_or(i64::MAX) // usize→i64 can't fail for real page sizes
+    });
+    let next_cursor = env
+        .get("next_cursor")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let more = if next_cursor.is_some() {
+        " More available — pass cursor."
+    } else {
+        ""
+    };
+    let summary = format!("Showing {n} of {total} sources.{more}");
+    let brief: Vec<Value> = sources
+        .iter()
+        .map(|s| {
+            json!({
+                "id": s.get("id").cloned().unwrap_or(Value::Null),
+                "slug": s.get("slug").cloned().unwrap_or(Value::Null),
+                "display_name": s.get("display_name").cloned().unwrap_or(Value::Null),
+                "kind": s.get("kind").cloned().unwrap_or(Value::Null),
+            })
+        })
+        .collect();
+    let trimmed = json!({ "count": n, "total": total, "sources": brief });
+    let mut actions = Vec::new();
+    if let Some(c) = next_cursor {
+        actions.push(NextAction::call(
+            "Fetch the next page of sources",
+            "list_sources",
+            json!({ "cursor": c }),
+        ));
+    }
+    if let Some(slug) = sources
+        .first()
+        .and_then(|s| s.get("slug"))
+        .and_then(Value::as_str)
+    {
+        actions.push(NextAction::call(
+            format!("Restrict a search to the `{slug}` source (swap in your own query and slug)"),
+            "advanced_search",
+            json!({ "queries": ["<your query>"], "filters": { "source_slug": { "any_of": [slug] } } }),
+        ));
+    }
+    ToolOutcome::new(summary, env, trimmed, actions)
 }
 
 /// `facets`: `{ modes:[..], filters:[ {key, type, ..}, .. ] }`. Dimensions are `filters[].key`.
@@ -1466,20 +1487,66 @@ mod tests {
     }
 
     #[test]
-    fn project_sources_lists_names() {
-        let env = json!([
-            { "slug": "compact-docs", "display_name": "Compact Docs" },
-            { "slug": "midnight-js", "display_name": "Midnight JS" }
-        ]);
+    fn project_sources_paged_summary_cursor_and_filter_example() {
+        let env = json!({
+            "sources": [
+                { "id": "u1", "slug": "compact-docs", "display_name": "Compact Docs",
+                  "kind": "docs_site", "origin_url": "https://x", "retention_count": 3,
+                  "created_at": "2026-01-01T00:00:00Z", "retired_at": null },
+                { "id": "u2", "slug": "midnight-js", "display_name": "Midnight JS",
+                  "kind": "code_repo", "origin_url": "https://y", "retention_count": 3,
+                  "created_at": "2026-01-02T00:00:00Z", "retired_at": null }
+            ],
+            "total": 43,
+            "next_cursor": "tok=="
+        });
+        let o = super::project_sources(env.clone());
+        assert_eq!(o.summary, "Showing 2 of 43 sources. More available — pass cursor.");
+        // structured = env verbatim (already an object; no wrapping)
+        assert_eq!(o.structured, env);
+        assert_eq!(o.trimmed["count"], 2);
+        assert_eq!(o.trimmed["total"], 43);
+        assert_eq!(o.trimmed["sources"][0]["slug"], "compact-docs");
+        assert!(o.trimmed["sources"][0].get("origin_url").is_none()); // brief view only
+                                                                      // next-page action carries the cursor verbatim
+        let next = &o.suggested_next_actions[0];
+        assert_eq!(next.tool, Some("list_sources"));
+        assert_eq!(next.arguments.as_ref().unwrap()["cursor"], "tok==");
+        // advanced_search example uses the REAL first slug in description + filters
+        let example = &o.suggested_next_actions[1];
+        assert_eq!(example.tool, Some("advanced_search"));
+        assert!(example.description.contains("compact-docs"));
+        let args = example.arguments.as_ref().unwrap();
+        assert_eq!(args["filters"]["source_slug"]["any_of"], json!(["compact-docs"]));
+    }
+
+    #[test]
+    fn project_sources_last_page_has_no_next_page_action() {
+        let env = json!({
+            "sources": [{ "id": "u1", "slug": "compact-docs", "display_name": "Compact Docs",
+                          "kind": "docs_site" }],
+            "total": 1,
+            "next_cursor": null
+        });
         let o = super::project_sources(env);
-        assert!(o.summary.contains("2 sources"));
-        assert!(o.summary.contains("Compact Docs"));
-        assert!(o.structured.is_object()); // array wrapped
-        assert!(o.structured["sources"].is_array());
+        assert_eq!(o.summary, "Showing 1 of 1 sources.");
+        assert!(!o
+            .suggested_next_actions
+            .iter()
+            .any(|a| a.tool == Some("list_sources")));
+        // the concrete filter example is still offered
         assert!(o
             .suggested_next_actions
             .iter()
-            .any(|a| a.tool == Some("search")));
+            .any(|a| a.tool == Some("advanced_search")));
+    }
+
+    #[test]
+    fn project_sources_empty_page_has_no_example_action() {
+        let env = json!({ "sources": [], "total": 0, "next_cursor": null });
+        let o = super::project_sources(env);
+        assert_eq!(o.summary, "Showing 0 of 0 sources.");
+        assert!(o.suggested_next_actions.is_empty());
     }
 
     #[test]

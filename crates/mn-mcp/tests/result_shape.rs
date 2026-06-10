@@ -56,9 +56,11 @@ fn all_passthrough_projectors_conform_to_passthrough_schema() {
             mn_mcp::schemas::chunks_output_schema(),
         ),
         (
-            mn_mcp::render::project_sources(
-                serde_json::json!([{ "slug": "s", "display_name": "S" }]),
-            )
+            mn_mcp::render::project_sources(serde_json::json!({
+                "sources": [{ "slug": "s", "display_name": "S" }],
+                "total": 1,
+                "next_cursor": null
+            }))
             .into_result()
             .structured_content
             .unwrap(),

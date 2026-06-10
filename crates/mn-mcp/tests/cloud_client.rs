@@ -211,14 +211,18 @@ async fn list_sources_round_trips() {
         .and(path("/v1/sources"))
         .and(query_param_is_missing("cursor"))
         .and(query_param_is_missing("limit"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
-            {"slug": "midnight-docs", "kind": "github", "display_name": "Midnight Docs"},
-        ])))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "sources": [
+                {"slug": "midnight-docs", "kind": "docs_site", "display_name": "Midnight Docs"},
+            ],
+            "total": 1,
+            "next_cursor": null,
+        })))
         .mount(&server)
         .await;
     let client = CloudClient::new(&server.uri(), None).unwrap();
     let v = client.list_sources(&[]).await.unwrap();
-    assert_eq!(v[0]["slug"], "midnight-docs");
+    assert_eq!(v["sources"][0]["slug"], "midnight-docs");
 }
 
 #[tokio::test]

@@ -124,10 +124,17 @@ pub fn list() -> ToolsListResult {
             ToolDescription {
                 name: "list_sources",
                 description:
-                    "Enumerate the corpus's available sources so an agent can narrow filters.",
+                    "List the sources that make up the corpus (paginated). Use to discover what material exists and to get source slugs for advanced_search filters.",
                 input_schema: json!({
                     "type": "object",
-                    "properties": {},
+                    "properties": {
+                        "cursor": { "type": "string", "description": "Opaque pagination token from a previous response's next_cursor." },
+                        "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 },
+                        "created_after": { "type": "string", "format": "date-time", "description": "Only sources registered after this RFC3339 instant." },
+                        "created_before": { "type": "string", "format": "date-time", "description": "Only sources registered before this RFC3339 instant." },
+                        "kind": { "type": "string", "enum": ["docs_site", "code_repo", "standalone", "mixed"] },
+                        "retired": { "type": "boolean", "default": false, "description": "Include retired sources." }
+                    },
                     "additionalProperties": false,
                 }),
                 output_schema: Some(crate::schemas::sources_output_schema()),
@@ -1409,6 +1416,40 @@ pub async fn run_get_chunks(
         CloudError::NotFound(msg) => PassthroughError::NotFound(msg),
         other => PassthroughError::Cloud(other.to_string()),
     })
+}
+
+/// Dispatch `list_sources`. Forwards the pagination/filter arguments
+/// (`cursor`, `limit`, `created_after`, `created_before`, `kind`, `retired`)
+/// to `GET /v1/sources` as query params — only keys present in `args` are
+/// sent. Non-string JSON scalars are rendered in their query-string form
+/// (`true`, `20`); the input schema forbids object/array values, so no
+/// further validation happens here.
+///
+/// # Errors
+///
+/// Propagates any [`CloudError`] from the transport / status mapping.
+pub async fn run_list_sources(
+    args: &serde_json::Value,
+    cloud: &Arc<CloudClient>,
+) -> Result<serde_json::Value, CloudError> {
+    let mut params: Vec<(&str, String)> = Vec::new();
+    for key in [
+        "cursor",
+        "limit",
+        "created_after",
+        "created_before",
+        "kind",
+        "retired",
+    ] {
+        if let Some(v) = args.get(key) {
+            let s = match v {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            params.push((key, s));
+        }
+    }
+    cloud.list_sources(&params).await
 }
 
 #[cfg(test)]
