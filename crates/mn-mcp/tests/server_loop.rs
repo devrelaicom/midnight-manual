@@ -157,28 +157,30 @@ async fn status_tool_works_without_model_load() {
     assert!(json["reranker_loaded"].is_boolean());
 }
 
+/// The public `tools/list` surface: all thirteen tools, in the canonical
+/// registration order (exact-order equality also pins exact membership).
 #[tokio::test]
-async fn tools_list_contains_all_thirteen() {
+async fn tools_list_is_canonically_ordered() {
     let list = mn_mcp::tools::list();
-    let names: Vec<_> = list.tools.iter().map(|t| t.name).collect();
-    for expected in [
-        "search",
-        "advanced_search",
-        "get_chunks",
-        "get_chunk_next",
-        "get_chunk_prev",
-        "get_chunk_neighbors",
-        "get_chunk_parents",
-        "get_document",
-        "get_document_chunks",
-        "list_sources",
-        "facets",
-        "status",
-        "install_search_skill",
-    ] {
-        assert!(names.contains(&expected), "missing tool: {expected}");
-    }
-    assert_eq!(names.len(), 13);
+    let names: Vec<&str> = list.tools.iter().map(|t| t.name).collect();
+    assert_eq!(
+        names,
+        [
+            "search",
+            "advanced_search",
+            "get_chunks",
+            "get_chunk_next",
+            "get_chunk_prev",
+            "get_chunk_neighbors",
+            "get_chunk_parents",
+            "get_document",
+            "get_document_chunks",
+            "list_sources",
+            "facets",
+            "status",
+            "install_search_skill",
+        ]
+    );
 }
 
 /// Drive `prompts/list` and `prompts/get` through the same framed-I/O harness

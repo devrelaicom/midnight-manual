@@ -31,14 +31,15 @@ use tokio::sync::OnceCell;
 use uuid::Uuid;
 
 use crate::cloud_client::{CloudClient, CloudError, QueryPair, SearchRequest};
-use crate::protocol::{ToolDescription, ToolsListResult};
+use crate::protocol::{ToolAnnotations, ToolDescription, ToolsListResult};
 use crate::server::ServerConfig;
 
 /// Build the static tool manifest sent in response to `tools/list`.
 ///
-/// All fourteen tools declared in spec.md US5 / contracts/mcp-tools.json.
-/// Schemas here are kept in sync with the canonical document by way of the
-/// contract tests in `tests/`.
+/// All thirteen tools declared in spec.md US5 / contracts/mcp-tools.json, in
+/// canonical registration order (search pair, chunk reads, document reads,
+/// corpus discovery, diagnostics, local install). Schemas here are kept in
+/// sync with the canonical document by way of the contract tests in `tests/`.
 #[must_use]
 // A flat manifest of `ToolDescription` literals: length is inherent to the
 // data (one entry per tool), so splitting it would hurt readability without
@@ -53,6 +54,7 @@ pub fn list() -> ToolsListResult {
                     "Search the Midnight Network documentation and code corpus (docs, SDK references, Compact language material, code examples). Returns ranked excerpts with confidence scores and source attribution. Use it whenever you need facts about Midnight, Compact, or the Midnight SDK. For multi-query strategies, facet filters, or rerank control, use advanced_search.",
                 input_schema: search_input_schema(),
                 output_schema: Some(crate::schemas::search_output_schema()),
+                annotations: ToolAnnotations::read_only(),
             },
             ToolDescription {
                 name: "advanced_search",
@@ -60,43 +62,48 @@ pub fn list() -> ToolsListResult {
                     "Full-control search over the Midnight corpus: fuse multiple queries (HyDE, expansion, step-back), restrict by facet filters, switch retrieval mode, and toggle reranking. Use when basic search comes up short or when the midnight-advanced-search skill prescribes a pattern. Call facets first to discover valid filter values.",
                 input_schema: advanced_search_input_schema(),
                 output_schema: Some(crate::schemas::search_output_schema()),
+                annotations: ToolAnnotations::read_only(),
             },
             ToolDescription {
                 name: "get_chunks",
                 description:
-                    "Fetch the full content of one or more chunks by id (up to 20 per call), typically ids returned by search. Use this to read the actual text behind search results.",
+                    "Fetch the full content of one or more chunks by id, typically ids returned by search. Use this to read the actual text behind search results.",
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
                         "ids": { "type": "array", "minItems": 1, "maxItems": 20,
                             "items": { "type": "string", "format": "uuid" },
-                            "description": "Chunk ids to fetch. One id is a one-element array." }
+                            "description": "Chunk ids to fetch, 1-20 per call. One id is a one-element array." }
                     },
                     "required": ["ids"],
                     "additionalProperties": false
                 }),
                 output_schema: Some(crate::schemas::chunks_output_schema()),
+                annotations: ToolAnnotations::read_only(),
             },
             ToolDescription {
                 name: "get_chunk_next",
                 description:
-                    "Fetch up to `count` chunks immediately following the given chunk in chunk_index order, scoped to the same document. Returns `{chunks: ChunkWithContext[]}` sorted ascending. Returns `{chunks: []}` (not 404) when called on the last chunk. `embed_failed` chunks are skipped, so the returned chunk_index sequence may have gaps. count defaults to 5 and must be in [1, 100]; out-of-range values are rejected as InvalidParams before the call reaches the cloud.",
+                    "Fetch chunks that immediately follow a given chunk in its document's reading order. Use to continue reading past the end of a chunk you already have.",
                 input_schema: chunk_nav_schema(),
                 output_schema: Some(crate::schemas::chunk_list_output_schema()),
+                annotations: ToolAnnotations::read_only(),
             },
             ToolDescription {
                 name: "get_chunk_prev",
                 description:
-                    "Fetch up to `count` chunks immediately preceding the given chunk in chunk_index order, scoped to the same document. Returns `{chunks: ChunkWithContext[]}` sorted ascending (reading order). Returns `{chunks: []}` (not 404) when called on the first chunk. `embed_failed` chunks are skipped, so the returned chunk_index sequence may have gaps. count defaults to 5 and must be in [1, 100]; out-of-range values are rejected as InvalidParams before the call reaches the cloud.",
+                    "Fetch chunks that immediately precede a given chunk in its document's reading order. Use to read the context leading up to a chunk you already have.",
                 input_schema: chunk_nav_schema(),
                 output_schema: Some(crate::schemas::chunk_list_output_schema()),
+                annotations: ToolAnnotations::read_only(),
             },
             ToolDescription {
                 name: "get_chunk_neighbors",
                 description:
-                    "Bundle `get_chunk_prev` + the anchor chunk + `get_chunk_next` in one round-trip. Returns `{prev: {chunks: ChunkWithContext[]}, chunk: ChunkWithContext, next: {chunks: ChunkWithContext[]}}` where `prev`/`next` are the same envelopes the standalone tools return (so an empty corpus edge yields `chunks: []`, not 404). The three cloud calls are issued in parallel, so latency is roughly that of the slowest leg. `count` defaults to 2 (chunks on each side) and must be in [1, 100]; out-of-range values are rejected as InvalidParams before any wire call. A 404 on the anchor chunk surfaces a not-found error envelope.",
+                    "Fetch the chunks immediately before and after a given chunk in one call. Use when a search hit needs surrounding context to be understood.",
                 input_schema: chunk_neighbors_schema(),
                 output_schema: Some(crate::schemas::neighbors_output_schema()),
+                annotations: ToolAnnotations::read_only(),
             },
             ToolDescription {
                 name: "get_chunk_parents",
@@ -104,6 +111,7 @@ pub fn list() -> ToolsListResult {
                     "Show where a chunk sits in its source's structure: the chain of containing nodes (document, folders) up to the source root. Use to orient a chunk within its source and find its containing document.",
                 input_schema: id_only_schema(),
                 output_schema: Some(crate::schemas::parents_output_schema()),
+                annotations: ToolAnnotations::read_only(),
             },
             ToolDescription {
                 name: "get_document",
@@ -111,6 +119,7 @@ pub fn list() -> ToolsListResult {
                     "Fetch a document's metadata plus an ordered skeleton of its chunks (ids, positions, token counts — no bodies). Use to size up a document before reading it with get_document_chunks.",
                 input_schema: id_only_schema(),
                 output_schema: Some(crate::schemas::document_output_schema()),
+                annotations: ToolAnnotations::read_only(),
             },
             ToolDescription {
                 name: "get_document_chunks",
@@ -118,6 +127,7 @@ pub fn list() -> ToolsListResult {
                     "Read a window of a document's chunk bodies by position. Use after get_document to read a document section by section.",
                 input_schema: document_chunks_schema(),
                 output_schema: Some(crate::schemas::document_output_schema()),
+                annotations: ToolAnnotations::read_only(),
             },
             ToolDescription {
                 name: "list_sources",
@@ -136,6 +146,7 @@ pub fn list() -> ToolsListResult {
                     "additionalProperties": false,
                 }),
                 output_schema: Some(crate::schemas::sources_output_schema()),
+                annotations: ToolAnnotations::read_only(),
             },
             ToolDescription {
                 name: "facets",
@@ -152,6 +163,7 @@ pub fn list() -> ToolsListResult {
                     "additionalProperties": false,
                 }),
                 output_schema: Some(crate::schemas::facets_output_schema()),
+                annotations: ToolAnnotations::read_only(),
             },
             ToolDescription {
                 name: "status",
@@ -163,6 +175,7 @@ pub fn list() -> ToolsListResult {
                     "additionalProperties": false,
                 }),
                 output_schema: Some(crate::schemas::status_output_schema()),
+                annotations: ToolAnnotations::read_only(),
             },
             ToolDescription {
                 name: "install_search_skill",
@@ -170,6 +183,7 @@ pub fn list() -> ToolsListResult {
                     "Install (or update) the midnight-advanced-search skill — a retrieval playbook teaching effective corpus search patterns — into the user's AI harness(es). Use when search results are poor or the user asks for better search guidance.",
                 input_schema: install_search_skill_schema(),
                 output_schema: Some(crate::schemas::install_output_schema()),
+                annotations: ToolAnnotations::idempotent_writer(),
             },
         ],
     }
@@ -191,8 +205,10 @@ fn chunk_nav_schema() -> serde_json::Value {
         "type": "object",
         "required": ["id"],
         "properties": {
-            "id": { "type": "string", "format": "uuid" },
-            "count": { "type": "integer", "minimum": 1, "maximum": 100, "default": 5 },
+            "id": { "type": "string", "format": "uuid",
+                "description": "Anchor chunk id (from search results or another chunk tool)." },
+            "count": { "type": "integer", "minimum": 1, "maximum": 100, "default": 5,
+                "description": "Number of chunks to return; must be in [1, 100] (defaults to 5). Out-of-range values are rejected before any network call. Calling past the document edge returns an empty list, not an error." },
         },
         "additionalProperties": false,
     })
@@ -203,8 +219,10 @@ fn chunk_neighbors_schema() -> serde_json::Value {
         "type": "object",
         "required": ["id"],
         "properties": {
-            "id": { "type": "string", "format": "uuid" },
-            "count": { "type": "integer", "minimum": 1, "maximum": 100, "default": 2 },
+            "id": { "type": "string", "format": "uuid",
+                "description": "Anchor chunk id (from search results or another chunk tool)." },
+            "count": { "type": "integer", "minimum": 1, "maximum": 100, "default": 2,
+                "description": "Chunks to fetch on each side of the anchor; must be in [1, 100] (defaults to 2). Out-of-range values are rejected before any network call. A side past the document edge comes back empty, not as an error." },
         },
         "additionalProperties": false,
     })
@@ -1395,32 +1413,59 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tool_list_has_all_thirteen_tools() {
+    fn tools_list_has_13_tools_with_annotations() {
         let m = list();
-        let names: Vec<_> = m.tools.iter().map(|t| t.name).collect();
-        for expected in [
-            "search",
-            "advanced_search",
-            "get_chunks",
-            "get_chunk_next",
-            "get_chunk_prev",
-            "get_chunk_neighbors",
-            "get_chunk_parents",
-            "get_document",
-            "get_document_chunks",
-            "list_sources",
-            "facets",
-            "status",
-            "install_search_skill",
-        ] {
-            assert!(names.contains(&expected), "missing tool: {expected}");
+        // Exact-order equality pins the canonical registration order AND the
+        // exact membership (so retired names like `get_chunk` / `pull_models`
+        // cannot reappear without failing here).
+        let names: Vec<&str> = m.tools.iter().map(|t| t.name).collect();
+        assert_eq!(
+            names,
+            [
+                "search",
+                "advanced_search",
+                "get_chunks",
+                "get_chunk_next",
+                "get_chunk_prev",
+                "get_chunk_neighbors",
+                "get_chunk_parents",
+                "get_document",
+                "get_document_chunks",
+                "list_sources",
+                "facets",
+                "status",
+                "install_search_skill",
+            ]
+        );
+        for t in &m.tools {
+            let v = serde_json::to_value(t).unwrap();
+            assert!(
+                v["annotations"]["readOnlyHint"].is_boolean(),
+                "{} missing annotations",
+                t.name
+            );
+            // Description hygiene: what/when prose only — no repo paths, no
+            // spec/decision numbers (mechanical constraints live in schemas).
+            assert!(
+                !t.description.contains("docs/"),
+                "{} description references a repo path",
+                t.name
+            );
+            assert!(
+                !t.description.contains("FR-"),
+                "{} description references a spec number",
+                t.name
+            );
         }
-        assert_eq!(names.len(), 13, "expected 13 tools, got {}", names.len());
-        // Replaced by the batch tool in the response-format v2 work.
-        assert!(!names.contains(&"get_chunk"), "get_chunk was replaced by get_chunks");
-        // Removed: the reranker loads lazily on the first reranking search,
-        // and `status` reports reranker state.
-        assert!(!names.contains(&"pull_models"), "pull_models was removed");
+        let install = m
+            .tools
+            .iter()
+            .find(|t| t.name == "install_search_skill")
+            .unwrap();
+        let v = serde_json::to_value(install).unwrap();
+        assert_eq!(v["annotations"]["readOnlyHint"], false);
+        assert_eq!(v["annotations"]["idempotentHint"], true);
+        assert_eq!(v["annotations"]["destructiveHint"], false);
     }
 
     #[test]
