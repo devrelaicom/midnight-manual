@@ -9,7 +9,9 @@
 
 use mn_mcp::cloud_client::{CloudClient, CloudError, QueryPair, SearchRequest};
 use serde_json::json;
-use wiremock::matchers::{body_partial_json, header, method, path, query_param};
+use wiremock::matchers::{
+    body_partial_json, header, method, path, query_param, query_param_is_missing,
+};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn make_search_req() -> SearchRequest {
@@ -204,14 +206,133 @@ async fn list_sources_round_trips() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/v1/sources"))
+        .and(query_param_is_missing("cursor"))
+        .and(query_param_is_missing("limit"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([
             {"slug": "midnight-docs", "kind": "github", "display_name": "Midnight Docs"},
         ])))
         .mount(&server)
         .await;
     let client = CloudClient::new(&server.uri(), None).unwrap();
-    let v = client.list_sources().await.unwrap();
+    let v = client.list_sources(&[]).await.unwrap();
     assert_eq!(v[0]["slug"], "midnight-docs");
+}
+
+#[tokio::test]
+async fn list_sources_sends_pagination_params() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/sources"))
+        .and(query_param("cursor", "abc=="))
+        .and(query_param("limit", "20"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "sources": [{"slug": "midnight-docs"}],
+            "next_cursor": null,
+        })))
+        .mount(&server)
+        .await;
+    let client = CloudClient::new(&server.uri(), None).unwrap();
+    let v = client
+        .list_sources(&[("cursor", "abc==".to_owned()), ("limit", "20".to_owned())])
+        .await
+        .unwrap();
+    assert_eq!(v["sources"][0]["slug"], "midnight-docs");
+}
+
+#[tokio::test]
+async fn get_chunks_sends_comma_joined_ids() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/chunks"))
+        .and(query_param("ids", "a,b"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "chunks": [{"id": "a"}, {"id": "b"}],
+            "missing": [],
+        })))
+        .mount(&server)
+        .await;
+    let client = CloudClient::new(&server.uri(), None).unwrap();
+    let v = client
+        .get_chunks(&["a".to_owned(), "b".to_owned()])
+        .await
+        .unwrap();
+    assert_eq!(v["chunks"].as_array().unwrap().len(), 2);
+    assert_eq!(v["chunks"][1]["id"], "b");
+    assert_eq!(v["missing"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn get_facets_sends_drilldown_param() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/facets"))
+        .and(query_param("facet", "tags"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "facet": "tags",
+            "values": [{"value": "zk", "count": 12}],
+        })))
+        .mount(&server)
+        .await;
+    let client = CloudClient::new(&server.uri(), None).unwrap();
+    let v = client
+        .get_facets(&[("facet", "tags".to_owned())])
+        .await
+        .unwrap();
+    assert_eq!(v["facet"], "tags");
+    assert_eq!(v["values"][0]["value"], "zk");
+}
+
+#[tokio::test]
+async fn get_me_round_trips() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/me"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "user": "aaron",
+            "rate_limit": {"remaining": 99},
+        })))
+        .mount(&server)
+        .await;
+    let client = CloudClient::new(&server.uri(), None).unwrap();
+    let v = client.get_me().await.unwrap();
+    assert_eq!(v["user"], "aaron");
+    assert_eq!(v["rate_limit"]["remaining"], 99);
+}
+
+#[tokio::test]
+async fn readyz_returns_200_as_data() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/readyz"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+    let client = CloudClient::new(&server.uri(), None).unwrap();
+    assert_eq!(client.readyz().await.unwrap(), 200);
+}
+
+#[tokio::test]
+async fn readyz_returns_503_as_data_not_error() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/readyz"))
+        .respond_with(ResponseTemplate::new(503).set_body_string("draining"))
+        .mount(&server)
+        .await;
+    let client = CloudClient::new(&server.uri(), None).unwrap();
+    assert_eq!(client.readyz().await.unwrap(), 503);
+}
+
+#[tokio::test]
+async fn readyz_maps_refused_connection_to_transport() {
+    // Bind to an OS-assigned port, then drop the listener so the port is dead.
+    let dead_port = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap().port()
+    };
+    let client = CloudClient::new(&format!("http://127.0.0.1:{dead_port}"), None).unwrap();
+    let err = client.readyz().await.unwrap_err();
+    assert!(matches!(err, CloudError::Transport(_)));
 }
 
 #[tokio::test]

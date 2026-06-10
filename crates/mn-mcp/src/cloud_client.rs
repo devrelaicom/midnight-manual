@@ -256,9 +256,38 @@ impl CloudClient {
         }))
     }
 
-    /// `GET /v1/sources`.
-    pub async fn list_sources(&self) -> Result<serde_json::Value, CloudError> {
-        self.get_json("/v1/sources").await
+    /// `GET /v1/chunks?ids=a,b,c` — batch fetch, input order preserved server-side.
+    /// Returns `{ chunks: [...], missing: [...] }`.
+    ///
+    /// # Errors
+    ///
+    /// Propagates any [`CloudError`] from the transport / status mapping.
+    pub async fn get_chunks(&self, ids: &[String]) -> Result<serde_json::Value, CloudError> {
+        let mut url = self
+            .base
+            .join("/v1/chunks")
+            .map_err(|e| CloudError::Transport(e.to_string()))?;
+        url.query_pairs_mut().append_pair("ids", &ids.join(","));
+        self.get_json_url(url).await
+    }
+
+    /// `GET /v1/sources` with pagination/filter params, appended as query
+    /// pairs (percent-encoding handled by `query_pairs_mut`).
+    ///
+    /// # Errors
+    ///
+    /// Propagates any [`CloudError`] from the transport / status mapping.
+    pub async fn list_sources(
+        &self,
+        params: &[(&str, String)],
+    ) -> Result<serde_json::Value, CloudError> {
+        let mut url = self
+            .base
+            .join("/v1/sources")
+            .map_err(|e| CloudError::Transport(e.to_string()))?;
+        url.query_pairs_mut()
+            .extend_pairs(params.iter().map(|(k, v)| (*k, v.as_str())));
+        self.get_json_url(url).await
     }
 
     /// `GET /v1/documents/:id`.
@@ -278,12 +307,51 @@ impl CloudClient {
         self.get_json(&path).await
     }
 
-    /// `GET /v1/facets` — the corpus's filterable facets + corpus-derived values.
+    /// `GET /v1/facets` — overview when `params` is empty, drill-down otherwise.
     ///
     /// # Errors
+    ///
     /// Propagates any [`CloudError`] from the transport / status mapping.
-    pub async fn get_facets(&self) -> Result<serde_json::Value, CloudError> {
-        self.get_json("/v1/facets").await
+    pub async fn get_facets(
+        &self,
+        params: &[(&str, String)],
+    ) -> Result<serde_json::Value, CloudError> {
+        let mut url = self
+            .base
+            .join("/v1/facets")
+            .map_err(|e| CloudError::Transport(e.to_string()))?;
+        url.query_pairs_mut()
+            .extend_pairs(params.iter().map(|(k, v)| (*k, v.as_str())));
+        self.get_json_url(url).await
+    }
+
+    /// `GET /v1/me` — auth / rate-limit / token-budget introspection.
+    ///
+    /// # Errors
+    ///
+    /// Propagates any [`CloudError`] from the transport / status mapping.
+    pub async fn get_me(&self) -> Result<serde_json::Value, CloudError> {
+        self.get_json("/v1/me").await
+    }
+
+    /// `GET /readyz` — returns the HTTP status code (no body parsing).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CloudError::Transport`] on connection failure only; any
+    /// HTTP status (200 or not) is returned as data.
+    pub async fn readyz(&self) -> Result<u16, CloudError> {
+        let url = self
+            .base
+            .join("/readyz")
+            .map_err(|e| CloudError::Transport(e.to_string()))?;
+        let resp = self
+            .http
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| CloudError::Transport(e.to_string()))?;
+        Ok(resp.status().as_u16())
     }
 
     async fn get_json(&self, path: &str) -> Result<serde_json::Value, CloudError> {
@@ -291,6 +359,10 @@ impl CloudClient {
             .base
             .join(path)
             .map_err(|e| CloudError::Transport(e.to_string()))?;
+        self.get_json_url(url).await
+    }
+
+    async fn get_json_url(&self, url: Url) -> Result<serde_json::Value, CloudError> {
         let mut rb = self.http.get(url);
         if let Some(b) = &self.bearer {
             rb = rb.bearer_auth(b);
