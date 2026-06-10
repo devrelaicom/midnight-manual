@@ -66,33 +66,96 @@ paths:
       operationId: getFacets
       summary: Discover the filterable search facets, their types, and corpus-derived values
       description: >-
-        Public read endpoint (same posture as /search). Advertises the available
-        `mode` values and the per-facet filter universe so a client can build a
-        valid `filters` object for /search. Closed-enum facets carry their full
-        `values` list; corpus-derived open sets (`language`, `source_slug`,
-        `tags`, `package`) carry top-N `values` plus `truncated` / `total`;
+        Public read endpoint (same posture as /search). Two modes. Overview
+        (no params): advertises the available `mode` values and the per-facet
+        filter universe so a client can build a valid `filters` object for
+        /search. Closed-enum facets carry their complete `values` list;
+        corpus-derived open sets (`language`, `source_slug`, `tags`, `package`)
+        carry at most 10 sample `values` plus `truncated` and an exact `total`;
         high-cardinality facets (`symbol`, `heading_path`) advertise their type
-        only. Backed by a short-lived server-side cache.
+        only. Backed by a short-lived server-side cache. Drill-down
+        (`?facet=<key>`): one keyset-paginated page of distinct values for a
+        single drillable open-set facet, never cached.
+      parameters:
+        - name: facet
+          in: query
+          required: false
+          description: >-
+            Switch to drill-down mode and return a paginated value list for
+            this one facet. Only the drillable open-set facets are accepted
+            (closed-enum facets list all values in the overview; `symbol` /
+            `heading_path` are not drillable).
+          schema: { type: string, enum: [source_slug, language, tags, package] }
+        - name: cursor
+          in: query
+          required: false
+          description: >-
+            Drill-down only. Opaque resume token from the previous page's
+            `next_cursor`; omit for the first page.
+          schema: { type: string }
+        - name: limit
+          in: query
+          required: false
+          description: Drill-down only. Page size.
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
       responses:
         '200':
-          description: OK
+          description: >-
+            Overview body when `facet` is absent; one drill-down page when
+            `facet` is present.
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/FacetsResponse' }
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/FacetsResponse'
+                  - $ref: '#/components/schemas/FacetValuesPage'
+        '400': { $ref: '#/components/responses/InvalidRequest' }
         '503': { $ref: '#/components/responses/ServiceUnavailable' }
 
   /sources:
     get:
       operationId: listSources
-      summary: List sources
+      summary: List sources (filterable, keyset-paginated on slug)
+      parameters:
+        - name: cursor
+          in: query
+          required: false
+          description: >-
+            Opaque resume token from the previous page's `next_cursor`; omit
+            for the first page.
+          schema: { type: string }
+        - name: limit
+          in: query
+          required: false
+          description: Page size.
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+        - name: created_after
+          in: query
+          required: false
+          description: Only sources created strictly after this RFC3339 timestamp.
+          schema: { type: string, format: date-time }
+        - name: created_before
+          in: query
+          required: false
+          description: Only sources created strictly before this RFC3339 timestamp.
+          schema: { type: string, format: date-time }
+        - name: kind
+          in: query
+          required: false
+          description: Only sources of this kind.
+          schema: { type: string, enum: [docs_site, code_repo, standalone, mixed] }
+        - name: retired
+          in: query
+          required: false
+          description: Include retired sources (default false = active only).
+          schema: { type: boolean, default: false }
       responses:
         '200':
           description: OK
           content:
             application/json:
-              schema:
-                type: array
-                items: { $ref: '#/components/schemas/Source' }
+              schema: { $ref: '#/components/schemas/SourcePage' }
+        '400': { $ref: '#/components/responses/InvalidRequest' }
     post:
       operationId: createSource
       summary: Create a source (admin)
@@ -341,6 +404,29 @@ paths:
           description: OK
 
   # ===== Chunks and traversal (Story 4) =====
+  /chunks:
+    get:
+      operationId: getChunksBatch
+      summary: Batch chunk fetch by id (order-preserving)
+      parameters:
+        - name: ids
+          in: query
+          required: true
+          description: >-
+            Comma-separated chunk UUIDs, 1-20 per request. Results come back
+            in input order; ids that resolve to nothing — and repeats of an id
+            already returned — land in `missing` instead of erroring the
+            whole batch.
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ChunkBatch' }
+        '400': { $ref: '#/components/responses/InvalidRequest' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+
   /chunks/{id}:
     parameters:
       - name: id
@@ -382,14 +468,14 @@ paths:
         schema: { type: string, format: uuid }
     get:
       operationId: getChunkParents
+      summary: Walk the chunk's parent chain (immediate parent → root)
       responses:
         '200':
           description: OK
           content:
             application/json:
-              schema:
-                type: array
-                items: { $ref: '#/components/schemas/Node' }
+              schema: { $ref: '#/components/schemas/ParentChain' }
+        '404': { $ref: '#/components/responses/NotFound' }
 
   /documents/{id}:
     parameters:
@@ -399,12 +485,14 @@ paths:
         schema: { type: string, format: uuid }
     get:
       operationId: getDocument
+      summary: Document overview (document row + source + ordered chunk skeletons)
       responses:
         '200':
           description: OK
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Document' }
+              schema: { $ref: '#/components/schemas/DocumentOverview' }
+        '404': { $ref: '#/components/responses/NotFound' }
 
   /documents/{id}/chunks:
     parameters:
@@ -464,6 +552,28 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/EmbeddingModel' }
+
+  # ===== Introspection =====
+  /me:
+    get:
+      operationId: getMe
+      summary: Auth + limit introspection for the calling client
+      description: >-
+        Public read endpoint; anonymous calls succeed and report
+        `authenticated: false`. Reports BOTH independent limit systems the
+        caller carries: the request rate limit (`rate_limit`, req/s token
+        bucket, peeked without spending a token) and the embedding token
+        budget (`token_limits`, rolling hourly/daily windows charged by
+        POST /v1/embeddings). NOTE the deliberate units asymmetry:
+        `rate_limit.reset_secs` is RELATIVE (seconds from now) while the
+        `token_limits` windows report ABSOLUTE `reset_at_secs` (unix epoch
+        seconds) — see `Me`.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Me' }
 
   # ===== Auth (Story 9) =====
   /auth/challenge:
@@ -741,6 +851,33 @@ components:
         created_at: { type: string, format: date-time }
         retired_at: { type: string, format: date-time, nullable: true }
 
+    SourceSummary:
+      type: object
+      description: Minimal source context bundled into navigation responses.
+      properties:
+        slug: { type: string }
+        display_name: { type: string }
+
+    SourcePage:
+      type: object
+      required: [sources, total, next_cursor]
+      description: >-
+        GET /v1/sources body — one keyset page (ordered by slug) plus
+        pagination facts.
+      properties:
+        sources:
+          type: array
+          items: { $ref: '#/components/schemas/Source' }
+        total:
+          type: integer
+          description: Total rows matching the filters (cursor ignored).
+        next_cursor:
+          type: string
+          nullable: true
+          description: >-
+            Opaque resume token for the next page; `null` on the last page.
+            Pass back verbatim as `?cursor=`.
+
     SourceVersion:
       type: object
       properties:
@@ -773,6 +910,47 @@ components:
         kind: { type: string, enum: [root, group, document, chunk] }
         name: { type: string }
         order_index: { type: integer }
+
+    ParentNode:
+      type: object
+      description: >-
+        One ancestor in a chunk's parent chain. Unlike the generic Node,
+        `kind` never takes the value `chunk`, and document-kind nodes carry
+        their fetchable `document_id`.
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Node id (structural hierarchy id — NOT a document id).
+        source_version_id: { type: string, format: uuid }
+        parent_node_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: "`null` for the root."
+        kind: { type: string, enum: [document, group, root] }
+        name: { type: string, description: "File or folder name; `root` for the root." }
+        order_index: { type: integer }
+        document_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: >-
+            The fetchable document id (feed to GET /v1/documents/{id});
+            present only on `kind == "document"` nodes, `null` on group/root.
+
+    ParentChain:
+      type: object
+      required: [parents, source]
+      description: >-
+        GET /v1/chunks/{id}/parents body. `parents` is ordered immediate
+        parent → root (for a chunk the first entry is its document node,
+        followed by the enclosing groups, ending at the implicit root).
+      properties:
+        parents:
+          type: array
+          items: { $ref: '#/components/schemas/ParentNode' }
+        source: { $ref: '#/components/schemas/SourceSummary' }
 
     Document:
       type: object
@@ -842,6 +1020,38 @@ components:
         end_byte: { type: integer }
         token_count: { type: integer }
         status: { type: string, enum: [ready, embed_failed, deprecated] }
+
+    ChunkSkeleton:
+      type: object
+      required: [id, chunk_index, token_count]
+      description: >-
+        Per-chunk skeleton entry in a document overview — position + cost,
+        no body.
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Chunk id (feed to GET /v1/chunks?ids=).
+        chunk_index: { type: integer, description: Position within the document. }
+        token_count: { type: integer, description: Token count of the chunk body. }
+
+    DocumentOverview:
+      description: >-
+        GET /v1/documents/{id} body — the complete Document row flattened at
+        the top level, plus the owning source's summary and ordered chunk
+        skeletons. No chunk bodies.
+      allOf:
+        - $ref: '#/components/schemas/Document'
+        - type: object
+          required: [source, chunks]
+          properties:
+            source: { $ref: '#/components/schemas/SourceSummary' }
+            chunks:
+              type: array
+              description: >-
+                Ready chunk skeletons in chunk_index order (embed_failed
+                chunks excluded).
+              items: { $ref: '#/components/schemas/ChunkSkeleton' }
 
     # ===== Search =====
     SearchRequest:
@@ -1133,10 +1343,11 @@ components:
       type: object
       required: [key, type, negatable]
       description: >-
-        One filterable facet. `values` is present for closed enums (the full
-        allowed set) and for corpus-derived open sets (`language`, `source_slug`,
-        `tags`, `package`); for the corpus-derived sets `truncated` / `total`
-        are also present. `symbol` and `heading_path` advertise type only.
+        One filterable facet. `values` is present for closed enums (the
+        complete allowed set) and for corpus-derived open sets (`language`,
+        `source_slug`, `tags`, `package`); for the corpus-derived sets
+        `truncated` / `total` are also present. `symbol` and `heading_path`
+        advertise type only.
       properties:
         key: { type: string, description: The wire key used inside a `filters` object. }
         type:
@@ -1148,20 +1359,45 @@ components:
         values:
           type: array
           description: >-
-            Allowed values (closed enums) or corpus-derived values (open sets).
-            Absent for object-set/range/bool facets and for non-enumerated
-            open sets (`symbol`, `heading_path`).
+            Allowed values (closed enums: the complete set) or corpus-derived
+            sample values (open sets: at most 10 — fetch the rest via the
+            `?facet=` drill-down). Absent for object-set/range/bool facets and
+            for non-enumerated open sets (`symbol`, `heading_path`).
           items: { type: string }
         truncated:
           type: boolean
           description: >-
             Present only for corpus-derived open sets; true when more distinct
-            values exist than are listed in `values`.
+            values exist than are listed in `values` (fetch the rest via the
+            `?facet=` drill-down).
         total:
           type: integer
           description: >-
-            Present only for corpus-derived open sets; count of distinct values
-            found (capped, so reads as "N or more" when `truncated`).
+            Present only for corpus-derived open sets; EXACT count of distinct
+            values in the active corpus (not capped at the sample size).
+
+    FacetValuesPage:
+      type: object
+      required: [facet, values, total, next_cursor]
+      description: >-
+        One drill-down page (GET /v1/facets?facet=...) of distinct values for
+        a single drillable open-set facet, ordered by value text.
+      properties:
+        facet: { type: string, enum: [source_slug, language, tags, package] }
+        values:
+          type: array
+          items: { type: string }
+        total:
+          type: integer
+          description: >-
+            Exact count of distinct values in the active corpus (cursor
+            ignored); matches the overview's `total` for the same facet.
+        next_cursor:
+          type: string
+          nullable: true
+          description: >-
+            Opaque resume token for the next page; `null` on the last page.
+            Pass back verbatim as `?cursor=`.
 
     SearchResponse:
       type: object
@@ -1247,6 +1483,21 @@ components:
         version_match_multiplier: { type: number }
         relevance_source: { type: string, enum: [rrf, rerank] }
         relevance_multiplier: { type: number }
+
+    ChunkBatch:
+      type: object
+      required: [chunks, missing]
+      description: >-
+        GET /v1/chunks?ids= body. `chunks` preserves the input id order; ids
+        that resolved to nothing — and duplicate input ids beyond their first
+        occurrence — appear in `missing`.
+      properties:
+        chunks:
+          type: array
+          items: { $ref: '#/components/schemas/ChunkResult' }
+        missing:
+          type: array
+          items: { type: string, format: uuid }
 
     # ===== Ingest =====
     StartIngestRunRequest:
@@ -1381,6 +1632,72 @@ components:
         limit_rps: { type: integer }
         expires_at: { type: string, format: date-time }
         note: { type: string }
+
+    # ===== Introspection =====
+    Me:
+      type: object
+      required: [authenticated, auth_type, identity, permission_level, rate_limit, token_limits, server_version]
+      description: >-
+        GET /v1/me body. The caller's two limit systems are independent and —
+        deliberately, but easy to misread — use DIFFERENT time units:
+        `rate_limit.reset_secs` is RELATIVE (seconds from now until the bucket
+        refills), while the `token_limits` windows report ABSOLUTE
+        `reset_at_secs` (unix epoch seconds when the window's oldest bucket
+        expires).
+      properties:
+        authenticated: { type: boolean }
+        auth_type:
+          type: string
+          enum: [anonymous, github_oauth, admin]
+        identity:
+          type: string
+          nullable: true
+          description: Token subject; `null` when anonymous.
+        permission_level:
+          type: string
+          enum: [read, write, admin]
+        rate_limit:
+          type: object
+          nullable: true
+          description: >-
+            Request rate-limit bucket snapshot (non-consuming peek; no token
+            is spent answering /me). `null` when the rate limiter is disabled.
+          properties:
+            tier:
+              type: string
+              enum: [cidr_override, admin, read_uplift, anonymous]
+            limit: { type: integer }
+            remaining: { type: integer }
+            reset_secs:
+              type: integer
+              description: >-
+                RELATIVE seconds from now until the bucket refills (retry-after
+                when `remaining` is 0). NOT a unix timestamp — contrast with
+                `token_limits.*.reset_at_secs`.
+        token_limits:
+          type: object
+          description: >-
+            Embedding token budget (rolling hourly + daily windows, charged by
+            POST /v1/embeddings).
+          properties:
+            tier:
+              type: string
+              enum: [anonymous, read_uplift, admin]
+            hourly: { $ref: '#/components/schemas/TokenWindow' }
+            daily: { $ref: '#/components/schemas/TokenWindow' }
+        server_version: { type: string }
+
+    TokenWindow:
+      type: object
+      description: One embedding-token window snapshot (see `Me.token_limits`).
+      properties:
+        limit: { type: integer, description: Configured token ceiling for this window. }
+        remaining: { type: integer, description: Tokens remaining before the window is exhausted. }
+        reset_at_secs:
+          type: integer
+          description: >-
+            ABSOLUTE unix epoch seconds when the window's oldest bucket
+            expires. NOT relative — contrast with `rate_limit.reset_secs`.
 
     TelemetryRejection:
       type: object
