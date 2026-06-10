@@ -2,7 +2,8 @@
 //!
 //! Thirteen tools across four categories:
 //!
-//! - Local-only: `status`.
+//! - Diagnostics: `status` (concurrent probes — cloud `/readyz`, `/v1/me`
+//!   auth + rate/token limits, VoyageAI key validity, local reranker state).
 //! - Cloud search: `search` + `advanced_search` (embed locally, post to
 //!   `/v1/search`, optional local rerank; `advanced_search` adds multi-query
 //!   fusion, facet filters, and the rerank toggle).
@@ -30,6 +31,7 @@ pub mod protocol;
 pub mod render;
 pub mod schemas;
 pub mod server;
+pub mod status;
 pub mod tools;
 pub mod transport;
 

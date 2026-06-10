@@ -67,9 +67,12 @@ fn all_passthrough_projectors_conform_to_passthrough_schema() {
             mn_mcp::schemas::sources_output_schema(),
         ),
         (
-            mn_mcp::render::project_status(
-                serde_json::json!({ "server_version":"0","reranker":"r","model_state":"ready" }),
-            )
+            mn_mcp::render::project_status(serde_json::json!({
+                "mcp_version": "0", "cloud": "reachable", "cloud_version": "0.4.2",
+                "authenticated": false, "auth_type": "anonymous", "identity": null,
+                "permission_level": "read", "rate_limit": null, "token_limits": null,
+                "voyage": "not_configured", "reranker": "r", "reranker_loaded": false
+            }))
             .into_result()
             .structured_content
             .unwrap(),

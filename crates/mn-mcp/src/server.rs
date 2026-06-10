@@ -32,7 +32,8 @@ pub struct ServerConfig {
     /// is cached here.)
     pub cache_dir: PathBuf,
     /// Base URL of the cloud server (`https://midnight-manual.midnightntwrk.expert` in
-    /// production). Tools call this for everything except `status`.
+    /// production). Every tool calls it — `status` probes its `/readyz` and
+    /// `/v1/me` alongside the local checks.
     pub cloud_url: String,
     /// Optional read-uplift bearer to forward as `Authorization: Bearer ...`
     /// on every cloud request. `None` means the MCP server is running in
@@ -395,8 +396,16 @@ async fn dispatch_tool_inner(
 
     Ok(match params.name.as_str() {
         "status" => {
-            let out = tools::run_status(Some(&state.cfg.cache_dir));
-            let v = serde_json::to_value(out).unwrap_or(serde_json::Value::Null);
+            // Resolve the BYOK Voyage key the same way `run_search` does
+            // (flag is always None on the MCP surface; env + config only).
+            let voyage_key = {
+                let cfg_env = mn_core::config::StdEnv;
+                let (core_cfg, _) =
+                    mn_core::config::Config::discover(None, &cfg_env).unwrap_or_default();
+                mn_core::config::resolve_voyage_api_key(None, &core_cfg.models, &cfg_env)
+            };
+            let report = crate::status::assemble(&state.cloud, voyage_key.as_deref()).await;
+            let v = serde_json::to_value(&report).unwrap_or(serde_json::Value::Null);
             ok(render::project_status(v).into_result(), None)
         }
         "search" | "advanced_search" => return Ok(run_search_dispatch(&params, state).await),
@@ -470,7 +479,7 @@ async fn run_search_dispatch(params: &ToolCallParams, state: &ServerState) -> To
         }
     };
     // Best-effort reranker name for telemetry. Use the well-known constant —
-    // the constant is what `run_status` also reports, so it's the most
+    // the constant is what `status` also reports, so it's the most
     // accurate single-process value we have.
     let reranker_name: Option<String> = if parsed.rerank {
         Some(mn_embedding::RERANKER_MODEL_NAME.to_string())

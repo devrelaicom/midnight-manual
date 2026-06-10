@@ -2,9 +2,9 @@
 //!
 //! Thirteen tools, four categories:
 //!
-//! - `status` — local-only; reports on the reranker model cache. The corpus
-//!   embedder is VoyageAI (remote), so there is no local embedder to load
-//!   here. No cloud round-trip.
+//! - `status` — diagnostics; the assembler lives in [`crate::status`] (cloud
+//!   `/readyz` + `/v1/me` probes, VoyageAI key validity, local reranker
+//!   state). This module only contributes the reranker-loaded marker.
 //! - `search` / `advanced_search` — embed via VoyageAI (BYOK or server-proxy),
 //!   post to the cloud `/v1/search`, optionally rerank with the local
 //!   cross-encoder. `search` is the simple 90% surface (`{query, mode?,
@@ -26,7 +26,6 @@ use std::sync::Arc;
 use mn_core::scoring::normalize_rerank;
 use mn_core::scoring_policy::ScoringPolicy;
 use mn_embedding::{client as embed_client, reranker, reranker_catalog, voyage, LoadedReranker};
-use serde::Serialize;
 use serde_json::json;
 use tokio::sync::OnceCell;
 use uuid::Uuid;
@@ -157,7 +156,7 @@ pub fn list() -> ToolsListResult {
             ToolDescription {
                 name: "status",
                 description:
-                    "Report health and model state. Works without models loaded.",
+                    "Diagnose the retrieval setup: cloud reachability, authentication and rate-limit state, VoyageAI key validity, and reranker readiness. Call when searches fail, return errors, or before starting a long session.",
                 input_schema: json!({
                     "type": "object",
                     "properties": {},
@@ -404,50 +403,12 @@ pub(crate) fn run_install_search_skill_in(
 }
 
 // ---------------------------------------------------------------------------
-// status (local)
+// status (reranker-loaded marker; report assembly lives in crate::status)
 // ---------------------------------------------------------------------------
 
-/// `status` tool response payload.
-#[derive(Debug, Serialize)]
-pub struct StatusOutput {
-    /// mn-mcp crate version.
-    pub server_version: &'static str,
-    /// Reranker model identifier. The corpus embedder is VoyageAI (remote), so
-    /// no local embedder is reported.
-    pub reranker: &'static str,
-    /// Current model state.
-    pub model_state: ModelState,
-    /// Resolved on-disk model cache directory, if any.
-    pub cache_dir: Option<String>,
-}
-
-/// Coarse model-state values reported by `status`.
-#[derive(Debug, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum ModelState {
-    /// Reranker not yet loaded for this process.
-    Missing,
-    /// Reranker loaded and ready to use.
-    Ready,
-}
-
-/// Dispatch the `status` tool.
-#[must_use]
-pub fn run_status(cache_dir: Option<&PathBuf>) -> StatusOutput {
-    StatusOutput {
-        server_version: crate::VERSION,
-        reranker: mn_embedding::RERANKER_MODEL_NAME,
-        // Only the reranker is a local model now; the embedder is remote Voyage.
-        model_state: if reranker_loaded() {
-            ModelState::Ready
-        } else {
-            ModelState::Missing
-        },
-        cache_dir: cache_dir.map(|p| p.display().to_string()),
-    }
-}
-
-fn reranker_loaded() -> bool {
+/// Whether a reranker has been loaded into this process (coarse "rerank
+/// capability is warm" signal consumed by the `status` report assembler).
+pub(crate) fn reranker_loaded() -> bool {
     LOADED_MARKERS.load_relaxed_reranker()
 }
 
@@ -1676,13 +1637,6 @@ mod tests {
         ];
         let out = rerank_postprocess(results, &scores, 2);
         assert_eq!(out.len(), 2);
-    }
-
-    #[test]
-    fn status_reports_models() {
-        let s = run_status(None);
-        assert_eq!(s.reranker, "bge-reranker-base");
-        assert!(matches!(s.model_state, ModelState::Missing | ModelState::Ready));
     }
 
     #[test]

@@ -844,23 +844,99 @@ pub fn project_facets(env: Value) -> ToolOutcome {
     ToolOutcome::new(summary, env, trimmed, actions)
 }
 
-/// `status` (StatusOutput as JSON).
+/// `status` (StatusReport as JSON).
 pub fn project_status(env: Value) -> ToolOutcome {
-    let reranker = env.get("reranker").and_then(Value::as_str).unwrap_or("?");
-    let state = env
-        .get("model_state")
+    let s = |k: &str| env.get(k).and_then(Value::as_str).unwrap_or("?").to_owned();
+    let cloud = s("cloud");
+    let cloud_ver = env
+        .get("cloud_version")
         .and_then(Value::as_str)
-        .unwrap_or("?");
-    let ver = env
-        .get("server_version")
-        .and_then(Value::as_str)
-        .unwrap_or("?");
-    let summary = format!("Server {ver}; reranker {reranker}; model state {state}.");
-    // No next action even when the model state is not `ready`: the reranker
-    // loads lazily on the first reranking `search`, so there is nothing for
-    // the caller to do up front.
-    let trimmed = json!({ "server_version": ver, "reranker": reranker, "model_state": state });
-    ToolOutcome::new(summary, env, trimmed, vec![])
+        .map(|v| format!(" (v{v})"))
+        .unwrap_or_default();
+    let auth = if env
+        .get("authenticated")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        format!(
+            "{} {} ({})",
+            s("auth_type"),
+            env.get("identity").and_then(Value::as_str).unwrap_or("?"),
+            s("permission_level")
+        )
+    } else {
+        "anonymous (read)".to_owned()
+    };
+    let rl = env
+        .get("rate_limit")
+        .filter(|v| !v.is_null())
+        .map(|r| {
+            format!(
+                "; requests {}/{}",
+                r.get("remaining").and_then(Value::as_u64).unwrap_or(0),
+                r.get("limit").and_then(Value::as_u64).unwrap_or(0),
+            )
+        })
+        .unwrap_or_default();
+    let tl = env
+        .get("token_limits")
+        .filter(|v| !v.is_null())
+        .map(|t| {
+            let w = |k: &str, unit: &str| {
+                format!(
+                    "{}/{} {unit}",
+                    t.pointer(&format!("/{k}/remaining"))
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0),
+                    t.pointer(&format!("/{k}/limit"))
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0),
+                )
+            };
+            format!("; embed tokens {} · {}", w("hourly", "hr"), w("daily", "day"))
+        })
+        .unwrap_or_default();
+    let reranker = format!(
+        "{} {}",
+        s("reranker"),
+        if env
+            .get("reranker_loaded")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            "loaded"
+        } else {
+            "not loaded (loads on first reranked search)"
+        }
+    );
+    let summary = format!(
+        "Cloud {cloud}{cloud_ver}; auth: {auth}{rl}{tl}; Voyage key {}; reranker {reranker}.",
+        s("voyage").replace('_', " "),
+    );
+    let trimmed = json!({
+        "cloud": env.get("cloud").cloned().unwrap_or(Value::Null),
+        "authenticated": env.get("authenticated").cloned().unwrap_or(Value::Null),
+        "auth_type": env.get("auth_type").cloned().unwrap_or(Value::Null),
+        "voyage": env.get("voyage").cloned().unwrap_or(Value::Null),
+        "rate_limit": env.get("rate_limit").cloned().unwrap_or(Value::Null),
+        "token_limits": env.get("token_limits").cloned().unwrap_or(Value::Null),
+    });
+    let mut actions = Vec::new();
+    if s("voyage") == "invalid_key" {
+        actions.push(NextAction::user(
+            "Ask the user to check their VOYAGE_API_KEY — the Voyage API rejected it",
+        ));
+    }
+    if !env
+        .get("authenticated")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        actions.push(NextAction::user(
+            "For higher rate limits, ask the user to run `mnm auth github`",
+        ));
+    }
+    ToolOutcome::new(summary, env, trimmed, actions)
 }
 
 /// `install_search_skill` (InstallReport as JSON).
@@ -891,8 +967,6 @@ pub enum ErrorKind {
     EmbeddingModelMismatch,
     /// A transient or permanent error was returned by the cloud API.
     CloudError,
-    /// The local embedding or reranker model could not be loaded.
-    ModelLoadFailed,
     /// The `install_search_skill` tool failed to write the skill file.
     InstallFailed,
 }
@@ -904,7 +978,6 @@ impl ErrorKind {
             Self::NotFound => "NOT_FOUND",
             Self::EmbeddingModelMismatch => "EMBEDDING_MODEL_MISMATCH",
             Self::CloudError => "CLOUD_ERROR",
-            Self::ModelLoadFailed => "MODEL_LOAD_FAILED",
             Self::InstallFailed => "INSTALL_FAILED",
         }
     }
@@ -913,9 +986,7 @@ impl ErrorKind {
             // Permanent for an identical retry — recovery requires a suggested action.
             Self::NotFound | Self::EmbeddingModelMismatch => false,
             // Transient or fixable-and-retry.
-            Self::InvalidInput | Self::CloudError | Self::ModelLoadFailed | Self::InstallFailed => {
-                true
-            }
+            Self::InvalidInput | Self::CloudError | Self::InstallFailed => true,
         }
     }
 }
@@ -1698,15 +1769,91 @@ mod tests {
         assert!(o.suggested_next_actions.is_empty());
     }
 
+    /// A fully-populated StatusReport env (authenticated, both limit systems,
+    /// valid Voyage key).
+    fn full_status_env() -> Value {
+        json!({
+            "mcp_version": "0.1.0",
+            "cloud": "reachable",
+            "cloud_version": "0.4.2",
+            "authenticated": true,
+            "auth_type": "github_oauth",
+            "identity": "octocat",
+            "permission_level": "write",
+            "rate_limit": { "tier": "authenticated", "limit": 120, "remaining": 87,
+                            "reset_secs": 31 },
+            "token_limits": {
+                "tier": "authenticated",
+                "hourly": { "limit": 200_000, "remaining": 150_000, "reset_at_secs": 1_200 },
+                "daily": { "limit": 2_000_000, "remaining": 1_900_000, "reset_at_secs": 50_000 }
+            },
+            "voyage": "valid",
+            "reranker": "bge-reranker-base",
+            "reranker_loaded": false
+        })
+    }
+
     #[test]
-    fn project_status_reports_state() {
-        let env = json!({ "server_version": "0.1.0", "reranker": "bge-reranker-base",
-                          "model_state": "missing", "cache_dir": null });
-        let o = super::project_status(env);
-        assert!(o.summary.to_lowercase().contains("reranker"));
-        // No suggested action even with state != ready: the reranker loads
-        // lazily on the first reranking search.
+    fn project_status_full_env_summarizes_every_section() {
+        let o = super::project_status(full_status_env());
+        assert!(o.summary.contains("Cloud reachable"), "cloud state: {}", o.summary);
+        assert!(o.summary.contains("(v0.4.2)"), "cloud version: {}", o.summary);
+        assert!(o.summary.contains("github_oauth octocat (write)"), "identity: {}", o.summary);
+        assert!(o.summary.contains("requests 87/120"), "rate limit: {}", o.summary);
+        assert!(
+            o.summary
+                .contains("embed tokens 150000/200000 hr · 1900000/2000000 day"),
+            "token limits: {}",
+            o.summary
+        );
+        assert!(o.summary.contains("Voyage key valid"), "voyage: {}", o.summary);
+        assert!(o.summary.contains("bge-reranker-base not loaded"), "reranker: {}", o.summary);
+        // Authenticated + valid key → nothing to suggest.
         assert!(o.suggested_next_actions.is_empty());
+    }
+
+    #[test]
+    fn project_status_invalid_key_suggests_user_action() {
+        let mut env = full_status_env();
+        env["voyage"] = json!("invalid_key");
+        let o = super::project_status(env);
+        assert!(o.summary.contains("Voyage key invalid key"), "summary: {}", o.summary);
+        assert!(
+            o.suggested_next_actions
+                .iter()
+                .any(|a| a.tool.is_none() && a.description.contains("VOYAGE_API_KEY")),
+            "invalid_key must surface a user action about the key"
+        );
+    }
+
+    #[test]
+    fn project_status_unauthenticated_suggests_auth_github() {
+        let mut env = full_status_env();
+        env["authenticated"] = json!(false);
+        let o = super::project_status(env);
+        assert!(o.summary.contains("anonymous (read)"), "summary: {}", o.summary);
+        assert!(
+            o.suggested_next_actions
+                .iter()
+                .any(|a| a.tool.is_none() && a.description.contains("mnm auth github")),
+            "unauthenticated must surface the auth-github user action"
+        );
+    }
+
+    #[test]
+    fn project_status_trimmed_carries_all_six_keys() {
+        let o = super::project_status(full_status_env());
+        let t = o.trimmed.as_object().expect("trimmed is an object");
+        for key in [
+            "cloud",
+            "authenticated",
+            "auth_type",
+            "voyage",
+            "rate_limit",
+            "token_limits",
+        ] {
+            assert!(t.contains_key(key), "trimmed must carry `{key}`");
+        }
     }
 
     #[test]

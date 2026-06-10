@@ -139,14 +139,22 @@ async fn tools_list_returns_two_phase_5b_tools() {
 
 #[tokio::test]
 async fn status_tool_works_without_model_load() {
-    // The status tool MUST NOT trigger model load (US5 acceptance #9). It
-    // reports model_state without forcing the reranker singleton.
-    let out = mn_mcp::tools::run_status(None);
-    assert_eq!(out.reranker, "bge-reranker-base");
+    // The status tool MUST NOT trigger model load (US5 acceptance #9). The
+    // assembler reads the reranker-loaded marker without forcing the
+    // singleton, and degrades cloud sections instead of failing when the
+    // server is unreachable. The Voyage key is passed explicitly (None →
+    // proxy mode), so an exported VOYAGE_API_KEY cannot leak in.
+    let cloud = mn_mcp::CloudClient::new("http://127.0.0.1:9", None).unwrap();
+    let report = mn_mcp::status::assemble(&cloud, None).await;
+    assert_eq!(report.reranker, "bge-reranker-base");
     // The shape is well-formed regardless of whether sibling tests have
     // loaded models.
-    let json = serde_json::to_value(&out).unwrap();
-    assert!(json["model_state"].is_string());
+    let json = serde_json::to_value(&report).unwrap();
+    assert_eq!(json["cloud"], "unreachable");
+    assert_eq!(json["auth_type"], "anonymous");
+    assert_eq!(json["permission_level"], "read");
+    assert_eq!(json["voyage"], "not_configured");
+    assert!(json["reranker_loaded"].is_boolean());
 }
 
 #[tokio::test]
