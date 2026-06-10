@@ -508,11 +508,6 @@ async fn run_search_dispatch(params: &ToolCallParams, state: &ServerState) -> To
                 outcome: Outcome::Ok,
             }
         }
-        Err(tools::SearchError::InvalidInput(msg)) => ToolResponse {
-            result: ToolFailure::simple(ErrorKind::InvalidInput, msg.clone(), msg).into_result(),
-            telemetry: None,
-            outcome: Outcome::InvalidInput,
-        },
         Err(tools::SearchError::Mismatch {
             corpus_model,
             client_model,

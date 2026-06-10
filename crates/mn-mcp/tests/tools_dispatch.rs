@@ -731,7 +731,9 @@ async fn dispatch_search_mismatch_produces_iserror_envelope() {
             remediation,
             ..
         } => (corpus_model, message, remediation),
-        other => panic!("expected SearchError::Mismatch, got {other:?}"),
+        other @ SearchError::Cloud(_) => {
+            panic!("expected SearchError::Mismatch, got {other:?}")
+        }
     };
 
     // Mirror the render pipeline that run_search_dispatch uses.

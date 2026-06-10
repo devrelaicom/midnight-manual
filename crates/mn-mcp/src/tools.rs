@@ -580,9 +580,6 @@ pub async fn run_pull_models(cache_dir: PathBuf) -> Result<PullModelsOutput, Str
 /// them to the right MCP error code.
 #[derive(Debug)]
 pub enum SearchError {
-    /// Caller-supplied arguments are malformed (oneOf violation, type
-    /// mismatch, etc.).
-    InvalidInput(String),
     /// Cloud returned an embedding-model mismatch — the JSON-RPC error layer
     /// turns this into a typed response with `data.next_tool = "pull_models"`.
     Mismatch {
@@ -1495,9 +1492,15 @@ mod tests {
         assert_eq!(advanced["type"], "object");
         assert_eq!(advanced["required"], json!(["queries"]));
         assert_eq!(advanced["additionalProperties"], false);
-        assert_eq!(advanced["properties"]["queries"]["maxItems"], 10);
+        assert_eq!(advanced["properties"]["queries"]["maxItems"], MAX_QUERIES);
         assert!(advanced["properties"]["filters"].is_object());
         assert!(advanced["properties"].get("query").is_none(), "advanced must not expose query");
+
+        // The advertised limit bounds must track the parser's constants.
+        for schema in [&basic, &advanced] {
+            assert_eq!(schema["properties"]["limit"]["maximum"], MAX_LIMIT);
+            assert_eq!(schema["properties"]["limit"]["default"], DEFAULT_LIMIT);
+        }
     }
 
     #[test]
