@@ -418,6 +418,36 @@ pub async fn get_with_context(pool: &PgPool, id: Uuid) -> Result<ChunkWithContex
     row.try_into()
 }
 
+/// Fetch many chunks (each with document + source context) in one query.
+///
+/// Rows come back in arbitrary DB order; callers re-order by input order.
+/// Ids that don't exist (or are `embed_failed`) are simply absent.
+///
+/// # Errors
+///
+/// Returns `StoreError::Database` on any SQL failure.
+pub async fn get_many_with_context(pool: &PgPool, ids: &[Uuid]) -> Result<Vec<ChunkWithContext>> {
+    let rows = sqlx::query_as::<_, ChunkWithContextRow>(
+        "SELECT \
+            c.id, c.source_version_id, c.document_id, c.node_id, c.chunk_index, c.total_chunks, \
+            c.content, c.content_hash, c.embedding_model_id, c.heading_path, c.symbol_path, \
+            c.start_byte, c.end_byte, c.token_count, c.status, c.created_at, \
+            d.source_path AS d_source_path, d.published_url AS d_published_url, \
+            d.source_url AS d_source_url, d.language AS d_language, d.kind AS d_kind, \
+            d.provenance AS d_provenance, \
+            s.slug AS s_slug, s.display_name AS s_display_name \
+         FROM chunk c \
+         JOIN document d ON c.document_id = d.id \
+         JOIN source_version sv ON c.source_version_id = sv.id \
+         JOIN source s ON sv.source_id = s.id \
+         WHERE c.id = ANY($1) AND c.status <> 'embed_failed'",
+    )
+    .bind(ids)
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter().map(TryInto::try_into).collect()
+}
+
 #[derive(sqlx::FromRow)]
 struct ChunkWithContextRow {
     // 16 chunk columns (same as ChunkRow):

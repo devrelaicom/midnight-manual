@@ -1,4 +1,4 @@
-//! Integration tests for `GET /v1/chunks/:id` + `/parents`.
+//! Integration tests for `GET /v1/chunks?ids=` + `/v1/chunks/:id` + `/parents`.
 
 #![cfg(feature = "integration")]
 #![allow(
@@ -155,6 +155,50 @@ async fn get_chunk_returns_404_for_unknown_id() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn get_chunks_batch_preserves_input_order_and_reports_missing() {
+    let h = common::boot().await;
+    let (_, a, b) = seed_two_chunks(&h.pool).await;
+    let app = app::build(h.pool.clone(), cfg()).expect("build app");
+    let unknown = Uuid::new_v4();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/chunks?ids={b},{a},{unknown}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let chunks = v["chunks"].as_array().unwrap();
+    assert_eq!(chunks.len(), 2);
+    // Input order preserved: b was requested first.
+    assert_eq!(chunks[0]["id"].as_str().unwrap(), b.to_string());
+    assert_eq!(chunks[1]["id"].as_str().unwrap(), a.to_string());
+    let missing = v["missing"].as_array().unwrap();
+    assert_eq!(missing.len(), 1);
+    assert_eq!(missing[0].as_str().unwrap(), unknown.to_string());
+}
+
+#[tokio::test]
+async fn get_chunks_batch_rejects_invalid_ids_with_400() {
+    let h = common::boot().await;
+    let app = app::build(h.pool.clone(), cfg()).expect("build app");
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/chunks?ids=not-a-uuid")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
