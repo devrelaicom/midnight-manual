@@ -913,6 +913,37 @@ mod tests {
     }
 
     #[test]
+    fn project_search_nudge_boundary_is_strict_less_than_five() {
+        let opts = SearchRenderOpts {
+            skill_installed: false,
+            ..basic_opts()
+        };
+        let o = super::project_search(envelope_with_candidates(5), &opts);
+        assert!(
+            !o.summary.contains("install_search_skill"),
+            "exactly 5 candidates must NOT nudge (threshold is strict <5)"
+        );
+        let o = super::project_search(envelope_with_candidates(4), &opts);
+        assert!(o.summary.contains("install_search_skill"), "4 candidates must nudge");
+    }
+
+    #[test]
+    fn project_search_nudges_when_total_candidates_absent() {
+        // An envelope with no search_metadata.total_candidates treats the
+        // count as 0 — nudge fires when the skill is absent.
+        let opts = SearchRenderOpts {
+            skill_installed: false,
+            ..basic_opts()
+        };
+        let mut env = sample_search_envelope();
+        if let Some(meta) = env["search_metadata"].as_object_mut() {
+            meta.remove("total_candidates");
+        }
+        let o = super::project_search(env, &opts);
+        assert!(o.summary.contains("install_search_skill"));
+    }
+
+    #[test]
     fn project_search_no_nudge_when_skill_installed() {
         let opts = SearchRenderOpts {
             skill_installed: true,
