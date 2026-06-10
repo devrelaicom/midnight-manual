@@ -524,7 +524,7 @@ mnm ingest run --manifest kitties.yaml \
                --source-root ./example-kitties
 ```
 
-`mnm manifest generate` walks the tree (honouring `.gitignore`), classifies each file by extension against your `--include` globs, and writes a ready-to-use `hierarchy.yaml` you can ingest as-is or hand-tune. Fine-tune discovery with `manifest generate`'s `--include` / `--exclude` globs, and the chunker itself with `ingest run`'s `--code-chunk-tokens`, `--code-chunk-lines`, and `--code-chunk-overlap`. Run `mnm manifest generate --help` and `mnm ingest run --help` for the full set.
+`mnm manifest generate` walks the tree (honouring `.gitignore`), classifies each file by extension against your `--include` globs, and writes a ready-to-use `hierarchy.yaml` you can ingest as-is or hand-tune. Fine-tune discovery with `manifest generate`'s `--include` / `--exclude` globs, and the chunker itself with `ingest run`'s `--chunk-tokens` (the per-chunk token budget for both markdown and code). Run `mnm manifest generate --help` and `mnm ingest run --help` for the full set.
 
 > The `.compact`, `.ts`, and `.tsx` files in those repos are chunked with full symbol awareness, so a search for a specific circuit or contract lands on exactly that definition — attributed back to the OpenZeppelin or Midnight source it came from.
 

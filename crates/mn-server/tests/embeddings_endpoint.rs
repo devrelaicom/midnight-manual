@@ -84,9 +84,17 @@ async fn embeds_via_voyage_and_charges_tokens() {
     let cfg = ServerConfig::default();
     // Rate limiting is irrelevant to this test; token accounting is what matters.
     let limiter = None;
-    let app =
-        app::build_with_limiter(h.pool.clone(), cfg, limiter, corpus_model, token_limiter, voyage)
-            .expect("build app");
+    let app = app::build_with_limiter(
+        h.pool.clone(),
+        cfg,
+        limiter,
+        corpus_model,
+        token_limiter,
+        voyage,
+        None,
+        Arc::new(RwLock::new(None)),
+    )
+    .expect("build app");
 
     let resp = app
         .oneshot(
@@ -142,6 +150,8 @@ async fn over_hourly_cap_returns_429_with_retry_after() {
         pinned_corpus_model(),
         token_limiter,
         Some(unreachable_voyage()),
+        None,
+        Arc::new(RwLock::new(None)),
     )
     .expect("build app");
 
@@ -197,6 +207,8 @@ async fn missing_voyage_key_returns_503() {
         pinned_corpus_model(),
         token_limiter,
         None,
+        None,
+        Arc::new(RwLock::new(None)),
     )
     .expect("build app");
 
@@ -233,6 +245,8 @@ async fn over_1000_inputs_returns_413() {
         pinned_corpus_model(),
         token_limiter,
         Some(unreachable_voyage()),
+        None,
+        Arc::new(RwLock::new(None)),
     )
     .expect("build app");
 

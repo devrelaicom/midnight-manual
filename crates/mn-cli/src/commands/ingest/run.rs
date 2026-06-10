@@ -136,22 +136,10 @@ pub struct Args {
     #[arg(long)]
     pub voyage_timeout_secs: Option<u64>,
 
-    /// Semantic code-chunk budget in tokens.
-    #[arg(long, default_value_t = 400)]
-    pub code_chunk_tokens: u32,
-
-    /// Soft minimum markdown chunk size in tokens (small sections are merged up
-    /// to this; ~70% of the code-chunk budget).
-    #[arg(long, default_value_t = 280)]
-    pub md_min_tokens: u32,
-
-    /// Line-window fallback size (lines).
-    #[arg(long, default_value_t = 60)]
-    pub code_chunk_lines: u32,
-
-    /// Line-window fallback overlap (lines).
-    #[arg(long, default_value_t = 20)]
-    pub code_chunk_overlap: u32,
+    /// Chunk budget in tokens, all document kinds (markdown, code, plaintext).
+    /// Greedy coalescing packs sibling units up to 90% of this.
+    #[arg(long = "chunk-tokens", default_value_t = 1024)]
+    pub chunk_tokens: u32,
 
     /// Whitelist glob (repeatable).
     ///
@@ -386,12 +374,8 @@ async fn run_inner(
         .unwrap_or_else(|| super::infer_revision(&source_root));
 
     let chunker_config = mn_content::chunk::ChunkerConfig {
-        max_tokens: args.code_chunk_tokens,
-        min_tokens: args.md_min_tokens,
-        fallback_lines: args.code_chunk_lines,
-        fallback_overlap_lines: args.code_chunk_overlap,
+        max_tokens: args.chunk_tokens,
         max_file_bytes: args.max_file_size,
-        ..mn_content::chunk::ChunkerConfig::default()
     };
     let mut builder =
         PlanBuilder::new(&args.source_slug, SourceKind::DocsSite, &revision, PriorState::default())
@@ -1362,7 +1346,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_code_chunk_and_filter_flags() {
+    fn parses_chunk_and_filter_flags() {
         use clap::Parser as _;
         // Args derives ClapArgs (not Parser); wrap in a minimal Parser for
         // testing so try_parse_from is available.
@@ -1375,12 +1359,8 @@ mod tests {
             "ingest-run",
             "--source-slug",
             "s",
-            "--code-chunk-tokens",
+            "--chunk-tokens",
             "256",
-            "--code-chunk-lines",
-            "80",
-            "--code-chunk-overlap",
-            "15",
             "--include",
             "*.rs",
             "--exclude",
@@ -1393,9 +1373,7 @@ mod tests {
         ])
         .unwrap();
         let args = w.inner;
-        assert_eq!(args.code_chunk_tokens, 256);
-        assert_eq!(args.code_chunk_lines, 80);
-        assert_eq!(args.code_chunk_overlap, 15);
+        assert_eq!(args.chunk_tokens, 256);
         assert_eq!(args.include, vec!["*.rs".to_string()]);
         assert_eq!(args.exclude, vec!["gen_*".to_string()]);
         assert!(args.no_respect_gitignore);

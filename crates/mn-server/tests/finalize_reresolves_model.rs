@@ -186,9 +186,17 @@ async fn finalize_reresolves_corpus_model_shared() {
 
     let limiter = None; // rate limiting not needed for this test
     let token_limiter = mn_server::tokenlimit::TokenUsageLimiter::from_config(&cfg);
-    let app =
-        app::build_with_limiter(h.pool.clone(), cfg, limiter, corpus_model, token_limiter, None)
-            .expect("build app");
+    let app = app::build_with_limiter(
+        h.pool.clone(),
+        cfg,
+        limiter,
+        corpus_model,
+        token_limiter,
+        None,
+        None,
+        Arc::new(RwLock::new(None)),
+    )
+    .expect("build app");
     let token = mint_admin_token(app.clone(), "aaron", &kp).await;
 
     // 1. Start an ingest run on voyage-code-3@1.

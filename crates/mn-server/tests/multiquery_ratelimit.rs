@@ -167,6 +167,8 @@ async fn over_cap_returns_400_and_refunds_the_base_token() {
         resolved_cm(&h.pool).await,
         token_limiter,
         None,
+        None,
+        std::sync::Arc::new(std::sync::RwLock::new(None)),
     )
     .expect("build");
     let ip = unique_ip();
@@ -200,6 +202,8 @@ async fn duplicate_queries_do_not_inflate_cost() {
         resolved_cm(&h.pool).await,
         token_limiter,
         None,
+        None,
+        std::sync::Arc::new(std::sync::RwLock::new(None)),
     )
     .expect("build");
     let ip = unique_ip();
@@ -225,6 +229,8 @@ async fn distinct_queries_charge_n_tokens() {
         resolved_cm(&h.pool).await,
         token_limiter,
         None,
+        None,
+        std::sync::Arc::new(std::sync::RwLock::new(None)),
     )
     .expect("build");
     let ip = unique_ip();
@@ -255,6 +261,8 @@ async fn insufficient_budget_returns_429() {
         resolved_cm(&h.pool).await,
         token_limiter,
         None,
+        None,
+        std::sync::Arc::new(std::sync::RwLock::new(None)),
     )
     .expect("build");
     let ip = unique_ip();

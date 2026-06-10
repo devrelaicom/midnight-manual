@@ -62,8 +62,17 @@ async fn spawn_server(pool: sqlx::PgPool, cfg: ServerConfig, voyage_mock_uri: &s
             .with_base_url(voyage_mock_uri),
     ));
 
-    let app = app::build_with_limiter(pool, cfg, limiter, corpus_model, token_limiter, voyage)
-        .expect("build app");
+    let app = app::build_with_limiter(
+        pool,
+        cfg,
+        limiter,
+        corpus_model,
+        token_limiter,
+        voyage,
+        None,
+        Arc::new(RwLock::new(None)),
+    )
+    .expect("build app");
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -238,10 +247,7 @@ async fn code_ingest_smoke_persists_symbol_paths_and_packages() {
         source_base_url: None,
         batch_size: 50,
         voyage_timeout_secs: None,
-        code_chunk_tokens: 400,
-        md_min_tokens: 1,
-        code_chunk_lines: 60,
-        code_chunk_overlap: 20,
+        chunk_tokens: 400,
         include: vec![],
         exclude: vec![],
         no_respect_gitignore: false,

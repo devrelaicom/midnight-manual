@@ -64,7 +64,9 @@ async fn main() -> anyhow::Result<()> {
     // Token-usage limiter (tiered embedding-token ceilings). Kept in a binding
     // so Task 4.8's snapshot/reaper job can share this exact instance.
     let token_limiter = mn_server::tokenlimit::TokenUsageLimiter::from_config(&cfg);
-    // Server-side Voyage embedder for POST /v1/embeddings (None when no key).
+    // Server-side Voyage embedders for POST /v1/embeddings (None when no key):
+    // the flat voyage-code-3 client (`type=code`) and the contextualized
+    // voyage-context-3 client (`type=general`).
     let voyage = cfg.voyage_api_key.as_ref().map(|k| {
         std::sync::Arc::new(mn_embedding::voyage::VoyageEmbedder::new(
             k,
@@ -73,6 +75,29 @@ async fn main() -> anyhow::Result<()> {
             &cfg.voyage_output_dtype,
         ))
     });
+    let voyage_ctx = cfg.voyage_api_key.as_ref().map(|k| {
+        std::sync::Arc::new(mn_embedding::contextualized::ContextualizedVoyageEmbedder::new(
+            k,
+            &cfg.voyage_context_model,
+            cfg.voyage_output_dimension,
+            &cfg.voyage_output_dtype,
+        ))
+    });
+    // Config-pinned code-embedding model, resolved against the registry. An
+    // unresolved model degrades (code_mode searches 503) rather than failing
+    // boot — a corpus ingested without code embeddings is still serviceable.
+    let code_model: mn_server::code_model::Shared = std::sync::Arc::new(std::sync::RwLock::new(
+        match mn_server::code_model::resolve(&pool, &cfg.code_model_wire).await {
+            Ok(cm) => {
+                tracing::info!(code_model = %cm.wire, "resolved code embedding model");
+                Some(cm)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "code model unresolved; code_mode searches will 503");
+                None
+            }
+        },
+    ));
     let app = app::build_with_limiter(
         pool.clone(),
         cfg.clone(),
@@ -80,6 +105,8 @@ async fn main() -> anyhow::Result<()> {
         corpus_model,
         token_limiter.clone(),
         voyage,
+        voyage_ctx,
+        code_model,
     )
     .context("build app")?;
     let addr: SocketAddr = format!("0.0.0.0:{}", cfg.port)

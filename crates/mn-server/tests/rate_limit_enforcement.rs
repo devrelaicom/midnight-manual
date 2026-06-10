@@ -146,6 +146,8 @@ async fn success_carries_ratelimit_headers() {
         std::sync::Arc::new(std::sync::RwLock::new(None)),
         token_limiter,
         None,
+        None,
+        std::sync::Arc::new(std::sync::RwLock::new(None)),
     )
     .expect("build");
     let (status, headers, _) = send(app, "GET", "/v1/sources", &unique_ip(), None).await;
@@ -169,6 +171,8 @@ async fn anonymous_over_budget_returns_429_with_retry_after() {
         std::sync::Arc::new(std::sync::RwLock::new(None)),
         token_limiter,
         None,
+        None,
+        std::sync::Arc::new(std::sync::RwLock::new(None)),
     )
     .expect("build");
     let ip = unique_ip();
@@ -200,6 +204,8 @@ async fn health_is_exempt_from_limiting() {
         std::sync::Arc::new(std::sync::RwLock::new(None)),
         token_limiter,
         None,
+        None,
+        std::sync::Arc::new(std::sync::RwLock::new(None)),
     )
     .expect("build");
     let ip = unique_ip();
@@ -240,6 +246,8 @@ async fn cidr_override_raises_the_limit() {
         std::sync::Arc::new(std::sync::RwLock::new(None)),
         token_limiter,
         None,
+        None,
+        std::sync::Arc::new(std::sync::RwLock::new(None)),
     )
     .expect("build");
     // Anon floor of 1 would 429 the third request; the /24 override (50 rps)
@@ -268,6 +276,8 @@ async fn admin_token_gets_the_top_tier() {
         std::sync::Arc::new(std::sync::RwLock::new(None)),
         token_limiter,
         None,
+        None,
+        std::sync::Arc::new(std::sync::RwLock::new(None)),
     )
     .expect("build");
     let token = mint_token(app.clone(), &user, &kp, &unique_ip()).await;

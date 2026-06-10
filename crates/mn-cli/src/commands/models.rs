@@ -489,10 +489,7 @@ async fn ingest_source(
         batch_size: 25,
         // None → resolver falls back to VOYAGE_TIMEOUT_SECS env / config / default.
         voyage_timeout_secs: None,
-        code_chunk_tokens: 400,
-        md_min_tokens: 280,
-        code_chunk_lines: 60,
-        code_chunk_overlap: 20,
+        chunk_tokens: 1024,
         include: Vec::new(),
         exclude: Vec::new(),
         no_respect_gitignore: false,
@@ -661,6 +658,27 @@ pub struct ActiveModelResponse {
     pub dim: i32,
     /// Provider tag (e.g. `baai`).
     pub provider: String,
+    /// The corpus's code-embedding model (dual embeddings). `None` when the
+    /// server has no resolved code model (or predates dual embeddings) —
+    /// code search is then unavailable server-side.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<ActiveCode>,
+}
+
+/// The code-embedding half of [`ActiveModelResponse`]. `name@revision` forms
+/// the wire id clients pin code vectors against.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ActiveCode {
+    /// Canonical model name (e.g. `voyage-code-3`).
+    pub name: String,
+    /// Monotonic revision; combined with `name` forms the wire id.
+    pub revision: i32,
+    /// Embedding dimensionality.
+    #[serde(default)]
+    pub dim: i32,
+    /// Provider tag (e.g. `voyageai`).
+    #[serde(default)]
+    pub provider: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -749,7 +767,32 @@ mod tests {
             revision: 1,
             dim: 768,
             provider: "baai".to_owned(),
+            code: None,
         }
+    }
+
+    #[test]
+    fn active_response_deserializes_without_code() {
+        // Pre-dual-embeddings servers omit `code` entirely.
+        let v: ActiveModelResponse = serde_json::from_value(serde_json::json!({
+            "name": "voyage-context-3", "revision": 1, "dim": 1024, "provider": "voyageai"
+        }))
+        .unwrap();
+        assert!(v.code.is_none());
+    }
+
+    #[test]
+    fn active_response_deserializes_with_code() {
+        let v: ActiveModelResponse = serde_json::from_value(serde_json::json!({
+            "name": "voyage-context-3", "revision": 1, "dim": 1024, "provider": "voyageai",
+            "code": { "name": "voyage-code-3", "revision": 1, "dim": 1024, "provider": "voyageai" }
+        }))
+        .unwrap();
+        let code = v.code.expect("code model present");
+        assert_eq!(code.name, "voyage-code-3");
+        assert_eq!(code.revision, 1);
+        assert_eq!(code.dim, 1024);
+        assert_eq!(code.provider, "voyageai");
     }
 
     #[test]

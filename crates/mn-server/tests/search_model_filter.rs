@@ -156,9 +156,17 @@ async fn off_model_chunks_excluded_from_results() {
     let cfg = ServerConfig::default();
     let limiter = mn_server::ratelimit::RateLimiter::from_config(&cfg);
     let token_limiter = mn_server::tokenlimit::TokenUsageLimiter::from_config(&cfg);
-    let app =
-        app::build_with_limiter(h.pool.clone(), cfg, limiter, corpus_model, token_limiter, None)
-            .expect("build app");
+    let app = app::build_with_limiter(
+        h.pool.clone(),
+        cfg,
+        limiter,
+        corpus_model,
+        token_limiter,
+        None,
+        None,
+        Arc::new(RwLock::new(None)),
+    )
+    .expect("build app");
 
     let body = serde_json::json!({
         "query": token,

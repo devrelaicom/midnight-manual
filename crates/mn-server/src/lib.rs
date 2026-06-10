@@ -16,6 +16,7 @@
 )]
 
 pub mod app;
+pub mod code_model;
 pub mod config;
 pub mod corpus_model;
 pub mod error;
