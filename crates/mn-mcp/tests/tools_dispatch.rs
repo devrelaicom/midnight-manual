@@ -714,13 +714,14 @@ async fn dispatch_search_mismatch_produces_iserror_envelope() {
 
     let cloud = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
 
-    let err = run_search(
-        &json!({ "query": "compact contract", "mode": "fts", "rerank": false }),
-        &cfg,
-        &cloud,
-    )
-    .await
-    .unwrap_err();
+    let parsed = mn_mcp::tools::ParsedSearchArgs {
+        queries: vec!["compact contract".to_owned()],
+        limit: 10,
+        rerank: false,
+        filters: None,
+        mode: "fts",
+    };
+    let err = run_search(&parsed, &cfg, &cloud).await.unwrap_err();
 
     // Extract mismatch fields — same as run_search_dispatch in server.rs.
     let (corpus_model, message, remediation) = match err {

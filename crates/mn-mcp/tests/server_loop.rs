@@ -149,11 +149,12 @@ async fn status_tool_works_without_model_load() {
 }
 
 #[tokio::test]
-async fn tools_list_contains_all_thirteen() {
+async fn tools_list_contains_all_fourteen() {
     let list = mn_mcp::tools::list();
     let names: Vec<_> = list.tools.iter().map(|t| t.name).collect();
     for expected in [
         "search",
+        "advanced_search",
         "get_chunk",
         "get_chunk_next",
         "get_chunk_prev",
@@ -169,7 +170,7 @@ async fn tools_list_contains_all_thirteen() {
     ] {
         assert!(names.contains(&expected), "missing tool: {expected}");
     }
-    assert_eq!(names.len(), 13);
+    assert_eq!(names.len(), 14);
 }
 
 /// Drive `prompts/list` and `prompts/get` through the same framed-I/O harness

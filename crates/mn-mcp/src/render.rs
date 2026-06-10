@@ -182,15 +182,44 @@ fn chunk_briefs_at(env: &Value, pointer: &str) -> Value {
     )
 }
 
-/// Project the cloud search envelope. `reranker_used` is the local reranker name when local
-/// rerank ran, else `None`.
+/// How [`project_search`] should render the cloud envelope.
+#[derive(Debug, Clone, Default)]
+pub struct SearchRenderOpts {
+    /// Reranker model name when local rerank ran.
+    pub reranker_used: Option<String>,
+    /// `true` for advanced_search (keeps matched_queries; basic strips it).
+    pub advanced: bool,
+    /// Whether the midnight-advanced-search skill is installed locally.
+    pub skill_installed: bool,
+}
+
+/// Fewer fused candidates than this triggers the "install the skill" nudge
+/// (when the skill is not already installed).
+const FEW_CANDIDATES_THRESHOLD: u64 = 5;
+
+/// Project the cloud search envelope for `search` / `advanced_search`.
 #[allow(clippy::too_many_lines, clippy::option_if_let_else)]
-pub fn project_search(envelope: Value, reranker_used: Option<&str>) -> ToolOutcome {
+pub fn project_search(envelope: Value, opts: &SearchRenderOpts) -> ToolOutcome {
+    let mut envelope = envelope;
+    // Basic search hides the multi-query machinery: strip `matched_queries`
+    // from each result's `scores` (advanced_search keeps it).
+    if !opts.advanced {
+        if let Some(results) = envelope.get_mut("results").and_then(Value::as_array_mut) {
+            for r in results {
+                if let Some(scores) = r.get_mut("scores").and_then(Value::as_object_mut) {
+                    scores.remove("matched_queries");
+                }
+            }
+        }
+    }
     let corpus_model = envelope
         .get("corpus_embedding_model")
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .map(str::to_owned);
+    let total_candidates = envelope
+        .pointer("/search_metadata/total_candidates")
+        .and_then(Value::as_u64);
     let results = envelope
         .get("results")
         .and_then(Value::as_array)
@@ -231,9 +260,12 @@ pub fn project_search(envelope: Value, reranker_used: Option<&str>) -> ToolOutco
         })
         .collect();
 
-    // Summary from the top result.
+    // Summary from the top result. The "(N candidates)" parenthetical is
+    // omitted when the cloud's search_metadata lacks `total_candidates`.
+    let candidates_note =
+        total_candidates.map_or_else(String::new, |c| format!(" ({c} candidates)"));
     let top = results.first();
-    let summary = match top {
+    let mut summary = match top {
         Some(t) => {
             let path = t
                 .get("source_path")
@@ -255,42 +287,66 @@ pub fn project_search(envelope: Value, reranker_used: Option<&str>) -> ToolOutco
                 .pointer("/scores/confidence")
                 .and_then(Value::as_f64)
                 .unwrap_or(0.0);
-            let chunk_id = t.get("chunk_id").and_then(Value::as_str).unwrap_or("?");
-            let model = corpus_model.as_deref().unwrap_or("?");
             let where_ = heading.map_or_else(|| path.to_owned(), |h| format!("{path} › {h}"));
-            format!(
-                "Search: {result_count} matches, corpus {model}. Top: {where_} [{attr} · {conf:.2}] chunk {chunk_id} — fetch with get_chunk."
-            )
+            format!("{result_count} matches{candidates_note}. Top: {where_} [{attr} · {conf:.2}].")
         }
-        None => format!("Search: 0 matches, corpus {}.", corpus_model.as_deref().unwrap_or("?")),
+        None => format!("0 matches{candidates_note}."),
     };
 
-    // suggested_next_actions from the top result.
-    let suggested_next_actions = top
-        .map(|t| {
-            let mut v = Vec::new();
-            if let Some(id) = t.get("chunk_id").and_then(Value::as_str) {
-                v.push(NextAction::call(
-                    "Fetch the top-ranked chunk's full content",
-                    "get_chunk",
-                    json!({ "id": id }),
-                ));
-            }
-            if let Some(id) = t.get("document_id").and_then(Value::as_str) {
-                v.push(NextAction::call(
-                    "Get the top result's parent document overview",
-                    "get_document",
-                    json!({ "id": id }),
-                ));
-            }
-            v
-        })
-        .unwrap_or_default();
+    // suggested_next_actions from the top result + the top-5 batch fetch.
+    let top5: Vec<&str> = results
+        .iter()
+        .take(5)
+        .filter_map(|r| r.get("chunk_id").and_then(Value::as_str))
+        .collect();
+    let mut suggested_next_actions = Vec::new();
+    if let Some(t) = top {
+        if let Some(id) = t.get("chunk_id").and_then(Value::as_str) {
+            suggested_next_actions.push(NextAction::call(
+                "Fetch the top-ranked chunk's full content",
+                "get_chunks",
+                json!({ "ids": [id] }),
+            ));
+            suggested_next_actions.push(NextAction::call(
+                "Read the chunks surrounding the top result for more context",
+                "get_chunk_neighbors",
+                json!({ "id": id }),
+            ));
+        }
+        if top5.len() > 1 {
+            suggested_next_actions.push(NextAction::call(
+                "Fetch the top 5 ranked chunks' content in one call",
+                "get_chunks",
+                json!({ "ids": top5 }),
+            ));
+        }
+        if let Some(d) = t.get("document_id").and_then(Value::as_str) {
+            suggested_next_actions.push(NextAction::call(
+                "Get the top result's parent document overview and chunk map",
+                "get_document",
+                json!({ "id": d }),
+            ));
+        }
+    }
+
+    // Low-candidate nudge: the corpus barely matched and the advanced-search
+    // skill isn't installed — teach the agent how to get it.
+    if total_candidates.unwrap_or(0) < FEW_CANDIDATES_THRESHOLD && !opts.skill_installed {
+        summary.push_str(
+            "\nFew candidates matched — the midnight-advanced-search skill teaches query \
+             patterns that find more (run install_search_skill).",
+        );
+        suggested_next_actions.push(NextAction::call(
+            "Install the midnight-advanced-search skill to learn higher-recall query patterns",
+            "install_search_skill",
+            json!({}),
+        ));
+    }
 
     // Telemetry facts.
     let telemetry = SearchTelemetry {
         corpus_model,
-        reranker_used: reranker_used.map(str::to_owned),
+        reranker_used: opts.reranker_used.clone(),
         top_confidence_bucket: top
             .and_then(|t| t.pointer("/scores/confidence").and_then(Value::as_f64))
             .map(confidence_bucket),
@@ -595,8 +651,8 @@ pub fn project_facets(env: Value) -> ToolOutcome {
         trimmed,
         vec![NextAction::call(
             "Search the corpus using these facet keys as filters",
-            "search",
-            json!({ "query": "<terms>", "filters": {} }),
+            "advanced_search",
+            json!({ "queries": ["<terms>"], "filters": {} }),
         )],
     )
 }
@@ -778,29 +834,148 @@ mod tests {
                 "source_slug": "compact-docs", "source_display_name": "Compact Docs",
                 "source_path": "docs/intro.md", "heading_path": ["Compiling", "Witnesses"],
                 "symbol_path": [], "content": "withVacantWitnesses ...",
-                "scores": { "confidence": 0.81, "trust_score": 1.0,
+                "scores": { "confidence": 0.81, "trust_score": 1.0, "matched_queries": [0],
                             "confidence_factors": { "attribution": "foundation", "verified": true } }
             }],
-            "search_metadata": { "filtered_by_confidence": 0, "deduplicated_count": 0 }
+            "search_metadata": { "filtered_by_confidence": 0, "deduplicated_count": 0,
+                                 "total_candidates": 37 }
         })
+    }
+
+    /// Opts for a reranked basic search with the skill already installed
+    /// (keeps the nudge out of tests that aren't about it).
+    fn basic_opts() -> SearchRenderOpts {
+        SearchRenderOpts {
+            reranker_used: Some("bge-reranker-base".to_owned()),
+            advanced: false,
+            skill_installed: true,
+        }
     }
 
     #[test]
     fn project_search_summary_and_telemetry() {
-        let o = super::project_search(sample_search_envelope(), Some("bge-reranker-base"));
+        let o = super::project_search(sample_search_envelope(), &basic_opts());
         assert!(o.summary.contains("docs/intro.md"));
-        assert!(o.summary.contains("Compact Docs") || o.summary.contains("foundation"));
+        assert!(o.summary.contains("(37 candidates)"));
+        assert!(o.summary.contains("foundation"));
+        assert!(!o.summary.contains("corpus"), "summary must not name the corpus model");
         assert!(o.trimmed["results"][0].get("scores").is_none());
         assert_eq!(o.trimmed["results"][0]["source_path"], "docs/intro.md");
         assert!(o.structured["results"][0].get("scores").is_some());
-        assert_eq!(o.suggested_next_actions[0].tool, Some("get_chunk"));
-        assert_eq!(o.suggested_next_actions[0].arguments.as_ref().unwrap()["id"], "1f39");
+        assert_eq!(o.suggested_next_actions[0].tool, Some("get_chunks"));
+        assert_eq!(o.suggested_next_actions[0].arguments.as_ref().unwrap()["ids"], json!(["1f39"]));
         let t = o.telemetry.unwrap();
         assert_eq!(t.result_count, 1);
         assert_eq!(t.corpus_model.as_deref(), Some("voyage-code-3@1"));
         assert_eq!(t.top_attribution.as_deref(), Some("foundation"));
         assert_eq!(t.top_source.as_deref(), Some("Compact Docs"));
         assert_eq!(t.reranker_used.as_deref(), Some("bge-reranker-base"));
+    }
+
+    #[test]
+    fn project_search_basic_strips_matched_queries_advanced_keeps_it() {
+        let basic = super::project_search(sample_search_envelope(), &basic_opts());
+        assert!(
+            basic.structured["results"][0]["scores"]
+                .get("matched_queries")
+                .is_none(),
+            "basic search must strip scores.matched_queries"
+        );
+        let opts = SearchRenderOpts { advanced: true, ..basic_opts() };
+        let advanced = super::project_search(sample_search_envelope(), &opts);
+        assert_eq!(
+            advanced.structured["results"][0]["scores"]["matched_queries"],
+            json!([0]),
+            "advanced_search must keep scores.matched_queries"
+        );
+    }
+
+    fn envelope_with_candidates(total_candidates: u64) -> Value {
+        let mut env = sample_search_envelope();
+        env["search_metadata"]["total_candidates"] = json!(total_candidates);
+        env
+    }
+
+    #[test]
+    fn project_search_nudges_on_few_candidates_without_skill() {
+        let opts = SearchRenderOpts {
+            skill_installed: false,
+            ..basic_opts()
+        };
+        let o = super::project_search(envelope_with_candidates(2), &opts);
+        assert!(o.summary.contains("install_search_skill"), "summary must carry the nudge");
+        assert!(
+            o.suggested_next_actions
+                .iter()
+                .any(|a| a.tool == Some("install_search_skill")),
+            "nudge must add an install_search_skill action"
+        );
+    }
+
+    #[test]
+    fn project_search_no_nudge_when_skill_installed() {
+        let opts = SearchRenderOpts {
+            skill_installed: true,
+            ..basic_opts()
+        };
+        let o = super::project_search(envelope_with_candidates(2), &opts);
+        assert!(!o.summary.contains("install_search_skill"));
+        assert!(!o
+            .suggested_next_actions
+            .iter()
+            .any(|a| a.tool == Some("install_search_skill")));
+    }
+
+    #[test]
+    fn project_search_no_nudge_when_candidates_plentiful() {
+        let opts = SearchRenderOpts {
+            skill_installed: false,
+            ..basic_opts()
+        };
+        let o = super::project_search(envelope_with_candidates(50), &opts);
+        assert!(!o.summary.contains("install_search_skill"));
+        assert!(!o
+            .suggested_next_actions
+            .iter()
+            .any(|a| a.tool == Some("install_search_skill")));
+    }
+
+    #[test]
+    fn project_search_actions_cover_single_top5_neighbors_and_document() {
+        let mut env = sample_search_envelope();
+        let results: Vec<Value> = (0..6)
+            .map(|i| {
+                json!({
+                    "chunk_id": format!("c{i}"), "document_id": "d0",
+                    "source_path": "docs/x.md", "heading_path": [], "content": "body",
+                    "scores": { "confidence": 0.9,
+                                "confidence_factors": { "attribution": "foundation" } }
+                })
+            })
+            .collect();
+        env["results"] = Value::Array(results);
+        let o = super::project_search(env, &basic_opts());
+        let find = |tool: &str, pred: &dyn Fn(&NextAction) -> bool| {
+            o.suggested_next_actions
+                .iter()
+                .find(|a| a.tool == Some(tool) && pred(a))
+                .unwrap_or_else(|| panic!("missing action for {tool}"))
+                .clone()
+        };
+        let single = find("get_chunks", &|a| a.arguments.as_ref().unwrap()["ids"] == json!(["c0"]));
+        let batch = find("get_chunks", &|a| {
+            a.arguments.as_ref().unwrap()["ids"]
+                .as_array()
+                .unwrap()
+                .len()
+                == 5
+        });
+        let neighbors =
+            find("get_chunk_neighbors", &|a| a.arguments.as_ref().unwrap()["id"] == "c0");
+        let document = find("get_document", &|a| a.arguments.as_ref().unwrap()["id"] == "d0");
+        for a in [single, batch, neighbors, document] {
+            assert!(!a.description.is_empty(), "every action needs a description");
+        }
     }
 
     #[test]
@@ -843,16 +1018,35 @@ mod tests {
         let envelope = json!({
             "corpus_embedding_model": "",
             "results": [],
-            "search_metadata": { "filtered_by_confidence": 2, "deduplicated_count": 0 }
+            "search_metadata": { "filtered_by_confidence": 2, "deduplicated_count": 0,
+                                 "total_candidates": 3 }
         });
-        let o = super::project_search(envelope, None);
-        assert!(o.summary.contains("0 matches"));
-        assert!(!o.summary.contains("corpus . ")); // empty model must not leak into summary
-        assert!(o.suggested_next_actions.is_empty());
+        let o = super::project_search(envelope, &SearchRenderOpts::default());
+        assert!(o.summary.starts_with("0 matches (3 candidates)."));
+        assert!(!o.summary.contains("corpus")); // no corpus model in the summary
+                                                // 3 candidates < 5 and the skill isn't installed → nudge only.
+        assert_eq!(o.suggested_next_actions.len(), 1);
+        assert_eq!(o.suggested_next_actions[0].tool, Some("install_search_skill"));
         let t = o.telemetry.unwrap();
         assert_eq!(t.result_count, 0);
         assert!(t.top_confidence_bucket.is_none());
         assert!(t.corpus_model.is_none()); // "" treated as absent
+    }
+
+    #[test]
+    fn project_search_omits_candidates_note_when_absent() {
+        let envelope = json!({
+            "corpus_embedding_model": "voyage-code-3@1",
+            "results": [],
+            "search_metadata": { "filtered_by_confidence": 0, "deduplicated_count": 0 }
+        });
+        let opts = SearchRenderOpts {
+            skill_installed: true,
+            ..SearchRenderOpts::default()
+        };
+        let o = super::project_search(envelope, &opts);
+        assert!(o.summary.starts_with("0 matches."));
+        assert!(!o.summary.contains("candidates"));
     }
 
     #[test]
@@ -1041,7 +1235,7 @@ mod tests {
             "search_metadata": { "filtered_by_confidence": 1, "deduplicated_count": 0,
                                  "overlap_dropped_count": 3, "overlap_trimmed_count": 2 }
         });
-        let o = super::project_search(env, None);
+        let o = super::project_search(env, &SearchRenderOpts::default());
         let t = o.telemetry.unwrap();
         assert_eq!(t.filtered_by_confidence, Some(1));
         assert_eq!(t.deduplicated_count, Some(5)); // overlap_dropped(3) + overlap_trimmed(2), NOT input-dedup(0)

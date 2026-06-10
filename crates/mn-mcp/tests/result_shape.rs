@@ -12,9 +12,11 @@ fn search_structured_conforms_to_output_schema() {
                       "symbol_path": [], "content": "c",
                       "scores": { "confidence": 0.9, "trust_score": 1.0,
                                   "confidence_factors": { "attribution": "foundation", "verified": true } } }],
-        "search_metadata": { "filtered_by_confidence": 0, "deduplicated_count": 0 }
+        "search_metadata": { "filtered_by_confidence": 0, "deduplicated_count": 0,
+                             "total_candidates": 12 }
     });
-    let result = mn_mcp::render::project_search(env, None).into_result();
+    let result = mn_mcp::render::project_search(env, &mn_mcp::render::SearchRenderOpts::default())
+        .into_result();
     let sc = result
         .structured_content
         .as_ref()

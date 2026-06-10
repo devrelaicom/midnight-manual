@@ -289,16 +289,20 @@ fn passthrough_failure(e: tools::PassthroughError) -> ToolFailure {
 async fn dispatch_tool(id: RequestId, params: ToolCallParams, state: &ServerState) -> Response {
     let started = Instant::now();
     let name_for_event = tool_name_for_event(&params.name);
-    // `rerank` is only meaningful to the `search` tool; for everything else
-    // the field doesn't exist in the schema, so the telemetry value is false.
-    // Search's own default is `true` (see parse_search_args), so an absent
-    // field there must log `true` to match what actually happened on the wire.
-    let rerank_on = params.name == "search"
-        && params
+    // `rerank` is only meaningful to the search tools; for everything else the
+    // field doesn't exist in the schema, so the telemetry value is false. Basic
+    // `search` has no rerank arg at all (reranking always runs), and
+    // `advanced_search` defaults the toggle to `true`, so an absent field must
+    // log `true` to match what actually happened on the wire.
+    let rerank_on = match params.name.as_str() {
+        "search" => true,
+        "advanced_search" => params
             .arguments
             .get("rerank")
             .and_then(serde_json::Value::as_bool)
-            .unwrap_or(true);
+            .unwrap_or(true),
+        _ => false,
+    };
 
     let (response, telemetry, outcome) = match dispatch_tool_inner(id.clone(), params, state).await
     {
@@ -342,7 +346,9 @@ async fn dispatch_tool(id: RequestId, params: ToolCallParams, state: &ServerStat
 
 fn tool_name_for_event(name: &str) -> Option<McpToolName> {
     match name {
-        "search" => Some(McpToolName::Search),
+        // TODO(task 21): map advanced_search to a dedicated
+        // McpToolName::AdvancedSearch variant once the telemetry schema grows one.
+        "search" | "advanced_search" => Some(McpToolName::Search),
         "get_chunk" => Some(McpToolName::GetChunk),
         "get_chunk_next" => Some(McpToolName::GetChunkNext),
         "get_chunk_prev" => Some(McpToolName::GetChunkPrev),
@@ -408,7 +414,7 @@ async fn dispatch_tool_inner(
                 Outcome::Error,
             ),
         },
-        "search" => return Ok(run_search_dispatch(&params, state).await),
+        "search" | "advanced_search" => return Ok(run_search_dispatch(&params, state).await),
         "get_chunk"
         | "get_chunk_next"
         | "get_chunk_prev"
@@ -457,25 +463,44 @@ async fn dispatch_tool_inner(
 // ---------------------------------------------------------------------------
 
 async fn run_search_dispatch(params: &ToolCallParams, state: &ServerState) -> ToolResponse {
-    use crate::render::{self, ToolFailure};
+    use crate::render::{self, SearchRenderOpts, ToolFailure};
 
-    let rerank_on = params
-        .arguments
-        .get("rerank")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(true);
+    // The dispatcher knows the tool name; the parser encodes each tool's
+    // argument contract (basic: {query, mode?, limit?}; advanced: full surface).
+    let advanced = params.name == "advanced_search";
+    let parsed = if advanced {
+        tools::parse_advanced_search_args(&params.arguments)
+    } else {
+        tools::parse_basic_search_args(&params.arguments)
+    };
+    let parsed = match parsed {
+        Ok(p) => p,
+        Err(msg) => {
+            return ToolResponse {
+                result: ToolFailure::simple(ErrorKind::InvalidInput, msg.clone(), msg)
+                    .into_result(),
+                telemetry: None,
+                outcome: Outcome::InvalidInput,
+            };
+        }
+    };
     // Best-effort reranker name for telemetry. Use the well-known constant —
     // the constant is what `run_status` and `pull_models` also report, so it's
     // the most accurate single-process value we have.
-    let reranker_name: Option<String> = if rerank_on {
+    let reranker_name: Option<String> = if parsed.rerank {
         Some(mn_embedding::RERANKER_MODEL_NAME.to_string())
     } else {
         None
     };
 
-    match tools::run_search(&params.arguments, &state.cfg, &state.cloud).await {
+    match tools::run_search(&parsed, &state.cfg, &state.cloud).await {
         Ok(envelope) => {
-            let outcome = render::project_search(envelope, reranker_name.as_deref());
+            let opts = SearchRenderOpts {
+                reranker_used: reranker_name,
+                advanced,
+                skill_installed: mn_skills::installed_anywhere(&mn_skills::StdSkillEnv),
+            };
+            let outcome = render::project_search(envelope, &opts);
             let telemetry = outcome.telemetry.clone();
             ToolResponse {
                 result: outcome.into_result(),

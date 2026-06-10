@@ -259,6 +259,18 @@ fn make_server_cfg(cloud_url: &str) -> ServerConfig {
     cfg
 }
 
+/// Single-query, no-rerank `ParsedSearchArgs` (the shape these wiremock tests
+/// always drive `run_search` with).
+fn single_query_args(query: &str) -> mn_mcp::tools::ParsedSearchArgs {
+    mn_mcp::tools::ParsedSearchArgs {
+        queries: vec![query.to_owned()],
+        limit: 10,
+        rerank: false,
+        filters: None,
+        mode: "hybrid",
+    }
+}
+
 #[tokio::test]
 async fn run_search_uses_corpus_wire_id_as_client_embedding_model() {
     // Mount /v1/models/active with wire id "voyage-code-3@1".
@@ -314,13 +326,9 @@ async fn run_search_uses_corpus_wire_id_as_client_embedding_model() {
     let cfg = make_server_cfg(&server.uri());
     let cloud = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
 
-    let result = run_search(
-        &json!({ "query": "how to compile a Compact contract", "rerank": false }),
-        &cfg,
-        &cloud,
-    )
-    .await
-    .expect("run_search should succeed with corpus wire id");
+    let result = run_search(&single_query_args("how to compile a Compact contract"), &cfg, &cloud)
+        .await
+        .expect("run_search should succeed with corpus wire id");
 
     // The response must carry the corpus wire id as corpus_embedding_model.
     assert_eq!(
@@ -400,10 +408,9 @@ async fn run_search_server_embed_end_to_end_when_byok_absent() {
     let cfg = make_server_cfg(&server.uri());
     let cloud = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
 
-    let result =
-        run_search(&json!({ "query": "zero knowledge proof", "rerank": false }), &cfg, &cloud)
-            .await
-            .expect("run_search must succeed in server-embed mode");
+    let result = run_search(&single_query_args("zero knowledge proof"), &cfg, &cloud)
+        .await
+        .expect("run_search must succeed in server-embed mode");
 
     // The corpus wire id must be correct.
     assert_eq!(result["corpus_embedding_model"], "voyage-code-3@1");
@@ -439,7 +446,7 @@ async fn run_search_propagates_active_model_fetch_failure() {
     let cfg = make_server_cfg(&server.uri());
     let cloud = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
 
-    let err = run_search(&json!({ "query": "test query", "rerank": false }), &cfg, &cloud)
+    let err = run_search(&single_query_args("test query"), &cfg, &cloud)
         .await
         .unwrap_err();
 
