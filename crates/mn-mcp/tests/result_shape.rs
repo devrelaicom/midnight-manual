@@ -74,10 +74,13 @@ fn all_passthrough_projectors_conform_to_passthrough_schema() {
             mn_mcp::schemas::status_output_schema(),
         ),
         (
-            mn_mcp::render::project_parents(serde_json::json!([{ "name": "G" }]))
-                .into_result()
-                .structured_content
-                .unwrap(),
+            mn_mcp::render::project_parents(serde_json::json!({
+                "parents": [{ "id": "p1", "kind": "root", "name": "G", "document_id": null }],
+                "source": { "slug": "s", "display_name": "S" }
+            }))
+            .into_result()
+            .structured_content
+            .unwrap(),
             mn_mcp::schemas::parents_output_schema(),
         ),
     ];

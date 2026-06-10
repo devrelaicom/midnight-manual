@@ -189,16 +189,19 @@ async fn get_chunk_parents_round_trips() {
     let id = "00000000-0000-0000-0000-000000000009";
     Mock::given(method("GET"))
         .and(path(format!("/v1/chunks/{id}/parents")))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
-            {"id": "p1", "kind": "document"},
-            {"id": "p2", "kind": "root"},
-        ])))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "parents": [
+                {"id": "p1", "kind": "document", "document_id": "d1"},
+                {"id": "p2", "kind": "root", "document_id": null},
+            ],
+            "source": {"slug": "s", "display_name": "S"},
+        })))
         .mount(&server)
         .await;
     let client = CloudClient::new(&server.uri(), None).unwrap();
     let v = client.get_chunk_parents(id).await.unwrap();
-    assert_eq!(v.as_array().unwrap().len(), 2);
-    assert_eq!(v[0]["kind"], "document");
+    assert_eq!(v["parents"].as_array().unwrap().len(), 2);
+    assert_eq!(v["parents"][0]["kind"], "document");
 }
 
 #[tokio::test]

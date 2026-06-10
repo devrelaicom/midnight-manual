@@ -538,25 +538,53 @@ pub fn project_neighbors(env: Value) -> ToolOutcome {
     ToolOutcome::new(summary, env, trimmed, suggested_next_actions)
 }
 
-/// `get_chunk_parents`: a top-level JSON ARRAY of ancestor nodes. Wrap as an object so
-/// `structured` stays an object (for `suggested_next_actions` injection + outputSchema).
-// `env` is consumed by the `json!` macro (ownership move); a reference would require an
-// extra clone, so suppress the false-positive lint.
-#[allow(clippy::needless_pass_by_value)]
+/// `get_chunk_parents`: `{ parents: [ParentNode..], source: {slug, display_name} }`,
+/// ordered immediate parent → root.
 pub fn project_parents(env: Value) -> ToolOutcome {
-    let names: Vec<String> = env
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .filter_map(|node| node.get("name").and_then(Value::as_str).map(str::to_owned))
-                .collect()
+    let parents = env
+        .get("parents")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let n = parents.len();
+    let source_name = env
+        .pointer("/source/display_name")
+        .and_then(Value::as_str)
+        .or_else(|| env.pointer("/source/slug").and_then(Value::as_str))
+        .unwrap_or("(unknown)");
+    let mut lines = Vec::with_capacity(n);
+    for p in &parents {
+        let name = p.get("name").and_then(Value::as_str).unwrap_or("?");
+        let kind = p.get("kind").and_then(Value::as_str).unwrap_or("?");
+        let id = p.get("id").and_then(Value::as_str).unwrap_or("?");
+        lines.push(format!("  {name} ({kind}) — {id}"));
+    }
+    let summary =
+        format!("{n} ancestor(s), root last — source: {source_name}\n{}", lines.join("\n"));
+    let trimmed = json!({
+        "count": n,
+        "source": env.get("source").cloned().unwrap_or(Value::Null),
+        "parents": parents.iter().map(|p| json!({
+            "id": p.get("id").cloned().unwrap_or(Value::Null),
+            "name": p.get("name").cloned().unwrap_or(Value::Null),
+            "kind": p.get("kind").cloned().unwrap_or(Value::Null),
+            "document_id": p.get("document_id").cloned().unwrap_or(Value::Null),
+        })).collect::<Vec<_>>(),
+    });
+    // Only the document-kind node maps to a fetchable document.
+    let actions = parents
+        .iter()
+        .find(|p| p.get("kind").and_then(Value::as_str) == Some("document"))
+        .and_then(|p| p.get("document_id").and_then(Value::as_str))
+        .map(|d| {
+            vec![NextAction::call(
+                "Fetch the containing document's overview and chunk map",
+                "get_document",
+                json!({ "id": d }),
+            )]
         })
         .unwrap_or_default();
-    let n = names.len();
-    let summary = format!("{n} ancestor node(s): {}.", names.join(" / "));
-    let trimmed = json!({ "count": n, "names": names });
-    let structured = json!({ "parents": env });
-    ToolOutcome::new(summary, structured, trimmed, vec![])
+    ToolOutcome::new(summary, env, trimmed, actions)
 }
 
 /// Skeleton entries are small (`{id, chunk_index, token_count}`), so the text fence carries
@@ -666,7 +694,7 @@ pub fn project_document_window(env: Value) -> ToolOutcome {
 
 /// `list_sources`: a top-level JSON ARRAY of source objects. Wrap as an object for structured.
 // `env` is consumed by `json!({ "sources": env })` (ownership move); a reference would require
-// an extra clone, so suppress the false-positive lint — same pattern as `project_parents`.
+// an extra clone, so suppress the false-positive lint.
 #[allow(clippy::needless_pass_by_value)]
 pub fn project_sources(env: Value) -> ToolOutcome {
     let names: Vec<String> = env
@@ -1258,13 +1286,69 @@ mod tests {
     }
 
     #[test]
-    fn project_parents_wraps_array_as_object() {
-        let env = json!([ { "name": "Group A" }, { "name": "Doc B" } ]);
+    fn project_parents_enriched_shape_with_document_action() {
+        let env = json!({
+            "parents": [
+                { "id": "p1", "source_version_id": "sv1", "parent_node_id": "p2",
+                  "kind": "document", "name": "intro.md", "order_index": 0,
+                  "document_id": "d1" },
+                { "id": "p2", "source_version_id": "sv1", "parent_node_id": "p3",
+                  "kind": "group", "name": "guides", "order_index": 1,
+                  "document_id": null },
+                { "id": "p3", "source_version_id": "sv1", "parent_node_id": null,
+                  "kind": "root", "name": "/", "order_index": 0,
+                  "document_id": null }
+            ],
+            "source": { "slug": "compact-docs", "display_name": "Compact Docs" }
+        });
+        let o = super::project_parents(env.clone());
+        let mut summary_lines = o.summary.lines();
+        assert_eq!(
+            summary_lines.next().unwrap(),
+            "3 ancestor(s), root last — source: Compact Docs"
+        );
+        assert_eq!(summary_lines.next().unwrap(), "  intro.md (document) — p1");
+        assert_eq!(summary_lines.next().unwrap(), "  guides (group) — p2");
+        assert_eq!(summary_lines.next().unwrap(), "  / (root) — p3");
+        // structured is the cloud envelope as-is — no extra wrapping.
+        assert_eq!(o.structured, env);
+        assert_eq!(o.trimmed["count"], 3);
+        assert_eq!(o.trimmed["source"]["display_name"], "Compact Docs");
+        assert_eq!(o.trimmed["parents"][0]["document_id"], "d1");
+        assert_eq!(o.trimmed["parents"][1]["document_id"], Value::Null);
+        assert_eq!(o.trimmed["parents"][2]["kind"], "root");
+        // The document-kind node's document_id drives the next action.
+        assert_eq!(o.suggested_next_actions.len(), 1);
+        let action = &o.suggested_next_actions[0];
+        assert_eq!(action.description, "Fetch the containing document's overview and chunk map");
+        assert_eq!(action.tool, Some("get_document"));
+        assert_eq!(action.arguments.as_ref().unwrap()["id"], "d1");
+    }
+
+    #[test]
+    fn project_parents_no_document_node_yields_no_actions() {
+        let env = json!({
+            "parents": [
+                { "id": "p2", "kind": "group", "name": "guides", "document_id": null },
+                { "id": "p3", "kind": "root", "name": "/", "document_id": null }
+            ],
+            "source": { "slug": "compact-docs", "display_name": "Compact Docs" }
+        });
         let o = super::project_parents(env);
-        assert!(o.summary.contains("Group A"));
-        // structured must be an OBJECT (array wrapped) so suggested_next_actions injection + outputSchema hold
-        assert!(o.structured.is_object());
-        assert!(o.structured["parents"].is_array());
+        assert!(o.suggested_next_actions.is_empty());
+        assert_eq!(o.trimmed["count"], 2);
+    }
+
+    #[test]
+    fn project_parents_missing_source_is_unknown() {
+        let env = json!({
+            "parents": [ { "id": "p3", "kind": "root", "name": "/", "document_id": null } ]
+        });
+        let o = super::project_parents(env);
+        assert!(o
+            .summary
+            .starts_with("1 ancestor(s), root last — source: (unknown)"));
+        assert_eq!(o.trimmed["source"], Value::Null);
     }
 
     #[test]

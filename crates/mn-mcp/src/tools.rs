@@ -103,7 +103,7 @@ pub fn list() -> ToolsListResult {
             ToolDescription {
                 name: "get_chunk_parents",
                 description:
-                    "Walk the parent chain from a chunk up to its source-version root. Returns nodes from immediate parent to root.",
+                    "Show where a chunk sits in its source's structure: the chain of containing nodes (document, folders) up to the source root. Use to orient a chunk within its source and find its containing document.",
                 input_schema: id_only_schema(),
                 output_schema: Some(crate::schemas::parents_output_schema()),
             },

@@ -47,14 +47,17 @@ async fn run_passthrough_id_hits_parents_endpoint() {
     let id = "11111111-1111-1111-1111-111111111111";
     Mock::given(method("GET"))
         .and(path(format!("/v1/chunks/{id}/parents")))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!([{"name": "Root"}])))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "parents": [{ "id": "p1", "kind": "root", "name": "Root", "document_id": null }],
+            "source": { "slug": "s", "display_name": "S" }
+        })))
         .mount(&server)
         .await;
     let client = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
     let v = run_passthrough_id(&json!({"id": id}), &client, PassthroughKind::Parents)
         .await
         .unwrap();
-    assert_eq!(v[0]["name"], "Root");
+    assert_eq!(v["parents"][0]["name"], "Root");
 }
 
 // ---------------------------------------------------------------------------

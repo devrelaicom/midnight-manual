@@ -100,7 +100,7 @@ pub fn install_output_schema() -> Value {
     passthrough_object_schema()
 }
 
-/// Output schema for `get_chunk_parents` (array wrapped under `parents`).
+/// Output schema for `get_chunk_parents` (`{parents: [ParentNode..], source}`).
 pub fn parents_output_schema() -> Value {
     passthrough_object_schema()
 }
