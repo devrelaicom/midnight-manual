@@ -1109,9 +1109,7 @@ const CHUNK_NEIGHBORS_DEFAULT_COUNT: u32 = 2;
 /// the UUID and range, then asks the cloud client to fan out three parallel
 /// requests.
 ///
-/// `count` is applied symmetrically to prev and next. The `too_many_chunks`
-/// envelope is unreachable here (neither `/next`, `/prev`, nor `/:id` raises
-/// 412), so we exhaustively match it as an internal-error sanity gate.
+/// `count` is applied symmetrically to prev and next.
 ///
 /// # Errors
 ///
