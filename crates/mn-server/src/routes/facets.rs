@@ -2,15 +2,22 @@
 //! closed enums) their allowed values, so clients can construct valid filters.
 //! Open-set values are filled from the active corpus in `corpus_values` and
 //! served from a short-lived TTL cache held in [`crate::app::AppState`].
+//!
+//! Two modes:
+//! - **Overview** (no params): the cached facet catalogue with ≤[`SAMPLE_CAP`]
+//!   sample values per open-set facet plus exact `total` counts.
+//! - **Drill-down** (`?facet=<key>&cursor=&limit=`): a keyset-paginated value
+//!   list for one drillable open-set facet, never cached.
 
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Extension, Json, Router};
 use mn_retrieval::facets::{self, FacetType};
+use serde::Deserialize;
 use serde_json::json;
 
 use crate::app::AppState;
@@ -30,8 +37,13 @@ pub fn new_cache() -> FacetsCache {
 
 /// How long an assembled `/v1/facets` body is served before re-querying.
 const TTL: Duration = Duration::from_secs(60);
-/// Per-facet cap on enumerated open-set values for high-cardinality facets.
-const VALUE_CAP: i64 = 200;
+/// Per-facet cap on sample values listed in the overview body. Full value
+/// lists are available via the `?facet=` drill-down.
+const SAMPLE_CAP: i64 = 10;
+/// Drill-down page size when `limit` is omitted.
+const DRILL_DEFAULT_LIMIT: i64 = 50;
+/// Hard cap on drill-down page size.
+const DRILL_MAX_LIMIT: i64 = 200;
 
 /// Mount the `GET /v1/facets` route.
 #[must_use]
@@ -39,11 +51,28 @@ pub fn router() -> Router<AppState> {
     Router::new().route("/v1/facets", get(get_facets))
 }
 
+#[derive(Debug, Deserialize)]
+struct FacetsQuery {
+    /// When present: return a paginated value list for this one facet.
+    facet: Option<String>,
+    /// Opaque resume token from a previous drill-down page's `next_cursor`.
+    cursor: Option<String>,
+    /// Drill-down page size, 1..=[`DRILL_MAX_LIMIT`].
+    limit: Option<i64>,
+}
+
 async fn get_facets(
     State(state): State<AppState>,
+    Query(q): Query<FacetsQuery>,
     Extension(req_id): Extension<RequestId>,
 ) -> Response {
     let rid = req_id.as_str();
+
+    // Drill-down mode bypasses the overview cache entirely: it must never be
+    // answered FROM the cached overview body, and must never write INTO it.
+    if let Some(f) = q.facet.as_deref() {
+        return facet_values_page(&state, rid, f, q.cursor.as_deref(), q.limit).await;
+    }
 
     // Serve a fresh-enough cached body if present.
     if let Some(body) = cached_body(&state.facets_cache) {
@@ -109,23 +138,159 @@ fn cached_body(cache: &FacetsCache) -> Option<serde_json::Value> {
     })
 }
 
-/// Bounded distinct values for open-set facets, keyed by facet name.
+/// Exact distinct-value count for the `tags` facet. Shared by the drill-down
+/// and the overview so both report the same `total` (identical join/filter
+/// shape — drift here would make the numbers lie).
+const TAGS_COUNT_SQL: &str = "SELECT count(DISTINCT tag) FROM document d \
+     JOIN source_version sv ON sv.id = d.source_version_id \
+     CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(d.provenance->'tags','[]'::jsonb)) AS tag \
+     WHERE sv.is_active = true";
+
+/// Exact distinct-value count for the `package` facet (see [`TAGS_COUNT_SQL`]
+/// on why this is shared between drill-down and overview).
+const PACKAGE_COUNT_SQL: &str = "SELECT count(DISTINCT p.name) FROM package p \
+     JOIN source_version sv ON sv.id = p.source_version_id \
+     WHERE sv.is_active = true";
+
+/// Per-facet `(sql_page, sql_count)` for the drillable open-set facets. The
+/// page query takes (`$1` = after-value keyset bound, `$2` = limit+1) and
+/// yields a `v` text column ordered ascending. Join/filter shapes mirror the
+/// corresponding `corpus_values` queries exactly so totals agree. `symbol` and
+/// `heading_path` are intentionally not drillable (extreme cardinality, same
+/// rationale as their omission from the overview).
+fn drill_queries(facet: &str) -> Option<(&'static str, &'static str)> {
+    match facet {
+        "source_slug" => Some((
+            "SELECT s.slug AS v FROM source s WHERE s.retired_at IS NULL AND s.slug > $1 \
+             ORDER BY v LIMIT $2",
+            "SELECT count(*) FROM source s WHERE s.retired_at IS NULL",
+        )),
+        "language" => Some((
+            "SELECT DISTINCT d.language AS v FROM document d \
+             JOIN source_version sv ON sv.id = d.source_version_id \
+             WHERE sv.is_active = true AND d.language IS NOT NULL AND d.language > $1 \
+             ORDER BY v LIMIT $2",
+            "SELECT count(DISTINCT d.language) FROM document d \
+             JOIN source_version sv ON sv.id = d.source_version_id \
+             WHERE sv.is_active = true AND d.language IS NOT NULL",
+        )),
+        "tags" => Some((
+            "SELECT DISTINCT tag AS v FROM document d \
+             JOIN source_version sv ON sv.id = d.source_version_id \
+             CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(d.provenance->'tags','[]'::jsonb)) AS tag \
+             WHERE sv.is_active = true AND tag > $1 ORDER BY v LIMIT $2",
+            TAGS_COUNT_SQL,
+        )),
+        "package" => Some((
+            "SELECT DISTINCT p.name AS v FROM package p \
+             JOIN source_version sv ON sv.id = p.source_version_id \
+             WHERE sv.is_active = true AND p.name > $1 ORDER BY v LIMIT $2",
+            PACKAGE_COUNT_SQL,
+        )),
+        _ => None,
+    }
+}
+
+/// Drill-down mode: one keyset-paginated page of distinct values for a single
+/// drillable facet, ordered by value text. The cursor is the opaque encoding
+/// of the last value on the previous page; `""` (the no-cursor bound) sorts
+/// before all non-empty text, so page one starts at the smallest value.
+async fn facet_values_page(
+    state: &AppState,
+    rid: &str,
+    facet: &str,
+    cursor: Option<&str>,
+    limit: Option<i64>,
+) -> Response {
+    use sqlx::Row as _;
+    let limit = limit.unwrap_or(DRILL_DEFAULT_LIMIT);
+    if !(1..=DRILL_MAX_LIMIT).contains(&limit) {
+        return error::bad_request(
+            format!("limit must be in 1..={DRILL_MAX_LIMIT}"),
+            "pass `limit` between 1 and 200, or omit it for the default",
+            rid,
+        );
+    }
+    let Some((page_sql, count_sql)) = drill_queries(facet) else {
+        return error::bad_request(
+            format!("facet `{facet}` is not drillable"),
+            "drillable facets: source_slug, language, tags, package \
+             (closed-enum facets list all values in the overview)",
+            rid,
+        );
+    };
+    let after = match cursor {
+        None => String::new(), // "" sorts before all non-empty text
+        Some(c) => match crate::pagination::decode_cursor(c) {
+            Some(s) => s,
+            None => {
+                return error::bad_request(
+                    "cursor is malformed",
+                    "pass the `next_cursor` value from the previous page verbatim",
+                    rid,
+                )
+            }
+        },
+    };
+    let total: i64 = match sqlx::query_scalar(count_sql).fetch_one(&state.pool).await {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::warn!(request_id = rid, error = %e, "facet count failed");
+            return error::service_unavailable("facet value count failed", rid);
+        }
+    };
+    // Over-fetch by one row to learn whether another page exists without a
+    // second query.
+    let rows = match sqlx::query(page_sql)
+        .bind(&after)
+        .bind(limit.saturating_add(1))
+        .fetch_all(&state.pool)
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(request_id = rid, error = %e, "facet page failed");
+            return error::service_unavailable("facet value page failed", rid);
+        }
+    };
+    let mut values: Vec<String> = rows
+        .iter()
+        .filter_map(|r| r.try_get::<String, _>("v").ok())
+        .collect();
+    let has_more = values.len() > usize::try_from(limit).unwrap_or(usize::MAX);
+    values.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
+    let next_cursor = if has_more {
+        values.last().map(|v| crate::pagination::encode_cursor(v))
+    } else {
+        None
+    };
+    Json(json!({
+        "facet": facet,
+        "values": values,
+        "total": total,
+        "next_cursor": next_cursor,
+    }))
+    .into_response()
+}
+
+/// Bounded sample values for open-set facets, keyed by facet name.
 struct OpenValues {
-    /// The enumerated values (≤ `VALUE_CAP` for high-cardinality facets).
+    /// The sampled values (≤ [`SAMPLE_CAP`]).
     values: serde_json::Value,
-    /// `true` when more distinct values exist than are listed in `values`.
+    /// `true` when more distinct values exist than are listed in `values`
+    /// (fetch the rest via the `?facet=` drill-down).
     truncated: bool,
-    /// Count of distinct values found, capped at `VALUE_CAP + 1` for
-    /// high-cardinality facets — so when `truncated` is true this reads as
-    /// "`VALUE_CAP + 1` or more", not the exact cardinality.
+    /// Exact count of distinct values in the active corpus.
     total: i64,
 }
 
-/// Corpus-derived open-set values, queried from the active source versions.
+/// Corpus-derived open-set value samples, queried from the active source
+/// versions.
 ///
-/// Low-cardinality facets (`language`, `source_slug`) are enumerated in full;
-/// high-cardinality facets (`tags`, `package`) are capped at [`VALUE_CAP`] by
-/// document frequency and flagged `truncated` when more exist. `symbol` and
+/// Every open-set facet lists at most [`SAMPLE_CAP`] sample values alongside
+/// an exact `total`: `language` / `source_slug` are enumerated in full and
+/// truncated in-process; `tags` / `package` sample the top-N by document
+/// frequency with a separate exact `count(DISTINCT …)`. `symbol` and
 /// `heading_path` are intentionally NOT enumerated (extreme cardinality; the
 /// facet type plus `symbol.kind`'s closed enum suffice for agents) — they
 /// advertise their type only.
@@ -140,7 +305,9 @@ async fn corpus_values(
     use sqlx::Row as _;
     let mut out = std::collections::HashMap::new();
 
-    // language (low cardinality, no cap)
+    let sample_cap = usize::try_from(SAMPLE_CAP).unwrap_or(usize::MAX);
+
+    // language (low cardinality: enumerate in full, sample in-process)
     let rows = sqlx::query(
         "SELECT DISTINCT d.language FROM document d \
          JOIN source_version sv ON sv.id = d.source_version_id \
@@ -148,87 +315,91 @@ async fn corpus_values(
     )
     .fetch_all(pool)
     .await?;
-    let langs: Vec<String> = rows
+    let mut langs: Vec<String> = rows
         .iter()
         .filter_map(|r| r.try_get::<String, _>("language").ok())
         .collect();
+    // Count BEFORE truncating to the sample cap: this is the exact total.
+    let lang_total = i64::try_from(langs.len()).unwrap_or(i64::MAX);
+    let lang_trunc = langs.len() > sample_cap;
+    langs.truncate(sample_cap);
     out.insert(
         "language".into(),
         OpenValues {
-            total: i64::try_from(langs.len()).unwrap_or(i64::MAX),
-            truncated: false,
+            total: lang_total,
+            truncated: lang_trunc,
             values: serde_json::json!(langs),
         },
     );
 
-    // source_slug (no cap)
+    // source_slug (low cardinality: enumerate in full, sample in-process)
     let rows =
         sqlx::query("SELECT s.slug FROM source s WHERE s.retired_at IS NULL ORDER BY s.slug")
             .fetch_all(pool)
             .await?;
-    let slugs: Vec<String> = rows
+    let mut slugs: Vec<String> = rows
         .iter()
         .filter_map(|r| r.try_get::<String, _>("slug").ok())
         .collect();
+    // Count BEFORE truncating (see the language block above).
+    let slug_total = i64::try_from(slugs.len()).unwrap_or(i64::MAX);
+    let slug_trunc = slugs.len() > sample_cap;
+    slugs.truncate(sample_cap);
     out.insert(
         "source_slug".into(),
         OpenValues {
-            total: i64::try_from(slugs.len()).unwrap_or(i64::MAX),
-            truncated: false,
+            total: slug_total,
+            truncated: slug_trunc,
             values: serde_json::json!(slugs),
         },
     );
 
-    // tags (high cardinality -> top-N by document frequency)
+    // tags (high cardinality -> exact distinct count + top-N sample by
+    // document frequency)
+    let tag_total: i64 = sqlx::query_scalar(TAGS_COUNT_SQL).fetch_one(pool).await?;
     let rows = sqlx::query(
         "SELECT tag, count(*) AS n FROM document d \
          JOIN source_version sv ON sv.id = d.source_version_id \
          CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(d.provenance->'tags','[]'::jsonb)) AS tag \
          WHERE sv.is_active = true GROUP BY tag ORDER BY n DESC, tag LIMIT $1",
     )
-    .bind(VALUE_CAP + 1)
+    .bind(SAMPLE_CAP)
     .fetch_all(pool)
     .await?;
-    let mut tags: Vec<String> = rows
+    let tags: Vec<String> = rows
         .iter()
         .filter_map(|r| r.try_get::<String, _>("tag").ok())
         .collect();
-    // Capture the count BEFORE truncate. The query is LIMIT VALUE_CAP + 1, so
-    // this is at most VALUE_CAP + 1 (201) — i.e. "201 or more" when truncated.
-    let total = i64::try_from(tags.len()).unwrap_or(i64::MAX);
-    let truncated = tags.len() > usize::try_from(VALUE_CAP).unwrap_or(usize::MAX);
-    tags.truncate(usize::try_from(VALUE_CAP).unwrap_or(usize::MAX));
     out.insert(
         "tags".into(),
         OpenValues {
-            total,
-            truncated,
+            total: tag_total,
+            truncated: tag_total > SAMPLE_CAP,
             values: serde_json::json!(tags),
         },
     );
 
-    // package names (top-N)
+    // package names (exact distinct count + top-N sample by frequency)
+    let pkg_total: i64 = sqlx::query_scalar(PACKAGE_COUNT_SQL)
+        .fetch_one(pool)
+        .await?;
     let rows = sqlx::query(
         "SELECT p.name, count(*) AS n FROM package p \
          JOIN source_version sv ON sv.id = p.source_version_id \
          WHERE sv.is_active = true GROUP BY p.name ORDER BY n DESC, p.name LIMIT $1",
     )
-    .bind(VALUE_CAP + 1)
+    .bind(SAMPLE_CAP)
     .fetch_all(pool)
     .await?;
-    let mut pkgs: Vec<String> = rows
+    let pkgs: Vec<String> = rows
         .iter()
         .filter_map(|r| r.try_get::<String, _>("name").ok())
         .collect();
-    // Capture the count BEFORE truncate (see the tags block above).
-    let pkg_total = i64::try_from(pkgs.len()).unwrap_or(i64::MAX);
-    let pkg_trunc = pkgs.len() > usize::try_from(VALUE_CAP).unwrap_or(usize::MAX);
-    pkgs.truncate(usize::try_from(VALUE_CAP).unwrap_or(usize::MAX));
     out.insert(
         "package".into(),
         OpenValues {
             total: pkg_total,
-            truncated: pkg_trunc,
+            truncated: pkg_total > SAMPLE_CAP,
             values: serde_json::json!(pkgs),
         },
     );
