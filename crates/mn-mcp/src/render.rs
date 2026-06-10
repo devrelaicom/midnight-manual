@@ -151,6 +151,37 @@ fn str_field<'a>(v: &'a Value, path: &[&str]) -> Option<&'a str> {
     cur.as_str()
 }
 
+/// First ~150 chars of a chunk body on a char boundary, ellipsised.
+fn snippet(content: &str) -> String {
+    const MAX: usize = 150;
+    if content.chars().count() <= MAX {
+        return content.to_owned();
+    }
+    let head: String = content.chars().take(MAX).collect();
+    format!("{head}…")
+}
+
+/// Trimmed per-chunk entry for multi-chunk text fences. `c` is a chunk-with-context
+/// object: chunk fields flattened at top level, `document`/`source` nested.
+fn chunk_brief(c: &Value) -> Value {
+    json!({
+        "id": c.get("id").cloned().unwrap_or(Value::Null),
+        "source_path": c.pointer("/document/source_path").cloned().unwrap_or(Value::Null),
+        "heading_path": c.get("heading_path").cloned().unwrap_or(json!([])),
+        "snippet": c.get("content").and_then(Value::as_str).map(snippet),
+    })
+}
+
+/// `chunk_brief` over the array at `pointer` (empty array if absent or not an array).
+fn chunk_briefs_at(env: &Value, pointer: &str) -> Value {
+    Value::Array(
+        env.pointer(pointer)
+            .and_then(Value::as_array)
+            .map(|a| a.iter().map(chunk_brief).collect())
+            .unwrap_or_default(),
+    )
+}
+
 /// Project the cloud search envelope. `reranker_used` is the local reranker name when local
 /// rerank ran, else `None`.
 #[allow(clippy::too_many_lines, clippy::option_if_let_else)]
@@ -347,7 +378,7 @@ pub fn project_chunk_list(env: Value, direction: &str) -> ToolOutcome {
         .get("chunks")
         .and_then(Value::as_array)
         .map_or(0, Vec::len);
-    let trimmed = json!({ "count": chunks_len });
+    let trimmed = json!({ "count": chunks_len, "chunks": chunk_briefs_at(&env, "/chunks") });
     if chunks_len == 0 {
         return ToolOutcome::new(
             format!("No more chunks {direction} the anchor."),
@@ -405,7 +436,15 @@ pub fn project_neighbors(env: Value) -> ToolOutcome {
         .and_then(Value::as_str)
         .map(str::to_owned);
     let summary = format!("{} neighbor(s) around {id} ({prev} before, {next} after).", prev + next);
-    let trimmed = json!({ "prev": prev, "next": next });
+    let trimmed = json!({
+        "prev": prev,
+        "next": next,
+        "chunks": {
+            "prev": chunk_briefs_at(&env, "/prev/chunks"),
+            "anchor": env.get("chunk").map_or(Value::Null, chunk_brief),
+            "next": chunk_briefs_at(&env, "/next/chunks"),
+        }
+    });
     let suggested_next_actions = doc_id
         .map(|d| {
             vec![NextAction::call(
@@ -852,10 +891,20 @@ mod tests {
 
     #[test]
     fn project_chunk_list_counts() {
-        let env = json!({ "chunks": [ { "id": "a" }, { "id": "b" } ] });
+        let env = json!({ "chunks": [
+            { "id": "a", "content": "alpha body", "heading_path": ["H1"],
+              "document": { "source_path": "docs/a.md" } },
+            { "id": "b", "content": "beta body",
+              "document": { "source_path": "docs/a.md" } }
+        ] });
         let o = super::project_chunk_list(env, "after");
         assert!(o.summary.contains('2'));
         assert_eq!(o.trimmed["count"], 2);
+        // The fence must carry per-chunk briefs with snippets for text-only clients.
+        assert_eq!(o.trimmed["chunks"][0]["id"], "a");
+        assert_eq!(o.trimmed["chunks"][0]["source_path"], "docs/a.md");
+        assert_eq!(o.trimmed["chunks"][0]["snippet"], "alpha body");
+        assert_eq!(o.trimmed["chunks"][1]["snippet"], "beta body");
     }
 
     #[test]
@@ -907,6 +956,8 @@ mod tests {
         let o = super::project_chunk_list(json!({ "chunks": [] }), "after");
         assert!(o.summary.contains("No more chunks"));
         assert!(o.suggested_next_actions.is_empty());
+        assert_eq!(o.trimmed["count"], 0);
+        assert_eq!(o.trimmed["chunks"], json!([]));
     }
 
     #[test]
@@ -994,6 +1045,74 @@ mod tests {
         let t = o.telemetry.unwrap();
         assert_eq!(t.filtered_by_confidence, Some(1));
         assert_eq!(t.deduplicated_count, Some(5)); // overlap_dropped(3) + overlap_trimmed(2), NOT input-dedup(0)
+    }
+
+    #[test]
+    fn snippet_truncates_long_ascii_on_char_boundary() {
+        let long = "a".repeat(200);
+        let s = super::snippet(&long);
+        assert_eq!(s.chars().count(), 151); // 150 head chars + '…'
+        assert!(s.ends_with('…'));
+    }
+
+    #[test]
+    fn snippet_leaves_short_content_unchanged() {
+        assert_eq!(super::snippet("ten chars."), "ten chars.");
+    }
+
+    #[test]
+    fn snippet_multibyte_counts_chars_not_bytes() {
+        let long: String = "é".repeat(200); // 2 bytes per char — byte-index slicing would panic
+        let s = super::snippet(&long);
+        assert_eq!(s.chars().count(), 151);
+        assert!(s.ends_with('…'));
+        assert!(s.starts_with("ééé"));
+    }
+
+    #[test]
+    fn chunk_brief_extracts_fields_from_chunk_with_context() {
+        let c = json!({
+            "id": "c1", "content": "body text", "chunk_index": 4,
+            "heading_path": ["A", "B"],
+            "document": { "source_path": "docs/intro.md" },
+            "source": { "display_name": "Compact Docs" }
+        });
+        let b = super::chunk_brief(&c);
+        assert_eq!(b["id"], "c1");
+        assert_eq!(b["source_path"], "docs/intro.md");
+        assert_eq!(b["heading_path"], json!(["A", "B"]));
+        assert_eq!(b["snippet"], "body text");
+    }
+
+    #[test]
+    fn chunk_brief_yields_nulls_for_absent_fields() {
+        let b = super::chunk_brief(&json!({}));
+        assert_eq!(b["id"], Value::Null);
+        assert_eq!(b["source_path"], Value::Null);
+        assert_eq!(b["heading_path"], json!([]));
+        assert_eq!(b["snippet"], Value::Null);
+    }
+
+    #[test]
+    fn project_neighbors_fence_carries_anchor_and_side_briefs() {
+        let env = json!({
+            "prev": { "chunks": [
+                { "id": "p1", "content": "prev body", "document": { "source_path": "docs/x.md" } }
+            ] },
+            "chunk": { "id": "c1", "document_id": "d1", "content": "anchor body",
+                       "heading_path": ["H"], "document": { "source_path": "docs/x.md" } },
+            "next": { "chunks": [
+                { "id": "n1", "content": "next body", "document": { "source_path": "docs/x.md" } },
+                { "id": "n2", "content": "next body 2", "document": { "source_path": "docs/x.md" } }
+            ] }
+        });
+        let o = super::project_neighbors(env);
+        assert_eq!(o.trimmed["prev"], 1);
+        assert_eq!(o.trimmed["next"], 2);
+        assert_eq!(o.trimmed["chunks"]["anchor"]["id"], "c1");
+        assert_eq!(o.trimmed["chunks"]["anchor"]["snippet"], "anchor body");
+        assert_eq!(o.trimmed["chunks"]["prev"][0]["snippet"], "prev body");
+        assert_eq!(o.trimmed["chunks"]["next"][1]["snippet"], "next body 2");
     }
 
     #[test]
