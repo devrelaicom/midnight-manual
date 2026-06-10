@@ -144,7 +144,7 @@ pub(crate) fn run_tree_sitter(
         return LineWindowChunker.chunk(body, cfg);
     }
 
-    // Pass A: fold tiny same-scope fragments together.
+    // Pass A: greedily pack adjacent chunks up to 90% of the token budget.
     let mut chunks = coalesce_code(body, &chunks, cfg);
 
     // Pass B: prepend an enclosing-symbol breadcrumb to interior chunks of a
@@ -198,38 +198,20 @@ fn entries_from_path(path: &[SymbolSegment]) -> Vec<SymbolSegment> {
     out
 }
 
-/// Length of the shared symbol-path prefix of `a` and `b`.
-fn common_prefix_len(a: &[SymbolSegment], b: &[SymbolSegment]) -> usize {
-    a.iter().zip(b.iter()).take_while(|(x, y)| x == y).count()
-}
-
-/// Light coalescing for code chunks: merge adjacent chunks that share a
-/// non-empty enclosing symbol scope until each run reaches `code_min_tokens`,
-/// never exceeding `max_tokens`.
-///
-/// Folds tiny structural fragments (e.g. a wrapper-only `namespace Foo`) into
-/// their following sibling/child while leaving distinct top-level symbols (no
-/// shared named scope) separate. Merged runs keep the FIRST chunk's
-/// `symbol_path` and span `[first.start, last.end)`.
+/// Greedy coalescing for code chunks (D2): pack adjacent chunks while the
+/// merged run stays within `coalesce_target` (90% of `max_tokens`). Unlike the
+/// pre-dual-embeddings version this merges across unrelated top-level symbols —
+/// `symbol_path` carries the union of every merged chunk's entries (§5.3).
 pub(crate) fn coalesce_code(body: &str, chunks: &[Chunk], cfg: &ChunkerConfig) -> Vec<Chunk> {
-    let min = cfg.code_min_tokens;
-    let max = cfg.max_tokens;
+    let target = crate::chunk::coalesce_target(cfg);
     let mut out: Vec<Chunk> = Vec::new();
     let mut i = 0usize;
     while i < chunks.len() {
         let mut end = i;
         while end + 1 < chunks.len() {
             let next = &chunks[end + 1];
-            // Require a shared *named* enclosing scope (empty prefix = unrelated
-            // top-level symbols or file-level preamble → never merge).
-            if common_prefix_len(&chunks[i].symbol_path, &next.symbol_path) == 0 {
+            if crate::tokens::count(&body[chunks[i].start_byte..next.end_byte]) > target {
                 break;
-            }
-            if crate::tokens::count(&body[chunks[i].start_byte..next.end_byte]) > max {
-                break;
-            }
-            if crate::tokens::count(&body[chunks[i].start_byte..chunks[end].end_byte]) >= min {
-                break; // run already meets the floor
             }
             end += 1;
         }
@@ -239,10 +221,18 @@ pub(crate) fn coalesce_code(body: &str, chunks: &[Chunk], cfg: &ChunkerConfig) -
             let start_byte = chunks[i].start_byte;
             let end_byte = chunks[end].end_byte;
             let content = body[start_byte..end_byte].to_string();
+            let mut symbol_path: Vec<SymbolSegment> = Vec::new();
+            for c in &chunks[i..=end] {
+                for e in &c.symbol_path {
+                    if !symbol_path.contains(e) {
+                        symbol_path.push(e.clone());
+                    }
+                }
+            }
             out.push(Chunk {
                 token_count: crate::tokens::count(&content),
                 content,
-                symbol_path: chunks[i].symbol_path.clone(),
+                symbol_path,
                 heading_path: Vec::new(),
                 start_byte,
                 end_byte,
@@ -382,42 +372,48 @@ mod coalesce_tests {
     }
 
     #[test]
-    fn folds_wrapper_only_fragment_into_child() {
-        let body = "namespace Big ".to_string() + &"x ".repeat(40);
-        let cfg = ChunkerConfig::default(); // code_min_tokens = 64
+    fn packs_adjacent_units_up_to_target() {
+        // Two tiny adjacent symbols pack into one chunk (greedy-to-90%),
+        // regardless of shared scope — distinct top-level symbols now merge.
+        let body = "fn a() {} fn b() {}".to_string();
+        let cfg = ChunkerConfig::default();
         let chunks = vec![
-            chunk(0, 14, vec![seg("namespace", "Big")]),
-            chunk(14, body.len(), vec![seg("namespace", "Big")]),
+            chunk(0, 9, vec![seg("fn", "a")]),
+            chunk(9, body.len(), vec![seg("fn", "b")]),
         ];
         let out = coalesce_code(&body, &chunks, &cfg);
-        assert_eq!(out.len(), 1, "tiny wrapper should fold into its child");
+        assert_eq!(out.len(), 1, "tiny adjacent top-level symbols must pack");
         assert_eq!(out[0].start_byte, 0);
-        assert_eq!(out[0].symbol_path, vec![seg("namespace", "Big")]);
+        assert_eq!(out[0].end_byte, body.len());
     }
 
     #[test]
-    fn does_not_merge_distinct_top_level_symbols() {
-        let body = "fn a fn b".to_string();
+    fn merged_chunk_unions_symbol_entries() {
+        let body = "fn a() {} fn b() {}".to_string();
         let cfg = ChunkerConfig::default();
         let chunks = vec![
-            chunk(0, 4, vec![seg("fn", "a")]),
-            chunk(4, 9, vec![seg("fn", "b")]),
+            chunk(0, 9, vec![seg("fn", "a")]),
+            chunk(9, body.len(), vec![seg("fn", "b")]),
         ];
         let out = coalesce_code(&body, &chunks, &cfg);
-        assert_eq!(out.len(), 2, "unrelated top-level symbols stay separate");
+        assert_eq!(out[0].symbol_path, vec![seg("fn", "a"), seg("fn", "b")]);
     }
 
     #[test]
-    fn does_not_merge_past_floor() {
-        // First chunk already exceeds the floor → stands alone.
-        let body = "word ".repeat(200);
-        let cfg = ChunkerConfig::default();
+    fn stops_when_next_unit_would_exceed_target() {
+        // Two halves of ~250 tokens each against a 256-token budget (target ≈230):
+        // the first half alone already exceeds the target, so no merge happens.
+        let body = "word ".repeat(500);
+        let cfg = ChunkerConfig {
+            max_tokens: 256,
+            ..ChunkerConfig::default()
+        };
         let mid = body.len() / 2;
-        let big = crate::tokens::count(&body[0..mid]);
-        assert!(big >= cfg.code_min_tokens, "precondition: first half over floor (got {big})");
+        let first = crate::tokens::count(&body[0..mid]);
+        assert!(first > crate::chunk::coalesce_target(&cfg), "precondition (got {first})");
         let chunks = vec![
-            chunk(0, mid, vec![seg("mod", "m"), seg("fn", "a")]),
-            chunk(mid, body.len(), vec![seg("mod", "m"), seg("fn", "b")]),
+            chunk(0, mid, vec![seg("fn", "a")]),
+            chunk(mid, body.len(), vec![seg("fn", "b")]),
         ];
         let out = coalesce_code(&body, &chunks, &cfg);
         assert_eq!(out.len(), 2);

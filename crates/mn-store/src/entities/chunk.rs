@@ -3,7 +3,9 @@
 //! Chunks carry the FTS vector (`tsvector`, GENERATED STORED) and the
 //! embedding (`vector(1024)`); both are written at insert time. The trigger
 //! `trg_chunk_embedding_model_match` ensures `chunk.embedding_model_id`
-//! always matches the owning `source_version.embedding_model_id` (FR-002).
+//! always matches the owning `source_version.embedding_model_id` (FR-002),
+//! and that `code_embedding` is only present when the owning version
+//! declares a `code_embedding_model_id` (migration 0011).
 
 use mn_core::types::{Chunk, ChunkStatus};
 use pgvector::Vector;
@@ -87,6 +89,11 @@ pub struct NewChunk<'a> {
     /// Embedding model used to produce `embedding`. MUST match the owning
     /// source_version's embedding_model_id (trigger-enforced).
     pub embedding_model_id: Uuid,
+    /// Optional code-model vector (voyage-code-3); `None` for non-code chunks
+    /// or versions without code embeddings. Requires the owning
+    /// source_version to declare a `code_embedding_model_id` when `Some`
+    /// (trigger-enforced).
+    pub code_embedding: Option<Vec<f32>>,
     /// Markdown heading path.
     pub heading_path: &'a [String],
     /// Code-symbol path (structured, persisted as JSONB).
@@ -117,9 +124,9 @@ pub async fn insert(pool: &PgPool, c: NewChunk<'_>) -> Result<Uuid> {
     let row: (Uuid,) = sqlx::query_as(
         "INSERT INTO chunk ( \
             source_version_id, document_id, node_id, chunk_index, total_chunks, content, \
-            content_hash, embedding, embedding_model_id, heading_path, symbol_path, \
-            start_byte, end_byte, token_count, status \
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING id",
+            content_hash, embedding, embedding_model_id, code_embedding, heading_path, \
+            symbol_path, start_byte, end_byte, token_count, status \
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING id",
     )
     .bind(c.source_version_id)
     .bind(c.document_id)
@@ -130,6 +137,7 @@ pub async fn insert(pool: &PgPool, c: NewChunk<'_>) -> Result<Uuid> {
     .bind(c.content_hash)
     .bind(c.embedding.map(Vector::from))
     .bind(c.embedding_model_id)
+    .bind(c.code_embedding.map(Vector::from))
     .bind(c.heading_path)
     .bind(sqlx::types::Json(c.symbol_path))
     .bind(c.start_byte)
@@ -272,6 +280,9 @@ pub struct CarryForwardChunk {
     /// Embedding model id from the prior version — must match the new SV's
     /// embedding model (trigger-enforced).
     pub embedding_model_id: Uuid,
+    /// Existing code-model vector, carried forward so re-ingest doesn't
+    /// silently drop code embeddings (`None` for non-code chunks).
+    pub code_embedding: Option<Vec<f32>>,
     /// Markdown heading path.
     pub heading_path: Vec<String>,
     /// Code-symbol path (structured).
@@ -302,8 +313,9 @@ pub async fn list_for_carry_forward(
     document_id: Uuid,
 ) -> Result<Vec<CarryForwardChunk>> {
     let rows = sqlx::query_as::<_, CarryForwardRow>(
-        "SELECT content, content_hash, embedding, embedding_model_id, heading_path, symbol_path, \
-                chunk_index, total_chunks, start_byte, end_byte, token_count, status \
+        "SELECT content, content_hash, embedding, embedding_model_id, code_embedding, \
+                heading_path, symbol_path, chunk_index, total_chunks, start_byte, end_byte, \
+                token_count, status \
          FROM chunk WHERE document_id = $1 ORDER BY chunk_index",
     )
     .bind(document_id)
@@ -497,6 +509,7 @@ struct CarryForwardRow {
     content_hash: String,
     embedding: Option<Vector>,
     embedding_model_id: Uuid,
+    code_embedding: Option<Vector>,
     heading_path: Vec<String>,
     symbol_path: sqlx::types::Json<Vec<mn_core::types::SymbolSegment>>,
     chunk_index: i32,
@@ -518,6 +531,7 @@ impl TryFrom<CarryForwardRow> for CarryForwardChunk {
             content_hash: r.content_hash,
             embedding: r.embedding.map(|v| v.to_vec()),
             embedding_model_id: r.embedding_model_id,
+            code_embedding: r.code_embedding.map(|v| v.to_vec()),
             heading_path: r.heading_path,
             symbol_path: r.symbol_path.0,
             chunk_index: r.chunk_index,

@@ -8,7 +8,9 @@ async fn resolves_voyage_corpus_model_from_db() {
     let cm = mn_server::corpus_model::resolve(&h.pool)
         .await
         .expect("resolve");
-    assert_eq!(cm.wire, "voyage-code-3@1");
+    // Fresh DB, no active source_version: get_active falls back to the
+    // newest registered model — voyage-context-3@1 since migration 0011.
+    assert_eq!(cm.wire, "voyage-context-3@1");
     assert_eq!(cm.dim, 1024);
     assert!(!cm.id.is_nil(), "resolved model must carry a real id");
 }

@@ -27,7 +27,7 @@ async fn seed_two_chunks(pool: &sqlx::PgPool) -> (Uuid, Uuid, Uuid) {
     let source_id = source::insert(pool, &slug, "Chunks", SourceKind::DocsSite, None, 5)
         .await
         .unwrap();
-    let (sv_id, _) = source_version::create_building(pool, source_id, model_id, "0.1.0", "h")
+    let (sv_id, _) = source_version::create_building(pool, source_id, model_id, None, "0.1.0", "h")
         .await
         .unwrap();
     let root = node::insert(pool, sv_id, None, NodeKind::Root, "root", 0)
@@ -79,6 +79,7 @@ async fn seed_two_chunks(pool: &sqlx::PgPool) -> (Uuid, Uuid, Uuid) {
             content_hash: "ha",
             embedding: None,
             embedding_model_id: model_id,
+            code_embedding: None,
             heading_path: &[],
             symbol_path: &[],
             start_byte: 0,
@@ -101,6 +102,7 @@ async fn seed_two_chunks(pool: &sqlx::PgPool) -> (Uuid, Uuid, Uuid) {
             content_hash: "hb",
             embedding: None,
             embedding_model_id: model_id,
+            code_embedding: None,
             heading_path: &[],
             symbol_path: &[],
             start_byte: 6,

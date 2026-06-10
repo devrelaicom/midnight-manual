@@ -461,14 +461,15 @@ mod tests {
         PlanBuilder::new("docs", SourceKind::DocsSite, "rev-1", PriorState::default())
     }
 
-    /// Builder with the markdown coalescing pass disabled (`min_tokens == 1`):
-    /// every non-empty section already meets the soft floor, so the chunker
-    /// emits one chunk per heading. Used by multi-chunk bookkeeping tests that
-    /// would otherwise see tiny sections merge into a single chunk under the
-    /// default `min_tokens`.
-    fn no_coalesce_builder() -> PlanBuilder {
+    /// Builder with a coalescing-suppressing chunker config: a tiny budget
+    /// whose 90% target is smaller than any two adjacent test sections
+    /// combined, so each heading stays its own chunk (and sections stay under
+    /// `max_tokens` so no window split kicks in either). Used by multi-chunk
+    /// bookkeeping tests that would otherwise see tiny sections greedily
+    /// pack into a single chunk under the default budget.
+    fn per_section_builder() -> PlanBuilder {
         empty_builder().with_chunker_config(ChunkerConfig {
-            min_tokens: 1,
+            max_tokens: 28,
             ..ChunkerConfig::default()
         })
     }
@@ -652,10 +653,18 @@ mod tests {
 
     #[test]
     fn chunks_carry_total_and_index_for_multi_chunk_documents() {
-        // Disable coalescing so the three tiny sections stay as three chunks and
-        // the total_chunks / chunk_index bookkeeping is genuinely exercised.
-        let mut b = no_coalesce_builder();
-        feed(&mut b, "multi.md", "# A\n\nbody A\n\n# B\n\nbody B\n\n# C\n\nbody C\n");
+        // Suppress coalescing (each ~15-token section fits the 28-token budget
+        // alone, two adjacent ones exceed the 25-token target) so the three
+        // sections stay as three chunks and the total_chunks / chunk_index
+        // bookkeeping is genuinely exercised.
+        let mut b = per_section_builder();
+        feed(
+            &mut b,
+            "multi.md",
+            "# A\n\nthis section body has roughly fifteen tokens of filler text here\n\n\
+             # B\n\nthis section body has roughly fifteen tokens of filler text here\n\n\
+             # C\n\nthis section body has roughly fifteen tokens of filler text here\n",
+        );
         let plan = b.finalize();
         let doc = &plan.new_documents[0];
         assert_eq!(doc.chunks.len(), 3);
@@ -667,10 +676,16 @@ mod tests {
 
     #[test]
     fn chunk_content_hashes_are_stable_and_unique_for_distinct_content() {
-        // Disable coalescing so the two sections stay distinct chunks with
-        // distinct content hashes (the property under test).
-        let mut b = no_coalesce_builder();
-        feed(&mut b, "h.md", "# A\n\nbody A\n\n# B\n\nbody B that differs.\n");
+        // Suppress coalescing (sections sized to NOT merge under the 28-token
+        // budget) so the two sections stay distinct chunks with distinct
+        // content hashes (the property under test).
+        let mut b = per_section_builder();
+        feed(
+            &mut b,
+            "h.md",
+            "# A\n\nthis section body has roughly fifteen tokens of filler text here\n\n\
+             # B\n\nthis other section body differs with its own fifteen tokens of filler\n",
+        );
         let plan = b.finalize();
         let chunks = &plan.new_documents[0].chunks;
         assert_eq!(chunks.len(), 2);

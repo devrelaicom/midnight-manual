@@ -35,7 +35,7 @@ async fn create_and_finalize_promotes_active_and_demotes_prior() {
 
     // First ingest: revision 1, finalize, becomes active.
     let (sv1_id, rev1) =
-        source_version::create_building(&h.pool, source_id, model_id, "0.1.0", "hashA")
+        source_version::create_building(&h.pool, source_id, model_id, None, "0.1.0", "hashA")
             .await
             .expect("start v1");
     assert_eq!(rev1, 1);
@@ -55,7 +55,7 @@ async fn create_and_finalize_promotes_active_and_demotes_prior() {
 
     // Second ingest: revision 2, finalize, demotes v1.
     let (sv2_id, rev2) =
-        source_version::create_building(&h.pool, source_id, model_id, "0.1.0", "hashB")
+        source_version::create_building(&h.pool, source_id, model_id, None, "0.1.0", "hashB")
             .await
             .expect("start v2");
     assert_eq!(rev2, 2);
@@ -91,9 +91,10 @@ async fn finalize_rejects_non_building_state() {
         .await
         .unwrap();
 
-    let (sv_id, _) = source_version::create_building(&h.pool, source_id, model_id, "0.1.0", "h")
-        .await
-        .unwrap();
+    let (sv_id, _) =
+        source_version::create_building(&h.pool, source_id, model_id, None, "0.1.0", "h")
+            .await
+            .unwrap();
     source_version::abort(&h.pool, sv_id).await.expect("abort");
 
     let err = source_version::finalize(&h.pool, sv_id).await.unwrap_err();
@@ -116,9 +117,10 @@ async fn retire_marks_eligible_for_sweep() {
         .await
         .unwrap();
 
-    let (sv_id, _) = source_version::create_building(&h.pool, source_id, model_id, "0.1.0", "h")
-        .await
-        .unwrap();
+    let (sv_id, _) =
+        source_version::create_building(&h.pool, source_id, model_id, None, "0.1.0", "h")
+            .await
+            .unwrap();
     source_version::finalize(&h.pool, sv_id).await.unwrap();
     source_version::retire(&h.pool, sv_id)
         .await

@@ -85,6 +85,10 @@ pub struct SourceVersion {
     pub ingest_cli_version: String,
     /// The embedding model used for every chunk in this version.
     pub embedding_model_id: Uuid,
+    /// Code-embedding model for this version's `chunk.code_embedding` vectors.
+    /// `None` ⇔ code embeddings disabled (or no code files) for this version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_embedding_model_id: Option<Uuid>,
     /// Aggregate content hash for tamper-detection.
     pub content_hash: String,
     /// Free-form notes captured at ingest time.

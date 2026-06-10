@@ -13,27 +13,29 @@ use crate::error::Result;
 ///
 /// # Errors
 ///
-/// Returns [`crate::error::StoreError::ForeignKeyViolation`] if `source_id`
-/// or `embedding_model_id` are unknown, or
+/// Returns [`crate::error::StoreError::ForeignKeyViolation`] if `source_id`,
+/// `embedding_model_id`, or `code_embedding_model_id` are unknown, or
 /// [`crate::error::StoreError::UniqueViolation`] on a revision collision (rare —
 /// only if two ingests race past the SELECT-then-INSERT window).
 pub async fn create_building(
     pool: &PgPool,
     source_id: Uuid,
     embedding_model_id: Uuid,
+    code_embedding_model_id: Option<Uuid>,
     ingest_cli_version: &str,
     content_hash: &str,
 ) -> Result<(Uuid, i32)> {
     // Auto-assign revision = max(existing) + 1 in a single statement.
     let row: (Uuid, i32) = sqlx::query_as(
         "INSERT INTO source_version (source_id, revision, status, embedding_model_id, \
-                                     ingest_cli_version, content_hash) \
-         SELECT $1, COALESCE(MAX(revision), 0) + 1, 'building', $2, $3, $4 \
+                                     code_embedding_model_id, ingest_cli_version, content_hash) \
+         SELECT $1, COALESCE(MAX(revision), 0) + 1, 'building', $2, $3, $4, $5 \
          FROM source_version WHERE source_id = $1 \
          RETURNING id, revision",
     )
     .bind(source_id)
     .bind(embedding_model_id)
+    .bind(code_embedding_model_id)
     .bind(ingest_cli_version)
     .bind(content_hash)
     .fetch_one(pool)
@@ -144,7 +146,7 @@ pub async fn retire(pool: &PgPool, source_version_id: Uuid) -> Result<()> {
 pub async fn get_active(pool: &PgPool, source_id: Uuid) -> Result<SourceVersion> {
     let row = sqlx::query_as::<_, SourceVersionRow>(
         "SELECT id, source_id, revision, status, is_active, ingested_at, ingest_cli_version, \
-                embedding_model_id, content_hash, notes, retired_at \
+                embedding_model_id, code_embedding_model_id, content_hash, notes, retired_at \
          FROM source_version WHERE source_id = $1 AND is_active = true",
     )
     .bind(source_id)
@@ -161,7 +163,7 @@ pub async fn get_active(pool: &PgPool, source_id: Uuid) -> Result<SourceVersion>
 pub async fn get_by_id(pool: &PgPool, id: Uuid) -> Result<SourceVersion> {
     let row = sqlx::query_as::<_, SourceVersionRow>(
         "SELECT id, source_id, revision, status, is_active, ingested_at, ingest_cli_version, \
-                embedding_model_id, content_hash, notes, retired_at \
+                embedding_model_id, code_embedding_model_id, content_hash, notes, retired_at \
          FROM source_version WHERE id = $1",
     )
     .bind(id)
@@ -180,7 +182,7 @@ pub async fn get_by_id(pool: &PgPool, id: Uuid) -> Result<SourceVersion> {
 pub async fn list_for_source(pool: &PgPool, source_id: Uuid) -> Result<Vec<SourceVersion>> {
     let rows = sqlx::query_as::<_, SourceVersionRow>(
         "SELECT id, source_id, revision, status, is_active, ingested_at, ingest_cli_version, \
-                embedding_model_id, content_hash, notes, retired_at \
+                embedding_model_id, code_embedding_model_id, content_hash, notes, retired_at \
          FROM source_version WHERE source_id = $1 ORDER BY revision DESC",
     )
     .bind(source_id)
@@ -341,7 +343,7 @@ pub async fn get_by_revision(
 ) -> Result<SourceVersion> {
     let row = sqlx::query_as::<_, SourceVersionRow>(
         "SELECT id, source_id, revision, status, is_active, ingested_at, ingest_cli_version, \
-                embedding_model_id, content_hash, notes, retired_at \
+                embedding_model_id, code_embedding_model_id, content_hash, notes, retired_at \
          FROM source_version WHERE source_id = $1 AND revision = $2",
     )
     .bind(source_id)
@@ -361,6 +363,7 @@ struct SourceVersionRow {
     ingested_at: OffsetDateTime,
     ingest_cli_version: String,
     embedding_model_id: Uuid,
+    code_embedding_model_id: Option<Uuid>,
     content_hash: String,
     notes: Option<String>,
     retired_at: Option<OffsetDateTime>,
@@ -382,6 +385,7 @@ impl TryFrom<SourceVersionRow> for SourceVersion {
             ingested_at: r.ingested_at,
             ingest_cli_version: r.ingest_cli_version,
             embedding_model_id: r.embedding_model_id,
+            code_embedding_model_id: r.code_embedding_model_id,
             content_hash: r.content_hash,
             notes: r.notes,
             retired_at: r.retired_at,

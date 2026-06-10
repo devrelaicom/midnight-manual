@@ -55,7 +55,7 @@ async fn seed(pool: &sqlx::PgPool) -> (Uuid, Uuid) {
     let source_id = source::insert(pool, &slug, "Filters", SourceKind::DocsSite, None, 5)
         .await
         .unwrap();
-    let (sv_id, _) = source_version::create_building(pool, source_id, model_id, "0.1.0", "h")
+    let (sv_id, _) = source_version::create_building(pool, source_id, model_id, None, "0.1.0", "h")
         .await
         .unwrap();
     let root = node::insert(pool, sv_id, None, NodeKind::Root, "root", 0)
@@ -103,6 +103,7 @@ async fn seed(pool: &sqlx::PgPool) -> (Uuid, Uuid) {
             content_hash: "ha",
             embedding: Some(unit_vector(0.10)),
             embedding_model_id: model_id,
+            code_embedding: None,
             heading_path: &[],
             symbol_path: &[],
             start_byte: 0,
@@ -154,6 +155,7 @@ async fn seed(pool: &sqlx::PgPool) -> (Uuid, Uuid) {
             content_hash: "hb",
             embedding: Some(unit_vector(0.12)),
             embedding_model_id: model_id,
+            code_embedding: None,
             heading_path: &[],
             symbol_path: &[],
             start_byte: 0,

@@ -45,7 +45,7 @@ async fn seed_documents(pool: &sqlx::PgPool, docs: &[(&str, Provenance)]) {
     let source_id = source::insert(pool, &slug, "Facets", SourceKind::DocsSite, None, 5)
         .await
         .unwrap();
-    let (sv_id, _) = source_version::create_building(pool, source_id, model_id, "0.1.0", "h")
+    let (sv_id, _) = source_version::create_building(pool, source_id, model_id, None, "0.1.0", "h")
         .await
         .unwrap();
     let root = node::insert(pool, sv_id, None, NodeKind::Root, "root", 0)

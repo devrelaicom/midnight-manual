@@ -27,9 +27,10 @@ async fn seed_source_with_chunks(pool: &PgPool, prefix: &str) -> (Uuid, Uuid, Uu
     let source_id = source::insert(pool, &slug, "Sweep Fixture", SourceKind::DocsSite, None, 5)
         .await
         .expect("insert source");
-    let (sv_id, _rev) = source_version::create_building(pool, source_id, model_id, "0.1.0", "h")
-        .await
-        .expect("start sv");
+    let (sv_id, _rev) =
+        source_version::create_building(pool, source_id, model_id, None, "0.1.0", "h")
+            .await
+            .expect("start sv");
     source_version::finalize(pool, sv_id)
         .await
         .expect("finalize");
@@ -76,6 +77,7 @@ async fn seed_source_with_chunks(pool: &PgPool, prefix: &str) -> (Uuid, Uuid, Uu
             content_hash: "ch",
             embedding: None,
             embedding_model_id: model_id,
+            code_embedding: None,
             heading_path: &[],
             symbol_path: &[],
             start_byte: 0,

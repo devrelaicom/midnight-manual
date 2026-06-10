@@ -54,10 +54,11 @@ async fn readyz_returns_200_when_pgvector_present() {
 #[tokio::test]
 async fn active_model_returns_seeded_row() {
     let h = common::boot().await;
-    // The active model after migrations is voyage-code-3@1: migration 0008
+    // The active model after migrations is voyage-context-3@1: migration 0011
     // registers it most-recently, so `get_active` returns it over the older
-    // bge-base-en-v1.5@1 (migration 0006). Upsert is idempotent.
-    embedding_model::upsert(&h.pool, "voyage-code-3", 1, 1024, "voyageai")
+    // voyage-code-3@1 (0008) and bge-base-en-v1.5@1 (0006). Upsert is
+    // idempotent (and does not bump created_at on conflict).
+    embedding_model::upsert(&h.pool, "voyage-context-3", 1, 1024, "voyageai")
         .await
         .unwrap();
     let app = app::build(h.pool.clone(), ServerConfig::default()).expect("build app");
@@ -75,7 +76,7 @@ async fn active_model_returns_seeded_row() {
 
     let body = to_bytes(resp.into_body(), 4096).await.unwrap();
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(v["name"], "voyage-code-3");
+    assert_eq!(v["name"], "voyage-context-3");
     assert_eq!(v["revision"], 1);
     assert_eq!(v["dim"], 1024);
 }

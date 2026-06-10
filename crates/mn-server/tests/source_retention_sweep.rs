@@ -24,7 +24,7 @@ async fn seed_retired_source(pool: &PgPool, prefix: &str, retired_seconds_ago: i
     let source_id = source::insert(pool, &slug, "Job Fixture", SourceKind::DocsSite, None, 5)
         .await
         .unwrap();
-    let (sv_id, _) = source_version::create_building(pool, source_id, model_id, "0.1.0", "h")
+    let (sv_id, _) = source_version::create_building(pool, source_id, model_id, None, "0.1.0", "h")
         .await
         .unwrap();
     source_version::finalize(pool, sv_id).await.unwrap();
@@ -71,6 +71,7 @@ async fn seed_retired_source(pool: &PgPool, prefix: &str, retired_seconds_ago: i
             content_hash: "ch",
             embedding: None,
             embedding_model_id: model_id,
+            code_embedding: None,
             heading_path: &[],
             symbol_path: &[],
             start_byte: 0,
@@ -184,6 +185,7 @@ async fn sweep_once_runs_version_pass_alongside_source_pass() {
             &h.pool,
             source_id,
             model_id,
+            None,
             "0.1.0",
             &format!("hv{i}"),
         )
@@ -239,12 +241,12 @@ async fn sweep_once_runs_aborted_pass_alongside_other_passes() {
             .await
             .unwrap();
     let (active_id, _) =
-        source_version::create_building(&h.pool, source_id, model_id, "0.1.0", "h-active")
+        source_version::create_building(&h.pool, source_id, model_id, None, "0.1.0", "h-active")
             .await
             .unwrap();
     source_version::finalize(&h.pool, active_id).await.unwrap();
     let (aborted_id, _) =
-        source_version::create_building(&h.pool, source_id, model_id, "0.1.0", "h-aborted")
+        source_version::create_building(&h.pool, source_id, model_id, None, "0.1.0", "h-aborted")
             .await
             .unwrap();
     source_version::abort(&h.pool, aborted_id).await.unwrap();

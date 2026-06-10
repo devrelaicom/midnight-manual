@@ -23,9 +23,10 @@ async fn parent_chain_walks_to_root() {
         source::insert(&h.pool, &slug, "Parent Chain Test", SourceKind::DocsSite, None, 5)
             .await
             .unwrap();
-    let (sv_id, _) = source_version::create_building(&h.pool, source_id, model_id, "0.1.0", "h")
-        .await
-        .unwrap();
+    let (sv_id, _) =
+        source_version::create_building(&h.pool, source_id, model_id, None, "0.1.0", "h")
+            .await
+            .unwrap();
 
     // Build a 4-level hierarchy: root -> group("docs") -> group("getting-started") -> document("quickstart.md")
     let root = node::insert(&h.pool, sv_id, None, NodeKind::Root, "root", 0)
@@ -69,9 +70,10 @@ async fn parent_chain_of_root_is_empty() {
         source::insert(&h.pool, &slug, "Parent Chain Test 2", SourceKind::DocsSite, None, 5)
             .await
             .unwrap();
-    let (sv_id, _) = source_version::create_building(&h.pool, source_id, model_id, "0.1.0", "h")
-        .await
-        .unwrap();
+    let (sv_id, _) =
+        source_version::create_building(&h.pool, source_id, model_id, None, "0.1.0", "h")
+            .await
+            .unwrap();
 
     let root = node::insert(&h.pool, sv_id, None, NodeKind::Root, "root", 0)
         .await

@@ -274,6 +274,9 @@ async fn start_ingest_run(
         &state.pool,
         src.id,
         model.id,
+        // Code-embedding model resolution lands with the dual-embedding
+        // ingest wiring (Task 14); until then versions carry no code model.
+        None,
         &req.ingest_cli_version,
         "pending",
     )
@@ -815,6 +818,9 @@ async fn insert_new_document(
                 content_hash: &chunk_upload.content_hash,
                 embedding,
                 embedding_model_id,
+                // Code vectors arrive with the dual-embedding upload schema
+                // (Task 16); fresh uploads carry none until then.
+                code_embedding: None,
                 heading_path: &chunk_upload.heading_path,
                 symbol_path: &chunk_upload.symbol_path,
                 start_byte: chunk_upload.start_byte,
@@ -882,6 +888,7 @@ async fn carry_forward_one(
                 content_hash: &prior.content_hash,
                 embedding: prior.embedding.clone(),
                 embedding_model_id,
+                code_embedding: prior.code_embedding.clone(),
                 heading_path: &prior.heading_path,
                 symbol_path: &prior.symbol_path,
                 start_byte: prior.start_byte,

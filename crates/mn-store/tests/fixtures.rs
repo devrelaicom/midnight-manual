@@ -49,7 +49,7 @@ pub async fn ingest_minimal_two_chunk_doc(pool: &PgPool, slug: &str) -> MinimalD
             .await
             .expect("insert source");
 
-    let (sv_id, _) = source_version::create_building(pool, source_id, model_id, "0.1.0", "h")
+    let (sv_id, _) = source_version::create_building(pool, source_id, model_id, None, "0.1.0", "h")
         .await
         .expect("create source_version");
 
@@ -107,6 +107,7 @@ pub async fn ingest_minimal_two_chunk_doc(pool: &PgPool, slug: &str) -> MinimalD
             content_hash: "fixture-chunk-hash-0",
             embedding: None,
             embedding_model_id: model_id,
+            code_embedding: None,
             heading_path: &[],
             symbol_path: &[],
             start_byte: 0,
@@ -130,6 +131,7 @@ pub async fn ingest_minimal_two_chunk_doc(pool: &PgPool, slug: &str) -> MinimalD
             content_hash: "fixture-chunk-hash-1",
             embedding: None,
             embedding_model_id: model_id,
+            code_embedding: None,
             heading_path: &[],
             symbol_path: &[],
             start_byte: 37,
@@ -171,7 +173,7 @@ pub async fn ingest_n_chunk_doc(pool: &PgPool, slug: &str, n: usize) -> MinimalD
             .await
             .expect("insert source");
 
-    let (sv_id, _) = source_version::create_building(pool, source_id, model_id, "0.1.0", "h")
+    let (sv_id, _) = source_version::create_building(pool, source_id, model_id, None, "0.1.0", "h")
         .await
         .expect("create source_version");
 
@@ -227,6 +229,7 @@ pub async fn ingest_n_chunk_doc(pool: &PgPool, slug: &str, n: usize) -> MinimalD
                 content_hash: &format!("fixture-chunk-hash-{i}"),
                 embedding: None,
                 embedding_model_id: model_id,
+                code_embedding: None,
                 heading_path: &[],
                 symbol_path: &[],
                 start_byte: i * 40,

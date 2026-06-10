@@ -42,7 +42,7 @@ async fn seed(pool: &sqlx::PgPool) -> (Uuid, Uuid) {
     let source_id = source::insert(pool, &slug, "Search", SourceKind::DocsSite, None, 5)
         .await
         .unwrap();
-    let (sv_id, _) = source_version::create_building(pool, source_id, model_id, "0.1.0", "h")
+    let (sv_id, _) = source_version::create_building(pool, source_id, model_id, None, "0.1.0", "h")
         .await
         .unwrap();
     let root = node::insert(pool, sv_id, None, NodeKind::Root, "root", 0)
@@ -92,6 +92,7 @@ async fn seed(pool: &sqlx::PgPool) -> (Uuid, Uuid) {
             content_hash: "ha",
             embedding: Some(unit_vector(0.10)),
             embedding_model_id: model_id,
+            code_embedding: None,
             heading_path: &[],
             symbol_path: &[],
             start_byte: 0,
@@ -114,6 +115,7 @@ async fn seed(pool: &sqlx::PgPool) -> (Uuid, Uuid) {
             content_hash: "hb",
             embedding: Some(unit_vector(0.90)),
             embedding_model_id: model_id,
+            code_embedding: None,
             heading_path: &[],
             symbol_path: &[],
             start_byte: 41,
@@ -320,7 +322,7 @@ async fn seed_hybrid(pool: &sqlx::PgPool) -> (Uuid, Uuid) {
     let source_id = source::insert(pool, &slug, "Hybrid", SourceKind::DocsSite, None, 5)
         .await
         .unwrap();
-    let (sv_id, _) = source_version::create_building(pool, source_id, model_id, "0.1.0", "h")
+    let (sv_id, _) = source_version::create_building(pool, source_id, model_id, None, "0.1.0", "h")
         .await
         .unwrap();
     let root = node::insert(pool, sv_id, None, NodeKind::Root, "root", 0)
@@ -372,6 +374,7 @@ async fn seed_hybrid(pool: &sqlx::PgPool) -> (Uuid, Uuid) {
             content_hash: "he",
             embedding: Some(unit_vector(0.4242)),
             embedding_model_id: model_id,
+            code_embedding: None,
             heading_path: &[],
             symbol_path: &[],
             start_byte: 0,
@@ -399,6 +402,7 @@ async fn seed_hybrid(pool: &sqlx::PgPool) -> (Uuid, Uuid) {
             content_hash: "hf",
             embedding: None,
             embedding_model_id: model_id,
+            code_embedding: None,
             heading_path: &[],
             symbol_path: &[],
             start_byte: 41,
@@ -427,7 +431,7 @@ async fn seed_scored(pool: &sqlx::PgPool) -> (Uuid, Uuid, String) {
     let source_id = source::insert(pool, &slug, "Scored", SourceKind::DocsSite, None, 5)
         .await
         .unwrap();
-    let (sv_id, _) = source_version::create_building(pool, source_id, model_id, "0.1.0", "h")
+    let (sv_id, _) = source_version::create_building(pool, source_id, model_id, None, "0.1.0", "h")
         .await
         .unwrap();
     let root = node::insert(pool, sv_id, None, NodeKind::Root, "root", 0)
@@ -539,6 +543,7 @@ async fn seed_scored_chunk(
             content_hash: name,
             embedding: Some(vector.to_vec()),
             embedding_model_id: model_id,
+            code_embedding: None,
             heading_path: &[],
             symbol_path: &[],
             start_byte: 0,
@@ -563,7 +568,7 @@ async fn seed_filter_fixture(pool: &sqlx::PgPool) -> (Uuid, String, String, Stri
     let source_id = source::insert(pool, &slug, "Filter", SourceKind::DocsSite, None, 5)
         .await
         .unwrap();
-    let (sv_id, _) = source_version::create_building(pool, source_id, model_id, "0.1.0", "h")
+    let (sv_id, _) = source_version::create_building(pool, source_id, model_id, None, "0.1.0", "h")
         .await
         .unwrap();
     let root = node::insert(pool, sv_id, None, NodeKind::Root, "root", 0)
@@ -631,6 +636,7 @@ async fn seed_filter_fixture(pool: &sqlx::PgPool) -> (Uuid, String, String, Stri
             content_hash: "hc",
             embedding: Some(unit_vector(0.271)),
             embedding_model_id: model_id,
+            code_embedding: None,
             heading_path: &[],
             symbol_path: &[],
             start_byte: 0,
