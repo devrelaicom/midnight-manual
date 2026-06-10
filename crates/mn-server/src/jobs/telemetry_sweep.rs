@@ -75,8 +75,12 @@ pub async fn sweep_once(pool: &PgPool, retention_days: i64) -> Result<SweepStats
     .rows_affected();
 
     // Dimensional rollup: preserve retrieval-quality dimensions for expired
-    // search events past raw retention. Missing fields coalesce to '' so the
-    // primary key is always satisfiable.
+    // search AND advanced_search events past raw retention (both emit the
+    // same retrieval-quality fields; the rollup has no tool_name dimension,
+    // so rows sharing dimensions merge — intended). Missing fields coalesce
+    // to '' so the primary key is always satisfiable. NOTE: migration 0010's
+    // header comment still says "(tool=search)" — it is an applied migration
+    // and must stay frozen; this comment is the live description.
     sqlx::query(
         "WITH expired_search AS (
              SELECT received_at::date AS day,
