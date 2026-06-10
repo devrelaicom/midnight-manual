@@ -95,7 +95,9 @@ pub struct ParentNode {
 ///
 /// # Errors
 ///
-/// Returns [`crate::error::StoreError::Database`] on driver failure.
+/// Returns [`crate::error::StoreError::Database`] on driver failure, or
+/// [`crate::error::StoreError::Json`] if a `node.kind` value fails to decode
+/// into [`NodeKind`].
 pub async fn parent_chain_with_documents(pool: &PgPool, node_id: Uuid) -> Result<Vec<ParentNode>> {
     #[derive(sqlx::FromRow)]
     struct Row {
