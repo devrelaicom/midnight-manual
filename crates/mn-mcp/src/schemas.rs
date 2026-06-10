@@ -21,13 +21,17 @@ fn chunk_fragment() -> Value {
     })
 }
 
-fn next_actions_fragment() -> Value {
+fn suggested_next_actions_fragment() -> Value {
     json!({
         "type": "array",
         "items": {
             "type": "object",
-            "properties": { "tool": { "type": "string" }, "arguments": { "type": "object" } },
-            "required": ["tool"]
+            "properties": {
+                "description": { "type": "string", "description": "What this suggested action achieves. Actions are suggestions, not required next steps." },
+                "tool": { "type": "string", "description": "Tool to call. Absent for actions the user (not the agent) must take." },
+                "arguments": { "type": "object" }
+            },
+            "required": ["description"]
         }
     })
 }
@@ -40,7 +44,7 @@ pub fn search_output_schema() -> Value {
             "corpus_embedding_model": { "type": "string" },
             "results": { "type": "array", "items": chunk_fragment() },
             "search_metadata": { "type": "object", "additionalProperties": true },
-            "next_actions": next_actions_fragment()
+            "suggested_next_actions": suggested_next_actions_fragment()
         },
         "required": ["results"],
         "additionalProperties": true
@@ -48,7 +52,7 @@ pub fn search_output_schema() -> Value {
 }
 
 fn passthrough_object_schema() -> Value {
-    json!({ "type": "object", "additionalProperties": true, "properties": { "next_actions": next_actions_fragment() } })
+    json!({ "type": "object", "additionalProperties": true, "properties": { "suggested_next_actions": suggested_next_actions_fragment() } })
 }
 
 /// Output schema for `get_chunk`.

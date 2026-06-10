@@ -485,8 +485,8 @@ async fn dispatch_get_chunk_structured_content_has_top_level_id() {
     let sc = result.structured_content.unwrap();
     // Chunk fields are flattened — `id` is top-level, NOT `sc["chunk"]["id"]`.
     assert_eq!(sc["id"], id);
-    // next_actions injected by the projector.
-    assert!(sc["next_actions"].is_array());
+    // suggested_next_actions injected by the projector.
+    assert!(sc["suggested_next_actions"].is_array());
     // text block has a fenced JSON summary, not the raw JSON dump.
     let text = match &result.content[0] {
         mn_mcp::protocol::ContentBlock::Text { text } => text.clone(),
@@ -547,7 +547,7 @@ async fn dispatch_get_chunk_neighbors_structured_content_shape() {
     // prev / next arrays accessible at sc["prev"]["chunks"] / sc["next"]["chunks"]
     assert_eq!(sc["prev"]["chunks"].as_array().unwrap().len(), 1);
     assert_eq!(sc["next"]["chunks"].as_array().unwrap().len(), 2);
-    assert!(sc["next_actions"].is_array());
+    assert!(sc["suggested_next_actions"].is_array());
 }
 
 /// Tool-execution errors become `isError: true` results (not JSON-RPC errors).
@@ -561,18 +561,19 @@ async fn dispatch_passthrough_not_found_produces_iserror_envelope() {
         message: "not found: no chunk abc".into(),
         guidance: "Not found — verify the id from a recent search result.".into(),
         details: json!({}),
-        next_actions: vec![render::NextAction {
-            tool: "search",
-            arguments: json!({ "query": "<terms>" }),
-        }],
+        suggested_next_actions: vec![render::NextAction::call(
+            "Run a fresh search to find a valid id",
+            "search",
+            json!({ "query": "<terms>" }),
+        )],
     };
     let result = failure.into_result();
     assert!(result.is_error, "isError must be true for tool-execution errors");
     let sc = result.structured_content.unwrap();
     assert_eq!(sc["error"]["code"], "NOT_FOUND");
     assert_eq!(sc["error"]["retryable"], false);
-    // next_actions still present so the agent can recover.
-    assert!(sc["next_actions"].is_array());
+    // suggested_next_actions still present so the agent can recover.
+    assert!(sc["suggested_next_actions"].is_array());
 }
 
 /// Verify that a successful `get_chunk` round-trip through the full
@@ -641,7 +642,7 @@ async fn dispatch_get_document_chunks_full_pipeline_via_wiremock() {
 
 /// Search that returns a 409 embedding-model mismatch from the cloud surfaces
 /// as `isError: true` with `EMBEDDING_MODEL_MISMATCH`, `retryable: false`, a
-/// `corpus_model` field, and `next_actions[0].tool == "pull_models"`.
+/// `corpus_model` field, and `suggested_next_actions[0].tool == "pull_models"`.
 ///
 /// Approach: run `run_search` through a full wiremock stack (models/active +
 /// embeddings server-proxy + search→409) to obtain `SearchError::Mismatch`,
@@ -742,10 +743,11 @@ async fn dispatch_search_mismatch_produces_iserror_envelope() {
             "client_model": "voyage-code-3@2",
             "remediation": remediation,
         }),
-        next_actions: vec![NextAction {
-            tool: "pull_models",
-            arguments: serde_json::json!({}),
-        }],
+        suggested_next_actions: vec![NextAction::call(
+            "Pull the current corpus models to resolve the mismatch",
+            "pull_models",
+            serde_json::json!({}),
+        )],
     };
     let result = failure.into_result();
 
@@ -754,7 +756,7 @@ async fn dispatch_search_mismatch_produces_iserror_envelope() {
     assert_eq!(sc["error"]["code"], "EMBEDDING_MODEL_MISMATCH");
     assert_eq!(sc["error"]["retryable"], false, "mismatch must not be retryable (I2)");
     assert!(sc["error"]["corpus_model"].is_string(), "corpus_model must be a string");
-    assert_eq!(sc["next_actions"][0]["tool"], "pull_models");
+    assert_eq!(sc["suggested_next_actions"][0]["tool"], "pull_models");
 }
 
 /// Verify that `get_chunk_neighbors` full pipeline preserves `sc["prev"]["chunks"]`

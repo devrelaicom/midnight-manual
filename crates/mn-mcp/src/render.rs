@@ -1,29 +1,58 @@
 //! Shapes every tool result into the MCP "summary + structuredContent" form.
 //!
 //! Success → one `text` content block (`summary` + the trimmed JSON in a fenced
-//! ```json block) plus full-fidelity `structuredContent` (with `next_actions`).
-//! Failure → an `isError: true` result carrying a shared error envelope.
+//! ```json block) plus full-fidelity `structuredContent` (with
+//! `suggested_next_actions`). Failure → an `isError: true` result carrying a
+//! shared error envelope.
 
 use serde_json::{json, Value};
 
 use crate::protocol::{ContentBlock, ToolCallResult};
 
-/// A suggested follow-up tool call surfaced to the agent.
+/// A suggested follow-up surfaced to the agent. `tool: None` describes a user
+/// action (e.g. "ask the user to restart the harness") rather than a tool call.
 #[derive(Debug, Clone)]
 pub struct NextAction {
-    /// Tool name to call next.
-    pub tool: &'static str,
-    /// Arguments object for that call.
-    pub arguments: Value,
+    /// What this action achieves, as a human-written sentence.
+    pub description: String,
+    /// Tool name to call next (`None` for user actions).
+    pub tool: Option<&'static str>,
+    /// Arguments object for that call (`None` for user actions).
+    pub arguments: Option<Value>,
 }
 
 impl NextAction {
+    /// Tool-call action.
+    pub fn call(description: impl Into<String>, tool: &'static str, arguments: Value) -> Self {
+        Self {
+            description: description.into(),
+            tool: Some(tool),
+            arguments: Some(arguments),
+        }
+    }
+
+    /// User action (no tool).
+    pub fn user(description: impl Into<String>) -> Self {
+        Self {
+            description: description.into(),
+            tool: None,
+            arguments: None,
+        }
+    }
+
     fn to_value(&self) -> Value {
-        json!({ "tool": self.tool, "arguments": self.arguments })
+        let mut o = json!({ "description": self.description });
+        if let Some(t) = self.tool {
+            o["tool"] = json!(t);
+        }
+        if let Some(a) = &self.arguments {
+            o["arguments"] = a.clone();
+        }
+        o
     }
 }
 
-fn next_actions_value(actions: &[NextAction]) -> Value {
+fn suggested_next_actions_value(actions: &[NextAction]) -> Value {
     Value::Array(actions.iter().map(NextAction::to_value).collect())
 }
 
@@ -52,12 +81,13 @@ pub struct SearchTelemetry {
 pub struct ToolOutcome {
     /// Concise, agent-facing summary line(s).
     pub summary: String,
-    /// Full canonical payload (becomes `structuredContent`; `next_actions` injected at render).
+    /// Full canonical payload (becomes `structuredContent`; `suggested_next_actions`
+    /// injected at render).
     pub structured: Value,
     /// Essentials-only view embedded as the fenced JSON in the text block.
     pub trimmed: Value,
     /// Suggested follow-ups.
-    pub next_actions: Vec<NextAction>,
+    pub suggested_next_actions: Vec<NextAction>,
     /// Optional telemetry facts (search only).
     pub telemetry: Option<SearchTelemetry>,
 }
@@ -68,13 +98,13 @@ impl ToolOutcome {
         summary: String,
         structured: Value,
         trimmed: Value,
-        next_actions: Vec<NextAction>,
+        suggested_next_actions: Vec<NextAction>,
     ) -> Self {
         Self {
             summary,
             structured,
             trimmed,
-            next_actions,
+            suggested_next_actions,
             telemetry: None,
         }
     }
@@ -83,7 +113,10 @@ impl ToolOutcome {
     pub fn into_result(self) -> ToolCallResult {
         let mut structured = self.structured;
         if let Value::Object(map) = &mut structured {
-            map.insert("next_actions".to_owned(), next_actions_value(&self.next_actions));
+            map.insert(
+                "suggested_next_actions".to_owned(),
+                suggested_next_actions_value(&self.suggested_next_actions),
+            );
         }
         let trimmed = serde_json::to_string(&self.trimmed).unwrap_or_else(|_| "{}".to_owned());
         ToolCallResult {
@@ -201,21 +234,23 @@ pub fn project_search(envelope: Value, reranker_used: Option<&str>) -> ToolOutco
         None => format!("Search: 0 matches, corpus {}.", corpus_model.as_deref().unwrap_or("?")),
     };
 
-    // next_actions from the top result.
-    let next_actions = top
+    // suggested_next_actions from the top result.
+    let suggested_next_actions = top
         .map(|t| {
             let mut v = Vec::new();
             if let Some(id) = t.get("chunk_id").and_then(Value::as_str) {
-                v.push(NextAction {
-                    tool: "get_chunk",
-                    arguments: json!({ "id": id }),
-                });
+                v.push(NextAction::call(
+                    "Fetch the top-ranked chunk's full content",
+                    "get_chunk",
+                    json!({ "id": id }),
+                ));
             }
             if let Some(id) = t.get("document_id").and_then(Value::as_str) {
-                v.push(NextAction {
-                    tool: "get_document",
-                    arguments: json!({ "id": id }),
-                });
+                v.push(NextAction::call(
+                    "Get the top result's parent document overview",
+                    "get_document",
+                    json!({ "id": id }),
+                ));
             }
             v
         })
@@ -245,7 +280,7 @@ pub fn project_search(envelope: Value, reranker_used: Option<&str>) -> ToolOutco
         summary,
         structured: envelope,
         trimmed: json!({ "results": trimmed_results, "match_count": result_count }),
-        next_actions,
+        suggested_next_actions,
         telemetry: Some(telemetry),
     }
 }
@@ -281,25 +316,29 @@ pub fn project_chunk(env: Value) -> ToolOutcome {
     };
     let summary = format!("Chunk {id} — {where_}{pos}.");
     let trimmed = json!({ "chunk_id": id, "source_path": path });
-    let next_actions = vec![
-        NextAction {
-            tool: "get_chunk_next",
-            arguments: json!({ "id": id }),
-        },
-        NextAction {
-            tool: "get_chunk_prev",
-            arguments: json!({ "id": id }),
-        },
-        NextAction {
-            tool: "get_chunk_neighbors",
-            arguments: json!({ "id": id }),
-        },
-        NextAction {
-            tool: "get_chunk_parents",
-            arguments: json!({ "id": id }),
-        },
+    let suggested_next_actions = vec![
+        NextAction::call(
+            "Read the next chunk in this document",
+            "get_chunk_next",
+            json!({ "id": id }),
+        ),
+        NextAction::call(
+            "Read the previous chunk in this document",
+            "get_chunk_prev",
+            json!({ "id": id }),
+        ),
+        NextAction::call(
+            "Fetch the chunks immediately surrounding this one for more context",
+            "get_chunk_neighbors",
+            json!({ "id": id }),
+        ),
+        NextAction::call(
+            "List this chunk's ancestor sections and parent document",
+            "get_chunk_parents",
+            json!({ "id": id }),
+        ),
     ];
-    ToolOutcome::new(summary, env, trimmed, next_actions)
+    ToolOutcome::new(summary, env, trimmed, suggested_next_actions)
 }
 
 /// `get_chunk_next` / `get_chunk_prev`: `{ chunks: [ChunkWithContext,..] }`. `direction` = "after"/"before".
@@ -323,23 +362,27 @@ pub fn project_chunk_list(env: Value, direction: &str) -> ToolOutcome {
         .unwrap_or("?")
         .to_owned();
     // Page from the boundary chunk in the same direction.
-    let (page_tool, page_anchor) = if direction == "after" {
+    let page_action = if direction == "after" {
         let last_idx = chunks_len - 1;
         let last = env
             .pointer(&format!("/chunks/{last_idx}/id"))
             .and_then(Value::as_str)
             .unwrap_or("?")
             .to_owned();
-        ("get_chunk_next", last)
+        NextAction::call(
+            "Continue reading past the last returned chunk",
+            "get_chunk_next",
+            json!({ "id": last }),
+        )
     } else {
-        ("get_chunk_prev", first.clone())
+        NextAction::call(
+            "Continue reading before the first returned chunk",
+            "get_chunk_prev",
+            json!({ "id": first }),
+        )
     };
     let summary = format!("{chunks_len} chunk(s) {direction} the anchor (first: {first}).");
-    let next_actions = vec![NextAction {
-        tool: page_tool,
-        arguments: json!({ "id": page_anchor }),
-    }];
-    ToolOutcome::new(summary, env, trimmed, next_actions)
+    ToolOutcome::new(summary, env, trimmed, vec![page_action])
 }
 
 /// `get_chunk_neighbors`: `{ prev: {chunks:[..]}, chunk: <ChunkWithContext>, next: {chunks:[..]} }`.
@@ -363,19 +406,20 @@ pub fn project_neighbors(env: Value) -> ToolOutcome {
         .map(str::to_owned);
     let summary = format!("{} neighbor(s) around {id} ({prev} before, {next} after).", prev + next);
     let trimmed = json!({ "prev": prev, "next": next });
-    let next_actions = doc_id
+    let suggested_next_actions = doc_id
         .map(|d| {
-            vec![NextAction {
-                tool: "get_document",
-                arguments: json!({ "id": d }),
-            }]
+            vec![NextAction::call(
+                "Fetch the parent document's overview and chunk map",
+                "get_document",
+                json!({ "id": d }),
+            )]
         })
         .unwrap_or_default();
-    ToolOutcome::new(summary, env, trimmed, next_actions)
+    ToolOutcome::new(summary, env, trimmed, suggested_next_actions)
 }
 
 /// `get_chunk_parents`: a top-level JSON ARRAY of ancestor nodes. Wrap as an object so
-/// `structured` stays an object (for next_actions injection + outputSchema).
+/// `structured` stays an object (for `suggested_next_actions` injection + outputSchema).
 // `env` is consumed by the `json!` macro (ownership move); a reference would require an
 // extra clone, so suppress the false-positive lint.
 #[allow(clippy::needless_pass_by_value)]
@@ -416,11 +460,12 @@ pub fn project_document_overview(env: Value) -> ToolOutcome {
         .map_or(0, Vec::len);
     let summary = format!("{path} ({name}): {n} chunks.");
     let trimmed = json!({ "source_path": path, "chunk_count": n });
-    let next_actions = vec![NextAction {
-        tool: "get_document_chunks",
-        arguments: json!({ "id": id }),
-    }];
-    ToolOutcome::new(summary, env, trimmed, next_actions)
+    let suggested_next_actions = vec![NextAction::call(
+        "Fetch this document's chunks with full content",
+        "get_document_chunks",
+        json!({ "id": id }),
+    )];
+    ToolOutcome::new(summary, env, trimmed, suggested_next_actions)
 }
 
 /// `get_document_chunks` (DocumentChunkWindow): Document flattened; window meta top-level.
@@ -446,15 +491,16 @@ pub fn project_document_window(env: Value) -> ToolOutcome {
     let to = from + n;
     let summary = format!("Chunks {from}..{to} of {path} (of {total}).");
     let trimmed = json!({ "source_path": path, "from": from, "to": to, "total_chunks": total });
-    let next_actions = if to < total {
-        vec![NextAction {
-            tool: "get_document_chunks",
-            arguments: json!({ "id": id, "from": to }),
-        }]
+    let suggested_next_actions = if to < total {
+        vec![NextAction::call(
+            "Fetch the next window of chunks in this document",
+            "get_document_chunks",
+            json!({ "id": id, "from": to }),
+        )]
     } else {
         vec![]
     };
-    ToolOutcome::new(summary, env, trimmed, next_actions)
+    ToolOutcome::new(summary, env, trimmed, suggested_next_actions)
 }
 
 /// `list_sources`: a top-level JSON ARRAY of source objects. Wrap as an object for structured.
@@ -483,10 +529,11 @@ pub fn project_sources(env: Value) -> ToolOutcome {
         summary,
         structured,
         trimmed,
-        vec![NextAction {
-            tool: "search",
-            arguments: json!({ "query": "<terms>" }),
-        }],
+        vec![NextAction::call(
+            "Search the corpus, optionally filtered to one of these sources",
+            "search",
+            json!({ "query": "<terms>" }),
+        )],
     )
 }
 
@@ -507,10 +554,11 @@ pub fn project_facets(env: Value) -> ToolOutcome {
         summary,
         env,
         trimmed,
-        vec![NextAction {
-            tool: "search",
-            arguments: json!({ "query": "<terms>", "filters": {} }),
-        }],
+        vec![NextAction::call(
+            "Search the corpus using these facet keys as filters",
+            "search",
+            json!({ "query": "<terms>", "filters": {} }),
+        )],
     )
 }
 
@@ -529,10 +577,11 @@ pub fn project_status(env: Value) -> ToolOutcome {
     let next = if state == "ready" {
         vec![]
     } else {
-        vec![NextAction {
-            tool: "pull_models",
-            arguments: json!({}),
-        }]
+        vec![NextAction::call(
+            "Download the missing local models so reranking can run",
+            "pull_models",
+            json!({}),
+        )]
     };
     let trimmed = json!({ "server_version": ver, "reranker": reranker, "model_state": state });
     ToolOutcome::new(summary, env, trimmed, next)
@@ -554,10 +603,11 @@ pub fn project_pull_models(env: Value) -> ToolOutcome {
         summary,
         env,
         trimmed,
-        vec![NextAction {
-            tool: "status",
-            arguments: json!({}),
-        }],
+        vec![NextAction::call(
+            "Confirm the models are now loaded and ready",
+            "status",
+            json!({}),
+        )],
     )
 }
 
@@ -608,7 +658,7 @@ impl ErrorKind {
     }
     const fn retryable(self) -> bool {
         match self {
-            // Permanent for an identical retry — recovery requires the next_action.
+            // Permanent for an identical retry — recovery requires a suggested action.
             Self::NotFound | Self::EmbeddingModelMismatch => false,
             // Transient or fixable-and-retry.
             Self::InvalidInput | Self::CloudError | Self::ModelLoadFailed | Self::InstallFailed => {
@@ -628,8 +678,8 @@ pub struct ToolFailure {
     pub guidance: String,
     /// Extra fields merged into the `error` object (e.g. mismatch data).
     pub details: Value,
-    /// Suggested follow-up tool calls.
-    pub next_actions: Vec<NextAction>,
+    /// Suggested follow-ups (tool calls or user actions).
+    pub suggested_next_actions: Vec<NextAction>,
 }
 
 impl ToolFailure {
@@ -644,7 +694,7 @@ impl ToolFailure {
             message: message.into(),
             guidance: guidance.into(),
             details: Value::Null,
-            next_actions: Vec::new(),
+            suggested_next_actions: Vec::new(),
         }
     }
 
@@ -662,7 +712,7 @@ impl ToolFailure {
         }
         let structured = json!({
             "error": error,
-            "next_actions": next_actions_value(&self.next_actions),
+            "suggested_next_actions": suggested_next_actions_value(&self.suggested_next_actions),
         });
         let trimmed =
             json!({ "error": { "code": self.kind.code(), "retryable": self.kind.retryable() } });
@@ -704,8 +754,8 @@ mod tests {
         assert!(o.trimmed["results"][0].get("scores").is_none());
         assert_eq!(o.trimmed["results"][0]["source_path"], "docs/intro.md");
         assert!(o.structured["results"][0].get("scores").is_some());
-        assert_eq!(o.next_actions[0].tool, "get_chunk");
-        assert_eq!(o.next_actions[0].arguments["id"], "1f39");
+        assert_eq!(o.suggested_next_actions[0].tool, Some("get_chunk"));
+        assert_eq!(o.suggested_next_actions[0].arguments.as_ref().unwrap()["id"], "1f39");
         let t = o.telemetry.unwrap();
         assert_eq!(t.result_count, 1);
         assert_eq!(t.corpus_model.as_deref(), Some("voyage-code-3@1"));
@@ -720,10 +770,11 @@ mod tests {
             "Found 1.".into(),
             json!({ "results": [1] }),
             json!({ "match_count": 1 }),
-            vec![NextAction {
-                tool: "get_chunk",
-                arguments: json!({ "id": "abc" }),
-            }],
+            vec![NextAction::call(
+                "Fetch the chunk's full content",
+                "get_chunk",
+                json!({ "id": "abc" }),
+            )],
         );
         let r = o.into_result();
         assert!(!r.is_error);
@@ -734,7 +785,7 @@ mod tests {
         assert!(text.contains("\"match_count\":1"));
         let sc = r.structured_content.unwrap();
         assert_eq!(sc["results"][0], 1);
-        assert_eq!(sc["next_actions"][0]["tool"], "get_chunk");
+        assert_eq!(sc["suggested_next_actions"][0]["tool"], "get_chunk");
     }
 
     #[test]
@@ -758,7 +809,7 @@ mod tests {
         let o = super::project_search(envelope, None);
         assert!(o.summary.contains("0 matches"));
         assert!(!o.summary.contains("corpus . ")); // empty model must not leak into summary
-        assert!(o.next_actions.is_empty());
+        assert!(o.suggested_next_actions.is_empty());
         let t = o.telemetry.unwrap();
         assert_eq!(t.result_count, 0);
         assert!(t.top_confidence_bucket.is_none());
@@ -791,9 +842,9 @@ mod tests {
         assert!(o.summary.contains("docs/intro.md"));
         assert!(o.summary.contains('4')); // chunk index
         assert_eq!(
-            o.next_actions
+            o.suggested_next_actions
                 .iter()
-                .filter(|a| a.tool == "get_chunk_next")
+                .filter(|a| a.tool == Some("get_chunk_next"))
                 .count(),
             1
         );
@@ -812,7 +863,7 @@ mod tests {
         let env = json!([ { "name": "Group A" }, { "name": "Doc B" } ]);
         let o = super::project_parents(env);
         assert!(o.summary.contains("Group A"));
-        // structured must be an OBJECT (array wrapped) so next_actions injection + outputSchema hold
+        // structured must be an OBJECT (array wrapped) so suggested_next_actions injection + outputSchema hold
         assert!(o.structured.is_object());
         assert!(o.structured["parents"].is_array());
     }
@@ -832,9 +883,9 @@ mod tests {
         assert!(o.summary.contains("docs/intro.md"));
         assert!(o.summary.contains('3'));
         assert!(o
-            .next_actions
+            .suggested_next_actions
             .iter()
-            .any(|a| a.tool == "get_document_chunks"));
+            .any(|a| a.tool == Some("get_document_chunks")));
     }
 
     #[test]
@@ -848,25 +899,26 @@ mod tests {
         assert!(o.summary.contains("3..5")); // from=3, +2 returned
         assert_eq!(o.trimmed["total_chunks"], 35);
         // to=5 < total=35 → should still have a next action
-        assert!(!o.next_actions.is_empty());
+        assert!(!o.suggested_next_actions.is_empty());
     }
 
     #[test]
     fn project_chunk_list_empty_has_no_next_action() {
         let o = super::project_chunk_list(json!({ "chunks": [] }), "after");
         assert!(o.summary.contains("No more chunks"));
-        assert!(o.next_actions.is_empty());
+        assert!(o.suggested_next_actions.is_empty());
     }
 
     #[test]
     fn project_chunk_list_pages_in_direction() {
         let env = json!({ "chunks": [ { "id": "a" }, { "id": "b" } ] });
         let after = super::project_chunk_list(env.clone(), "after");
-        assert_eq!(after.next_actions[0].tool, "get_chunk_next");
-        assert_eq!(after.next_actions[0].arguments["id"], "b"); // last
+        assert_eq!(after.suggested_next_actions[0].tool, Some("get_chunk_next"));
+        assert_eq!(after.suggested_next_actions[0].arguments.as_ref().unwrap()["id"], "b"); // last
         let before = super::project_chunk_list(env, "before");
-        assert_eq!(before.next_actions[0].tool, "get_chunk_prev");
-        assert_eq!(before.next_actions[0].arguments["id"], "a"); // first
+        assert_eq!(before.suggested_next_actions[0].tool, Some("get_chunk_prev"));
+        assert_eq!(before.suggested_next_actions[0].arguments.as_ref().unwrap()["id"], "a");
+        // first
     }
 
     #[test]
@@ -875,7 +927,7 @@ mod tests {
         let env = json!({ "id":"d1","source_path":"x","source":{"display_name":"X"},
             "from":33,"limit":7,"total_chunks":35,"chunks":[{"chunk_id":"a"},{"chunk_id":"b"}] });
         let o = super::project_document_window(env);
-        assert!(o.next_actions.is_empty());
+        assert!(o.suggested_next_actions.is_empty());
     }
 
     #[test]
@@ -889,7 +941,10 @@ mod tests {
         assert!(o.summary.contains("Compact Docs"));
         assert!(o.structured.is_object()); // array wrapped
         assert!(o.structured["sources"].is_array());
-        assert!(o.next_actions.iter().any(|a| a.tool == "search"));
+        assert!(o
+            .suggested_next_actions
+            .iter()
+            .any(|a| a.tool == Some("search")));
     }
 
     #[test]
@@ -910,7 +965,10 @@ mod tests {
                           "model_state": "missing", "cache_dir": null });
         let o = super::project_status(env);
         assert!(o.summary.to_lowercase().contains("reranker"));
-        assert!(o.next_actions.iter().any(|a| a.tool == "pull_models")); // state != ready
+        assert!(o
+            .suggested_next_actions
+            .iter()
+            .any(|a| a.tool == Some("pull_models"))); // state != ready
     }
 
     #[test]
@@ -936,5 +994,28 @@ mod tests {
         let t = o.telemetry.unwrap();
         assert_eq!(t.filtered_by_confidence, Some(1));
         assert_eq!(t.deduplicated_count, Some(5)); // overlap_dropped(3) + overlap_trimmed(2), NOT input-dedup(0)
+    }
+
+    #[test]
+    fn user_action_serializes_description_only() {
+        let a = NextAction::user("Ask the user to restart the harness");
+        let v = a.to_value();
+        assert_eq!(v["description"], "Ask the user to restart the harness");
+        let obj = v.as_object().unwrap();
+        assert!(!obj.contains_key("tool"), "user action must not carry a tool key");
+        assert!(!obj.contains_key("arguments"), "user action must not carry an arguments key");
+    }
+
+    #[test]
+    fn every_serialized_action_has_nonempty_description() {
+        let actions = vec![
+            NextAction::call("Fetch the chunk's full content", "get_chunk", json!({ "id": "a" })),
+            NextAction::user("Ask the user to restart the harness"),
+        ];
+        let v = suggested_next_actions_value(&actions);
+        for entry in v.as_array().unwrap() {
+            let d = entry["description"].as_str().unwrap();
+            assert!(!d.is_empty(), "every serialized action must carry a non-empty description");
+        }
     }
 }

@@ -245,10 +245,11 @@ fn cloud_failure(e: &crate::cloud_client::CloudError) -> ToolFailure {
             message: format!("not found: {msg}"),
             guidance: "Resource not found — verify the id from a recent search result.".into(),
             details: serde_json::Value::Null,
-            next_actions: vec![NextAction {
-                tool: "search",
-                arguments: serde_json::json!({ "query": "<terms>" }),
-            }],
+            suggested_next_actions: vec![NextAction::call(
+                "Run a fresh search to find a valid id",
+                "search",
+                serde_json::json!({ "query": "<terms>" }),
+            )],
         },
         other => ToolFailure::simple(
             ErrorKind::CloudError,
@@ -269,10 +270,11 @@ fn passthrough_failure(e: tools::PassthroughError) -> ToolFailure {
             message: format!("not found: {msg}"),
             guidance: "Not found — verify the id from a recent search result.".into(),
             details: json!({}),
-            next_actions: vec![NextAction {
-                tool: "search",
-                arguments: json!({ "query": "<terms>" }),
-            }],
+            suggested_next_actions: vec![NextAction::call(
+                "Run a fresh search to find a valid id",
+                "search",
+                json!({ "query": "<terms>" }),
+            )],
         },
         tools::PassthroughError::Cloud(msg) => {
             ToolFailure::simple(ErrorKind::CloudError, msg, "Upstream call failed; retry shortly.")
@@ -501,10 +503,11 @@ async fn run_search_dispatch(params: &ToolCallParams, state: &ServerState) -> To
                     "client_model": client_model,
                     "remediation": remediation,
                 }),
-                next_actions: vec![NextAction {
-                    tool: "pull_models",
-                    arguments: serde_json::json!({}),
-                }],
+                suggested_next_actions: vec![NextAction::call(
+                    "Pull the current corpus models to resolve the mismatch",
+                    "pull_models",
+                    serde_json::json!({}),
+                )],
             }
             .into_result(),
             telemetry: None,
