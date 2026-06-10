@@ -111,14 +111,16 @@ async fn sources_list_includes_inserted_row_and_show_round_trips() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = to_bytes(resp.into_body(), 16 * 1024).await.unwrap();
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert!(v.is_array(), "list response must be a JSON array");
-    let has_slug = v
+    let sources = v["sources"]
         .as_array()
-        .unwrap()
+        .expect("list response must be `{sources, total, next_cursor}`");
+    let has_slug = sources
         .iter()
         .filter_map(|row| row["slug"].as_str())
         .any(|s| s == slug);
     assert!(has_slug, "list response must include the inserted slug");
+    assert!(v["total"].as_i64().unwrap() >= 1, "total must count the inserted row: {v}");
+    assert!(v["next_cursor"].is_null(), "single page must have null next_cursor: {v}");
 
     // Show
     let resp = app

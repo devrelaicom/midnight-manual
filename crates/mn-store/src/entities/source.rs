@@ -70,6 +70,92 @@ pub async fn list_active(pool: &PgPool) -> Result<Vec<Source>> {
     rows.into_iter().map(TryInto::try_into).collect()
 }
 
+/// Filterable, keyset-paginated source listing. Page key is `slug` (unique,
+/// matches the existing ORDER BY). Returns one page plus the total row count
+/// for the same filter set (ignoring the cursor).
+#[derive(Debug, Default)]
+pub struct SourcePageQuery {
+    /// Resume after this slug (exclusive). `None` = first page.
+    pub after_slug: Option<String>,
+    /// Page size (validated by the route: 1..=100).
+    pub limit: i64,
+    /// Only sources created strictly after this instant.
+    pub created_after: Option<OffsetDateTime>,
+    /// Only sources created strictly before this instant.
+    pub created_before: Option<OffsetDateTime>,
+    /// Only sources of this kind (wire string, e.g. "docs_site").
+    pub kind: Option<String>,
+    /// Include retired sources (default false = active only).
+    pub include_retired: bool,
+}
+
+/// One page of sources plus pagination facts.
+#[derive(Debug)]
+pub struct SourcePage {
+    /// The page rows, ordered by slug.
+    pub sources: Vec<Source>,
+    /// Total rows matching the filters (cursor ignored).
+    pub total: i64,
+    /// Slug to resume from when more rows exist.
+    pub next_after_slug: Option<String>,
+}
+
+/// Run a [`SourcePageQuery`].
+///
+/// # Errors
+///
+/// Returns [`crate::error::StoreError::Database`] on driver failure.
+pub async fn list_paged(pool: &PgPool, q: &SourcePageQuery) -> Result<SourcePage> {
+    fn push_filters<'a>(b: &mut sqlx::QueryBuilder<'a, sqlx::Postgres>, q: &'a SourcePageQuery) {
+        b.push(" WHERE 1=1");
+        if !q.include_retired {
+            b.push(" AND retired_at IS NULL");
+        }
+        if let Some(t) = q.created_after {
+            b.push(" AND created_at > ").push_bind(t);
+        }
+        if let Some(t) = q.created_before {
+            b.push(" AND created_at < ").push_bind(t);
+        }
+        if let Some(k) = &q.kind {
+            b.push(" AND kind = ").push_bind(k.as_str());
+        }
+    }
+
+    let mut count = sqlx::QueryBuilder::new("SELECT count(*) FROM source");
+    push_filters(&mut count, q);
+    let total: i64 = count.build_query_scalar().fetch_one(pool).await?;
+
+    let mut page = sqlx::QueryBuilder::new(
+        "SELECT id, slug, display_name, kind, origin_url, retention_count, created_at, retired_at \
+         FROM source",
+    );
+    push_filters(&mut page, q);
+    if let Some(after) = &q.after_slug {
+        page.push(" AND slug > ").push_bind(after.as_str());
+    }
+    page.push(" ORDER BY slug LIMIT ").push_bind(q.limit + 1);
+    let rows: Vec<SourceRow> = page.build_query_as().fetch_all(pool).await?;
+
+    let page_len = usize::try_from(q.limit).unwrap_or(usize::MAX);
+    let has_more = rows.len() > page_len;
+    let sources: Vec<Source> = rows
+        .into_iter()
+        .take(page_len)
+        .map(TryInto::try_into)
+        .collect::<Result<_>>()?;
+    let next_after_slug = if has_more {
+        sources.last().map(|s| s.slug.clone())
+    } else {
+        None
+    };
+    Ok(SourcePage {
+        sources,
+        total,
+        next_after_slug,
+    })
+}
+
 /// List every source row, including retired ones, ordered by slug.
 ///
 /// Distinct from [`list_active`] which filters out `retired_at IS NOT NULL`.
