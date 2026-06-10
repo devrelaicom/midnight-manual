@@ -87,7 +87,7 @@ Per-tool actions:
 | `list_sources` | `"Showing 1–20 of 43 sources."` + fence of `[{id, display_name, kind}]` only. |
 | `facets` (overview) | `"7 filter dimensions: …. Values feed advanced_search filters."` + compact fence. |
 | `facets` (drill-down) | `"tags: showing 1–50 of 312 values."` + fence. |
-| `status` | e.g. `"Cloud reachable (v0.9.2); auth: github user aaronbassett (read); Voyage key valid; reranker voyage-rerank-2 (remote); rate limits: search 58/60, fetch 120/120."` |
+| `status` | e.g. `"Cloud reachable (v0.9.2); auth: github_oauth aaronbassett (read); requests 58/60; embed tokens 86k/100k hr · 940k/1M day; Voyage key valid; reranker bge-reranker-base loaded."` |
 | `install_search_skill` | Outcome summary; ends with the explicit instruction: "Ask the user to refresh/restart their harness's skills to activate." |
 
 ### 2.3 Low-candidate skill nudge
@@ -107,7 +107,9 @@ The `advanced_search` outputSchema describes it: "Trust multiplier from comparin
 1. **Batch chunks — `GET /v1/chunks?ids=a,b,c`** (cap 20). Returns `{chunks: [ChunkWithContext]}` preserving request order; unknown ids land in `missing: [id]` instead of failing the call. Costs 1 rate-limit token. Store: single `WHERE id = ANY($1)`.
 2. **Sources pagination — `GET /v1/sources`** gains `cursor`, `limit` (default 20, max 100), `created_after`, `created_before`, `kind`, `retired` (default `false` → active only). Keyset cursor on `(created_at, id)`, opaque base64 token. Response: `{sources, total, next_cursor?}`.
 3. **Facets drill-down — `GET /v1/facets`** gains optional `facet`, `cursor`, `limit`. No `facet` → overview (per-dimension samples trimmed to 10 + `total`); with `facet` → paginated value list for that dimension (same keyset pattern).
-4. **`GET /v1/me`** — auth introspection: `{authenticated, auth_type (github_oauth | admin_key | anonymous), identity, permission_level, rate_limits: [{bucket, limit, remaining, reset_at}]}`. Exposes the state the rate-limit middleware already computes for `X-RateLimit-*` headers.
+4. **`GET /v1/me`** — auth introspection: `{authenticated, auth_type (github_oauth | admin | anonymous), identity, permission_level, rate_limit, token_limits, server_version}`. Callers have **two independent limit systems**, and `/v1/me` reports both:
+   - `rate_limit` — the request rate limit (req/s token bucket, one bucket per caller): `{tier, limit, remaining, reset_secs}`. Exposes the state the rate-limit middleware already computes for `X-RateLimit-*` headers, peeked without spending a token (`charge(key, limit, 0)`).
+   - `token_limits` — the embedding token budget (`tokenlimit.rs`, charged by `POST /v1/embeddings`, surfaced today only via `x-tokenlimit-*` headers): `{tier, hourly: {limit, remaining, reset_at_secs}, daily: {limit, remaining, reset_at_secs}}`, from the limiter's non-consuming `snapshot_for` (`tokenlimit.rs:484`).
 5. **Parents enrichment — `GET /v1/chunks/:id/parents`**: each node gains `document_id` (non-null only for `kind: document` nodes, joined from documents) and the response gains top-level `source: {slug, display_name}` from the source version. Node ids remain the structural hierarchy ids; the document node now carries the fetchable document id.
 
 `openapi.yaml` and `mcp-tools.json` updated for all of the above.
@@ -117,7 +119,7 @@ The `advanced_search` outputSchema describes it: "Trust multiplier from comparin
 Assembles in parallel, ~3s timeout per probe, into a `StatusReport`:
 
 - **Cloud health**: `/readyz` → `reachable | degraded | unreachable` + server version.
-- **Auth + rate limits**: `GET /v1/me`; `anonymous` when no token.
+- **Auth + limits**: `GET /v1/me`; `anonymous` when no token. Carries both the request rate-limit bucket and the embedding token-limit windows (hourly + daily).
 - **VoyageAI**: if `VOYAGE_API_KEY` set → `GET https://api.voyageai.com/v1/files` → `valid | invalid_key | unreachable`; else `not_configured`.
 - **Reranker**: configured reranker id, remote/local, load state if local.
 

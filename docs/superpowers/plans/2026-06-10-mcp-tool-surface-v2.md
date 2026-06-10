@@ -600,19 +600,27 @@ git commit -m "feat(mn-server): facets drill-down (?facet=&cursor=&limit=) + 10-
 - [ ] **Step 1: Write the route:**
 
 ```rust
-//! `GET /v1/me` — auth + rate-limit introspection for clients (MCP `status`,
+//! `GET /v1/me` — auth + limit introspection for clients (MCP `status`,
 //! `mnm status`). Anonymous calls succeed and report `authenticated: false`.
+//!
+//! Callers carry TWO independent limit systems and this endpoint reports both:
+//! the request rate limit (req/s token bucket, `ratelimit.rs`) and the
+//! embedding token budget (rolling hourly/daily windows, `tokenlimit.rs`,
+//! charged by `POST /v1/embeddings`).
 
 use axum::extract::{Extension, State};
+use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use serde_json::json;
+use time::OffsetDateTime;
 
 use crate::app::AppState;
 use crate::middleware::bearer::AuthContext;
 use crate::middleware::rate_limit::RateLimitContext;
 use crate::ratelimit::Decision;
+use crate::tokenlimit::TokenTier;
 
 /// Mount the introspection route.
 #[must_use]
@@ -620,8 +628,17 @@ pub fn router() -> Router<AppState> {
     Router::new().route("/v1/me", get(me))
 }
 
+const fn token_tier_str(t: TokenTier) -> &'static str {
+    match t {
+        TokenTier::Anonymous => "anonymous",
+        TokenTier::ReadUplift => "read_uplift",
+        TokenTier::Admin => "admin",
+    }
+}
+
 async fn me(
     State(state): State<AppState>,
+    headers: HeaderMap,
     auth: Option<Extension<AuthContext>>,
     rl: Option<Extension<RateLimitContext>>,
 ) -> Response {
@@ -643,8 +660,9 @@ async fn me(
             (t, Some(a.sub.clone()), p)
         }
     };
-    // Peek the caller's bucket without spending a token (cost 0). The
-    // RateLimitContext extension exists whenever the limiter is enabled.
+    // Request rate limit: peek the caller's bucket without spending a token
+    // (cost 0). The RateLimitContext extension exists whenever the limiter is
+    // enabled.
     let rate_limit = rl.and_then(|Extension(ctx)| {
         state.rate_limiter.as_ref().map(|limiter| {
             let (remaining, reset_secs) = match limiter.charge(&ctx.key, ctx.limit, 0) {
@@ -659,23 +677,39 @@ async fn me(
             })
         })
     });
+    // Embedding token budget: same resolve + non-consuming snapshot the
+    // embeddings route uses (embeddings.rs:196-249).
+    let client_ip =
+        crate::middleware::rate_limit::client_ip(&headers, &state.cfg.rate_limit_client_ip_header);
+    let (subject, token_tier, limits) = state.token_limiter.resolve(&client_ip, auth.as_ref());
+    let now = OffsetDateTime::now_utc().unix_timestamp();
+    let usage = state.token_limiter.snapshot_for(&subject, limits, now);
+    let window = |w: crate::tokenlimit::WindowInfo| {
+        json!({ "limit": w.limit, "remaining": w.remaining, "reset_at_secs": w.reset_at_secs })
+    };
+    let token_limits = json!({
+        "tier": token_tier_str(token_tier),
+        "hourly": window(usage.hour),
+        "daily": window(usage.day),
+    });
     Json(json!({
         "authenticated": auth.is_some(),
         "auth_type": auth_type,
         "identity": identity,
         "permission_level": permission_level,
         "rate_limit": rate_limit,
+        "token_limits": token_limits,
         "server_version": env!("CARGO_PKG_VERSION"),
     }))
     .into_response()
 }
 ```
 
-(Design deviation, deliberate: `rate_limit` is a single object, not an array — there is exactly one bucket per caller. `server_version` rides along here so the MCP `status` tool gets the cloud version without a second endpoint.)
+(`rate_limit` is a single object — one request bucket per caller — while `token_limits` carries the two embedding windows. `server_version` rides along here so the MCP `status` tool gets the cloud version without a second endpoint.)
 
-- [ ] **Step 2: Check visibility.** `RateLimitContext` and `Tier::as_str` must be `pub` (they are, per `middleware/rate_limit.rs:19` and `ratelimit.rs`). If `mn_auth::Tier` import differs, mirror the import used in `ratelimit.rs`.
+- [ ] **Step 2: Check visibility.** `RateLimitContext`, `ratelimit::Tier::as_str`, `tokenlimit::{TokenTier, WindowInfo}`, `TokenUsageLimiter::{resolve, snapshot_for}` are all `pub` already; `middleware::rate_limit::client_ip` is `pub(crate)` (rate_limit.rs:~44) — that's sufficient from another module in the same crate. If `mn_auth::Tier` import differs, mirror the import used in `ratelimit.rs`.
 
-- [ ] **Step 3: Integration test (CI-only):** anonymous GET `/v1/me` → `authenticated:false, auth_type:"anonymous", permission_level:"read", server_version` non-empty; with an admin JWT (reuse the suite's existing JWT mint helper) → `auth_type:"admin"`, `identity` = sub, `rate_limit.limit > 0`, and `rate_limit.remaining` unchanged across two consecutive `/v1/me` calls plus one `/v1/sources` call in between decrements it (proves peek doesn't spend).
+- [ ] **Step 3: Integration test (CI-only):** anonymous GET `/v1/me` → `authenticated:false, auth_type:"anonymous", permission_level:"read", server_version` non-empty, `token_limits.tier == "anonymous"` with `hourly.limit > 0` and `daily.limit > 0`; with an admin JWT (reuse the suite's existing JWT mint helper) → `auth_type:"admin"`, `identity` = sub, `rate_limit.limit > 0`, `token_limits.tier == "admin"`; `rate_limit.remaining` unchanged across two consecutive `/v1/me` calls plus one `/v1/sources` call in between decrements it (proves peek doesn't spend); and `token_limits.hourly.remaining` drops after a `POST /v1/embeddings` call but NOT after `/v1/me` itself (proves `snapshot_for` doesn't charge).
 
 - [ ] **Step 4: Verify + commit**
 
@@ -1729,8 +1763,10 @@ pub struct StatusReport {
     pub identity: Option<String>,
     /// `read` / `write` / `admin`.
     pub permission_level: String,
-    /// Rate-limit bucket state (from `/v1/me`), when reachable.
+    /// Request rate-limit bucket state (from `/v1/me`), when reachable.
     pub rate_limit: Option<serde_json::Value>,
+    /// Embedding token-budget windows (from `/v1/me`): `{tier, hourly, daily}`.
+    pub token_limits: Option<serde_json::Value>,
     /// Voyage key state.
     pub voyage: VoyageState,
     /// Local reranker model name.
@@ -1797,6 +1833,10 @@ pub async fn assemble(cloud: &CloudClient, voyage_key: Option<&str>) -> StatusRe
             .and_then(|m| str_of(m, "permission_level"))
             .unwrap_or_else(|| "read".to_owned()),
         rate_limit: me.as_ref().and_then(|m| m.get("rate_limit").cloned()).filter(|v| !v.is_null()),
+        token_limits: me
+            .as_ref()
+            .and_then(|m| m.get("token_limits").cloned())
+            .filter(|v| !v.is_null()),
         voyage,
         reranker: mn_embedding::RERANKER_MODEL_NAME,
         reranker_loaded: crate::tools::reranker_loaded(),
@@ -1839,15 +1879,24 @@ pub fn project_status(env: Value) -> ToolOutcome {
         "anonymous (read)".to_owned()
     };
     let rl = env.get("rate_limit").filter(|v| !v.is_null()).map(|r| format!(
-        "; rate limit {}/{} ({})",
+        "; requests {}/{}",
         r.get("remaining").and_then(Value::as_u64).unwrap_or(0),
         r.get("limit").and_then(Value::as_u64).unwrap_or(0),
-        r.get("tier").and_then(Value::as_str).unwrap_or("?"),
     )).unwrap_or_default();
+    let tl = env.get("token_limits").filter(|v| !v.is_null()).map(|t| {
+        let w = |k: &str, unit: &str| {
+            format!(
+                "{}/{} {unit}",
+                t.pointer(&format!("/{k}/remaining")).and_then(Value::as_u64).unwrap_or(0),
+                t.pointer(&format!("/{k}/limit")).and_then(Value::as_u64).unwrap_or(0),
+            )
+        };
+        format!("; embed tokens {} · {}", w("hourly", "hr"), w("daily", "day"))
+    }).unwrap_or_default();
     let reranker = format!("{} {}", s("reranker"),
         if env.get("reranker_loaded").and_then(Value::as_bool).unwrap_or(false) { "loaded" } else { "not loaded (loads on first reranked search)" });
     let summary = format!(
-        "Cloud {cloud}{cloud_ver}; auth: {auth}{rl}; Voyage key {}; reranker {reranker}.",
+        "Cloud {cloud}{cloud_ver}; auth: {auth}{rl}{tl}; Voyage key {}; reranker {reranker}.",
         s("voyage").replace('_', " "),
     );
     let trimmed = json!({
@@ -1856,6 +1905,7 @@ pub fn project_status(env: Value) -> ToolOutcome {
         "auth_type": env.get("auth_type").cloned().unwrap_or(Value::Null),
         "voyage": env.get("voyage").cloned().unwrap_or(Value::Null),
         "rate_limit": env.get("rate_limit").cloned().unwrap_or(Value::Null),
+        "token_limits": env.get("token_limits").cloned().unwrap_or(Value::Null),
     });
     let mut actions = Vec::new();
     if s("voyage") == "invalid_key" {
@@ -2149,12 +2199,23 @@ fn print_human(r: &StatusReport, url: &str) {
     }
     if let Some(rl) = &r.rate_limit {
         println!(
-            "  rate limit:   {}/{} remaining ({} tier, resets in {}s)",
+            "  requests:     {}/{} remaining ({} tier, resets in {}s)",
             rl.get("remaining").and_then(serde_json::Value::as_u64).unwrap_or(0),
             rl.get("limit").and_then(serde_json::Value::as_u64).unwrap_or(0),
             rl.get("tier").and_then(serde_json::Value::as_str).unwrap_or("?"),
             rl.get("reset_secs").and_then(serde_json::Value::as_u64).unwrap_or(0),
         );
+    }
+    if let Some(tl) = &r.token_limits {
+        let w = |k: &str| {
+            (
+                tl.pointer(&format!("/{k}/remaining")).and_then(serde_json::Value::as_u64).unwrap_or(0),
+                tl.pointer(&format!("/{k}/limit")).and_then(serde_json::Value::as_u64).unwrap_or(0),
+            )
+        };
+        let (hr_rem, hr_lim) = w("hourly");
+        let (day_rem, day_lim) = w("daily");
+        println!("  embed tokens: {hr_rem}/{hr_lim} this hour, {day_rem}/{day_lim} today");
     }
     println!("  voyage key:   {}", match r.voyage {
         VoyageState::Valid => "valid",
@@ -2229,5 +2290,5 @@ git push
 ## Self-review checklist (done at write time)
 
 - **Spec coverage:** §1 surface → Tasks 11–20; §2 response rules → Tasks 9–19; §2.3 nudge → Task 11; §2.4/2.5 → Task 11 (strip + schema descriptions); §3 cloud → Tasks 1–6 (+ overview-skeleton, a §3 omission in the spec, covered by Task 6); §4 status → Task 18; §5 install → Task 19; §6 CLI → Task 23; §7 skill → Task 22; §8 telemetry → Task 21; §9 testing → distributed per task + Task 24/25; §10 deletions → Tasks 6, 8, 13, 17.
-- **Known judgment calls encoded:** `/v1/me` `rate_limit` is a single object (one bucket per caller); `slug` added to the list_sources brief (agents need it for filters); `mnm models pull` (CLI) is unrelated to the removed MCP `pull_models` and stays.
+- **Known judgment calls encoded:** `/v1/me` reports BOTH limit systems — `rate_limit` (one request bucket per caller) and `token_limits` (embedding budget, rolling hourly + daily windows via `TokenUsageLimiter::snapshot_for`); `slug` added to the list_sources brief (agents need it for filters); `mnm models pull` (CLI) is unrelated to the removed MCP `pull_models` and stays.
 - **Type consistency:** `NextAction::call/user` (Task 9) used by all later tasks; `chunk_brief`/`snippet` (Task 10) used by Tasks 12–13; `SearchRenderOpts` (Task 11) matches Task 11's dispatch; `ToolAnnotations::read_only/idempotent_writer` (Task 20) matches Task 12's note; `StatusReport` fields (Task 18) match Task 23's renderer.
