@@ -6,7 +6,7 @@
 //! - Cloud search: `search` + `advanced_search` (embed locally, post to
 //!   `/v1/search`, optional local rerank; `advanced_search` adds multi-query
 //!   fusion, facet filters, and the rerank toggle).
-//! - Cloud reads (pass-through): `get_chunk`, `get_chunk_next`,
+//! - Cloud reads (pass-through): `get_chunks`, `get_chunk_next`,
 //!   `get_chunk_prev`, `get_chunk_neighbors`, `get_chunk_parents`,
 //!   `get_document`, `get_document_chunks`, `list_sources`.
 //! - Local install: `install_search_skill` (writes the advanced-search

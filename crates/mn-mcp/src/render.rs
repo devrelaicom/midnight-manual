@@ -372,60 +372,82 @@ pub fn project_search(envelope: Value, opts: &SearchRenderOpts) -> ToolOutcome {
     }
 }
 
-/// `get_chunk`: single chunk-with-context. Chunk fields are top-level (flattened);
-/// `document`/`source` are nested summary objects.
-pub fn project_chunk(env: Value) -> ToolOutcome {
-    let id = env
-        .get("id")
-        .and_then(Value::as_str)
-        .unwrap_or("?")
-        .to_owned();
-    let path = env
-        .pointer("/document/source_path")
-        .and_then(Value::as_str)
-        .unwrap_or("(unknown)");
-    let heading = env
-        .get("heading_path")
+/// `get_chunks`: `{ chunks: [ChunkWithContext..], missing: [id..] }`.
+/// Single chunk → FULL content in the text fence (legacy text-only clients
+/// must receive the payload). Multiple → per-chunk snippets.
+pub fn project_chunks(env: Value) -> ToolOutcome {
+    let chunks = env
+        .get("chunks")
         .and_then(Value::as_array)
-        .map(|h| {
-            h.iter()
+        .cloned()
+        .unwrap_or_default();
+    let missing: Vec<String> = env
+        .get("missing")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
                 .filter_map(Value::as_str)
-                .collect::<Vec<_>>()
-                .join(" › ")
+                .map(str::to_owned)
+                .collect()
         })
-        .filter(|s| !s.is_empty());
-    let idx = env.get("chunk_index").and_then(Value::as_i64);
-    let total = env.get("total_chunks").and_then(Value::as_i64);
-    let where_ = heading.map_or_else(|| path.to_owned(), |h| format!("{path} › {h}"));
-    let pos = match (idx, total) {
-        (Some(i), Some(t)) => format!(" (idx {i}/{t})"),
-        _ => String::new(),
+        .unwrap_or_default();
+    let n = chunks.len();
+    let missing_note = if missing.is_empty() {
+        String::new()
+    } else {
+        format!(" ({} id(s) not found: {})", missing.len(), missing.join(", "))
     };
-    let summary = format!("Chunk {id} — {where_}{pos}.");
-    let trimmed = json!({ "chunk_id": id, "source_path": path });
-    let suggested_next_actions = vec![
-        NextAction::call(
-            "Read the next chunk in this document",
-            "get_chunk_next",
-            json!({ "id": id }),
-        ),
-        NextAction::call(
-            "Read the previous chunk in this document",
-            "get_chunk_prev",
-            json!({ "id": id }),
-        ),
-        NextAction::call(
-            "Fetch the chunks immediately surrounding this one for more context",
-            "get_chunk_neighbors",
-            json!({ "id": id }),
-        ),
-        NextAction::call(
-            "List this chunk's ancestor sections and parent document",
-            "get_chunk_parents",
-            json!({ "id": id }),
-        ),
-    ];
-    ToolOutcome::new(summary, env, trimmed, suggested_next_actions)
+    let (summary, trimmed) = if n == 1 {
+        let c = &chunks[0];
+        let id = c.get("id").and_then(Value::as_str).unwrap_or("?");
+        let path = c
+            .pointer("/document/source_path")
+            .and_then(Value::as_str)
+            .unwrap_or("(unknown)");
+        let heading = c
+            .get("heading_path")
+            .and_then(Value::as_array)
+            .map(|h| {
+                h.iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(" › ")
+            })
+            .filter(|s| !s.is_empty());
+        let where_ = heading.map_or_else(|| path.to_owned(), |h| format!("{path} › {h}"));
+        (
+            format!("Chunk {id} — {where_}.{missing_note}"),
+            json!({
+                "id": id,
+                "source_path": path,
+                "heading_path": c.get("heading_path").cloned().unwrap_or(json!([])),
+                "content": c.get("content").cloned().unwrap_or(Value::Null),
+            }),
+        )
+    } else {
+        (
+            format!("{n} chunks fetched.{missing_note}"),
+            json!({ "count": n, "chunks": chunks.iter().map(chunk_brief).collect::<Vec<_>>() }),
+        )
+    };
+    let mut actions = Vec::new();
+    if let Some(first) = chunks.first() {
+        if let Some(id) = first.get("id").and_then(Value::as_str) {
+            actions.push(NextAction::call(
+                "Read the chunks surrounding the first fetched chunk",
+                "get_chunk_neighbors",
+                json!({ "id": id }),
+            ));
+        }
+        if let Some(d) = first.get("document_id").and_then(Value::as_str) {
+            actions.push(NextAction::call(
+                "Fetch the first chunk's parent document overview and chunk map",
+                "get_document",
+                json!({ "id": d }),
+            ));
+        }
+    }
+    ToolOutcome::new(summary, env, trimmed, actions)
 }
 
 /// `get_chunk_next` / `get_chunk_prev`: `{ chunks: [ChunkWithContext,..] }`. `direction` = "after"/"before".
@@ -1017,8 +1039,8 @@ mod tests {
             json!({ "match_count": 1 }),
             vec![NextAction::call(
                 "Fetch the chunk's full content",
-                "get_chunk",
-                json!({ "id": "abc" }),
+                "get_chunks",
+                json!({ "ids": ["abc"] }),
             )],
         );
         let r = o.into_result();
@@ -1030,7 +1052,7 @@ mod tests {
         assert!(text.contains("\"match_count\":1"));
         let sc = r.structured_content.unwrap();
         assert_eq!(sc["results"][0], 1);
-        assert_eq!(sc["suggested_next_actions"][0]["tool"], "get_chunk");
+        assert_eq!(sc["suggested_next_actions"][0]["tool"], "get_chunks");
     }
 
     #[test]
@@ -1095,23 +1117,82 @@ mod tests {
     }
 
     #[test]
-    fn project_chunk_summary() {
+    fn project_chunks_single_carries_full_content_in_fence() {
+        let long_body = "x".repeat(500); // way past the snippet cut — must survive whole
         let env = json!({
-            "id": "c1", "chunk_index": 4, "total_chunks": 35, "content": "body",
-            "heading_path": ["A", "B"],
-            "document": { "source_path": "docs/intro.md" },
-            "source": { "display_name": "Compact Docs" }
+            "chunks": [{
+                "id": "c1", "document_id": "d1", "chunk_index": 4, "total_chunks": 35,
+                "content": long_body,
+                "heading_path": ["A", "B"],
+                "document": { "source_path": "docs/intro.md" },
+                "source": { "display_name": "Compact Docs" }
+            }],
+            "missing": []
         });
-        let o = super::project_chunk(env);
-        assert!(o.summary.contains("docs/intro.md"));
-        assert!(o.summary.contains('4')); // chunk index
-        assert_eq!(
-            o.suggested_next_actions
-                .iter()
-                .filter(|a| a.tool == Some("get_chunk_next"))
-                .count(),
-            1
+        let o = super::project_chunks(env);
+        assert!(o.summary.contains("c1"));
+        assert!(o.summary.contains("docs/intro.md › A › B"));
+        // Legacy text-only clients read the fence: full content, not a snippet.
+        assert_eq!(o.trimmed["content"], json!(long_body));
+        assert!(o.trimmed.get("snippet").is_none());
+        assert_eq!(o.trimmed["heading_path"], json!(["A", "B"]));
+        // Actions: neighbors of the chunk + its parent document.
+        let tools: Vec<_> = o.suggested_next_actions.iter().map(|a| a.tool).collect();
+        assert_eq!(tools, vec![Some("get_chunk_neighbors"), Some("get_document")]);
+        assert_eq!(o.suggested_next_actions[0].arguments.as_ref().unwrap()["id"], "c1");
+        assert_eq!(o.suggested_next_actions[1].arguments.as_ref().unwrap()["id"], "d1");
+        for a in &o.suggested_next_actions {
+            assert!(!a.description.is_empty());
+        }
+    }
+
+    #[test]
+    fn project_chunks_multi_uses_snippets_not_full_content() {
+        let long_body = "y".repeat(500);
+        let env = json!({
+            "chunks": [
+                { "id": "c1", "document_id": "d1", "content": long_body,
+                  "document": { "source_path": "docs/a.md" } },
+                { "id": "c2", "content": "short two",
+                  "document": { "source_path": "docs/b.md" } }
+            ],
+            "missing": []
+        });
+        let o = super::project_chunks(env);
+        assert!(o.summary.contains("2 chunks fetched."));
+        assert_eq!(o.trimmed["count"], 2);
+        let s = o.trimmed["chunks"][0]["snippet"].as_str().unwrap();
+        assert!(s.ends_with('…'), "long bodies must be snipped in multi mode");
+        assert_eq!(s.chars().count(), 151);
+        assert_eq!(o.trimmed["chunks"][1]["snippet"], "short two");
+        assert!(
+            o.trimmed["chunks"][0].get("content").is_none(),
+            "multi mode must not carry full content in the fence"
         );
+        // structuredContent keeps full fidelity regardless.
+        assert_eq!(o.structured["chunks"][0]["content"], json!(long_body));
+    }
+
+    #[test]
+    fn project_chunks_reports_missing_ids_in_summary() {
+        let env = json!({
+            "chunks": [{ "id": "c1", "content": "body",
+                         "document": { "source_path": "docs/a.md" } }],
+            "missing": ["m1", "m2"]
+        });
+        let o = super::project_chunks(env);
+        assert!(o.summary.contains("(2 id(s) not found: m1, m2)"));
+    }
+
+    #[test]
+    fn project_chunks_all_missing_is_success_with_no_actions() {
+        // The cloud answers 200 with partial semantics — not an isError.
+        let env = json!({ "chunks": [], "missing": ["m1", "m2", "m3"] });
+        let o = super::project_chunks(env);
+        assert_eq!(o.summary, "0 chunks fetched. (3 id(s) not found: m1, m2, m3)");
+        assert!(o.suggested_next_actions.is_empty());
+        assert_eq!(o.trimmed["count"], 0);
+        assert!(!o.into_result().is_error);
     }
 
     #[test]
@@ -1353,7 +1434,11 @@ mod tests {
     #[test]
     fn every_serialized_action_has_nonempty_description() {
         let actions = vec![
-            NextAction::call("Fetch the chunk's full content", "get_chunk", json!({ "id": "a" })),
+            NextAction::call(
+                "Fetch the chunk's full content",
+                "get_chunks",
+                json!({ "ids": ["a"] }),
+            ),
             NextAction::user("Ask the user to restart the harness"),
         ];
         let v = suggested_next_actions_value(&actions);

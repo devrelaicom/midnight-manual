@@ -349,7 +349,9 @@ fn tool_name_for_event(name: &str) -> Option<McpToolName> {
         // TODO(task 21): map advanced_search to a dedicated
         // McpToolName::AdvancedSearch variant once the telemetry schema grows one.
         "search" | "advanced_search" => Some(McpToolName::Search),
-        "get_chunk" => Some(McpToolName::GetChunk),
+        // TODO(task 21): dedicated GetChunks variant once the telemetry schema
+        // grows one (interim mapping, same approach as advanced_search above).
+        "get_chunks" => Some(McpToolName::GetChunk),
         "get_chunk_next" => Some(McpToolName::GetChunkNext),
         "get_chunk_prev" => Some(McpToolName::GetChunkPrev),
         "get_chunk_neighbors" => Some(McpToolName::GetChunkNeighbors),
@@ -415,7 +417,7 @@ async fn dispatch_tool_inner(
             ),
         },
         "search" | "advanced_search" => return Ok(run_search_dispatch(&params, state).await),
-        "get_chunk"
+        "get_chunks"
         | "get_chunk_next"
         | "get_chunk_prev"
         | "get_chunk_neighbors"
@@ -547,7 +549,7 @@ async fn run_search_dispatch(params: &ToolCallParams, state: &ServerState) -> To
 }
 
 // ---------------------------------------------------------------------------
-// run_passthrough_tool: eight chunk/document tools via projectors
+// run_passthrough_tool: seven chunk/document tools via projectors
 // ---------------------------------------------------------------------------
 
 #[allow(clippy::too_many_lines)]
@@ -558,23 +560,21 @@ async fn run_passthrough_tool(params: &ToolCallParams, state: &ServerState) -> T
 
     // Inline each arm to avoid macro/closure type-inference fights.
     match params.name.as_str() {
-        "get_chunk" => {
-            match tools::run_passthrough_id(args, cloud, tools::PassthroughKind::Chunk).await {
-                Ok(v) => ToolResponse {
-                    result: render::project_chunk(v).into_result(),
+        "get_chunks" => match tools::run_get_chunks(args, cloud).await {
+            Ok(v) => ToolResponse {
+                result: render::project_chunks(v).into_result(),
+                telemetry: None,
+                outcome: Outcome::Ok,
+            },
+            Err(e) => {
+                let outcome = passthrough_outcome(&e);
+                ToolResponse {
+                    result: passthrough_failure(e).into_result(),
                     telemetry: None,
-                    outcome: Outcome::Ok,
-                },
-                Err(e) => {
-                    let outcome = passthrough_outcome(&e);
-                    ToolResponse {
-                        result: passthrough_failure(e).into_result(),
-                        telemetry: None,
-                        outcome,
-                    }
+                    outcome,
                 }
             }
-        }
+        },
         "get_chunk_next" => {
             match tools::run_chunk_nav(args, cloud, tools::ChunkNavDirection::Next).await {
                 Ok(v) => ToolResponse {

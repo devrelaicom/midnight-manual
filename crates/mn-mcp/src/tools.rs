@@ -10,11 +10,12 @@
 //!   cross-encoder. `search` is the simple 90% surface (`{query, mode?,
 //!   limit?}`); `advanced_search` exposes multi-query fusion, facet filters,
 //!   and the rerank toggle.
-//! - All other tools (`get_chunk` / `get_chunk_next` / `get_chunk_prev` /
+//! - All other tools (`get_chunks` / `get_chunk_next` / `get_chunk_prev` /
 //!   `get_chunk_neighbors` / `get_chunk_parents` / `get_document` /
 //!   `get_document_chunks` / `list_sources`) —
 //!   pass-through to the cloud's read endpoints, returning the response JSON
-//!   verbatim. `get_chunk_neighbors` is the only one that fans out to three
+//!   verbatim. `get_chunks` batches 1-20 ids into one `/v1/chunks?ids=` call;
+//!   `get_chunk_neighbors` is the only one that fans out to three
 //!   cloud endpoints concurrently and bundles the results.
 //! - Local install: `install_search_skill` (writes the advanced-search
 //!   `SKILL.md` into the user's AI harness(es)).
@@ -63,11 +64,20 @@ pub fn list() -> ToolsListResult {
                 output_schema: Some(crate::schemas::search_output_schema()),
             },
             ToolDescription {
-                name: "get_chunk",
+                name: "get_chunks",
                 description:
-                    "Fetch one chunk by id. Returns the chunk row (id, content, chunk_index, total_chunks, content_hash, embedding_model_id, heading_path, symbol_path, start_byte, end_byte, token_count, status, created_at, document_id, source_version_id, node_id) plus a small `document` sub-object (id, source_path, published_url, source_url, language, kind, provenance) and a `source` sub-object (slug + display_name). For the chunk's parent chain call get_chunk_parents; for adjacent chunks call get_chunk_next/get_chunk_prev.",
-                input_schema: id_only_schema(),
-                output_schema: Some(crate::schemas::chunk_output_schema()),
+                    "Fetch the full content of one or more chunks by id (up to 20 per call), typically ids returned by search. Use this to read the actual text behind search results.",
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "ids": { "type": "array", "minItems": 1, "maxItems": 20,
+                            "items": { "type": "string", "format": "uuid" },
+                            "description": "Chunk ids to fetch. One id is a one-element array." }
+                    },
+                    "required": ["ids"],
+                    "additionalProperties": false
+                }),
+                output_schema: Some(crate::schemas::chunks_output_schema()),
             },
             ToolDescription {
                 name: "get_chunk_next",
@@ -86,7 +96,7 @@ pub fn list() -> ToolsListResult {
             ToolDescription {
                 name: "get_chunk_neighbors",
                 description:
-                    "Bundle `get_chunk_prev` + `get_chunk` + `get_chunk_next` in one round-trip. Returns `{prev: {chunks: ChunkWithContext[]}, chunk: ChunkWithContext, next: {chunks: ChunkWithContext[]}}` where `prev`/`next` are the same envelopes the standalone tools return (so an empty corpus edge yields `chunks: []`, not 404). The three cloud calls are issued in parallel, so latency is roughly that of the slowest leg. `count` defaults to 2 (chunks on each side) and must be in [1, 100]; out-of-range values are rejected as InvalidParams before any wire call. A 404 on the anchor chunk surfaces the same not-found envelope a plain `get_chunk` would.",
+                    "Bundle `get_chunk_prev` + the anchor chunk + `get_chunk_next` in one round-trip. Returns `{prev: {chunks: ChunkWithContext[]}, chunk: ChunkWithContext, next: {chunks: ChunkWithContext[]}}` where `prev`/`next` are the same envelopes the standalone tools return (so an empty corpus edge yields `chunks: []`, not 404). The three cloud calls are issued in parallel, so latency is roughly that of the slowest leg. `count` defaults to 2 (chunks on each side) and must be in [1, 100]; out-of-range values are rejected as InvalidParams before any wire call. A 404 on the anchor chunk surfaces a not-found error envelope.",
                 input_schema: chunk_neighbors_schema(),
                 output_schema: Some(crate::schemas::neighbors_output_schema()),
             },
@@ -1122,8 +1132,6 @@ fn recompute_confidence(
 /// Which cloud endpoint a pass-through tool should hit.
 #[derive(Debug, Clone, Copy)]
 pub enum PassthroughKind {
-    /// `/v1/chunks/:id`
-    Chunk,
     /// `/v1/chunks/:id/parents`
     Parents,
     /// `/v1/documents/:id`
@@ -1323,7 +1331,8 @@ pub async fn run_document_chunks(
         })
 }
 
-/// Dispatch any of the `get_chunk*` tools. Returns the cloud's JSON verbatim.
+/// Dispatch the single-id pass-through tools (`get_chunk_parents` /
+/// `get_document`). Returns the cloud's JSON verbatim.
 ///
 /// # Errors
 ///
@@ -1340,11 +1349,60 @@ pub async fn run_passthrough_id(
     Uuid::parse_str(id_str)
         .map_err(|e| PassthroughError::InvalidInput(format!("`id` is not a valid UUID: {e}")))?;
     let r = match kind {
-        PassthroughKind::Chunk => cloud.get_chunk(id_str).await,
         PassthroughKind::Parents => cloud.get_chunk_parents(id_str).await,
         PassthroughKind::Document => cloud.get_document(id_str).await,
     };
     r.map_err(|e| match e {
+        CloudError::NotFound(msg) => PassthroughError::NotFound(msg),
+        other => PassthroughError::Cloud(other.to_string()),
+    })
+}
+
+/// Maximum number of ids accepted by one `get_chunks` call.
+const GET_CHUNKS_MAX_IDS: usize = 20;
+
+/// Dispatch `get_chunks`. Parses `{ids: [uuid, ..]}` — an array of 1 to
+/// [`GET_CHUNKS_MAX_IDS`] UUID strings — and calls the cloud batch endpoint
+/// (`GET /v1/chunks?ids=`). Returns the cloud's `{chunks, missing}` envelope
+/// verbatim; unknown ids land in `missing` (the cloud answers 200, not 404).
+///
+/// # Errors
+///
+/// See [`PassthroughError`]. All shape violations (missing/empty/oversized
+/// array, non-string entry, malformed UUID) are rejected as `InvalidInput`
+/// before any wire call.
+pub async fn run_get_chunks(
+    args: &serde_json::Value,
+    cloud: &Arc<CloudClient>,
+) -> Result<serde_json::Value, PassthroughError> {
+    let arr = args
+        .get("ids")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            PassthroughError::InvalidInput(
+                "`ids` (array of 1-20 UUID strings) is required".to_owned(),
+            )
+        })?;
+    if arr.is_empty() {
+        return Err(PassthroughError::InvalidInput("`ids` must contain at least 1 id".to_owned()));
+    }
+    if arr.len() > GET_CHUNKS_MAX_IDS {
+        return Err(PassthroughError::InvalidInput(format!(
+            "`ids` accepts at most {GET_CHUNKS_MAX_IDS} ids per call, got {}",
+            arr.len()
+        )));
+    }
+    let mut ids = Vec::with_capacity(arr.len());
+    for (i, v) in arr.iter().enumerate() {
+        let s = v.as_str().ok_or_else(|| {
+            PassthroughError::InvalidInput(format!("`ids[{i}]` must be a string"))
+        })?;
+        Uuid::parse_str(s).map_err(|e| {
+            PassthroughError::InvalidInput(format!("`ids[{i}]` is not a valid UUID: {e}"))
+        })?;
+        ids.push(s.to_owned());
+    }
+    cloud.get_chunks(&ids).await.map_err(|e| match e {
         CloudError::NotFound(msg) => PassthroughError::NotFound(msg),
         other => PassthroughError::Cloud(other.to_string()),
     })
@@ -1361,7 +1419,7 @@ mod tests {
         for expected in [
             "search",
             "advanced_search",
-            "get_chunk",
+            "get_chunks",
             "get_chunk_next",
             "get_chunk_prev",
             "get_chunk_neighbors",
@@ -1377,6 +1435,8 @@ mod tests {
             assert!(names.contains(&expected), "missing tool: {expected}");
         }
         assert_eq!(names.len(), 14, "expected 14 tools, got {}", names.len());
+        // Replaced by the batch tool in the response-format v2 work.
+        assert!(!names.contains(&"get_chunk"), "get_chunk was replaced by get_chunks");
     }
 
     #[test]

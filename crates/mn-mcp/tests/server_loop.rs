@@ -155,7 +155,7 @@ async fn tools_list_contains_all_fourteen() {
     for expected in [
         "search",
         "advanced_search",
-        "get_chunk",
+        "get_chunks",
         "get_chunk_next",
         "get_chunk_prev",
         "get_chunk_neighbors",

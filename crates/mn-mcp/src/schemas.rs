@@ -55,8 +55,8 @@ fn passthrough_object_schema() -> Value {
     json!({ "type": "object", "additionalProperties": true, "properties": { "suggested_next_actions": suggested_next_actions_fragment() } })
 }
 
-/// Output schema for `get_chunk`.
-pub fn chunk_output_schema() -> Value {
+/// Output schema for `get_chunks`.
+pub fn chunks_output_schema() -> Value {
     passthrough_object_schema()
 }
 
@@ -113,7 +113,7 @@ mod tests {
     fn schemas_are_valid_json_schema_objects() {
         for s in [
             search_output_schema(),
-            chunk_output_schema(),
+            chunks_output_schema(),
             document_output_schema(),
             sources_output_schema(),
             facets_output_schema(),

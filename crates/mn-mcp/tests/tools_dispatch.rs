@@ -11,8 +11,8 @@ use std::sync::Arc;
 
 use mn_mcp::cloud_client::CloudClient;
 use mn_mcp::tools::{
-    run_chunk_nav, run_chunk_neighbors, run_document_chunks, run_passthrough_id, ChunkNavDirection,
-    PassthroughError, PassthroughKind,
+    run_chunk_nav, run_chunk_neighbors, run_document_chunks, run_get_chunks, run_passthrough_id,
+    ChunkNavDirection, PassthroughError, PassthroughKind,
 };
 use serde_json::json;
 use wiremock::matchers::{method, path, query_param};
@@ -22,7 +22,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 async fn run_passthrough_id_rejects_missing_id() {
     let server = MockServer::start().await;
     let client = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
-    let err = run_passthrough_id(&json!({}), &client, PassthroughKind::Chunk)
+    let err = run_passthrough_id(&json!({}), &client, PassthroughKind::Parents)
         .await
         .unwrap_err();
     assert!(matches!(err, PassthroughError::InvalidInput(_)));
@@ -32,7 +32,7 @@ async fn run_passthrough_id_rejects_missing_id() {
 async fn run_passthrough_id_rejects_non_uuid() {
     let server = MockServer::start().await;
     let client = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
-    let err = run_passthrough_id(&json!({"id": "not-a-uuid"}), &client, PassthroughKind::Chunk)
+    let err = run_passthrough_id(&json!({"id": "not-a-uuid"}), &client, PassthroughKind::Parents)
         .await
         .unwrap_err();
     match err {
@@ -42,19 +42,150 @@ async fn run_passthrough_id_rejects_non_uuid() {
 }
 
 #[tokio::test]
-async fn run_passthrough_id_hits_chunk_endpoint() {
+async fn run_passthrough_id_hits_parents_endpoint() {
     let server = MockServer::start().await;
     let id = "11111111-1111-1111-1111-111111111111";
     Mock::given(method("GET"))
-        .and(path(format!("/v1/chunks/{id}")))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": id})))
+        .and(path(format!("/v1/chunks/{id}/parents")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([{"name": "Root"}])))
         .mount(&server)
         .await;
     let client = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
-    let v = run_passthrough_id(&json!({"id": id}), &client, PassthroughKind::Chunk)
+    let v = run_passthrough_id(&json!({"id": id}), &client, PassthroughKind::Parents)
         .await
         .unwrap();
-    assert_eq!(v["id"], id);
+    assert_eq!(v[0]["name"], "Root");
+}
+
+// ---------------------------------------------------------------------------
+// run_get_chunks (batch fetch)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn run_get_chunks_happy_path_two_chunks() {
+    let server = MockServer::start().await;
+    let id_a = "66666666-6666-6666-6666-666666666600";
+    let id_b = "66666666-6666-6666-6666-666666666601";
+    Mock::given(method("GET"))
+        .and(path("/v1/chunks"))
+        .and(query_param("ids", format!("{id_a},{id_b}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "chunks": [
+                { "id": id_a, "content": "alpha", "document": { "source_path": "docs/a.md" } },
+                { "id": id_b, "content": "beta", "document": { "source_path": "docs/b.md" } }
+            ],
+            "missing": []
+        })))
+        .mount(&server)
+        .await;
+    let client = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
+    let v = run_get_chunks(&json!({"ids": [id_a, id_b]}), &client)
+        .await
+        .unwrap();
+    assert_eq!(v["chunks"].as_array().unwrap().len(), 2);
+    assert_eq!(v["chunks"][0]["id"], id_a);
+    assert!(v["missing"].as_array().unwrap().is_empty());
+}
+
+/// 0 ids → `InvalidInput`, surfaced through the same `isError` envelope the
+/// dispatcher builds from `PassthroughError::InvalidInput`.
+#[tokio::test]
+async fn run_get_chunks_rejects_empty_ids_as_iserror_invalid_input() {
+    use mn_mcp::render::{ErrorKind, ToolFailure};
+    let server = MockServer::start().await;
+    let client = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
+    let err = run_get_chunks(&json!({"ids": []}), &client)
+        .await
+        .unwrap_err();
+    let msg = match err {
+        PassthroughError::InvalidInput(msg) => msg,
+        other => panic!("expected InvalidInput, got {other:?}"),
+    };
+    // Mirror passthrough_failure's InvalidInput mapping in server.rs.
+    let result = ToolFailure::simple(ErrorKind::InvalidInput, msg.clone(), msg).into_result();
+    assert!(result.is_error);
+    let sc = result.structured_content.unwrap();
+    assert_eq!(sc["error"]["code"], "INVALID_INPUT");
+}
+
+#[tokio::test]
+async fn run_get_chunks_rejects_twenty_one_ids() {
+    let server = MockServer::start().await;
+    let client = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
+    let ids: Vec<String> = (0..21)
+        .map(|i| format!("66666666-6666-6666-6666-6666666666{i:02}"))
+        .collect();
+    let err = run_get_chunks(&json!({ "ids": ids }), &client)
+        .await
+        .unwrap_err();
+    match err {
+        PassthroughError::InvalidInput(msg) => {
+            assert!(msg.contains("at most 20"), "message must state the cap: {msg}");
+        }
+        other => panic!("expected InvalidInput, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn run_get_chunks_accepts_exactly_twenty_ids() {
+    let server = MockServer::start().await;
+    let ids: Vec<String> = (0..20)
+        .map(|i| format!("66666666-6666-6666-6666-6666666666{i:02}"))
+        .collect();
+    Mock::given(method("GET"))
+        .and(path("/v1/chunks"))
+        .and(query_param("ids", ids.join(",")))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({ "chunks": [], "missing": ids })),
+        )
+        .mount(&server)
+        .await;
+    let client = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
+    let v = run_get_chunks(&json!({ "ids": ids }), &client)
+        .await
+        .unwrap();
+    assert_eq!(v["missing"].as_array().unwrap().len(), 20);
+}
+
+#[tokio::test]
+async fn run_get_chunks_rejects_non_string_entry() {
+    let server = MockServer::start().await;
+    let client = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
+    let err = run_get_chunks(&json!({"ids": ["66666666-6666-6666-6666-666666666600", 7]}), &client)
+        .await
+        .unwrap_err();
+    match err {
+        PassthroughError::InvalidInput(msg) => {
+            assert!(msg.contains("ids[1]"), "message must locate the bad entry: {msg}");
+        }
+        other => panic!("expected InvalidInput, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn run_get_chunks_rejects_invalid_uuid() {
+    let server = MockServer::start().await;
+    let client = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
+    let err = run_get_chunks(&json!({"ids": ["not-a-uuid"]}), &client)
+        .await
+        .unwrap_err();
+    match err {
+        PassthroughError::InvalidInput(msg) => assert!(msg.contains("UUID")),
+        other => panic!("expected InvalidInput, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn run_get_chunks_rejects_missing_or_non_array_ids() {
+    let server = MockServer::start().await;
+    let client = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
+    for args in [
+        json!({}),
+        json!({"ids": "66666666-6666-6666-6666-666666666600"}),
+    ] {
+        let err = run_get_chunks(&args, &client).await.unwrap_err();
+        assert!(matches!(err, PassthroughError::InvalidInput(_)), "args: {args}");
+    }
 }
 
 #[tokio::test]
@@ -465,33 +596,66 @@ async fn run_document_chunks_404_maps_to_not_found() {
 // `run_search_dispatch` in server.rs follow.
 // ---------------------------------------------------------------------------
 
-/// `get_chunk` → `project_chunk`: structuredContent has top-level `id` (not
-/// nested under a `chunk` key) because chunk fields are flattened.
+/// `get_chunks` → `project_chunks`: structuredContent keeps the cloud's
+/// `{chunks, missing}` envelope, and a single-chunk fetch carries the FULL
+/// chunk content in the text fence (legacy text-only clients).
 #[tokio::test]
-async fn dispatch_get_chunk_structured_content_has_top_level_id() {
+async fn dispatch_get_chunks_single_structured_content_and_full_content_fence() {
     use mn_mcp::render;
     let id = "55555555-5555-5555-5555-555555555500";
+    let body = "b".repeat(400); // longer than the 150-char snippet cut
     let raw = json!({
-        "id": id,
-        "chunk_index": 0,
-        "total_chunks": 10,
-        "content": "body",
-        "heading_path": [],
-        "document": { "source_path": "docs/intro.md" },
-        "source": { "slug": "compact-docs" }
+        "chunks": [{
+            "id": id,
+            "chunk_index": 0,
+            "total_chunks": 10,
+            "content": body,
+            "heading_path": [],
+            "document": { "source_path": "docs/intro.md" },
+            "source": { "slug": "compact-docs" }
+        }],
+        "missing": []
     });
-    let result = render::project_chunk(raw).into_result();
+    let result = render::project_chunks(raw).into_result();
     assert!(!result.is_error);
     let sc = result.structured_content.unwrap();
-    // Chunk fields are flattened — `id` is top-level, NOT `sc["chunk"]["id"]`.
-    assert_eq!(sc["id"], id);
+    assert_eq!(sc["chunks"][0]["id"], id);
     // suggested_next_actions injected by the projector.
     assert!(sc["suggested_next_actions"].is_array());
-    // text block has a fenced JSON summary, not the raw JSON dump.
+    // text block has a fenced JSON summary carrying the FULL content string.
     let text = match &result.content[0] {
         mn_mcp::protocol::ContentBlock::Text { text } => text.clone(),
     };
     assert!(text.contains("```json"), "text block must contain a fenced json block");
+    assert!(
+        text.contains(&body),
+        "single-chunk fetch must put the full content in the text fence"
+    );
+}
+
+/// `get_chunks` with multiple chunks: the fence carries per-chunk snippets,
+/// never the full bodies.
+#[tokio::test]
+async fn dispatch_get_chunks_multi_fence_uses_snippets() {
+    use mn_mcp::render;
+    let body = "c".repeat(400);
+    let raw = json!({
+        "chunks": [
+            { "id": "a", "content": body, "document": { "source_path": "docs/a.md" } },
+            { "id": "b", "content": "tiny", "document": { "source_path": "docs/b.md" } }
+        ],
+        "missing": []
+    });
+    let result = render::project_chunks(raw).into_result();
+    assert!(!result.is_error);
+    let text = match &result.content[0] {
+        mn_mcp::protocol::ContentBlock::Text { text } => text.clone(),
+    };
+    assert!(
+        !text.contains(&body),
+        "multi-chunk fetch must not dump full bodies into the text fence"
+    );
+    assert!(text.contains("snippet"), "multi-chunk fence carries chunk briefs with snippets");
 }
 
 /// `get_chunk_next` → `project_chunk_list("after")`: structuredContent has
@@ -576,39 +740,43 @@ async fn dispatch_passthrough_not_found_produces_iserror_envelope() {
     assert!(sc["suggested_next_actions"].is_array());
 }
 
-/// Verify that a successful `get_chunk` round-trip through the full
+/// Verify that a successful `get_chunks` round-trip through the full
 /// tool→projector pipeline (with a wiremock cloud) produces:
 /// 1. `isError` absent (false)
-/// 2. `structuredContent["id"]` == the chunk id (flattened, top-level)
+/// 2. `structuredContent["chunks"][0]["id"]` == the chunk id
 /// 3. `content[0].text` contains a fenced json block (not the raw dump)
 #[tokio::test]
-async fn dispatch_get_chunk_full_pipeline_via_wiremock() {
+async fn dispatch_get_chunks_full_pipeline_via_wiremock() {
     use mn_mcp::render;
     let server = MockServer::start().await;
     let id = "55555555-5555-5555-5555-555555555502";
     Mock::given(method("GET"))
-        .and(path(format!("/v1/chunks/{id}")))
+        .and(path("/v1/chunks"))
+        .and(query_param("ids", id))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "id": id, "chunk_index": 2, "total_chunks": 20, "content": "body",
-            "heading_path": ["Intro"], "document": {"source_path": "x.md"},
-            "source": {"slug": "compact-docs"}
+            "chunks": [{
+                "id": id, "chunk_index": 2, "total_chunks": 20, "content": "body",
+                "heading_path": ["Intro"], "document": {"source_path": "x.md"},
+                "source": {"slug": "compact-docs"}
+            }],
+            "missing": []
         })))
         .mount(&server)
         .await;
     let client = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
-    let v = run_passthrough_id(&json!({"id": id}), &client, PassthroughKind::Chunk)
+    let v = run_get_chunks(&json!({"ids": [id]}), &client)
         .await
         .unwrap();
     // Thread through the projector (same as run_passthrough_tool does).
-    let result = render::project_chunk(v).into_result();
+    let result = render::project_chunks(v).into_result();
     assert!(!result.is_error);
     let sc = result.structured_content.unwrap();
-    assert_eq!(sc["id"], id);
+    assert_eq!(sc["chunks"][0]["id"], id);
     let text = match &result.content[0] {
         mn_mcp::protocol::ContentBlock::Text { text } => text.clone(),
     };
     assert!(text.contains("```json"), "text block must contain a fenced json summary");
-    // The text block is a summary string, not the raw JSON dump of the whole chunk.
+    // The text block is a summary string, not the raw JSON dump of the envelope.
     assert!(!text.starts_with('{'), "text block must not be a raw JSON dump");
 }
 

@@ -47,11 +47,13 @@ fn all_passthrough_projectors_conform_to_passthrough_schema() {
     });
     let cases: Vec<(serde_json::Value, serde_json::Value)> = vec![
         (
-            mn_mcp::render::project_chunk(chunk_env)
-                .into_result()
-                .structured_content
-                .unwrap(),
-            mn_mcp::schemas::chunk_output_schema(),
+            mn_mcp::render::project_chunks(
+                serde_json::json!({ "chunks": [chunk_env], "missing": [] }),
+            )
+            .into_result()
+            .structured_content
+            .unwrap(),
+            mn_mcp::schemas::chunks_output_schema(),
         ),
         (
             mn_mcp::render::project_sources(
