@@ -167,7 +167,7 @@ pub fn list() -> ToolsListResult {
             ToolDescription {
                 name: "install_search_skill",
                 description:
-                    "Install the midnight-advanced-search Agent Skill (a persistent retrieval playbook) into the user's AI harness(es). Writes the same SKILL.md to each detected harness's native skills directory; re-running updates in place. Returns, per harness, the scope, the exact path written, the action (created/updated/unchanged), and the reload step to relay to the user. Optional `harness` (subset of claude-code/codex/opencode/cursor) forces specific targets; omit to auto-detect. Optional `scope` is user (default) or project.",
+                    "Install (or update) the midnight-advanced-search skill — a retrieval playbook teaching effective corpus search patterns — into the user's AI harness(es). Use when search results are poor or the user asks for better search guidance.",
                 input_schema: install_search_skill_schema(),
                 output_schema: Some(crate::schemas::install_output_schema()),
             },

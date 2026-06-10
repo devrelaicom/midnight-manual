@@ -945,15 +945,39 @@ pub fn project_install(env: Value) -> ToolOutcome {
     let skill = env
         .get("skill_name")
         .and_then(Value::as_str)
-        .unwrap_or("search");
+        .unwrap_or("midnight-advanced-search");
+    let empty = vec![];
     let installed = env
         .get("installed")
         .and_then(Value::as_array)
-        .map_or(0, Vec::len);
-    let summary =
-        format!("Installed `{skill}` skill for {installed} harness(es) (scope: {scope}).");
-    let trimmed = json!({ "skill_name": skill, "scope": scope, "installed_count": installed });
-    ToolOutcome::new(summary, env, trimmed, vec![])
+        .unwrap_or(&empty);
+    let names: Vec<&str> = installed
+        .iter()
+        .filter_map(|i| i.get("harness").and_then(Value::as_str))
+        .collect();
+    let summary = format!(
+        "Installed/updated `{skill}` for {} (scope: {scope}). The skill is NOT active yet — \
+         ask the user to restart their session or refresh their skills, then it will load automatically.",
+        if names.is_empty() { "no harnesses".to_owned() } else { names.join(", ") },
+    );
+    let trimmed = json!({
+        "skill_name": skill, "scope": scope,
+        "detected": env.get("detected").cloned().unwrap_or(json!([])),
+        "not_detected": env.get("not_detected").cloned().unwrap_or(json!([])),
+        "actions": installed.iter().map(|i| json!({
+            "harness": i.get("harness").cloned().unwrap_or(Value::Null),
+            "action": i.get("action").cloned().unwrap_or(Value::Null),
+        })).collect::<Vec<_>>(),
+    });
+    let actions = installed
+        .iter()
+        .filter_map(|i| {
+            let h = i.get("harness").and_then(Value::as_str)?;
+            let step = i.get("reload_step").and_then(Value::as_str)?;
+            Some(NextAction::user(format!("[{h}] Ask the user to: {step}")))
+        })
+        .collect();
+    ToolOutcome::new(summary, env, trimmed, actions)
 }
 
 /// Closed set of tool-execution error kinds.
@@ -1856,13 +1880,86 @@ mod tests {
         }
     }
 
+    /// An InstallReport env with two installed harnesses and one undetected.
+    fn install_env() -> Value {
+        json!({
+            "skill_name": "midnight-advanced-search", "scope": "user",
+            "installed": [
+                { "harness": "claude-code", "scope": "user",
+                  "path": "/home/u/.claude/skills/midnight-advanced-search/SKILL.md",
+                  "action": "created", "reload_step": "restart Claude Code or run /skills reload" },
+                { "harness": "cursor", "scope": "user",
+                  "path": "/home/u/.cursor/skills/midnight-advanced-search/SKILL.md",
+                  "action": "updated", "reload_step": "restart Cursor" }
+            ],
+            "detected": ["claude-code", "cursor"],
+            "not_detected": ["codex", "opencode"]
+        })
+    }
+
     #[test]
-    fn project_install_summary() {
-        let env = json!({ "skill_name": "search", "scope": "user",
-                          "installed": [ {"harness":"claude-code"} ], "not_detected": [] });
+    fn project_install_summary_names_harnesses_and_refresh_instruction() {
+        let o = super::project_install(install_env());
+        assert!(o.summary.contains("`midnight-advanced-search`"), "summary: {}", o.summary);
+        assert!(o.summary.contains("claude-code, cursor"), "summary: {}", o.summary);
+        assert!(o.summary.contains("(scope: user)"), "summary: {}", o.summary);
+        assert!(
+            o.summary.contains(
+                "NOT active yet — ask the user to restart their session or refresh their skills"
+            ),
+            "summary must carry the refresh instruction: {}",
+            o.summary
+        );
+    }
+
+    #[test]
+    fn project_install_emits_one_user_action_per_harness_with_reload_step() {
+        let o = super::project_install(install_env());
+        assert_eq!(o.suggested_next_actions.len(), 2);
+        let a0 = &o.suggested_next_actions[0];
+        assert_eq!(a0.tool, None, "reload steps are user actions, not tool calls");
+        assert!(a0.arguments.is_none());
+        assert_eq!(
+            a0.description,
+            "[claude-code] Ask the user to: restart Claude Code or run /skills reload",
+            "reload_step must be carried verbatim"
+        );
+        let a1 = &o.suggested_next_actions[1];
+        assert_eq!(a1.tool, None);
+        assert_eq!(a1.description, "[cursor] Ask the user to: restart Cursor");
+    }
+
+    #[test]
+    fn project_install_trimmed_carries_detected_not_detected_and_actions() {
+        let o = super::project_install(install_env());
+        assert_eq!(o.trimmed["detected"], json!(["claude-code", "cursor"]));
+        assert_eq!(o.trimmed["not_detected"], json!(["codex", "opencode"]));
+        assert_eq!(
+            o.trimmed["actions"],
+            json!([
+                { "harness": "claude-code", "action": "created" },
+                { "harness": "cursor", "action": "updated" }
+            ])
+        );
+        // Full report (paths, reload steps) stays in structuredContent.
+        assert!(o.trimmed["actions"][0].get("path").is_none());
+        assert_eq!(
+            o.structured["installed"][0]["path"],
+            "/home/u/.claude/skills/midnight-advanced-search/SKILL.md"
+        );
+    }
+
+    #[test]
+    fn project_install_empty_installed_says_no_harnesses_with_no_actions() {
+        let env = json!({
+            "skill_name": "midnight-advanced-search", "scope": "user",
+            "installed": [], "detected": [],
+            "not_detected": ["claude-code", "codex", "opencode", "cursor"]
+        });
         let o = super::project_install(env);
-        assert!(o.summary.contains('1')); // 1 harness
-        assert!(o.summary.contains("user")); // scope
+        assert!(o.summary.contains("for no harnesses"), "summary: {}", o.summary);
+        assert!(o.suggested_next_actions.is_empty());
+        assert_eq!(o.trimmed["actions"], json!([]));
     }
 
     #[test]
