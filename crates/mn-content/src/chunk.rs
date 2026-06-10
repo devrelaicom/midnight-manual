@@ -67,6 +67,14 @@ impl Default for ChunkerConfig {
     }
 }
 
+/// Greedy coalescing target: 90% of `max_tokens` (D2). Both the markdown and
+/// code coalescers pack sibling units up to this; only a single unit larger
+/// than `max_tokens` is ever split.
+#[must_use]
+pub const fn coalesce_target(cfg: &ChunkerConfig) -> u32 {
+    cfg.max_tokens.saturating_mul(9) / 10
+}
+
 /// Errors a chunker can surface for one file. Never panics; the planner maps
 /// these to a per-file warning (default) or a run failure (`--strict`).
 #[derive(Debug, thiserror::Error)]
@@ -107,5 +115,18 @@ mod tests {
         assert_eq!(c.fallback_lines, 60);
         assert_eq!(c.fallback_overlap_lines, 20);
         assert_eq!(c.max_file_bytes, 10 * 1024 * 1024);
+    }
+
+    #[test]
+    fn coalesce_target_is_90_pct_of_max_tokens() {
+        // 921 == 1024 * 9 / 10 (integer division); 1024 becomes the default
+        // `max_tokens` in the ChunkerConfig cleanup task.
+        assert_eq!(
+            coalesce_target(&ChunkerConfig {
+                max_tokens: 1024,
+                ..ChunkerConfig::default()
+            }),
+            921
+        );
     }
 }

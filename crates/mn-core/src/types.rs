@@ -283,6 +283,11 @@ pub struct SymbolSegment {
     pub kind: String,
     /// Identifier or label for this segment.
     pub name: String,
+    /// Ancestor symbol names, outermost first. Empty for top-level symbols.
+    /// (Since the dual-embeddings cutover, `chunk.symbol_path` is a flat
+    /// union of entries — nesting lives here, not in array order.)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub path: Vec<String>,
 }
 
 /// A single ingested document (a Markdown page or source-code file).
@@ -414,14 +419,29 @@ mod tests {
 
     #[test]
     fn symbol_segment_json_roundtrip() {
+        // Empty `path` is skipped: top-level entries serialize byte-identically
+        // to the pre-dual-embeddings `{kind,name}` shape.
         let seg = SymbolSegment {
             kind: "impl".to_string(),
             name: "Foo".to_string(),
+            path: Vec::new(),
         };
         let json = serde_json::to_string(&seg).unwrap();
         assert_eq!(json, r#"{"kind":"impl","name":"Foo"}"#);
         let back: SymbolSegment = serde_json::from_str(&json).unwrap();
         assert_eq!(back, seg);
+
+        // Non-empty `path` round-trips (and old `{kind,name}` JSON still
+        // deserializes via `#[serde(default)]` — covered by `back` above).
+        let nested = SymbolSegment {
+            kind: "fn".to_string(),
+            name: "bar".to_string(),
+            path: vec!["m".to_string(), "Foo".to_string()],
+        };
+        let json = serde_json::to_string(&nested).unwrap();
+        assert_eq!(json, r#"{"kind":"fn","name":"bar","path":["m","Foo"]}"#);
+        let back: SymbolSegment = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, nested);
     }
 
     #[test]

@@ -183,10 +183,12 @@ async fn chunk_symbol_path_roundtrips_structured() {
         SymbolSegment {
             kind: "impl".into(),
             name: "Foo".into(),
+            path: Vec::new(),
         },
         SymbolSegment {
             kind: "fn".into(),
             name: "bar".into(),
+            path: vec!["Foo".into()],
         },
     ];
 

@@ -12,6 +12,7 @@
 
 pub mod cache;
 pub mod client;
+pub mod contextualized;
 pub mod error;
 pub mod reranker;
 pub mod reranker_catalog;

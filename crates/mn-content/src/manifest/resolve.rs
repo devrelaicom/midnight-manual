@@ -234,8 +234,10 @@ fn compose_url(inherited: Option<&str>, file: &Path) -> Option<String> {
 fn kind_for(path: &Path) -> DocumentKind {
     match crate::language::from_path(path) {
         Some("markdown") => DocumentKind::Markdown,
+        // `.txt` resolves to "plaintext" but must NOT take the Code path —
+        // it has no grammar and belongs with unknown files in line-window land.
+        Some("plaintext") | None => DocumentKind::Plaintext,
         Some(_) => DocumentKind::Code,
-        None => DocumentKind::Plaintext,
     }
 }
 
@@ -273,6 +275,15 @@ root:
         let paths: Vec<_> = leaves.iter().map(|l| l.rel_path.clone()).collect();
         assert_eq!(paths, vec![PathBuf::from("a.md"), PathBuf::from("dir/b.md")]);
         assert_eq!(leaves[0].kind, DocumentKind::Markdown);
+    }
+
+    #[test]
+    fn txt_is_plaintext_json_is_code() {
+        assert_eq!(kind_for(Path::new("notes.txt")), DocumentKind::Plaintext);
+        assert_eq!(kind_for(Path::new("cfg.json")), DocumentKind::Code);
+        assert_eq!(kind_for(Path::new("doc.md")), DocumentKind::Markdown);
+        assert_eq!(kind_for(Path::new("lib.rs")), DocumentKind::Code);
+        assert_eq!(kind_for(Path::new("mystery.zzz")), DocumentKind::Plaintext);
     }
 
     #[test]

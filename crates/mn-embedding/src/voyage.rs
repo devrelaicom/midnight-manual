@@ -1,7 +1,7 @@
 //! VoyageAI embeddings + reranking HTTP client (raw reqwest; no official Rust SDK).
 use serde::{Deserialize, Serialize};
 
-const DEFAULT_BASE_URL: &str = "https://api.voyageai.com";
+pub(crate) const DEFAULT_BASE_URL: &str = "https://api.voyageai.com";
 
 /// Default per-request timeout (seconds) for embedding calls.
 ///
@@ -17,7 +17,7 @@ pub const DEFAULT_EMBED_TIMEOUT_SECS: u64 = 120;
 /// batches — surfacing as `error sending request` after ~20-40s even with a
 /// generous timeout. Over HTTP/1.1 the identical batch returns in ~2.4s
 /// (verified against the live API).
-fn voyage_http_client(timeout_secs: u64) -> reqwest::Client {
+pub(crate) fn voyage_http_client(timeout_secs: u64) -> reqwest::Client {
     reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(5))
         .timeout(std::time::Duration::from_secs(timeout_secs))
@@ -38,7 +38,7 @@ pub enum InputType {
 }
 
 impl InputType {
-    const fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Query => "query",
             Self::Document => "document",
@@ -93,8 +93,8 @@ struct EmbedData {
 }
 
 #[derive(Deserialize)]
-struct Usage {
-    total_tokens: u64,
+pub(crate) struct Usage {
+    pub(crate) total_tokens: u64,
 }
 
 #[derive(Deserialize)]

@@ -123,10 +123,10 @@ pub(crate) fn run_tree_sitter(
         // `use`/`import`, attributes) before any named item — retry at the
         // first in-table node contained in the chunk, so small single-chunk
         // files still record the symbol they contain.
-        let mut symbol_path = symbol_path_at(&tree, body, r.start, table);
+        let mut symbol_path = entries_from_path(&symbol_path_at(&tree, body, r.start, table));
         if symbol_path.is_empty() {
             if let Some(off) = symbols::first_symbol_start(&tree, r.start, r.end, table) {
-                symbol_path = symbol_path_at(&tree, body, off, table);
+                symbol_path = entries_from_path(&symbol_path_at(&tree, body, off, table));
             }
         }
         chunks.push(Chunk {
@@ -179,6 +179,23 @@ pub(crate) fn run_tree_sitter(
         c.chunk_index = u32::try_from(i).unwrap_or(u32::MAX);
     }
     Ok(chunks)
+}
+
+/// Convert a root→leaf ancestor path into the flat entry list stored on the
+/// chunk: one entry per symbol (ancestors included, so scope-level facet
+/// containment keeps matching), each carrying its own ancestor names.
+fn entries_from_path(path: &[SymbolSegment]) -> Vec<SymbolSegment> {
+    let mut ancestors: Vec<String> = Vec::new();
+    let mut out = Vec::with_capacity(path.len());
+    for seg in path {
+        out.push(SymbolSegment {
+            kind: seg.kind.clone(),
+            name: seg.name.clone(),
+            path: ancestors.clone(),
+        });
+        ancestors.push(seg.name.clone());
+    }
+    out
 }
 
 /// Length of the shared symbol-path prefix of `a` and `b`.
@@ -337,6 +354,7 @@ mod coalesce_tests {
         SymbolSegment {
             kind: kind.into(),
             name: name.into(),
+            path: Vec::new(),
         }
     }
     fn chunk(start: usize, end: usize, path: Vec<SymbolSegment>) -> Chunk {
@@ -350,6 +368,17 @@ mod coalesce_tests {
             chunk_index: 0,
             fallback_used: false,
         }
+    }
+
+    #[test]
+    fn entries_from_path_emits_ancestors_and_leaf() {
+        let raw = vec![seg("mod", "m"), seg("impl", "Foo"), seg("fn", "bar")];
+        let entries = entries_from_path(&raw);
+        assert_eq!(entries.len(), 3);
+        assert_eq!((entries[0].kind.as_str(), entries[0].name.as_str()), ("mod", "m"));
+        assert!(entries[0].path.is_empty());
+        assert_eq!(entries[1].path, vec!["m".to_string()]);
+        assert_eq!(entries[2].path, vec!["m".to_string(), "Foo".to_string()]);
     }
 
     #[test]

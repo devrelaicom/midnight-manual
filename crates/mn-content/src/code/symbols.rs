@@ -43,6 +43,7 @@ pub fn symbol_path_at(
             path.push(SymbolSegment {
                 kind: entry.label.to_string(),
                 name,
+                path: Vec::new(),
             });
         }
         let next = {
