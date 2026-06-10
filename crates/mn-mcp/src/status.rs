@@ -71,8 +71,13 @@ async fn probe_voyage(key: &str) -> VoyageState {
 
 /// Inner probe against an arbitrary base — separated so tests can wiremock it.
 async fn probe_voyage_at(url: &str, key: &str) -> VoyageState {
+    // `http1_only`: Voyage's HTTP/2 endpoint stalls/resets intermittently (see
+    // mn-embedding's VoyageEmbedder, which forces HTTP/1.1 for the same host).
+    // The probe must use the same transport as the workload it diagnoses, or a
+    // valid key can misreport as `Unreachable`.
     let client = match reqwest::Client::builder()
         .timeout(Duration::from_secs(3))
+        .http1_only()
         .build()
     {
         Ok(c) => c,
@@ -87,6 +92,8 @@ async fn probe_voyage_at(url: &str, key: &str) -> VoyageState {
 
 /// Assemble the report. `voyage_key` is the resolved BYOK key (None = proxy mode).
 pub async fn assemble(cloud: &CloudClient, voyage_key: Option<&str>) -> StatusReport {
+    // The wrappers tighten CloudClient's general-purpose 30s timeout down to
+    // this module's 3s-per-probe status budget.
     let readyz = tokio::time::timeout(Duration::from_secs(3), cloud.readyz());
     let me = tokio::time::timeout(Duration::from_secs(3), cloud.get_me());
     let voyage = async {
