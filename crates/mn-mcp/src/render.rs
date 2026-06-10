@@ -559,8 +559,13 @@ pub fn project_parents(env: Value) -> ToolOutcome {
     ToolOutcome::new(summary, structured, trimmed, vec![])
 }
 
-/// `get_document` (DocumentOverview): Document flattened to top level; `source` nested; `chunks` skeleton array.
-pub fn project_document_overview(env: Value) -> ToolOutcome {
+/// Skeleton entries are small (`{id, chunk_index, token_count}`), so the text fence carries
+/// up to this many before truncating; the full set is always in `structuredContent`.
+const FENCE_SKELETON_CAP: usize = 50;
+
+/// `get_document` (DocumentOverview): Document flattened to top level; `source` nested;
+/// metadata + chunk skeleton (`chunks: [{id, chunk_index, token_count}]`).
+pub fn project_document(env: Value) -> ToolOutcome {
     let path = env
         .get("source_path")
         .and_then(Value::as_str)
@@ -568,27 +573,39 @@ pub fn project_document_overview(env: Value) -> ToolOutcome {
     let name = env
         .pointer("/source/display_name")
         .and_then(Value::as_str)
+        .or_else(|| env.pointer("/source/slug").and_then(Value::as_str))
         .unwrap_or("");
     let id = env
         .get("id")
         .and_then(Value::as_str)
         .unwrap_or("?")
         .to_owned();
-    let n = env
+    let skeleton = env
         .get("chunks")
         .and_then(Value::as_array)
-        .map_or(0, Vec::len);
-    let summary = format!("{path} ({name}): {n} chunks.");
-    let trimmed = json!({ "source_path": path, "chunk_count": n });
+        .cloned()
+        .unwrap_or_default();
+    let n = skeleton.len();
+    let tokens: i64 = skeleton
+        .iter()
+        .filter_map(|c| c.get("token_count").and_then(Value::as_i64))
+        .sum();
+    let summary = format!("{path} ({name}): {n} chunks, ~{tokens} tokens.");
+    let trimmed = json!({
+        "id": id, "source_path": path, "chunk_count": n, "total_tokens": tokens,
+        "chunks": skeleton.iter().take(FENCE_SKELETON_CAP).cloned().collect::<Vec<_>>(),
+    });
     let suggested_next_actions = vec![NextAction::call(
-        "Fetch this document's chunks with full content",
+        "Read the document's chunk bodies from the beginning",
         "get_document_chunks",
-        json!({ "id": id }),
+        json!({ "id": id, "from": 0 }),
     )];
     ToolOutcome::new(summary, env, trimmed, suggested_next_actions)
 }
 
 /// `get_document_chunks` (DocumentChunkWindow): Document flattened; window meta top-level.
+/// The text fence carries per-chunk briefs (`{chunk_id, chunk_index, snippet}`); full
+/// bodies stay in `structuredContent`.
 pub fn project_document_window(env: Value) -> ToolOutcome {
     let path = env
         .get("source_path")
@@ -610,16 +627,40 @@ pub fn project_document_window(env: Value) -> ToolOutcome {
     let total = env.get("total_chunks").and_then(Value::as_u64).unwrap_or(0);
     let to = from + n;
     let summary = format!("Chunks {from}..{to} of {path} (of {total}).");
-    let trimmed = json!({ "source_path": path, "from": from, "to": to, "total_chunks": total });
-    let suggested_next_actions = if to < total {
+    // NOTE: window chunks are ChunkBody (`chunk_id`, no nested `document`), so
+    // `chunk_brief` (ChunkWithContext shape) does not apply here.
+    let briefs: Vec<Value> = env
+        .get("chunks")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .map(|c| {
+                    json!({
+                        "chunk_id": c.get("chunk_id").cloned().unwrap_or(Value::Null),
+                        "chunk_index": c.get("chunk_index").cloned().unwrap_or(Value::Null),
+                        "snippet": c.get("content").and_then(Value::as_str).map(snippet),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let trimmed = json!({
+        "source_path": path, "from": from, "to": to, "total_chunks": total, "chunks": briefs,
+    });
+    let mut suggested_next_actions = if to < total {
         vec![NextAction::call(
-            "Fetch the next window of chunks in this document",
+            "Read the next window of chunk bodies",
             "get_document_chunks",
             json!({ "id": id, "from": to }),
         )]
     } else {
         vec![]
     };
+    suggested_next_actions.push(NextAction::call(
+        "Fetch the document overview and full chunk map",
+        "get_document",
+        json!({ "id": id }),
+    ));
     ToolOutcome::new(summary, env, trimmed, suggested_next_actions)
 }
 
@@ -1227,7 +1268,7 @@ mod tests {
     }
 
     #[test]
-    fn project_document_overview_summary() {
+    fn project_document_summary_counts_chunks_and_tokens() {
         let env = json!({
             "id": "d1", "source_path": "docs/intro.md",
             "source": { "display_name": "Compact Docs" },
@@ -1237,27 +1278,74 @@ mod tests {
                 { "id": "c", "chunk_index": 2, "token_count": 30 }
             ]
         });
-        let o = super::project_document_overview(env);
+        let o = super::project_document(env);
         assert!(o.summary.contains("docs/intro.md"));
-        assert!(o.summary.contains('3'));
-        assert!(o
-            .suggested_next_actions
-            .iter()
-            .any(|a| a.tool == Some("get_document_chunks")));
+        assert!(o.summary.contains("3 chunks"));
+        assert!(o.summary.contains("~60 tokens"));
+        assert_eq!(o.trimmed["chunk_count"], 3);
+        assert_eq!(o.trimmed["total_tokens"], 60);
+        // Skeleton fits under the fence cap → carried whole in the fence.
+        assert_eq!(o.trimmed["chunks"].as_array().unwrap().len(), 3);
+        let action = &o.suggested_next_actions[0];
+        assert_eq!(action.tool, Some("get_document_chunks"));
+        let args = action.arguments.as_ref().unwrap();
+        assert_eq!(args["id"], "d1");
+        assert_eq!(args["from"], 0);
+    }
+
+    #[test]
+    fn project_document_fence_caps_skeleton_structured_keeps_all() {
+        let skeleton: Vec<_> = (0..60)
+            .map(|i| json!({ "id": format!("c{i}"), "chunk_index": i, "token_count": 5 }))
+            .collect();
+        let env = json!({
+            "id": "d1", "source_path": "docs/big.md",
+            "source": { "slug": "compact-docs" },
+            "chunks": skeleton
+        });
+        let o = super::project_document(env);
+        // display_name absent → slug fallback.
+        assert!(o.summary.contains("compact-docs"));
+        assert_eq!(o.trimmed["chunks"].as_array().unwrap().len(), 50);
+        assert_eq!(o.structured["chunks"].as_array().unwrap().len(), 60);
+        assert_eq!(o.trimmed["chunk_count"], 60);
+        assert_eq!(o.trimmed["total_tokens"], 300);
     }
 
     #[test]
     fn project_document_window_range() {
+        let long_body = "x".repeat(400);
         let env = json!({
             "id": "d1", "source_path": "docs/intro.md", "source": {"display_name":"X"},
             "from": 3, "limit": 7, "total_chunks": 35,
-            "chunks": [ {"chunk_id":"a"}, {"chunk_id":"b"} ]
+            "chunks": [
+                {"chunk_id":"a", "chunk_index": 3, "content": long_body,
+                 "heading_path": ["Intro"], "token_count": 100},
+                {"chunk_id":"b", "chunk_index": 4, "content": "short body",
+                 "heading_path": ["Intro"], "token_count": 4}
+            ]
         });
         let o = super::project_document_window(env);
         assert!(o.summary.contains("3..5")); // from=3, +2 returned
         assert_eq!(o.trimmed["total_chunks"], 35);
-        // to=5 < total=35 → should still have a next action
-        assert!(!o.suggested_next_actions.is_empty());
+        // Fence carries per-chunk briefs: chunk_id / chunk_index / snippet.
+        let briefs = o.trimmed["chunks"].as_array().unwrap();
+        assert_eq!(briefs.len(), 2);
+        assert_eq!(briefs[0]["chunk_id"], "a");
+        assert_eq!(briefs[0]["chunk_index"], 3);
+        let snip = briefs[0]["snippet"].as_str().unwrap();
+        assert!(snip.chars().count() < 400, "fence carries a snippet, not the full body");
+        assert_eq!(briefs[1]["snippet"], "short body");
+        // Full bodies stay in structuredContent.
+        assert_eq!(o.structured["chunks"][0]["content"].as_str().unwrap().len(), 400);
+        // to=5 < total=35 → next-window action AND the overview backlink.
+        assert_eq!(o.suggested_next_actions.len(), 2);
+        let next = &o.suggested_next_actions[0];
+        assert_eq!(next.tool, Some("get_document_chunks"));
+        assert_eq!(next.arguments.as_ref().unwrap()["from"], 5);
+        let back = &o.suggested_next_actions[1];
+        assert_eq!(back.tool, Some("get_document"));
+        assert_eq!(back.arguments.as_ref().unwrap()["id"], "d1");
     }
 
     #[test]
@@ -1282,12 +1370,15 @@ mod tests {
     }
 
     #[test]
-    fn project_document_window_no_action_at_end() {
-        // from=33, 2 returned -> to=35 == total -> no next action
+    fn project_document_window_only_backlink_at_end() {
+        // from=33, 2 returned -> to=35 == total -> no next-window action,
+        // but the overview backlink is always present.
         let env = json!({ "id":"d1","source_path":"x","source":{"display_name":"X"},
             "from":33,"limit":7,"total_chunks":35,"chunks":[{"chunk_id":"a"},{"chunk_id":"b"}] });
         let o = super::project_document_window(env);
-        assert!(o.suggested_next_actions.is_empty());
+        assert_eq!(o.suggested_next_actions.len(), 1);
+        assert_eq!(o.suggested_next_actions[0].tool, Some("get_document"));
+        assert_eq!(o.suggested_next_actions[0].arguments.as_ref().unwrap()["id"], "d1");
     }
 
     #[test]

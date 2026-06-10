@@ -110,14 +110,14 @@ pub fn list() -> ToolsListResult {
             ToolDescription {
                 name: "get_document",
                 description:
-                    "Document overview: metadata (id, source_version_id, node_id, source_path, published_url, source_url, language, kind, content_hash, char_count, token_count, source_modified_at, created_at, frontmatter, provenance, package_id), the source `{slug}`, and an ordered `chunks` skeleton array of every ready chunk (`{id, chunk_index, token_count}`). No chunk bodies. Use get_document_chunks for bodies.",
+                    "Fetch a document's metadata plus an ordered skeleton of its chunks (ids, positions, token counts — no bodies). Use to size up a document before reading it with get_document_chunks.",
                 input_schema: id_only_schema(),
                 output_schema: Some(crate::schemas::document_output_schema()),
             },
             ToolDescription {
                 name: "get_document_chunks",
                 description:
-                    "Position-windowed chunk slice of a document. Returns `{chunks: ChunkBody[], from, limit, total_chunks}`. from defaults to 0 (must be >= 0); limit defaults to 20 and must be in [1, 100]. Out-of-range values are rejected as InvalidParams before the call reaches the cloud. `from` past the end returns `chunks: []` with accurate `total_chunks` (not 404). Use to page through a document's chunk bodies or to read a known offset.",
+                    "Read a window of a document's chunk bodies by position. Use after get_document to read a document section by section.",
                 input_schema: document_chunks_schema(),
                 output_schema: Some(crate::schemas::document_output_schema()),
             },
@@ -216,9 +216,12 @@ fn document_chunks_schema() -> serde_json::Value {
         "type": "object",
         "required": ["id"],
         "properties": {
-            "id": { "type": "string", "format": "uuid" },
-            "from": { "type": "integer", "minimum": 0, "default": 0 },
-            "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 },
+            "id": { "type": "string", "format": "uuid",
+                "description": "Document id (from search results or get_document)." },
+            "from": { "type": "integer", "minimum": 0, "default": 0,
+                "description": "Zero-based chunk position to start from; must be >= 0 (defaults to 0). A position past the end returns an empty window with accurate total_chunks, not an error." },
+            "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20,
+                "description": "Number of chunk bodies to return; must be in [1, 100] (defaults to 20)." },
         },
         "additionalProperties": false,
     })

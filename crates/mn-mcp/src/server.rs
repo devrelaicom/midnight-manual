@@ -644,7 +644,7 @@ async fn run_passthrough_tool(params: &ToolCallParams, state: &ServerState) -> T
         "get_document" => {
             match tools::run_passthrough_id(args, cloud, tools::PassthroughKind::Document).await {
                 Ok(v) => ToolResponse {
-                    result: render::project_document_overview(v).into_result(),
+                    result: render::project_document(v).into_result(),
                     telemetry: None,
                     outcome: Outcome::Ok,
                 },
