@@ -84,7 +84,11 @@ async fn create_override(
         return resp;
     }
     if req.limit_rps <= 0 {
-        return bad_request("limit_rps must be a positive integer", "supply limit_rps >= 1", rid);
+        return error::bad_request(
+            "limit_rps must be a positive integer",
+            "supply limit_rps >= 1",
+            rid,
+        );
     }
     let expires_at = match parse_future_timestamp(&req.expires_at) {
         Ok(ts) => ts,
@@ -102,13 +106,15 @@ async fn create_override(
     .await
     {
         Ok(row) => (StatusCode::CREATED, Json(row)).into_response(),
-        Err(StoreError::CheckViolation(msg)) => {
-            bad_request(msg, "check the override against the rate_limit_override constraints", rid)
-        }
+        Err(StoreError::CheckViolation(msg)) => error::bad_request(
+            msg,
+            "check the override against the rate_limit_override constraints",
+            rid,
+        ),
         Err(StoreError::Database(msg)) => {
             // A malformed CIDR that slipped past validation surfaces here.
             tracing::warn!(request_id = rid, op = "create_override", error = %msg, "insert rejected");
-            bad_request(
+            error::bad_request(
                 format!("could not store override: {msg}"),
                 "supply a well-formed CIDR such as `203.0.113.0/24`",
                 rid,
@@ -153,7 +159,7 @@ async fn update_override(
 
     if let Some(rps) = req.limit_rps {
         if rps <= 0 {
-            return bad_request(
+            return error::bad_request(
                 "limit_rps must be a positive integer",
                 "supply limit_rps >= 1",
                 rid,
@@ -180,7 +186,7 @@ async fn update_override(
             error::not_found(format!("rate-limit override `{id}` not found"), rid)
         }
         Err(StoreError::CheckViolation(msg)) => {
-            bad_request(msg, "check the patch against the override constraints", rid)
+            error::bad_request(msg, "check the patch against the override constraints", rid)
         }
         Err(e) => {
             tracing::warn!(request_id = rid, op = "update_override", error = %e, "update failed");
@@ -252,7 +258,7 @@ pub(crate) fn sub_of(auth: Option<&Extension<AuthContext>>) -> String {
 /// `subject` of a `subject_kind == "cidr"` token-limit override the same way.
 pub(crate) fn validate_cidr(cidr: &str, rid: &str) -> Option<Response> {
     let bad = |reason: &str| -> Response {
-        bad_request(
+        error::bad_request(
             format!("invalid cidr `{cidr}`: {reason}"),
             "supply an address/prefix such as `203.0.113.0/24` or `2001:db8::/32`",
             rid,
@@ -295,12 +301,12 @@ pub(crate) enum TimestampError {
 impl TimestampError {
     pub(crate) fn into_response(self, rid: &str) -> Response {
         match self {
-            Self::Malformed(s) => bad_request(
+            Self::Malformed(s) => error::bad_request(
                 format!("`{s}` is not a valid RFC 3339 timestamp"),
                 "supply an RFC 3339 timestamp such as `2026-06-01T00:00:00Z`",
                 rid,
             ),
-            Self::NotFuture => bad_request(
+            Self::NotFuture => error::bad_request(
                 "expires_at must be in the future",
                 "supply a timestamp later than now",
                 rid,
@@ -319,23 +325,6 @@ pub(crate) fn parse_future_timestamp(
         return Err(TimestampError::NotFuture);
     }
     Ok(ts)
-}
-
-/// Build a `400 invalid_request` response.
-///
-/// Shared with [`crate::routes::admin_tokenlimits`].
-pub(crate) fn bad_request(
-    message: impl Into<String>,
-    remediation: impl Into<String>,
-    rid: &str,
-) -> Response {
-    error::into_response(
-        CoreError::builder(ErrorCode::InvalidRequest)
-            .message(message)
-            .remediation(remediation)
-            .build(),
-        rid,
-    )
 }
 
 #[cfg(test)]

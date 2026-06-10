@@ -8,7 +8,6 @@ use axum::extract::{Extension, Path, Query, State};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
-use mn_core::error::{Error as CoreError, ErrorCode};
 use mn_store::{entities::source, StoreError};
 use serde::Deserialize;
 
@@ -28,9 +27,6 @@ pub fn router() -> Router<AppState> {
 const SOURCES_DEFAULT_LIMIT: i64 = 20;
 /// Hard cap on page size.
 const SOURCES_MAX_LIMIT: i64 = 100;
-
-/// Accepted wire strings for the `kind` filter.
-const SOURCE_KINDS: [&str; 4] = ["docs_site", "code_repo", "standalone", "mixed"];
 
 #[derive(Debug, Deserialize)]
 struct SourcesQuery {
@@ -61,18 +57,6 @@ fn parse_rfc3339(
     .transpose()
 }
 
-/// 400 with the typed `invalid_request` envelope (same pattern as the batch
-/// chunk endpoint).
-fn bad_request(message: String, remediation: &str, rid: &str) -> Response {
-    error::into_response(
-        CoreError::builder(ErrorCode::InvalidRequest)
-            .message(message)
-            .remediation(remediation)
-            .build(),
-        rid,
-    )
-}
-
 async fn list_sources(
     Query(q): Query<SourcesQuery>,
     State(state): State<AppState>,
@@ -81,7 +65,7 @@ async fn list_sources(
     let rid = req_id.as_str();
     let limit = q.limit.unwrap_or(SOURCES_DEFAULT_LIMIT);
     if !(1..=SOURCES_MAX_LIMIT).contains(&limit) {
-        return bad_request(
+        return error::bad_request(
             format!("limit must be in 1..={SOURCES_MAX_LIMIT}"),
             "pass `limit` between 1 and 100, or omit it for the default",
             rid,
@@ -92,8 +76,8 @@ async fn list_sources(
         Some(c) => match crate::pagination::decode_cursor(c) {
             Some(s) => Some(s),
             None => {
-                return bad_request(
-                    "cursor is malformed".to_owned(),
+                return error::bad_request(
+                    "cursor is malformed",
                     "pass the `next_cursor` token from the previous page verbatim",
                     rid,
                 )
@@ -102,15 +86,22 @@ async fn list_sources(
     };
     let created_after = match parse_rfc3339("created_after", q.created_after.as_deref()) {
         Ok(v) => v,
-        Err(m) => return bad_request(m, "e.g. `2026-01-01T00:00:00Z`", rid),
+        Err(m) => return error::bad_request(m, "e.g. `2026-01-01T00:00:00Z`", rid),
     };
     let created_before = match parse_rfc3339("created_before", q.created_before.as_deref()) {
         Ok(v) => v,
-        Err(m) => return bad_request(m, "e.g. `2026-01-01T00:00:00Z`", rid),
+        Err(m) => return error::bad_request(m, "e.g. `2026-01-01T00:00:00Z`", rid),
     };
+    // Validate `kind` against the enum's serde wire form so
+    // `mn_core::types::SourceKind` stays the single source of truth (the
+    // remediation list below is display-only).
     if let Some(k) = q.kind.as_deref() {
-        if !SOURCE_KINDS.contains(&k) {
-            return bad_request(
+        if serde_json::from_value::<mn_core::types::SourceKind>(serde_json::Value::String(
+            k.to_owned(),
+        ))
+        .is_err()
+        {
+            return error::bad_request(
                 format!("`{k}` is not a known source kind"),
                 "pass one of: docs_site, code_repo, standalone, mixed",
                 rid,

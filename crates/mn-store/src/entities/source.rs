@@ -102,6 +102,9 @@ pub struct SourcePage {
 
 /// Run a [`SourcePageQuery`].
 ///
+/// Extreme `limit` values are clamped rather than panicking (the `+ 1`
+/// look-ahead row saturates at `i64::MAX`).
+///
 /// # Errors
 ///
 /// Returns [`crate::error::StoreError::Database`] on driver failure.
@@ -134,7 +137,8 @@ pub async fn list_paged(pool: &PgPool, q: &SourcePageQuery) -> Result<SourcePage
     if let Some(after) = &q.after_slug {
         page.push(" AND slug > ").push_bind(after.as_str());
     }
-    page.push(" ORDER BY slug LIMIT ").push_bind(q.limit + 1);
+    page.push(" ORDER BY slug LIMIT ")
+        .push_bind(q.limit.saturating_add(1));
     let rows: Vec<SourceRow> = page.build_query_as().fetch_all(pool).await?;
 
     let page_len = usize::try_from(q.limit).unwrap_or(usize::MAX);

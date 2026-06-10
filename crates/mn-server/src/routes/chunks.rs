@@ -11,7 +11,6 @@ use axum::extract::{Extension, Path, Query, State};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
-use mn_core::error::{Error as CoreError, ErrorCode};
 use mn_store::{entities::chunk, entities::node, StoreError};
 use serde::Deserialize;
 use uuid::Uuid;
@@ -74,13 +73,9 @@ async fn get_chunks_batch(
     let ids = match parse_batch_ids(&q.ids) {
         Ok(ids) => ids,
         Err(message) => {
-            return error::into_response(
-                CoreError::builder(ErrorCode::InvalidRequest)
-                    .message(message)
-                    .remediation(format!(
-                        "pass `ids` as 1..={BATCH_IDS_CAP} comma-separated chunk UUIDs"
-                    ))
-                    .build(),
+            return error::bad_request(
+                message,
+                format!("pass `ids` as 1..={BATCH_IDS_CAP} comma-separated chunk UUIDs"),
                 rid,
             )
         }
