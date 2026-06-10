@@ -428,7 +428,7 @@ async fn dispatch_tool_inner(
             Ok(v) => ok(render::project_sources(v).into_result(), None),
             Err(e) => err(cloud_failure(&e).into_result(), Outcome::Error),
         },
-        "facets" => match state.cloud.get_facets(&[]).await {
+        "facets" => match tools::run_facets(&params.arguments, &state.cloud).await {
             Ok(v) => ok(render::project_facets(v).into_result(), None),
             Err(e) => err(cloud_failure(&e).into_result(), Outcome::Error),
         },

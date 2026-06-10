@@ -747,29 +747,101 @@ pub fn project_sources(env: Value) -> ToolOutcome {
     ToolOutcome::new(summary, env, trimmed, actions)
 }
 
-/// `facets`: `{ modes:[..], filters:[ {key, type, ..}, .. ] }`. Dimensions are `filters[].key`.
+/// `facets`: two shapes from `GET /v1/facets`.
+///
+/// - Overview (no params): `{ modes:[..], filters:[ {key, type, negatable,
+///   values?, truncated?, total?}, .. ] }`. Dimensions are `filters[].key`.
+/// - Drill-down (`?facet=..`): `{ facet, values:[string], total, next_cursor }`
+///   — distinguished by the top-level `facet` key.
 pub fn project_facets(env: Value) -> ToolOutcome {
-    let keys: Vec<String> = env
+    if let Some(facet) = env.get("facet").and_then(Value::as_str).map(str::to_owned) {
+        // Drill-down page.
+        let values = env
+            .get("values")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let n = values.len();
+        let total = env.get("total").and_then(Value::as_i64).unwrap_or_else(|| {
+            n.try_into().unwrap_or(i64::MAX) // usize→i64 can't fail for real page sizes
+        });
+        let next_cursor = env
+            .get("next_cursor")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let summary = format!("{facet}: showing {n} of {total} values.");
+        let mut actions = Vec::new();
+        if let Some(c) = next_cursor {
+            actions.push(NextAction::call(
+                format!("Fetch the next page of `{facet}` values"),
+                "facets",
+                json!({ "facet": facet, "cursor": c }),
+            ));
+        }
+        if let Some(v) = values.first().and_then(Value::as_str) {
+            // `json!` needs literal object keys; the facet name is dynamic.
+            let mut filters = serde_json::Map::new();
+            filters.insert(facet.clone(), json!({ "any_of": [v] }));
+            actions.push(NextAction::call(
+                format!("Search filtered to {facet}=`{v}` (swap in your own query and value)"),
+                "advanced_search",
+                json!({ "queries": ["<your query>"], "filters": filters }),
+            ));
+        }
+        let trimmed = json!({ "facet": facet, "values": values, "total": total });
+        return ToolOutcome::new(summary, env, trimmed, actions);
+    }
+    // Overview.
+    let dims = env
         .get("filters")
         .and_then(Value::as_array)
-        .map(|a| {
-            a.iter()
-                .filter_map(|f| f.get("key").and_then(Value::as_str).map(str::to_owned))
-                .collect()
-        })
+        .cloned()
         .unwrap_or_default();
-    let summary = format!("{} facet dimension(s): {}.", keys.len(), keys.join(", "));
-    let trimmed = json!({ "dimensions": keys });
-    ToolOutcome::new(
-        summary,
-        env,
-        trimmed,
-        vec![NextAction::call(
-            "Search the corpus using these facet keys as filters",
+    let keys: Vec<String> = dims
+        .iter()
+        .filter_map(|f| f.get("key").and_then(Value::as_str).map(str::to_owned))
+        .collect();
+    // `facets({facet})` is literal guidance for the calling agent (pass a
+    // facet name), not a formatting placeholder.
+    #[allow(clippy::literal_string_with_formatting_args)]
+    let summary = format!(
+        "{} filter dimensions for advanced_search: {}. Open-set dimensions show samples — drill in with facets({{facet}}).",
+        keys.len(),
+        keys.join(", ")
+    );
+    let trimmed = json!({ "dimensions": dims.iter().map(|f| json!({
+        "key": f.get("key").cloned().unwrap_or(Value::Null),
+        "type": f.get("type").cloned().unwrap_or(Value::Null),
+        "values": f.get("values").cloned().unwrap_or(Value::Null),
+        "total": f.get("total").cloned().unwrap_or(Value::Null),
+    })).collect::<Vec<_>>() });
+    // Concrete example from real corpus data: first dimension that has a
+    // non-empty values array.
+    let mut actions = Vec::new();
+    if let Some((key, v)) = dims.iter().find_map(|f| {
+        let key = f.get("key").and_then(Value::as_str)?;
+        let v = f
+            .get("values")
+            .and_then(Value::as_array)?
+            .first()?
+            .as_str()?;
+        Some((key.to_owned(), v.to_owned()))
+    }) {
+        // `json!` needs literal object keys; the facet name is dynamic.
+        let mut filters = serde_json::Map::new();
+        filters.insert(key.clone(), json!({ "any_of": [v] }));
+        actions.push(NextAction::call(
+            format!("Search filtered to {key}=`{v}` (swap in your own query and value)"),
             "advanced_search",
-            json!({ "queries": ["<terms>"], "filters": {} }),
-        )],
-    )
+            json!({ "queries": ["<your query>"], "filters": filters }),
+        ));
+    }
+    actions.push(NextAction::call(
+        "Page through every value of an open-set facet (e.g. tags)",
+        "facets",
+        json!({ "facet": "tags" }),
+    ));
+    ToolOutcome::new(summary, env, trimmed, actions)
 }
 
 /// `status` (StatusOutput as JSON).
@@ -1550,15 +1622,110 @@ mod tests {
     }
 
     #[test]
-    fn project_facets_lists_dimensions() {
+    fn project_facets_overview_names_dimensions_with_concrete_example() {
+        let env = json!({ "modes": ["hybrid", "vector", "fts"], "filters": [
+            { "key": "kind", "type": "closed_set", "negatable": true },
+            { "key": "source_slug", "type": "open_set", "negatable": true,
+              "values": ["compact-docs", "midnight-js"], "truncated": true, "total": 43 },
+            { "key": "tags", "type": "open_set", "negatable": true,
+              "values": ["zk"], "truncated": true, "total": 312 }
+        ]});
+        let o = super::project_facets(env.clone());
+        assert!(o.summary.contains("3 filter dimensions"));
+        assert!(o.summary.contains("kind, source_slug, tags"));
+        assert!(o.summary.contains("drill in with facets({facet})"));
+        // structured = env verbatim
+        assert_eq!(o.structured, env);
+        // trimmed keeps key/type/values/total per dimension (negatable/truncated dropped)
+        assert_eq!(o.trimmed["dimensions"][1]["key"], "source_slug");
+        assert_eq!(o.trimmed["dimensions"][1]["total"], 43);
+        assert_eq!(o.trimmed["dimensions"][1]["values"], json!(["compact-docs", "midnight-js"]));
+        assert!(o.trimmed["dimensions"][1].get("negatable").is_none());
+        // example action uses the REAL first value of the first dimension that
+        // has values (kind has none → source_slug wins)
+        let example = &o.suggested_next_actions[0];
+        assert_eq!(example.tool, Some("advanced_search"));
+        assert!(example.description.contains("source_slug"));
+        assert!(example.description.contains("compact-docs"));
+        let args = example.arguments.as_ref().unwrap();
+        assert_eq!(args["filters"]["source_slug"]["any_of"], json!(["compact-docs"]));
+        // drill-down suggestion present
+        let drill = &o.suggested_next_actions[1];
+        assert_eq!(drill.tool, Some("facets"));
+        assert_eq!(drill.arguments.as_ref().unwrap()["facet"], "tags");
+    }
+
+    #[test]
+    fn project_facets_overview_without_values_still_suggests_drill() {
         let env = json!({ "modes": ["hybrid"], "filters": [
-            { "key": "language", "type": "open_set" },
-            { "key": "source", "type": "open_set" }
+            { "key": "kind", "type": "closed_set", "negatable": true }
         ]});
         let o = super::project_facets(env);
-        assert!(o.summary.contains("language"));
-        assert!(o.summary.contains("source"));
-        assert_eq!(o.trimmed["dimensions"], json!(["language", "source"]));
+        // no dimension carries values → no concrete filter example
+        assert!(!o
+            .suggested_next_actions
+            .iter()
+            .any(|a| a.tool == Some("advanced_search")));
+        assert!(o
+            .suggested_next_actions
+            .iter()
+            .any(|a| a.tool == Some("facets")));
+    }
+
+    #[test]
+    fn project_facets_drilldown_pages_with_cursor_and_filter_example() {
+        let env = json!({
+            "facet": "tags",
+            "values": ["zk", "proofs"],
+            "total": 312,
+            "next_cursor": "tok=="
+        });
+        let o = super::project_facets(env.clone());
+        assert_eq!(o.summary, "tags: showing 2 of 312 values.");
+        assert_eq!(o.structured, env);
+        assert_eq!(o.trimmed, json!({ "facet": "tags", "values": ["zk", "proofs"], "total": 312 }));
+        // next-page action carries facet + cursor verbatim
+        let next = &o.suggested_next_actions[0];
+        assert_eq!(next.tool, Some("facets"));
+        let args = next.arguments.as_ref().unwrap();
+        assert_eq!(args["facet"], "tags");
+        assert_eq!(args["cursor"], "tok==");
+        // filter example uses values[0]
+        let example = &o.suggested_next_actions[1];
+        assert_eq!(example.tool, Some("advanced_search"));
+        assert!(example.description.contains("tags"));
+        assert!(example.description.contains("zk"));
+        let args = example.arguments.as_ref().unwrap();
+        assert_eq!(args["filters"]["tags"]["any_of"], json!(["zk"]));
+    }
+
+    #[test]
+    fn project_facets_drilldown_last_page_has_no_next_page_action() {
+        let env = json!({
+            "facet": "language",
+            "values": ["compact"],
+            "total": 1,
+            "next_cursor": null
+        });
+        let o = super::project_facets(env);
+        assert_eq!(o.summary, "language: showing 1 of 1 values.");
+        assert!(!o
+            .suggested_next_actions
+            .iter()
+            .any(|a| a.tool == Some("facets")));
+        // the concrete filter example is still offered
+        assert!(o
+            .suggested_next_actions
+            .iter()
+            .any(|a| a.tool == Some("advanced_search")));
+    }
+
+    #[test]
+    fn project_facets_drilldown_empty_values_has_no_example_action() {
+        let env = json!({ "facet": "package", "values": [], "total": 0, "next_cursor": null });
+        let o = super::project_facets(env);
+        assert_eq!(o.summary, "package: showing 0 of 0 values.");
+        assert!(o.suggested_next_actions.is_empty());
     }
 
     #[test]

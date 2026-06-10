@@ -11,8 +11,8 @@ use std::sync::Arc;
 
 use mn_mcp::cloud_client::CloudClient;
 use mn_mcp::tools::{
-    run_chunk_nav, run_chunk_neighbors, run_document_chunks, run_get_chunks, run_list_sources,
-    run_passthrough_id, ChunkNavDirection, PassthroughError, PassthroughKind,
+    run_chunk_nav, run_chunk_neighbors, run_document_chunks, run_facets, run_get_chunks,
+    run_list_sources, run_passthrough_id, ChunkNavDirection, PassthroughError, PassthroughKind,
 };
 use serde_json::json;
 use wiremock::matchers::{method, path, query_param, query_param_is_missing};
@@ -660,6 +660,57 @@ async fn run_list_sources_renders_bool_arg_as_query_string() {
         .await
         .unwrap();
     assert_eq!(v["total"], 0);
+}
+
+// ---------------------------------------------------------------------------
+// run_facets (drill-down param forwarding)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn run_facets_forwards_present_args_as_query_params() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/facets"))
+        .and(query_param("facet", "tags"))
+        .and(query_param("limit", "10"))
+        .and(query_param_is_missing("cursor"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "facet": "tags",
+            "values": ["zk", "proofs"],
+            "total": 312,
+            "next_cursor": "tok==",
+        })))
+        .mount(&server)
+        .await;
+    let client = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
+    // JSON integer 10 must arrive as the query string "10" (not e.g. "10.0").
+    let v = run_facets(&json!({"facet": "tags", "limit": 10}), &client)
+        .await
+        .unwrap();
+    assert_eq!(v["facet"], "tags");
+    assert_eq!(v["values"][0], "zk");
+}
+
+#[tokio::test]
+async fn run_facets_no_args_sends_no_query_params() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/facets"))
+        .and(query_param_is_missing("facet"))
+        .and(query_param_is_missing("cursor"))
+        .and(query_param_is_missing("limit"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "modes": ["hybrid", "vector", "fts"],
+            "filters": [
+                { "key": "source_slug", "type": "open_set", "negatable": true,
+                  "values": ["compact-docs"], "truncated": true, "total": 43 },
+            ],
+        })))
+        .mount(&server)
+        .await;
+    let client = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
+    let v = run_facets(&json!({}), &client).await.unwrap();
+    assert_eq!(v["filters"][0]["key"], "source_slug");
 }
 
 // ---------------------------------------------------------------------------

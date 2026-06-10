@@ -142,10 +142,15 @@ pub fn list() -> ToolsListResult {
             ToolDescription {
                 name: "facets",
                 description:
-                    "List the filterable facets for `search`, their types, whether they support exclusion (none_of), and the values present in the active corpus (languages, tags, sources, packages). Call this before constructing a `filters` object to learn valid values. Closed-enum facets (kind, content_type, attribution, source_kind) carry their full value list; high-cardinality sets (tags, package) are top-N with `truncated`/`total`.",
+                    "Discover the filter dimensions available to advanced_search and the values present in the corpus. Call without arguments for an overview; pass a facet name to page through all values of one dimension.",
                 input_schema: json!({
                     "type": "object",
-                    "properties": {},
+                    "properties": {
+                        "facet": { "type": "string", "enum": ["source_slug", "language", "tags", "package"],
+                            "description": "Drill into one open-set facet's full value list. Omit for the overview." },
+                        "cursor": { "type": "string", "description": "Opaque token from a previous drill-down response." },
+                        "limit": { "type": "integer", "minimum": 1, "maximum": 200, "default": 50 }
+                    },
                     "additionalProperties": false,
                 }),
                 output_schema: Some(crate::schemas::facets_output_schema()),
@@ -1450,6 +1455,33 @@ pub async fn run_list_sources(
         }
     }
     cloud.list_sources(&params).await
+}
+
+/// Dispatch `facets`. Forwards the drill-down arguments (`facet`, `cursor`,
+/// `limit`) to `GET /v1/facets` as query params — only keys present in
+/// `args` are sent, so a no-argument call yields the overview shape.
+/// Non-string JSON scalars are rendered in their query-string form (`50`);
+/// the input schema forbids object/array values, so no further validation
+/// happens here.
+///
+/// # Errors
+///
+/// Propagates any [`CloudError`] from the transport / status mapping.
+pub async fn run_facets(
+    args: &serde_json::Value,
+    cloud: &Arc<CloudClient>,
+) -> Result<serde_json::Value, CloudError> {
+    let mut params: Vec<(&str, String)> = Vec::new();
+    for key in ["facet", "cursor", "limit"] {
+        if let Some(v) = args.get(key) {
+            let s = match v {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            params.push((key, s));
+        }
+    }
+    cloud.get_facets(&params).await
 }
 
 #[cfg(test)]

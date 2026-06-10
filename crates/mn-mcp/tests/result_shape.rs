@@ -85,6 +85,28 @@ fn all_passthrough_projectors_conform_to_passthrough_schema() {
             .unwrap(),
             mn_mcp::schemas::parents_output_schema(),
         ),
+        // facets: overview shape
+        (
+            mn_mcp::render::project_facets(serde_json::json!({
+                "modes": ["hybrid"],
+                "filters": [{ "key": "source_slug", "type": "open_set", "negatable": true,
+                              "values": ["compact-docs"], "truncated": true, "total": 43 }]
+            }))
+            .into_result()
+            .structured_content
+            .unwrap(),
+            mn_mcp::schemas::facets_output_schema(),
+        ),
+        // facets: drill-down shape
+        (
+            mn_mcp::render::project_facets(serde_json::json!({
+                "facet": "tags", "values": ["zk"], "total": 312, "next_cursor": "tok=="
+            }))
+            .into_result()
+            .structured_content
+            .unwrap(),
+            mn_mcp::schemas::facets_output_schema(),
+        ),
     ];
     for (sc, schema) in cases {
         assert!(sc.is_object(), "structuredContent must be an object: {sc}");
