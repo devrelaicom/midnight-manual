@@ -419,6 +419,9 @@ pub fn project_chunks(env: Value) -> ToolOutcome {
             format!("Chunk {id} — {where_}.{missing_note}"),
             json!({
                 "id": id,
+                // Text-only clients can't read suggested_next_actions, so the
+                // fence carries the document id they'd need to navigate up.
+                "document_id": c.get("document_id").cloned().unwrap_or(Value::Null),
                 "source_path": path,
                 "heading_path": c.get("heading_path").cloned().unwrap_or(json!([])),
                 "content": c.get("content").cloned().unwrap_or(Value::Null),
