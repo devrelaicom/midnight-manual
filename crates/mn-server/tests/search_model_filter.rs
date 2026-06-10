@@ -172,6 +172,7 @@ async fn off_model_chunks_excluded_from_results() {
         "query": token,
         "vector": vector,
         "client_embedding_model": "voyage-code-3@1",
+        "code_mode": "off",
         "limit": 100,
     });
     let resp = app

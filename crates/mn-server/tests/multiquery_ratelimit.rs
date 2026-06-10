@@ -127,6 +127,7 @@ async fn search(app: axum::Router, ip: &str, queries: Value) -> (StatusCode, Hea
     let body = json!({
         "queries": queries,
         "client_embedding_model": "voyage-code-3@1",
+        "code_mode": "off",
         "limit": 5,
     });
     let resp = app

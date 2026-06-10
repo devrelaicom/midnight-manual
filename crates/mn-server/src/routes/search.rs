@@ -1,9 +1,11 @@
 //! `POST /v1/search` — hybrid FTS + pgvector retrieval.
 //!
-//! For each distinct query pair the handler runs both a pgvector cosine search
-//! and a Postgres full-text search, then fuses every ranked list — across both
-//! modes and across all query pairs — in a single Reciprocal Rank Fusion pass
-//! (k=60). Reranking and confidence scoring land in later phases.
+//! For each distinct query pair the handler runs a pgvector cosine search, a
+//! Postgres full-text search, and — when the effective `code_mode` is not
+//! `off` — a second cosine search over the partial voyage-code-3
+//! `code_embedding` index, then fuses every ranked list — across all modes and
+//! all query pairs — in a single Reciprocal Rank Fusion pass (k=60).
+//! Reranking and confidence scoring land in later phases.
 
 use axum::extract::{Extension, State};
 use axum::response::{IntoResponse, Response};
@@ -74,6 +76,30 @@ pub struct SearchRequest {
     /// Defaults to `true`.
     #[serde(default = "default_true")]
     pub include_scores: bool,
+    /// Code-vector fusion mode. Defaults to `on` for hybrid/vector, forced
+    /// `off` for fts (where `on`/`exclusive` is a 400).
+    #[serde(default)]
+    pub code_mode: Option<CodeMode>,
+    /// The code-embedding model wire id the client used for `code_vector`s.
+    /// REQUIRED when the effective code_mode != off.
+    #[serde(default)]
+    pub client_code_embedding_model: Option<String>,
+    /// Single-query convenience form: the voyage-code-3 embedding for `query`.
+    #[serde(default)]
+    pub code_vector: Option<Vec<f32>>,
+}
+
+/// Whether the code-vector ranked list joins the RRF pool (D5/D6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeMode {
+    /// Fuse the code-vector list alongside the general lists. Default for
+    /// hybrid/vector modes.
+    On,
+    /// General retrieval only (pre-dual-embeddings behavior). Forced for fts.
+    Off,
+    /// Code-vector list replaces the general vector list.
+    Exclusive,
 }
 
 /// How to order the result set (US6 acceptance #9).
@@ -113,6 +139,9 @@ pub struct QueryPair {
     /// model. Optional so `fts`-mode callers can omit it.
     #[serde(default)]
     pub vector: Vec<f32>,
+    /// The pre-computed code-model embedding; required iff code_mode != off.
+    #[serde(default)]
+    pub code_vector: Vec<f32>,
 }
 
 const fn default_limit() -> u32 {
@@ -206,6 +235,8 @@ pub struct SearchMetadata {
     /// The ordering key actually applied (echoes the request, default
     /// `confidence`), so callers can confirm the resolved sort.
     pub sort_by: SortBy,
+    /// The effective code_mode applied (request value or mode-derived default).
+    pub code_mode: CodeMode,
 }
 
 /// One per-query record.
@@ -221,6 +252,24 @@ pub struct PerQueryRecord {
     pub vector_candidates: usize,
     /// Vector-mode latency in milliseconds.
     pub vector_latency_ms: f64,
+    /// Code-vector candidate count for this query.
+    pub code_vector_candidates: usize,
+    /// Code-vector latency in milliseconds.
+    pub code_vector_latency_ms: f64,
+}
+
+/// Resolve the effective code mode for a request (D6 defaults; spec §10.2).
+/// `Err(())` = fts with an explicit on/exclusive (400).
+const fn effective_code_mode(
+    mode: SearchMode,
+    requested: Option<CodeMode>,
+) -> Result<CodeMode, ()> {
+    match (mode, requested) {
+        (SearchMode::Fts, None | Some(CodeMode::Off)) => Ok(CodeMode::Off),
+        (SearchMode::Fts, Some(_)) => Err(()),
+        (_, Some(m)) => Ok(m),
+        (_, None) => Ok(CodeMode::On),
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -237,9 +286,24 @@ async fn search(
     let run_vector = matches!(req.mode, SearchMode::Hybrid | SearchMode::Vector);
     let run_fts = matches!(req.mode, SearchMode::Hybrid | SearchMode::Fts);
 
+    // Resolve the effective code mode (D6 defaults): `on` for hybrid/vector,
+    // forced `off` for fts — where an explicit on/exclusive is a 400.
+    let Ok(code_mode) = effective_code_mode(req.mode, req.code_mode) else {
+        return error::into_response(
+            CoreError::builder(ErrorCode::InvalidRequest)
+                .message("code_mode on/exclusive is incompatible with mode=fts")
+                .remediation("drop code_mode, or use mode=hybrid/vector")
+                .build(),
+            rid,
+        );
+    };
+    // Exclusive replaces the general vector list with the code-vector list.
+    let run_general_vector = run_vector && !matches!(code_mode, CodeMode::Exclusive);
+    let run_code_vector = run_vector && !matches!(code_mode, CodeMode::Off);
+
     // Normalize the single-query convenience form `{query, vector}` (#6) into
     // the canonical query list. Ambiguous/incomplete requests are rejected.
-    let queries = match normalize_queries(&req) {
+    let queries = match normalize_queries(&req, code_mode) {
         Ok(queries) => queries,
         Err((message, remediation)) => {
             return error::into_response(
@@ -333,10 +397,11 @@ async fn search(
         );
     };
 
-    // The vector half (and its model/dim guards) only runs in hybrid/vector
-    // mode. fts mode skips embedding entirely, so `client_embedding_model` and
-    // `vector` are optional and ignored.
-    if run_vector {
+    // The general vector half (and its model/dim guards) only runs in
+    // hybrid/vector mode with a non-exclusive code_mode. fts mode skips
+    // embedding entirely, and exclusive code mode replaces the general list,
+    // so `client_embedding_model` and `vector` are optional and ignored.
+    if run_general_vector {
         let Some(client_model) = req.client_embedding_model.as_deref() else {
             return error::into_response(
                 CoreError::builder(ErrorCode::InvalidRequest)
@@ -376,6 +441,64 @@ async fn search(
             }
         }
     }
+
+    // Code-model guards (mirror the general ones): require the client's code
+    // model wire id, match it against the config-pinned code model, and check
+    // every query's `code_vector` dimension.
+    let code_model_id: Option<Uuid> = if run_code_vector {
+        let code_snapshot = state
+            .code_model
+            .read()
+            .expect("code_model lock poisoned")
+            .clone();
+        let Some(km) = code_snapshot else {
+            return error::service_unavailable(
+                "server has no resolved code model; check boot logs",
+                rid,
+            );
+        };
+        let Some(client_model) = req.client_code_embedding_model.as_deref() else {
+            return error::into_response(
+                CoreError::builder(ErrorCode::InvalidRequest)
+                    .message("client_code_embedding_model is required when code_mode != off")
+                    .remediation("supply client_code_embedding_model, or set code_mode=off")
+                    .build(),
+                rid,
+            );
+        };
+        if client_model != km.wire {
+            return error::into_response(
+                CoreError::builder(ErrorCode::EmbeddingModelMismatch)
+                    .message(format!(
+                        "client_code_embedding_model `{client_model}` does not match code model `{}`",
+                        km.wire,
+                    ))
+                    .remediation("re-embed code queries with the corpus code model")
+                    .context("code_model", km.wire.clone())
+                    .context("client_model", client_model.to_owned())
+                    .build(),
+                rid,
+            );
+        }
+        for (i, q) in queries.iter().enumerate() {
+            if q.code_vector.len() != km.dim {
+                return error::into_response(
+                    CoreError::builder(ErrorCode::InvalidRequest)
+                        .message(format!(
+                            "queries[{i}].code_vector has {} dimensions; expected {}",
+                            q.code_vector.len(),
+                            km.dim,
+                        ))
+                        .remediation("re-embed with the corpus code model")
+                        .build(),
+                    rid,
+                );
+            }
+        }
+        Some(km.id)
+    } else {
+        None
+    };
 
     // Deduplicate identical {text, vector} pairs (EC-90) so duplicates don't
     // inflate the rate-limit cost. First-occurrence order is preserved.
@@ -425,7 +548,7 @@ async fn search(
     // body doesn't borrow `cm`.
     let corpus_model_id = cm.id;
     let mut per_query = Vec::with_capacity(distinct.len());
-    let mut ranked_lists: Vec<Vec<Uuid>> = Vec::with_capacity(distinct.len() * 2);
+    let mut ranked_lists: Vec<Vec<Uuid>> = Vec::with_capacity(distinct.len() * 3);
     // Per chunk: which distinct queries contributed at least one rank, and the
     // best vector similarity seen (for reporting; FTS-only chunks stay at 0.0).
     let mut matched: std::collections::HashMap<Uuid, std::collections::BTreeSet<usize>> =
@@ -435,8 +558,10 @@ async fn search(
 
     for (i, q) in distinct.iter().enumerate() {
         // Per-mode gating uses the hoisted, loop-invariant flags: hybrid runs
-        // both halves; vector/fts run one each.
-        let (vector_hits, vector_latency_ms): (Vec<(Uuid, f64)>, f64) = if run_vector {
+        // both halves; vector/fts run one each. The code-vector list is a
+        // third half gated by the effective code_mode (exclusive swaps it in
+        // for the general list).
+        let (vector_hits, vector_latency_ms): (Vec<(Uuid, f64)>, f64) = if run_general_vector {
             let t0 = std::time::Instant::now();
             let hits = match vector_search(&state.pool, &q.vector, &req.filters, corpus_model_id)
                 .await
@@ -451,6 +576,25 @@ async fn search(
                 }
             };
             (hits, t0.elapsed().as_secs_f64() * 1000.0)
+        } else {
+            (Vec::new(), 0.0)
+        };
+
+        let (code_hits, code_vector_latency_ms): (Vec<(Uuid, f64)>, f64) = if run_code_vector {
+            let t = std::time::Instant::now();
+            let id = code_model_id.expect("validated above");
+            let hits = match code_vector_search(&state.pool, &q.code_vector, &req.filters, id).await
+            {
+                Ok(hits) => hits,
+                Err(e) => {
+                    tracing::warn!(request_id = rid, error = %e, query_index = i, "code vector search failed");
+                    return error::service_unavailable(
+                        format!("code vector search failed for query {i}"),
+                        rid,
+                    );
+                }
+            };
+            (hits, t.elapsed().as_secs_f64() * 1000.0)
         } else {
             (Vec::new(), 0.0)
         };
@@ -478,6 +622,8 @@ async fn search(
             fts_latency_ms,
             vector_candidates: vector_hits.len(),
             vector_latency_ms,
+            code_vector_candidates: code_hits.len(),
+            code_vector_latency_ms,
         });
 
         let mut vector_ids = Vec::with_capacity(vector_hits.len());
@@ -493,14 +639,30 @@ async fn search(
                 .or_insert(sim);
             vector_ids.push(id);
         }
+        let mut code_ids = Vec::with_capacity(code_hits.len());
+        for (id, sim) in code_hits {
+            matched.entry(id).or_default().insert(i);
+            best_similarity
+                .entry(id)
+                .and_modify(|s| {
+                    if sim > *s {
+                        *s = sim;
+                    }
+                })
+                .or_insert(sim);
+            code_ids.push(id);
+        }
         for id in &fts_hits {
             matched.entry(*id).or_default().insert(i);
         }
 
         // Only push the lists for halves that actually ran, so RRF doesn't fuse
         // empty placeholder lists (which would otherwise be harmless no-ops).
-        if run_vector {
+        if run_general_vector {
             ranked_lists.push(vector_ids);
+        }
+        if run_code_vector {
+            ranked_lists.push(code_ids);
         }
         if run_fts {
             ranked_lists.push(fts_hits);
@@ -623,6 +785,7 @@ async fn search(
             overlap_trimmed_count: dedup_stats.trimmed,
             filtered_by_confidence,
             sort_by: req.sort_by,
+            code_mode,
         },
     })
     .into_response()
@@ -789,13 +952,20 @@ async fn fetch_scoring_rows(
 }
 
 /// Resolve the effective query list from either the canonical `queries` array
-/// or the single-query convenience form `{query, vector}` (acceptance #6).
+/// or the single-query convenience form `{query, vector, code_vector}`
+/// (acceptance #6).
 ///
 /// The two forms are mutually exclusive. Returns `Err((message, remediation))`
 /// for an ambiguous (both forms) or incomplete (only one of `query`/`vector`)
-/// request. An entirely empty request yields `Ok(vec![])` so the caller's
-/// empty-queries guard produces the canonical error.
-fn normalize_queries(req: &SearchRequest) -> Result<Vec<QueryPair>, (String, String)> {
+/// request. The general `vector` requirement is keyed on the GENERAL list:
+/// fts mode skips embedding and exclusive `code_mode` replaces the general
+/// list, so both accept a vector-less single query. An entirely empty request
+/// yields `Ok(vec![])` so the caller's empty-queries guard produces the
+/// canonical error.
+fn normalize_queries(
+    req: &SearchRequest,
+    code_mode: CodeMode,
+) -> Result<Vec<QueryPair>, (String, String)> {
     let has_convenience = req.query.is_some() || req.vector.is_some();
     if !req.queries.is_empty() {
         if has_convenience {
@@ -812,12 +982,19 @@ fn normalize_queries(req: &SearchRequest) -> Result<Vec<QueryPair>, (String, Str
         (Some(text), Some(vector)) => Ok(vec![QueryPair {
             text: text.clone(),
             vector: vector.clone(),
+            code_vector: req.code_vector.clone().unwrap_or_default(),
         }]),
-        // fts mode skips embedding, so a vector-less single query is valid.
-        (Some(text), None) if req.mode == SearchMode::Fts => Ok(vec![QueryPair {
-            text: text.clone(),
-            vector: Vec::new(),
-        }]),
+        // fts mode skips embedding, and exclusive code mode replaces the
+        // general vector list, so a general-vector-less single query is valid.
+        (Some(text), None)
+            if req.mode == SearchMode::Fts || code_mode == CodeMode::Exclusive =>
+        {
+            Ok(vec![QueryPair {
+                text: text.clone(),
+                vector: Vec::new(),
+                code_vector: req.code_vector.clone().unwrap_or_default(),
+            }])
+        }
         (Some(_), None) | (None, Some(_)) => Err((
             "the single-query form requires both `query` and `vector`".to_owned(),
             "include the embedding `vector` (dimension must match the corpus model) alongside `query`, or use the `queries` array".to_owned(),
@@ -827,12 +1004,19 @@ fn normalize_queries(req: &SearchRequest) -> Result<Vec<QueryPair>, (String, Str
 }
 
 /// Stable content hash of a query pair (`text` + the raw bits of each vector
-/// component) used to detect duplicate queries for EC-90 dedup.
+/// component, general then code) used to detect duplicate queries for EC-90
+/// dedup. The vectors are length-delimited so `{vector: [a], code_vector: []}`
+/// never collides with `{vector: [], code_vector: [a]}`.
 fn query_hash(q: &QueryPair) -> u64 {
     use std::hash::{Hash as _, Hasher as _};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     q.text.hash(&mut h);
+    q.vector.len().hash(&mut h);
     for f in &q.vector {
+        f.to_bits().hash(&mut h);
+    }
+    q.code_vector.len().hash(&mut h);
+    for f in &q.code_vector {
         f.to_bits().hash(&mut h);
     }
     h.finish()
@@ -869,6 +1053,45 @@ async fn vector_search(
     qb.push_bind(corpus_model_id);
     push_filter_predicates(&mut qb, filters);
     qb.push(" ORDER BY chunk.embedding <=> ");
+    qb.push_bind(Vector::from(vector.to_vec()));
+    qb.push(" LIMIT 100");
+
+    let rows = qb.build().fetch_all(pool).await?;
+    Ok(rows
+        .iter()
+        .filter_map(|r| {
+            let id: Uuid = r.try_get("id").ok()?;
+            let sim: f64 = r.try_get("similarity").ok()?;
+            Some((id, sim))
+        })
+        .collect())
+}
+
+/// Run the code-vector half (voyage-code-3 over the partial HNSW). Restricted
+/// to chunks whose source_version declares the active code model — opt-out
+/// versions and NULL code_embeddings can never appear in this list.
+///
+/// # Errors
+///
+/// Propagates any `sqlx` error from the query.
+async fn code_vector_search(
+    pool: &sqlx::PgPool,
+    vector: &[f32],
+    filters: &SearchFilters,
+    code_model_id: Uuid,
+) -> Result<Vec<(Uuid, f64)>, sqlx::Error> {
+    let mut qb: QueryBuilder<Postgres> =
+        QueryBuilder::new("SELECT chunk.id, 1 - (chunk.code_embedding <=> ");
+    qb.push_bind(Vector::from(vector.to_vec()));
+    qb.push(") AS similarity FROM chunk JOIN source_version sv ON sv.id = chunk.source_version_id");
+    push_filter_joins(&mut qb, filters);
+    qb.push(
+        " WHERE chunk.code_embedding IS NOT NULL AND chunk.status = 'ready' AND sv.is_active = true",
+    );
+    qb.push(" AND sv.code_embedding_model_id = ");
+    qb.push_bind(code_model_id);
+    push_filter_predicates(&mut qb, filters);
+    qb.push(" ORDER BY chunk.code_embedding <=> ");
     qb.push_bind(Vector::from(vector.to_vec()));
     qb.push(" LIMIT 100");
 
@@ -1204,8 +1427,27 @@ fn date_to_dt(d: time::Date) -> time::OffsetDateTime {
 }
 
 #[cfg(test)]
+mod code_mode_tests {
+    use super::{effective_code_mode, CodeMode, SearchMode};
+
+    #[test]
+    fn matrix() {
+        use CodeMode::{Exclusive, Off, On};
+        use SearchMode::{Fts, Hybrid, Vector};
+        assert_eq!(effective_code_mode(Hybrid, None), Ok(On));
+        assert_eq!(effective_code_mode(Vector, None), Ok(On));
+        assert_eq!(effective_code_mode(Fts, None), Ok(Off));
+        assert_eq!(effective_code_mode(Hybrid, Some(Off)), Ok(Off));
+        assert_eq!(effective_code_mode(Vector, Some(Exclusive)), Ok(Exclusive));
+        assert_eq!(effective_code_mode(Fts, Some(Off)), Ok(Off));
+        assert_eq!(effective_code_mode(Fts, Some(On)), Err(()));
+        assert_eq!(effective_code_mode(Fts, Some(Exclusive)), Err(()));
+    }
+}
+
+#[cfg(test)]
 mod tests {
-    use super::{normalize_queries, QueryPair, SearchMode, SearchRequest, SortBy};
+    use super::{normalize_queries, CodeMode, QueryPair, SearchMode, SearchRequest, SortBy};
     use mn_retrieval::filters::{NumericRange, SearchFilters, SetMatch};
 
     fn req(
@@ -1224,6 +1466,9 @@ mod tests {
             mode: SearchMode::default(),
             min_confidence: 0.0,
             include_scores: true,
+            code_mode: None,
+            client_code_embedding_model: None,
+            code_vector: None,
         }
     }
 
@@ -1235,6 +1480,7 @@ mod tests {
             vec![QueryPair {
                 text: "hello world".to_owned(),
                 vector: v,
+                code_vector: Vec::new(),
             }],
             None,
             None,
@@ -1242,8 +1488,8 @@ mod tests {
         // The convenience form is pure sugar: both shapes resolve to the exact
         // same internal query list, so downstream processing is byte-identical.
         assert_eq!(
-            normalize_queries(&convenience).unwrap(),
-            normalize_queries(&canonical).unwrap()
+            normalize_queries(&convenience, CodeMode::On).unwrap(),
+            normalize_queries(&canonical, CodeMode::On).unwrap()
         );
     }
 
@@ -1254,24 +1500,25 @@ mod tests {
             vec![QueryPair {
                 text: "a".to_owned(),
                 vector: v.clone(),
+                code_vector: Vec::new(),
             }],
             Some("b".to_owned()),
             Some(v),
         );
-        assert!(normalize_queries(&both).is_err());
+        assert!(normalize_queries(&both, CodeMode::On).is_err());
     }
 
     #[test]
     fn rejects_incomplete_convenience_form() {
         let only_query = req(Vec::new(), Some("a".to_owned()), None);
         let only_vector = req(Vec::new(), None, Some(vec![0.5_f32; 768]));
-        assert!(normalize_queries(&only_query).is_err());
-        assert!(normalize_queries(&only_vector).is_err());
+        assert!(normalize_queries(&only_query, CodeMode::On).is_err());
+        assert!(normalize_queries(&only_vector, CodeMode::On).is_err());
     }
 
     #[test]
     fn empty_request_yields_empty_list() {
-        assert!(normalize_queries(&req(Vec::new(), None, None))
+        assert!(normalize_queries(&req(Vec::new(), None, None), CodeMode::On)
             .unwrap()
             .is_empty());
     }
@@ -1280,7 +1527,7 @@ mod tests {
     fn fts_mode_allows_vectorless_single_query() {
         let mut r = req(Vec::new(), Some("hello".to_owned()), None);
         r.mode = SearchMode::Fts;
-        let qs = normalize_queries(&r).unwrap();
+        let qs = normalize_queries(&r, CodeMode::Off).unwrap();
         assert_eq!(qs.len(), 1);
         assert_eq!(qs[0].text, "hello");
         assert!(qs[0].vector.is_empty());
@@ -1288,7 +1535,46 @@ mod tests {
         // Non-fts mode still requires the vector for the convenience form.
         let mut r2 = req(Vec::new(), Some("hello".to_owned()), None);
         r2.mode = SearchMode::Hybrid;
-        assert!(normalize_queries(&r2).is_err());
+        assert!(normalize_queries(&r2, CodeMode::On).is_err());
+    }
+
+    #[test]
+    fn exclusive_mode_allows_general_vectorless_single_query() {
+        // In exclusive code mode the general vector list is replaced by the
+        // code-vector list, so the convenience form may omit `vector` as long
+        // as `code_vector` carries the code-model embedding.
+        let mut r = req(Vec::new(), Some("hello".to_owned()), None);
+        r.code_mode = Some(CodeMode::Exclusive);
+        r.code_vector = Some(vec![0.5_f32; 4]);
+        let qs = normalize_queries(&r, CodeMode::Exclusive).unwrap();
+        assert_eq!(qs.len(), 1);
+        assert_eq!(qs[0].text, "hello");
+        assert!(qs[0].vector.is_empty());
+        assert_eq!(qs[0].code_vector.len(), 4);
+
+        // Outside exclusive (and fts) the general vector is still required.
+        assert!(normalize_queries(&r, CodeMode::On).is_err());
+    }
+
+    #[test]
+    fn code_mode_parses_and_defaults_to_none() {
+        let body = serde_json::json!({
+            "queries": [{ "text": "x", "vector": [0.0] }],
+            "client_embedding_model": "voyage-context-3@1"
+        });
+        let req: SearchRequest = serde_json::from_value(body).unwrap();
+        assert_eq!(req.code_mode, None);
+        assert!(req.queries[0].code_vector.is_empty());
+
+        let body2 = serde_json::json!({
+            "queries": [{ "text": "x", "vector": [0.0], "code_vector": [0.1, 0.2] }],
+            "client_embedding_model": "voyage-context-3@1",
+            "client_code_embedding_model": "voyage-code-3@1",
+            "code_mode": "exclusive"
+        });
+        let req2: SearchRequest = serde_json::from_value(body2).unwrap();
+        assert_eq!(req2.code_mode, Some(CodeMode::Exclusive));
+        assert_eq!(req2.queries[0].code_vector, vec![0.1_f32, 0.2_f32]);
     }
 
     #[test]

@@ -22,8 +22,21 @@ use thiserror::Error;
 pub struct Manifest {
     /// Schema sentinel. Always `1` in v1.
     pub manifest_version: u32,
+    /// Whether code-kind documents also get voyage-code-3 embeddings (D9).
+    /// CLI `--no-code-embeddings` overrides this. Default true.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub code_embeddings: bool,
     /// The root of the hierarchy.
     pub root: ManifestNode,
+}
+
+const fn default_true() -> bool {
+    true
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde `skip_serializing_if` requires `&T`
+const fn is_true(b: &bool) -> bool {
+    *b
 }
 
 /// One node in the manifest hierarchy.
@@ -306,5 +319,14 @@ root:
         let m = Manifest::parse(body).unwrap();
         assert!(m.root.include.is_empty());
         assert!(m.root.exclude.is_empty());
+    }
+
+    #[test]
+    fn code_embeddings_defaults_true_and_parses_false() {
+        let m = Manifest::parse("manifest_version: 1\nroot:\n  name: x\n").unwrap();
+        assert!(m.code_embeddings);
+        let m = Manifest::parse("manifest_version: 1\ncode_embeddings: false\nroot:\n  name: x\n")
+            .unwrap();
+        assert!(!m.code_embeddings);
     }
 }

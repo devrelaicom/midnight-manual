@@ -158,6 +158,7 @@ async fn search_returns_nearest_chunk_first() {
             "vector": unit_vector(0.11),
         }],
         "client_embedding_model": "voyage-code-3@1",
+        "code_mode": "off",
         "limit": 100,
     });
     let resp = app
@@ -291,6 +292,7 @@ async fn search_respects_limit_cap() {
     let body = serde_json::json!({
         "queries": [{ "text": "x", "vector": unit_vector(0.5) }],
         "client_embedding_model": "voyage-code-3@1",
+        "code_mode": "off",
         "limit": 1,
     });
     let resp = app
@@ -684,6 +686,7 @@ async fn fts_only_chunk_appears_via_hybrid_union() {
         serde_json::json!({
             "queries": [{ "text": "zzqxftsonly", "vector": unit_vector(0.4243) }],
             "client_embedding_model": "voyage-code-3@1",
+            "code_mode": "off",
             "limit": 50,
         }),
     )
@@ -726,6 +729,7 @@ async fn matched_queries_reflects_contributing_queries() {
                 { "text": "nomatchtoken99zz",  "vector": unit_vector(0.4244) },
             ],
             "client_embedding_model": "voyage-code-3@1",
+            "code_mode": "off",
             "limit": 50,
         }),
     )
@@ -779,6 +783,7 @@ async fn results_carry_rrf_score_in_descending_order() {
         serde_json::json!({
             "queries": [{ "text": "zzqxftsonly rare", "vector": unit_vector(0.4243) }],
             "client_embedding_model": "voyage-code-3@1",
+            "code_mode": "off",
             "limit": 50,
         }),
     )
@@ -812,6 +817,7 @@ async fn convenience_form_is_accepted_end_to_end() {
             "query": "zzqxftsonly",
             "vector": unit_vector(0.4243),
             "client_embedding_model": "voyage-code-3@1",
+            "code_mode": "off",
             "limit": 50,
         }),
     )
@@ -844,6 +850,7 @@ async fn results_carry_confidence_fields() {
             "query": token,
             "vector": unit_vector(0.314),
             "client_embedding_model": "voyage-code-3@1",
+            "code_mode": "off",
             "limit": 50,
         }),
     )
@@ -881,6 +888,7 @@ async fn higher_trust_outranks_under_default_confidence_sort() {
             "query": token,
             "vector": unit_vector(0.314),
             "client_embedding_model": "voyage-code-3@1",
+            "code_mode": "off",
             "limit": 50,
         }),
     )
@@ -919,6 +927,7 @@ async fn version_match_boost_applies_with_filter() {
             "query": token,
             "vector": unit_vector(0.314),
             "client_embedding_model": "voyage-code-3@1",
+            "code_mode": "off",
             "limit": 50,
             "filters": { "language_target": { "any_of": [{ "name": "compact", "version_satisfies": "0.31" }] } },
         }),
@@ -952,6 +961,7 @@ async fn min_confidence_filters_before_limit() {
             "query": token,
             "vector": unit_vector(0.314),
             "client_embedding_model": "voyage-code-3@1",
+            "code_mode": "off",
             "limit": 50,
             // Confidence is strictly < 1.0 (the relevance term never reaches 1),
             // so a floor of 1.0 filters everything.
@@ -985,6 +995,7 @@ async fn include_scores_false_omits_scores() {
             "query": token,
             "vector": unit_vector(0.314),
             "client_embedding_model": "voyage-code-3@1",
+            "code_mode": "off",
             "limit": 50,
             "include_scores": false,
         }),
@@ -1023,6 +1034,7 @@ async fn run_filtered(
             "query": token,
             "vector": unit_vector(0.271),
             "client_embedding_model": "voyage-code-3@1",
+            "code_mode": "off",
             "limit": 100,
             "filters": filters,
         }),
@@ -1189,4 +1201,175 @@ async fn search_returns_400_when_all_text_empty() {
     let body = to_bytes(resp.into_body(), 4096).await.unwrap();
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(v["error"]["code"], "invalid_request");
+}
+
+/// Oneshot `POST /v1/search` returning `(status, parsed JSON)` for the
+/// code_mode contract tests, which assert on both error and success bodies.
+async fn post_search_raw(
+    app: axum::Router,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/search")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = to_bytes(resp.into_body(), 256 * 1024).await.unwrap();
+    let v = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    (status, v)
+}
+
+#[tokio::test]
+async fn fts_mode_rejects_explicit_code_mode_400() {
+    // Spec §10.2: fts forces code_mode=off; an explicit on/exclusive is a 400.
+    let h = common::boot().await;
+    let _ = seed(&h.pool).await;
+    let app = app::build_resolved(h.pool.clone(), cfg())
+        .await
+        .expect("build app");
+
+    let (status, v) = post_search_raw(
+        app,
+        serde_json::json!({
+            "query": "zswap shielded",
+            "mode": "fts",
+            "code_mode": "on",
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(v["error"]["code"], "invalid_request");
+    assert!(
+        v["error"]["message"].as_str().unwrap().contains("fts"),
+        "error names the incompatible mode: {v}"
+    );
+}
+
+#[tokio::test]
+async fn hybrid_defaults_code_mode_on_and_reports_in_metadata() {
+    // D6: hybrid with no explicit code_mode defaults to `on`. The response
+    // metadata echoes the effective mode and the per-query records carry the
+    // code-vector counters. seed() leaves no code embeddings, so the code list
+    // is empty — the request still succeeds via the general + FTS halves.
+    let h = common::boot().await;
+    let _ = seed(&h.pool).await;
+    let app = app::build_resolved(h.pool.clone(), cfg())
+        .await
+        .expect("build app");
+
+    let (status, v) = post_search_raw(
+        app,
+        serde_json::json!({
+            "queries": [{
+                "text": "alpha chunk content",
+                "vector": unit_vector(0.11),
+                "code_vector": unit_vector(0.11),
+            }],
+            "client_embedding_model": "voyage-code-3@1",
+            "client_code_embedding_model": "voyage-code-3@1",
+            "limit": 10,
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["search_metadata"]["code_mode"], "on");
+    let pq = &v["search_metadata"]["per_query"][0];
+    assert!(pq["code_vector_candidates"].is_number());
+    assert!(pq["code_vector_latency_ms"].is_number());
+
+    // Explicit off is echoed back too (and drops the code requirements).
+    let app = app::build_resolved(h.pool.clone(), cfg())
+        .await
+        .expect("build app");
+    let (status, v) = post_search_raw(
+        app,
+        serde_json::json!({
+            "queries": [{ "text": "alpha chunk content", "vector": unit_vector(0.11) }],
+            "client_embedding_model": "voyage-code-3@1",
+            "code_mode": "off",
+            "limit": 10,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["search_metadata"]["code_mode"], "off");
+}
+
+#[tokio::test]
+async fn hybrid_missing_client_code_embedding_model_400() {
+    // With the effective code_mode `on` (the hybrid default), the client must
+    // name the code model it embedded with.
+    let h = common::boot().await;
+    let _ = seed(&h.pool).await;
+    let app = app::build_resolved(h.pool.clone(), cfg())
+        .await
+        .expect("build app");
+
+    let (status, v) = post_search_raw(
+        app,
+        serde_json::json!({
+            "queries": [{
+                "text": "alpha chunk content",
+                "vector": unit_vector(0.11),
+                "code_vector": unit_vector(0.11),
+            }],
+            "client_embedding_model": "voyage-code-3@1",
+            "limit": 10,
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(v["error"]["code"], "invalid_request");
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("client_code_embedding_model"),
+        "error names the missing field: {v}"
+    );
+}
+
+#[tokio::test]
+async fn wrong_code_vector_dim_400() {
+    // A code_vector whose dimension doesn't match the code model is a 400.
+    let h = common::boot().await;
+    let _ = seed(&h.pool).await;
+    let app = app::build_resolved(h.pool.clone(), cfg())
+        .await
+        .expect("build app");
+
+    let (status, v) = post_search_raw(
+        app,
+        serde_json::json!({
+            "queries": [{
+                "text": "alpha chunk content",
+                "vector": unit_vector(0.11),
+                "code_vector": vec![0.0_f32; 128],
+            }],
+            "client_embedding_model": "voyage-code-3@1",
+            "client_code_embedding_model": "voyage-code-3@1",
+            "limit": 10,
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(v["error"]["code"], "invalid_request");
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("code_vector"),
+        "error names the bad field: {v}"
+    );
 }
