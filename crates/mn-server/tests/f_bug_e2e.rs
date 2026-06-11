@@ -72,7 +72,8 @@ struct DocRow {
 /// handles `POST /v1/embeddings`. The caller keeps the `MockServer` alive for
 /// the duration of the test.
 async fn spawn_server(pool: sqlx::PgPool, cfg: ServerConfig, voyage_mock_uri: &str) -> String {
-    // Resolve the corpus model that migration 0008 registered (voyage-code-3@1).
+    // Resolve the active corpus model (post-0011: voyage-context-3@1, the
+    // newest registered model on a fresh corpus).
     let cm = mn_server::corpus_model::resolve(&pool).await.ok();
     let corpus_model = Arc::new(RwLock::new(cm));
 
@@ -85,6 +86,24 @@ async fn spawn_server(pool: sqlx::PgPool, cfg: ServerConfig, voyage_mock_uri: &s
         VoyageEmbedder::new("test-key", "voyage-code-3", 1024, "float")
             .with_base_url(voyage_mock_uri),
     ));
+    // The general (contextualized) embedder serves `type=general` calls — the
+    // CLI's server-proxy ingest path embeds context groups through it.
+    let voyage_ctx = Some(Arc::new(
+        mn_embedding::contextualized::ContextualizedVoyageEmbedder::new(
+            "test-key",
+            "voyage-context-3",
+            1024,
+            "float",
+        )
+        .with_base_url(voyage_mock_uri),
+    ));
+    // Resolve the code model (registered by migration 0008) so
+    // /v1/models/active advertises it, mirroring production boot.
+    let code_model = Arc::new(RwLock::new(
+        mn_server::code_model::resolve(&pool, "voyage-code-3@1")
+            .await
+            .ok(),
+    ));
 
     let app = app::build_with_limiter(
         pool,
@@ -93,8 +112,8 @@ async fn spawn_server(pool: sqlx::PgPool, cfg: ServerConfig, voyage_mock_uri: &s
         corpus_model,
         token_limiter,
         voyage,
-        None,
-        Arc::new(RwLock::new(None)),
+        voyage_ctx,
+        code_model,
     )
     .expect("build app");
 
@@ -134,6 +153,43 @@ async fn voyage_mock() -> MockServer {
                 "data": data,
                 "model": "voyage-code-3",
                 "usage": { "total_tokens": n }
+            }))
+        })
+        .mount(&mock)
+        .await;
+    // The contextualized endpoint serves the general (voyage-context-3) half:
+    // one zero-vector per chunk of each input group, nested per Voyage's shape.
+    Mock::given(method("POST"))
+        .and(path("/v1/contextualizedembeddings"))
+        .respond_with(|req: &Request| {
+            let body: serde_json::Value =
+                serde_json::from_slice(&req.body).unwrap_or(serde_json::Value::Null);
+            let empty = Vec::new();
+            let groups = body["inputs"].as_array().unwrap_or(&empty);
+            let mut total = 0usize;
+            let data: Vec<serde_json::Value> = groups
+                .iter()
+                .enumerate()
+                .map(|(gi, g)| {
+                    let n = g.as_array().map_or(0, Vec::len);
+                    total += n;
+                    serde_json::json!({
+                        "index": gi,
+                        "data": (0..n)
+                            .map(|k| {
+                                serde_json::json!({
+                                    "embedding": vec![0.0_f32; 1024],
+                                    "index": k
+                                })
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": data,
+                "model": "voyage-context-3",
+                "usage": { "total_tokens": total }
             }))
         })
         .mount(&mock)

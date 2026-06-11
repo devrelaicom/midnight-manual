@@ -259,7 +259,7 @@ async fn embeddings_charge_is_visible_in_me_token_budget() {
         "POST",
         "/v1/embeddings",
         None,
-        Some(json!({ "input": ["hi"], "input_type": "query" })),
+        Some(json!({ "input": ["hi"], "input_type": "query", "type": "code" })),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{v}");
