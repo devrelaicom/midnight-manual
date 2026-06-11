@@ -1301,7 +1301,7 @@ pub async fn run_passthrough_id(
 const GET_CHUNKS_MAX_IDS: usize = 20;
 
 /// Dispatch `get_chunks`. Parses `{ids: [uuid, ..]}` — an array of 1 to
-/// [`GET_CHUNKS_MAX_IDS`] UUID strings — and calls the cloud batch endpoint
+/// `GET_CHUNKS_MAX_IDS` UUID strings — and calls the cloud batch endpoint
 /// (`GET /v1/chunks?ids=`). Returns the cloud's `{chunks, missing}` envelope
 /// verbatim; unknown ids land in `missing` (the cloud answers 200, not 404).
 ///

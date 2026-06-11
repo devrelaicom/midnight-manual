@@ -4,7 +4,7 @@
 //! served from a short-lived TTL cache held in [`crate::app::AppState`].
 //!
 //! Two modes:
-//! - **Overview** (no params): the cached facet catalogue with ≤[`SAMPLE_CAP`]
+//! - **Overview** (no params): the cached facet catalogue with ≤`SAMPLE_CAP`
 //!   sample values per open-set facet plus exact `total` counts.
 //! - **Drill-down** (`?facet=<key>&cursor=&limit=`): a keyset-paginated value
 //!   list for one drillable open-set facet, never cached.
