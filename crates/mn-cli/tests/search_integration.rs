@@ -32,6 +32,8 @@ fn make_request(query: &str, limit: u32) -> SearchRequest {
         filters: SearchFilters::default(),
         // Non-rerank path: omitted on the wire (skip_serializing_if).
         sort_by: None,
+        rerank: None,
+        rerank_instructions: None,
     }
 }
 
@@ -113,6 +115,8 @@ async fn multi_query_request_sends_all_pairs() {
         code_mode: None,
         filters: SearchFilters::default(),
         sort_by: None,
+        rerank: None,
+        rerank_instructions: None,
     };
     search_via_http(&server.uri(), None, &request, true)
         .await
