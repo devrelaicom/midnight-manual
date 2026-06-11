@@ -240,6 +240,13 @@ async fn embeddings_charge_is_visible_in_me_token_budget() {
     let voyage = Some(Arc::new(
         VoyageEmbedder::new("k", "voyage-code-3", 1024, "float").with_base_url(&mock.uri()),
     ));
+    // `type=code` snapshots the resolved code model for the wire id; a
+    // synthetic entry suffices (the flat embedder above does the work).
+    let code_model = Arc::new(RwLock::new(Some(mn_server::code_model::CodeModel {
+        wire: "voyage-code-3@1".to_owned(),
+        id: Uuid::new_v4(),
+        dim: 1024,
+    })));
     let app = app::build_with_limiter(
         h.pool.clone(),
         ServerConfig::default(),
@@ -248,7 +255,7 @@ async fn embeddings_charge_is_visible_in_me_token_budget() {
         token_limiter,
         voyage,
         None,
-        Arc::new(RwLock::new(None)),
+        code_model,
     )
     .expect("build app");
 
