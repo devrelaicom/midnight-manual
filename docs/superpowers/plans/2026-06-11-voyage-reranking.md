@@ -1247,7 +1247,7 @@ Server-side observability landed as `metrics` counters in Task 4; client decisio
 - Modify: `crates/mn-cli/src/commands/search.rs` (emit alongside the existing `CliCommand` event)
 - Modify: `crates/mn-mcp` (emit where `McpToolCall` is emitted for search tools)
 
-- [ ] **Step 1: Failing test** — add a case to the existing payload-serialization test table in `events.rs` (mirror the exact tuple shape used by the `McpToolCall` case there):
+- [x] **Step 1: Failing test** — add a case to the existing payload-serialization test table in `events.rs` (mirror the exact tuple shape used by the `McpToolCall` case there):
 
 ```rust
 (
@@ -1264,7 +1264,7 @@ Server-side observability landed as `metrics` counters in Task 4; client decisio
 
 Run: `cargo test -p mn-telemetry` → compile FAIL.
 
-- [ ] **Step 2: Implement** — add the variant (serde attributes matching the enum's existing tagging convention — copy whatever `McpToolCall` uses):
+- [x] **Step 2: Implement** — add the variant (serde attributes matching the enum's existing tagging convention — copy whatever `McpToolCall` uses):
 
 ```rust
 /// One rerank decision (spec §6): where it ran, with what, and the outcome.
@@ -1288,9 +1288,9 @@ Rerank {
 
 Run: `cargo test -p mn-telemetry` → PASS.
 
-- [ ] **Step 3: Emit.** CLI: in `run_with_paths` next to the existing `telemetry.emit(...)` for `CliCommand`, emit one `Rerank` event per search (placement string from the resolved `RerankPlacement`, `applied` from whether the local rerank ran / what `search_metadata.rerank.applied` says on the server path, `billed_tokens` from the local `RerankOutput.total_tokens` run through `RerankParam::billed_tokens`). MCP: same, wherever search-tool telemetry is emitted (grep `McpToolCall` emission in mn-mcp). The existing three-mechanism opt-out wraps `TelemetryClient::emit` already — no extra work.
+- [x] **Step 3: Emit.** CLI: in `run_with_paths` next to the existing `telemetry.emit(...)` for `CliCommand`, emit one `Rerank` event per search (placement string from the resolved `RerankPlacement`, `applied` from whether the local rerank ran / what `search_metadata.rerank.applied` says on the server path, `billed_tokens` from the local `RerankOutput.total_tokens` run through `RerankParam::billed_tokens`). MCP: same, wherever search-tool telemetry is emitted (grep `McpToolCall` emission in mn-mcp). The existing three-mechanism opt-out wraps `TelemetryClient::emit` already — no extra work.
 
-- [ ] **Step 4: Run + commit**
+- [x] **Step 4: Run + commit**
 
 Run: `VOYAGE_API_KEY= cargo test -p mn-telemetry -p mn-cli -p mn-mcp`
 
@@ -1309,7 +1309,7 @@ git commit -m "feat(telemetry): rerank decision event from CLI + MCP"
 - Modify: `README.md` ("Telemetry & Privacy" section)
 - Modify: `CLAUDE.md` (Recent Changes)
 
-- [ ] **Step 1: SKILL.md.** Update the stale reranker copy: the "no model-pulling step / loads lazily" paragraph (lines ~74–75) becomes a short note that reranking is VoyageAI (`rerank-2.5`) — server-side by default, locally when a `VOYAGE_API_KEY` is configured — and that `advanced_search` exposes `rerank` (boolean) and `rerank_instructions`. Add a new section (place it near the rerank/`advanced_search` material, matching the file's heading style):
+- [x] **Step 1: SKILL.md.** Update the stale reranker copy: the "no model-pulling step / loads lazily" paragraph (lines ~74–75) becomes a short note that reranking is VoyageAI (`rerank-2.5`) — server-side by default, locally when a `VOYAGE_API_KEY` is configured — and that `advanced_search` exposes `rerank` (boolean) and `rerank_instructions`. Add a new section (place it near the rerank/`advanced_search` material, matching the file's heading style):
 
 ```markdown
 ## Rerank instructions
@@ -1356,7 +1356,7 @@ steers relevance toward chunks that *discuss* the current pattern rather than
 merely mention upgrades.
 ```
 
-- [ ] **Step 2: README.** In "Telemetry & Privacy", after the embeddings-proxy disclosure, add:
+- [x] **Step 2: README.** In "Telemetry & Privacy", after the embeddings-proxy disclosure, add:
 
 ```markdown
 When server-side reranking is enabled (the default), the search query — plus any
@@ -1367,7 +1367,7 @@ candidates out of the rerank call, or rerank locally with your own
 `VOYAGE_API_KEY`.
 ```
 
-- [ ] **Step 3: CLAUDE.md** — add a Recent Changes bullet (top of the list, dated 2026-06-XX with the actual date):
+- [x] **Step 3: CLAUDE.md** — add a Recent Changes bullet (top of the list, dated 2026-06-XX with the actual date):
 
 ```markdown
 - 2026-06-XX — VoyageAI reranking: inline server rerank in `/v1/search`
@@ -1378,7 +1378,7 @@ candidates out of the rerank call, or rerank locally with your own
   defaults), and full removal of the fastembed/ONNX reranker catalog.
 ```
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add crates/mn-skills README.md CLAUDE.md
@@ -1389,7 +1389,7 @@ git commit -m "docs: rerank instruction-writing guidance, privacy note, CLAUDE.m
 
 ### Task 11: Final verification sweep
 
-- [ ] **Step 1: Full CI-surface check** (per the project rule: package builds miss test targets and feature-gated files)
+- [x] **Step 1: Full CI-surface check** (per the project rule: package builds miss test targets and feature-gated files)
 
 ```bash
 cargo fmt --check
@@ -1400,13 +1400,13 @@ cargo test -p mn-server --no-run --features integration   # match sibling gating
 
 Expected: all clean except the 2 known `mn-cli auth_integration` loopback failures (sandbox-only).
 
-- [ ] **Step 2: Behavioral spot-checks** (no DB needed)
+- [x] **Step 2: Behavioral spot-checks** (no DB needed)
 
 ```bash
 cargo run -p mn-cli -- search --help            # new --rerank/--rerank-model/--rerank-instructions
 cargo run -p mn-cli -- search "x" --rerank local 2>&1 | head -3   # with VOYAGE_API_KEY unset: clear "needs a Voyage API key" error
 ```
 
-- [ ] **Step 3: Spec coverage re-read** — open `docs/superpowers/specs/2026-06-11-voyage-reranking-design.md` and confirm each section maps to landed code (§1 Task 4, §2 Tasks 1+4, §3 Tasks 1+4+6+7, §4 Tasks 2+6+7, §5 Task 8, §6 Tasks 5+9+10, §7 Tasks 1–9 tests). Fix anything missed before declaring done.
+- [x] **Step 3: Spec coverage re-read** — open `docs/superpowers/specs/2026-06-11-voyage-reranking-design.md` and confirm each section maps to landed code (§1 Task 4, §2 Tasks 1+4, §3 Tasks 1+4+6+7, §4 Tasks 2+6+7, §5 Task 8, §6 Tasks 5+9+10, §7 Tasks 1–9 tests). Fix anything missed before declaring done.
 
-- [ ] **Step 4: Commit any stragglers; do NOT push** — integration tests run in CI on the PR.
+- [x] **Step 4: Commit any stragglers; do NOT push** — integration tests run in CI on the PR.
