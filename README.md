@@ -630,6 +630,13 @@ Either way the query text reaches Voyage; the only question is *whose* Voyage ac
 
 The server records only **token counts** and an anonymised **subject key** (a hashed IP, or your SSO user id) for budget accounting — it **never** logs or persists the submitted query text. That invariant is enforced by a CI canary alongside the telemetry one.
 
+When server-side reranking is enabled (the default), the search query — plus any
+`rerank_instructions` — and the text of candidate result chunks are sent to
+VoyageAI's rerank API, the same third-party exposure class as the embeddings
+proxy. Send `rerank: "none"` (CLI: `--rerank off`) to keep a search's
+candidates out of the rerank call, or rerank locally with your own
+`VOYAGE_API_KEY`.
+
 ### BYOK setup
 
 Set a Voyage key any one of these ways and your client embeds directly, skipping the server proxy:

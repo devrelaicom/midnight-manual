@@ -71,8 +71,9 @@ Thirteen tools, four groups:
   key validity, and reranker state. Call it when searches fail or error.
 - `install_search_skill` — (re)install this skill into the user's harness(es).
 
-There is no model-pulling step: the reranker loads lazily on the first
-reranked search (expect a one-time delay), and `status` reports its state.
+Reranking is VoyageAI (`rerank-2.5`): server-side by default, or local when a
+`VOYAGE_API_KEY` is configured. `advanced_search` exposes `rerank` (boolean) and
+`rerank_instructions` to control and steer it; `status` reports the rerank state.
 
 For the exact filter shapes, the full facet catalog, and mode semantics, read
 `references/filters-and-modes.md`. For combined recipes, read
@@ -139,6 +140,39 @@ Chunks without code embeddings can never appear in the code-vector list, so
 `search_metadata.per_query` reports `code_vector_candidates` /
 `code_vector_latency_ms` and the top-level metadata carries the effective
 `code_mode`.
+
+## Rerank instructions
+
+`advanced_search` accepts `rerank_instructions` (max 400 chars): a natural-language
+directive that guides how results are reranked. It REPLACES the built-in default
+(code-focused when `code_mode=exclusive`; version-preferring when a
+`language_target` filter has `version_satisfies`), so include those concerns
+yourself if you override.
+
+Three instruction shapes work well:
+
+- **Emphasis** — name what matters in the match:
+  "Prioritize chunks that show complete, compilable examples over fragments."
+- **Filtering** — name what kind of document you want:
+  "Prefer API reference material; deprioritize tutorials and blog posts."
+- **Disambiguation** — pin ambiguous query terms:
+  "'Witness' means the Compact private-input function, not a legal term."
+
+Rules of thumb:
+
+1. Keep it under ~25 words. Instruction tokens are multiplied by the candidate
+   pool (~50 docs), so a long instruction is the single most expensive thing
+   you can add to a search.
+2. Don't restate the query — the model already sees it. Add only the
+   preference the query can't express.
+3. Don't stack contradictory goals ("prefer code" + "prefer conceptual
+   overviews"); pick the one that decides ties.
+4. Omit it entirely when the defaults fit: the derived defaults already handle
+   code-heavy and version-pinned searches.
+5. `rerank: false` is the cheap-exploration switch — use it for broad recon
+   sweeps where ordering precision doesn't matter, then rerank the refined query.
+
+See references/rerank-instructions.md for worked examples against this corpus.
 
 ## Match the user's version & freshness
 
@@ -243,3 +277,6 @@ technique D (differential search) for the filtered version of this.
   version+freshness precision, the discovery/self-correction loop and filter
   ladder, trust-stratified / differential / symbol-anchored recipes, and
   efficient deep reading.
+- `references/rerank-instructions.md` — worked `rerank_instructions` examples
+  against this corpus: the emphasis / filtering / disambiguation shapes, when to
+  override the derived defaults, and when to drop instructions or rerank at all.
