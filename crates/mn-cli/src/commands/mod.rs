@@ -16,6 +16,7 @@ pub mod ratelimits;
 pub mod search;
 pub mod skills;
 pub mod sources;
+pub mod status;
 pub mod telemetry;
 pub mod tokenlimits;
 pub mod users;

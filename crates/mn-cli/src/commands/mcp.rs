@@ -6,7 +6,6 @@
 
 use anyhow::{Context as _, Result};
 use clap::{Args as ClapArgs, Subcommand};
-use time::OffsetDateTime;
 
 /// `mnm mcp <subcommand>`.
 #[derive(Debug, ClapArgs)]
@@ -50,7 +49,7 @@ async fn serve() -> Result<()> {
     // Resolve a read-uplift bearer if the user has run `mnm auth github`.
     // Anonymous mode is fine — the cloud's read endpoints work without auth,
     // they just hit the lower rate-limit tier.
-    let bearer_token = resolve_read_uplift_token();
+    let bearer_token = crate::shared::resolve_read_uplift_token();
 
     let mut server_cfg = mn_mcp::ServerConfig::with_defaults(cache_dir);
     server_cfg.telemetry_url =
@@ -63,15 +62,4 @@ async fn serve() -> Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("MCP server loop failed: {e}"))?;
     Ok(())
-}
-
-/// Look up the active read-uplift bearer in `$XDG_CONFIG_HOME/midnight-manual/auth.toml`.
-/// Absent or expired tokens degrade silently to anonymous mode.
-fn resolve_read_uplift_token() -> Option<String> {
-    let path = mn_core::paths::auth_file_path(&mn_core::config::StdEnv)?;
-    let file = mn_core::auth_file::AuthFile::read_optional(&path)
-        .ok()
-        .flatten()?;
-    file.active_read_uplift_token(OffsetDateTime::now_utc())
-        .map(str::to_owned)
 }
