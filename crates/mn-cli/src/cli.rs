@@ -74,8 +74,9 @@ pub enum Command {
     Version,
     /// Diagnostic report.
     Doctor(commands::doctor::Args),
-    /// Ad-hoc retrieval — `mnm search <query>`.
-    Search(commands::search::Args),
+    /// Ad-hoc retrieval — `mnm search <query>`. Boxed: the search Args is by
+    /// far the largest payload (clippy::large_enum_variant).
+    Search(Box<commands::search::Args>),
     /// Print the corpus's filterable facets (modes + filter keys/values).
     Facets(commands::facets::Args),
     /// Source registry inspection.
@@ -166,7 +167,7 @@ pub async fn run() -> Result<()> {
         Command::Doctor(args) => commands::doctor::run(args, cli.json).await,
         Command::Search(args) => {
             commands::search::run(
-                args,
+                *args,
                 cli.server.as_deref(),
                 cli.config.as_deref(),
                 cli.voyage_api_key.as_deref(),

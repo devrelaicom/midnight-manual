@@ -497,6 +497,9 @@ async fn ingest_source(
         max_file_size: 10 * 1024 * 1024,
         // Migrate does NOT expose the global-cap opt-out.
         unsafe_no_global_limit: false,
+        // Follow the manifest's `code_embeddings` option (default on); migrate
+        // does not expose the per-run opt-out flag.
+        no_code_embeddings: false,
     };
 
     let stats = crate::commands::ingest::run::run_with_paths_stats(

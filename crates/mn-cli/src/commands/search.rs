@@ -10,18 +10,25 @@
 //!    Anonymous still works; the server's `/v1/search` is public and the
 //!    bearer only affects rate-limit tier.
 //!
-//! 3. Embed every query via VoyageAI. Two modes:
+//! 3. Embed every query via VoyageAI — with the GENERAL (contextualized)
+//!    model unless `--code-mode exclusive`, and additionally with the CODE
+//!    model unless `--code-mode off`. The effective need mirrors the server's
+//!    `code_mode` defaults (D6: explicit parameter, never query sniffing);
+//!    `--mode fts` embeds nothing. Each embedding runs in one of two modes:
 //!    - **BYOK** (flag/env/config key present): call Voyage directly with the
-//!      caller's own key via [`mn_embedding::client::EmbedSource::Byok`].
+//!      caller's own key via [`mn_embedding::client::EmbedSource::Byok`] /
+//!      [`mn_embedding::client::GeneralEmbedSource::Byok`].
 //!    - **Server-proxy** (no key): POST to the server's `/v1/embeddings`
-//!      endpoint, which holds the platform key and enforces token limits.
+//!      endpoint with the matching `type` tag (`general` | `code`); the server
+//!      holds the platform key and enforces token limits.
 //!
-//!    The corpus active model is fetched from `GET /v1/models/active` to form
-//!    the canonical wire id (`name@revision`) labelling the request.
+//!    The corpus active models are fetched from `GET /v1/models/active` to
+//!    form the canonical wire ids (`name@revision`) labelling the request.
 //!
-//! 4. `POST /v1/search` with the resulting `{text, vector}` pairs. With more
-//!    than one query the server RRFs across them; the response's per-query and
-//!    per-result diagnostics are surfaced in the rendered output.
+//! 4. `POST /v1/search` with the resulting `{text, vector, code_vector}` pairs
+//!    (plus `code_mode` when the flag was given). With more than one query the
+//!    server RRFs across them; the response's per-query and per-result
+//!    diagnostics are surfaced in the rendered output.
 //!
 //! 5. Optionally rerank. By default the CLI does NOT rerank — quick queries
 //!    trade the quality boost for lower latency and a smaller install
@@ -114,6 +121,12 @@ pub struct Args {
     /// Query mode: hybrid (default), vector, or fts.
     #[arg(long, default_value = "hybrid", value_parser = ["hybrid", "vector", "fts"])]
     pub mode: String,
+
+    /// Code-vector fusion mode: on (default for hybrid/vector), off, or
+    /// exclusive (code vectors replace the general vector list). Incompatible
+    /// with --mode fts.
+    #[arg(long = "code-mode", value_parser = ["on", "off", "exclusive"])]
+    pub code_mode: Option<String>,
 
     /// Restrict to these chunk kinds (markdown|code|plaintext). Repeatable.
     #[arg(long = "kind")]
@@ -226,10 +239,11 @@ pub async fn run(
     .await
 }
 
-/// Path-explicit driver. Embeds the query via VoyageAI (BYOK or server-proxy),
-/// resolves the corpus wire id, posts `/v1/search`, and — when `args.rerank` is
-/// set — reranks the candidates client-side via the configured reranker catalog
-/// id before rendering. `cache_dir` is the on-disk fastembed model cache used
+/// Path-explicit driver. Embeds the query via VoyageAI (BYOK or server-proxy)
+/// with the general and/or code model as the effective mode/`--code-mode`
+/// requires, resolves the corpus wire ids, posts `/v1/search`, and — when
+/// `args.rerank` is set — reranks the candidates client-side via the
+/// configured reranker catalog id before rendering. `cache_dir` is the on-disk fastembed model cache used
 /// by the local reranker variants.
 ///
 /// # Errors
@@ -260,65 +274,67 @@ pub async fn run_with_paths(
     let (cfg, _) = mn_core::config::Config::discover(config_path, &env).unwrap_or_default();
     let voyage_key = mn_core::config::resolve_voyage_api_key(voyage_api_key, &cfg.models, &env);
 
-    let input_type = mn_embedding::voyage::InputType::Query;
-    let embedded = if let Some(key) = voyage_key.as_deref() {
-        let embedder = mn_embedding::voyage::VoyageEmbedder::new(
-            key,
-            &cfg.models.embedding,
-            cfg.models.voyage_output_dimension,
-            &cfg.models.voyage_output_dtype,
-        );
-        mn_embedding::client::embed(
-            texts.clone(),
-            input_type,
-            mn_embedding::client::EmbedSource::Byok(&embedder),
-        )
-        .await
-    } else {
-        mn_embedding::client::embed(
-            texts.clone(),
-            input_type,
-            mn_embedding::client::EmbedSource::Server {
-                base_url: server_url,
-                bearer: bearer.as_deref(),
-                // Search never opts out of the global cap (read path, not ingest).
-                no_global_limit: false,
-            },
-        )
-        .await
-    }
-    .context("embed queries via Voyage")?;
-
-    let vectors = embedded.vectors;
-    if vectors.len() != texts.len() {
-        return Err(anyhow!(
-            "embedder returned {} vectors for {} queries",
-            vectors.len(),
-            texts.len()
-        ));
-    }
-
-    let client_embedding_model =
-        resolve_client_embedding_model(&args.embedding_model, server_url).await?;
-
     // Resolve mode + filters from the granular flags (or --filter-json) and
-    // fail fast on an invalid filter before any further work.
+    // fail fast on an invalid filter before any embedding / network work.
     let (mode, filters) = build_filters(&args)?;
     validate_filters(&filters)?;
 
+    // Which query embeddings this request needs — mirrors the server's
+    // code_mode defaults client-side (D6: explicit parameter, never query
+    // sniffing). The raw `args.code_mode` is still sent on the wire, so an
+    // invalid combination (fts + on/exclusive) gets the server's 400 message.
+    let (embed_general_query, embed_code_query) =
+        query_embed_needs(&args.mode, args.code_mode.as_deref());
+
+    let general_vectors = if embed_general_query {
+        embed_general_queries(
+            &texts,
+            voyage_key.as_deref(),
+            &cfg.models,
+            server_url,
+            bearer.as_deref(),
+        )
+        .await?
+    } else {
+        vec![Vec::new(); texts.len()]
+    };
+    let code_vectors = if embed_code_query {
+        embed_code_queries(
+            &texts,
+            voyage_key.as_deref(),
+            &cfg.models,
+            server_url,
+            bearer.as_deref(),
+        )
+        .await?
+    } else {
+        vec![Vec::new(); texts.len()]
+    };
+
+    let (client_embedding_model, client_code_embedding_model) = resolve_wire_models(
+        &args.embedding_model,
+        &cfg.models.code_embedding,
+        embed_code_query,
+        server_url,
+    )
+    .await?;
+
     let queries: Vec<QueryPair> = texts
         .into_iter()
-        .zip(vectors)
-        .map(|(text, vector)| QueryPair { text, vector })
+        .zip(general_vectors)
+        .zip(code_vectors)
+        .map(|((text, vector), code_vector)| QueryPair { text, vector, code_vector })
         .collect();
-    let request = build_search_request(
+    let request = build_search_request(SearchRequestParts {
         queries,
         client_embedding_model,
-        args.limit,
-        args.rerank,
+        client_code_embedding_model,
+        limit: args.limit,
+        rerank: args.rerank,
         mode,
+        code_mode: args.code_mode.clone(),
         filters,
-    );
+    });
 
     // Resolve the env-dependent rerank selection up front (synchronously) into
     // owned data. The `ConfigEnv` trait carries no `Sync` guarantee, so threading
@@ -367,24 +383,163 @@ pub async fn run_with_paths(
     result
 }
 
-/// Resolve the embedding-model wire id sent with the search request. When the
-/// sentinel [`DEFAULT_EMBEDDING_MODEL`] (`"auto"`) is in effect, fetch the
-/// corpus's active model from `GET /v1/models/active` so the wire id always
-/// matches the active corpus model; an explicit `--embedding-model` override is
-/// honoured verbatim and skips the round-trip.
+/// Which query embeddings the request needs: `(general, code)`. Mirrors the
+/// server's `code_mode` defaults client-side (D6: explicit parameter, never
+/// query sniffing) — fts embeds nothing; `exclusive` skips the general
+/// embedding; `off` skips the code embedding; hybrid/vector default to both.
+fn query_embed_needs(mode: &str, code_mode: Option<&str>) -> (bool, bool) {
+    let general = mode != "fts" && code_mode != Some("exclusive");
+    let code = mode != "fts" && code_mode != Some("off");
+    (general, code)
+}
+
+/// Embed the query texts with the GENERAL (contextualized) model — BYOK via
+/// [`mn_embedding::contextualized::ContextualizedVoyageEmbedder`] when a
+/// Voyage key is present, otherwise proxied through the server's
+/// `/v1/embeddings` with `type=general`.
+///
+/// # Errors
+///
+/// Returns `anyhow::Error` when the embedding call fails or the vector count
+/// doesn't match the query count.
+async fn embed_general_queries(
+    texts: &[String],
+    voyage_key: Option<&str>,
+    models: &mn_core::config::ModelsConfig,
+    server_url: &str,
+    bearer: Option<&str>,
+) -> Result<Vec<Vec<f32>>> {
+    let input_type = mn_embedding::voyage::InputType::Query;
+    let embedded = if let Some(key) = voyage_key {
+        let embedder = mn_embedding::contextualized::ContextualizedVoyageEmbedder::new(
+            key,
+            &models.embedding,
+            models.voyage_output_dimension,
+            &models.voyage_output_dtype,
+        );
+        mn_embedding::client::embed_general(
+            texts.to_vec(),
+            input_type,
+            mn_embedding::client::GeneralEmbedSource::Byok(&embedder),
+        )
+        .await
+    } else {
+        mn_embedding::client::embed_general(
+            texts.to_vec(),
+            input_type,
+            mn_embedding::client::GeneralEmbedSource::Server {
+                base_url: server_url,
+                bearer,
+                // Search never opts out of the global cap (read path, not ingest).
+                no_global_limit: false,
+            },
+        )
+        .await
+    }
+    .context("embed queries via Voyage (general model)")?;
+    ensure_vector_count(embedded.vectors, texts.len(), "general")
+}
+
+/// Embed the query texts with the CODE model (voyage-code-3, flat endpoint) —
+/// BYOK via the flat [`mn_embedding::voyage::VoyageEmbedder`] when a Voyage
+/// key is present, otherwise proxied through the server's `/v1/embeddings`
+/// with `type=code`.
+///
+/// # Errors
+///
+/// Returns `anyhow::Error` when the embedding call fails or the vector count
+/// doesn't match the query count.
+async fn embed_code_queries(
+    texts: &[String],
+    voyage_key: Option<&str>,
+    models: &mn_core::config::ModelsConfig,
+    server_url: &str,
+    bearer: Option<&str>,
+) -> Result<Vec<Vec<f32>>> {
+    let input_type = mn_embedding::voyage::InputType::Query;
+    let embedded = if let Some(key) = voyage_key {
+        let embedder = mn_embedding::voyage::VoyageEmbedder::new(
+            key,
+            &models.code_embedding,
+            models.voyage_output_dimension,
+            &models.voyage_output_dtype,
+        );
+        mn_embedding::client::embed_code(
+            texts.to_vec(),
+            input_type,
+            mn_embedding::client::EmbedSource::Byok(&embedder),
+        )
+        .await
+    } else {
+        mn_embedding::client::embed_code(
+            texts.to_vec(),
+            input_type,
+            mn_embedding::client::EmbedSource::Server {
+                base_url: server_url,
+                bearer,
+                no_global_limit: false,
+            },
+        )
+        .await
+    }
+    .context("embed queries via Voyage (code model)")?;
+    ensure_vector_count(embedded.vectors, texts.len(), "code")
+}
+
+/// Guard: one vector per query text, in order.
+fn ensure_vector_count(
+    vectors: Vec<Vec<f32>>,
+    expected: usize,
+    which: &str,
+) -> Result<Vec<Vec<f32>>> {
+    if vectors.len() == expected {
+        Ok(vectors)
+    } else {
+        Err(anyhow!(
+            "{which} embedder returned {} vectors for {expected} queries",
+            vectors.len()
+        ))
+    }
+}
+
+/// Resolve the general + code embedding-model wire ids sent with the search
+/// request, with at most one `GET /v1/models/active` round-trip.
+///
+/// The general id honours an explicit `--embedding-model` override verbatim;
+/// the sentinel [`DEFAULT_EMBEDDING_MODEL`] (`"auto"`) resolves from the
+/// corpus's active model so the wire id always matches. The code id (resolved
+/// only when `need_code`) comes from the active response's `code` half,
+/// falling back to `<config code model>@1` when the server reports none. When
+/// neither id needs the active model, the round-trip is skipped entirely.
 ///
 /// # Errors
 ///
 /// Returns `anyhow::Error` when the active-model fetch fails.
-async fn resolve_client_embedding_model(embedding_model: &str, server_url: &str) -> Result<String> {
-    if embedding_model == DEFAULT_EMBEDDING_MODEL {
-        let active = crate::commands::models::fetch_active(server_url)
-            .await
-            .context("resolve active corpus model")?;
-        Ok(format!("{}@{}", active.name, active.revision))
-    } else {
-        Ok(embedding_model.to_owned())
+async fn resolve_wire_models(
+    embedding_model: &str,
+    code_model_name: &str,
+    need_code: bool,
+    server_url: &str,
+) -> Result<(String, Option<String>)> {
+    let need_general_fetch = embedding_model == DEFAULT_EMBEDDING_MODEL;
+    if !need_general_fetch && !need_code {
+        return Ok((embedding_model.to_owned(), None));
     }
+    let active = crate::commands::models::fetch_active(server_url)
+        .await
+        .context("resolve active corpus model")?;
+    let general = if need_general_fetch {
+        format!("{}@{}", active.name, active.revision)
+    } else {
+        embedding_model.to_owned()
+    };
+    let code = need_code.then(|| {
+        active.code.as_ref().map_or_else(
+            || format!("{code_model_name}@1"),
+            |c| format!("{}@{}", c.name, c.revision),
+        )
+    });
+    Ok((general, code))
 }
 
 /// Map the granular filter flags (or `--filter-json`) into a [`SearchFilters`],
@@ -495,6 +650,29 @@ fn validate_filters(filters: &mn_retrieval::filters::SearchFilters) -> Result<()
     Ok(())
 }
 
+/// Everything [`build_search_request`] folds into the outgoing body. Grouped
+/// into a struct (like [`DispatchSearch`]) to keep the builder under the
+/// argument-count lint as fields accrue.
+struct SearchRequestParts {
+    /// Query pairs (general + code vectors already attached, empty halves for
+    /// embeddings the effective mode/code_mode skipped).
+    queries: Vec<QueryPair>,
+    /// General embedding-model wire id.
+    client_embedding_model: String,
+    /// Code embedding-model wire id; `None` when no code embedding was made.
+    client_code_embedding_model: Option<String>,
+    /// Caller's result limit.
+    limit: u32,
+    /// Whether the client-side rerank pass runs (widens the cloud pool).
+    rerank: bool,
+    /// Query mode (`hybrid` | `vector` | `fts`).
+    mode: String,
+    /// Raw `--code-mode` value; `None` defers to the server default.
+    code_mode: Option<String>,
+    /// Per-result filters.
+    filters: SearchFilters,
+}
+
 /// Build the outgoing `/v1/search` body, sizing the candidate pool for the
 /// chosen path.
 ///
@@ -505,25 +683,20 @@ fn validate_filters(filters: &mn_retrieval::filters::SearchFilters) -> Result<()
 /// truncates the reranked set back to `limit`. When `rerank` is off the body
 /// carries the caller's `limit` and omits `sort_by` (`skip_serializing_if`), so
 /// the wire body is byte-identical to the pre-Task-9.4 form.
-fn build_search_request(
-    queries: Vec<QueryPair>,
-    client_embedding_model: String,
-    limit: u32,
-    rerank: bool,
-    mode: String,
-    filters: SearchFilters,
-) -> SearchRequest {
-    let (cloud_limit, sort_by) = if rerank {
+fn build_search_request(parts: SearchRequestParts) -> SearchRequest {
+    let (cloud_limit, sort_by) = if parts.rerank {
         (RERANK_FETCH, Some("score".to_owned()))
     } else {
-        (limit, None)
+        (parts.limit, None)
     };
     SearchRequest {
-        queries,
-        client_embedding_model,
+        queries: parts.queries,
+        client_embedding_model: parts.client_embedding_model,
+        client_code_embedding_model: parts.client_code_embedding_model,
         limit: cloud_limit,
-        mode,
-        filters,
+        mode: parts.mode,
+        code_mode: parts.code_mode,
+        filters: parts.filters,
         sort_by,
     }
 }
@@ -868,11 +1041,22 @@ pub struct SearchRequest {
     pub queries: Vec<QueryPair>,
     /// Embedding model wire id the queries were encoded against.
     pub client_embedding_model: String,
+    /// Code embedding-model wire id the `code_vector`s were encoded against
+    /// (required server-side when the effective code_mode != off). `None` when
+    /// no code embedding was made — the key is then omitted on the wire.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_code_embedding_model: Option<String>,
     /// Maximum number of results.
     pub limit: u32,
     /// Query mode (`hybrid` | `vector` | `fts`); serialized as the `mode` key,
     /// matching the cloud's snake_case `SearchMode` values.
     pub mode: String,
+    /// Code-vector fusion mode (`on` | `off` | `exclusive`), serialized as the
+    /// raw string (the cloud's snake_case `CodeMode` values). `None` defers to
+    /// the server default (on for hybrid/vector, forced off for fts) and omits
+    /// the key entirely.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code_mode: Option<String>,
     /// Per-result filters.
     pub filters: SearchFilters,
     /// Optional ordering hint for the candidate pool. The rerank path sets this
@@ -884,14 +1068,21 @@ pub struct SearchRequest {
     pub sort_by: Option<String>,
 }
 
-/// One {text, vector} pair.
+/// One {text, vector, code_vector} triple.
 #[derive(Debug, Clone, Serialize)]
 pub struct QueryPair {
     /// Verbatim query text.
     pub text: String,
-    /// Pre-computed embedding; its dimension is set by the active corpus model
-    /// (e.g. 1024 for voyage-code-3).
+    /// Pre-computed general embedding; its dimension is set by the active
+    /// corpus model (e.g. 1024 for voyage-context-3). Empty — and omitted on
+    /// the wire — when the effective mode/code_mode skips the general
+    /// embedding (fts, or code_mode=exclusive).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub vector: Vec<f32>,
+    /// Pre-computed code-model embedding (e.g. 1024 for voyage-code-3). Empty
+    /// — and omitted on the wire — unless the effective code_mode != off.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub code_vector: Vec<f32>,
 }
 
 /// Search response shape. Matches `SearchResponse` on the server side, with
@@ -1212,6 +1403,7 @@ mod tests {
             rerank: false,
             reranker: None,
             mode: "hybrid".to_owned(),
+            code_mode: None,
             kind: Vec::new(),
             language: Vec::new(),
             exclude_language: Vec::new(),
@@ -1314,20 +1506,29 @@ mod tests {
         assert!((top_score - 0.95).abs() < 1e-6, "top rerank_score was {top_score}");
     }
 
+    /// Default [`SearchRequestParts`] for the build tests: one hybrid query
+    /// pair carrying a general vector, no rerank, no code fields.
+    fn parts(queries: Vec<QueryPair>, limit: u32, rerank: bool) -> SearchRequestParts {
+        SearchRequestParts {
+            queries,
+            client_embedding_model: "voyage-context-3@1".to_owned(),
+            client_code_embedding_model: None,
+            limit,
+            rerank,
+            mode: "hybrid".to_owned(),
+            code_mode: None,
+            filters: SearchFilters::default(),
+        }
+    }
+
     #[test]
     fn build_request_rerank_widens_pool_and_sets_score_sort() {
         let q = vec![QueryPair {
             text: "x".to_owned(),
             vector: vec![0.0],
+            code_vector: Vec::new(),
         }];
-        let req = build_search_request(
-            q,
-            "voyage-code-3@1".to_owned(),
-            5,
-            true,
-            "hybrid".to_owned(),
-            SearchFilters::default(),
-        );
+        let req = build_search_request(parts(q, 5, true));
         // Caller asked for 5 but the cloud pool is widened so the reranker can
         // promote a below-cutoff candidate.
         assert_eq!(req.limit, RERANK_FETCH);
@@ -1343,15 +1544,9 @@ mod tests {
         let q = vec![QueryPair {
             text: "x".to_owned(),
             vector: vec![0.0],
+            code_vector: Vec::new(),
         }];
-        let req = build_search_request(
-            q,
-            "voyage-code-3@1".to_owned(),
-            5,
-            false,
-            "hybrid".to_owned(),
-            SearchFilters::default(),
-        );
+        let req = build_search_request(parts(q, 5, false));
         assert_eq!(req.limit, 5);
         assert!(req.sort_by.is_none());
         // None must be OMITTED on the wire (skip_serializing_if), not null —
@@ -1361,6 +1556,80 @@ mod tests {
         assert!(
             body.as_object().unwrap().get("sort_by").is_none(),
             "sort_by key must be absent for the non-rerank path"
+        );
+    }
+
+    #[test]
+    fn embed_needs_mirror_server_code_mode_defaults() {
+        // (general, code) per mode × code_mode — no query sniffing (D6).
+        assert_eq!(query_embed_needs("hybrid", None), (true, true));
+        assert_eq!(query_embed_needs("vector", None), (true, true));
+        assert_eq!(query_embed_needs("hybrid", Some("on")), (true, true));
+        assert_eq!(query_embed_needs("hybrid", Some("off")), (true, false));
+        assert_eq!(query_embed_needs("hybrid", Some("exclusive")), (false, true));
+        // fts embeds nothing, whatever code_mode says (server 400s on/exclusive).
+        assert_eq!(query_embed_needs("fts", None), (false, false));
+        assert_eq!(query_embed_needs("fts", Some("on")), (false, false));
+        assert_eq!(query_embed_needs("fts", Some("exclusive")), (false, false));
+    }
+
+    #[test]
+    fn build_request_exclusive_sends_code_mode_and_permits_empty_general_vector() {
+        let q = vec![QueryPair {
+            text: "deployContract".to_owned(),
+            vector: Vec::new(), // exclusive: no general embedding was made
+            code_vector: vec![0.5, 0.25],
+        }];
+        let mut p = parts(q, 5, false);
+        p.client_code_embedding_model = Some("voyage-code-3@1".to_owned());
+        p.code_mode = Some("exclusive".to_owned());
+        let body = serde_json::to_value(build_search_request(p)).unwrap();
+        assert_eq!(body["code_mode"], "exclusive");
+        assert_eq!(body["client_code_embedding_model"], "voyage-code-3@1");
+        let q0 = body["queries"][0].as_object().unwrap();
+        assert!(
+            q0.get("vector").is_none(),
+            "empty general vector must be omitted in exclusive mode, got: {q0:?}"
+        );
+        assert_eq!(q0["code_vector"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn build_request_fts_omits_vector_and_code_fields() {
+        let q = vec![QueryPair {
+            text: "plain words".to_owned(),
+            vector: Vec::new(),
+            code_vector: Vec::new(),
+        }];
+        let mut p = parts(q, 5, false);
+        p.mode = "fts".to_owned();
+        let body = serde_json::to_value(build_search_request(p)).unwrap();
+        let top = body.as_object().unwrap();
+        assert!(top.get("code_mode").is_none(), "code_mode key must be absent");
+        assert!(
+            top.get("client_code_embedding_model").is_none(),
+            "client_code_embedding_model key must be absent"
+        );
+        let q0 = body["queries"][0].as_object().unwrap();
+        assert!(q0.get("vector").is_none(), "fts sends no general vector");
+        assert!(q0.get("code_vector").is_none(), "fts sends no code vector");
+    }
+
+    #[test]
+    fn code_mode_flag_parses_enum_and_defaults_to_none() {
+        use clap::Parser as _;
+        #[derive(clap::Parser)]
+        struct Probe {
+            #[command(flatten)]
+            inner: Args,
+        }
+        let p = Probe::parse_from(["search", "q"]);
+        assert!(p.inner.code_mode.is_none(), "--code-mode must default to None");
+        let p = Probe::parse_from(["search", "q", "--code-mode", "exclusive"]);
+        assert_eq!(p.inner.code_mode.as_deref(), Some("exclusive"));
+        assert!(
+            Probe::try_parse_from(["search", "q", "--code-mode", "bogus"]).is_err(),
+            "values outside on|off|exclusive must be rejected at parse time"
         );
     }
 

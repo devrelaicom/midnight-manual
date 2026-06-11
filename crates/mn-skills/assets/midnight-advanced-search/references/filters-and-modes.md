@@ -22,6 +22,17 @@ exist in the live corpus — every concrete value below is illustrative.
 - Rate-limit cost is `max(1, distinct queries)` tokens in every mode. Filters
   are free. `mode` changes work/latency, not token cost.
 
+### code_mode
+
+The corpus carries dual embeddings (general voyage-context-3 on every chunk;
+code voyage-code-3 on code chunks). `code_mode` controls the code-vector
+ranked list: `on` (default for `hybrid`/`vector`) fuses it into the RRF pool
+alongside the general results; `off` is general retrieval only; `exclusive`
+replaces the general vector list with the code-vector list. `fts` forces
+`off` — sending `on`/`exclusive` with `mode=fts` is a **400**. Use
+`exclusive` for code-shaped queries (function names, API signatures, error
+strings from code); see the defaults table in `SKILL.md`.
+
 ## Filter model
 
 `filters` is an object keyed by facet name. Across facets the combination is
@@ -137,6 +148,7 @@ facets` prints the discovery output:
 
 ```
 --mode <hybrid|vector|fts>
+--code-mode <on|off|exclusive>
 --kind <markdown|code|plaintext>                 (repeatable → any_of)
 --language <lang> / --exclude-language <lang>    (any_of / none_of)
 --tag <tag> / --exclude-tag <tag>

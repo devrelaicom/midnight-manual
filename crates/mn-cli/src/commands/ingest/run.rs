@@ -21,6 +21,10 @@
 //!    embedded by the CLI via VoyageAI (`input_type=document`) before upload —
 //!    either BYOK (Voyage direct, when a key resolves) or through the server's
 //!    `/v1/embeddings` proxy — so the server never loads an embedding model.
+//!    All chunks get GENERAL contextualized vectors (voyage-context-3,
+//!    per-document context groups); chunks of Code-kind documents additionally
+//!    get flat voyage-code-3 vectors unless opted out (manifest
+//!    `code_embeddings: false` or `--no-code-embeddings`, D9).
 //!
 //! 7. `POST /v1/admin/sources/:slug/ingest-runs/:id/finalize` — promote
 //!    the run to `active`.
@@ -40,7 +44,8 @@ use mn_content::manifest::Manifest;
 use mn_core::auth_file::AuthFile;
 use mn_core::provenance::Provenance;
 use mn_core::types::{DocumentKind, SourceKind};
-use mn_embedding::client::{embed, EmbedSource};
+use mn_embedding::client::{EmbedSource, GeneralEmbedSource};
+use mn_embedding::contextualized::ContextualizedVoyageEmbedder;
 use mn_embedding::voyage::{InputType, VoyageEmbedder};
 use mn_telemetry::events::{Component, EventPayload, Outcome};
 use mn_telemetry::{Event, TelemetryClient};
@@ -175,6 +180,12 @@ pub struct Args {
     /// counted against the global cap.
     #[arg(long)]
     pub unsafe_no_global_limit: bool,
+
+    /// Disable voyage-code-3 code embeddings for this run (overrides the
+    /// manifest's `code_embeddings` option). Code files still get general
+    /// contextualized embeddings.
+    #[arg(long)]
+    pub no_code_embeddings: bool,
 }
 
 /// Dispatch.
@@ -341,6 +352,12 @@ async fn run_inner(
     let manifest = Manifest::parse(&body).context("parse manifest")?;
     manifest.validate().context("validate manifest")?;
 
+    // Dual embeddings opt-out (D9): the CLI flag wins over the manifest's
+    // `code_embeddings` option (default true). When disabled, code-kind
+    // documents still get general contextualized embeddings — only the extra
+    // voyage-code-3 vectors are skipped.
+    let code_embeddings_enabled = !args.no_code_embeddings && manifest.code_embeddings;
+
     let source_root = args.source_root.clone().unwrap_or_else(|| {
         manifest_path
             .parent()
@@ -499,33 +516,53 @@ async fn run_inner(
     let voyage_key = mn_core::config::resolve_voyage_api_key(voyage_api_key, &cfg.models, &env);
     let voyage_timeout_secs =
         mn_core::config::resolve_voyage_timeout_secs(args.voyage_timeout_secs, &cfg.models, &env);
-    let byok_embedder = voyage_key.as_deref().map(|key| {
-        VoyageEmbedder::new(
+    let byok = voyage_key.as_deref().map(|key| ByokEmbedders {
+        general: ContextualizedVoyageEmbedder::new(
             key,
             &cfg.models.embedding,
             cfg.models.voyage_output_dimension,
             &cfg.models.voyage_output_dtype,
         )
-        .with_timeout_secs(voyage_timeout_secs)
+        .with_timeout_secs(voyage_timeout_secs),
+        code: VoyageEmbedder::new(
+            key,
+            &cfg.models.code_embedding,
+            cfg.models.voyage_output_dimension,
+            &cfg.models.voyage_output_dtype,
+        )
+        .with_timeout_secs(voyage_timeout_secs),
     });
     reporter.phase(
         "embedder_resolved",
-        serde_json::json!({"mode": if byok_embedder.is_some() { "byok" } else { "server" }}),
+        serde_json::json!({"mode": if byok.is_some() { "byok" } else { "server" }}),
     );
 
-    // Resolve the corpus wire id. When the sentinel "auto" is present, fetch the
-    // active model from the server so the wire id always matches the active
-    // corpus model; an explicit --embedding-model override is honoured directly
-    // (and skips the round-trip). This labels both the start-run request and the
-    // per-batch upload bodies.
-    let embedding_model = if args.embedding_model == DEFAULT_EMBEDDING_MODEL {
-        let active = crate::commands::models::fetch_active(server_url)
-            .await
-            .context("resolve active corpus model")?;
-        format!("{}@{}", active.name, active.revision)
+    // Resolve the corpus wire ids. One `GET /v1/models/active` round-trip covers
+    // both: the GENERAL wire id (when the sentinel "auto" is present — an
+    // explicit --embedding-model override is honoured directly) and the CODE
+    // wire id (when code embeddings are enabled). These label the start-run
+    // request and the per-batch upload bodies.
+    let active = if args.embedding_model == DEFAULT_EMBEDDING_MODEL || code_embeddings_enabled {
+        Some(
+            crate::commands::models::fetch_active(server_url)
+                .await
+                .context("resolve active corpus model")?,
+        )
     } else {
-        args.embedding_model.clone()
+        None
     };
+    let embedding_model = active
+        .as_ref()
+        .filter(|_| args.embedding_model == DEFAULT_EMBEDDING_MODEL)
+        .map_or_else(|| args.embedding_model.clone(), |a| format!("{}@{}", a.name, a.revision));
+    // Code wire id: prefer the server's active code model; fall back to the
+    // configured name at revision 1 for servers that predate dual embeddings.
+    let code_embedding_model = code_embeddings_enabled.then(|| {
+        active.as_ref().and_then(|a| a.code.as_ref()).map_or_else(
+            || format!("{}@1", cfg.models.code_embedding),
+            |c| format!("{}@{}", c.name, c.revision),
+        )
+    });
 
     // ── Phase: start ingest run ──────────────────────────────────────────────
     reporter.phase("start_run", serde_json::json!({"slug": args.source_slug}));
@@ -540,6 +577,7 @@ async fn run_inner(
         &StartIngestRunRequest {
             ingest_cli_version: env!("CARGO_PKG_VERSION").to_owned(),
             embedding_model: embedding_model.clone(),
+            code_embedding_model,
             note: args.note.clone(),
         },
     )
@@ -587,6 +625,7 @@ async fn run_inner(
                     end_byte: i32::try_from(c.end_byte).unwrap_or(i32::MAX),
                     token_count: i32::try_from(c.token_count).unwrap_or(i32::MAX),
                     embedding: None,
+                    code_embedding: None,
                 })
                 .collect(),
             package: d.package.clone(),
@@ -612,27 +651,38 @@ async fn run_inner(
     // on RunStats so the model-migration driver can budget at source boundaries.
     let mut total_tokens = 0u64;
 
-    // Build the embed context once: BYOK when a Voyage key resolved, else proxy
+    // Build the embed sources once: BYOK when a Voyage key resolved, else proxy
     // through the server's /v1/embeddings (which holds the platform key). The
     // admin-only `--unsafe-no-global-limit` opt-out only applies on the
     // server-proxy path; the server still enforces the admin-role check, so a
     // non-admin caller setting it has no effect. It is meaningless for BYOK
-    // (Voyage has no such cap), so the BYOK branch ignores it.
-    let embed_ctx = byok_embedder.as_ref().map_or(
-        EmbedCtx::Server {
+    // (Voyage has no such cap), so the BYOK branch ignores it. Both source enums
+    // are `Copy`, so the per-batch loop reuses them directly.
+    let general_src = byok.as_ref().map_or(
+        GeneralEmbedSource::Server {
             base_url: server_url,
             bearer: bearer.as_deref(),
             no_global_limit: args.unsafe_no_global_limit,
         },
-        EmbedCtx::Byok,
+        |b| GeneralEmbedSource::Byok(&b.general),
     );
+    let code_src = code_embeddings_enabled.then(|| {
+        byok.as_ref().map_or(
+            EmbedSource::Server {
+                base_url: server_url,
+                bearer: bearer.as_deref(),
+                no_global_limit: args.unsafe_no_global_limit,
+            },
+            |b| EmbedSource::Byok(&b.code),
+        )
+    });
 
     for (i, batch) in batches.into_iter().enumerate() {
         let mut batch_docs = batch;
         // Embedding is the slow per-batch step; surface it as its own phase so
         // progress consumers don't appear to hang on "uploading".
         reporter.batch(i + 1, batch_count, "embedding documents");
-        match embed_batch(&embed_ctx, &mut batch_docs).await {
+        match embed_batch(general_src, code_src, &mut batch_docs).await {
             Ok(tokens) => total_tokens = total_tokens.saturating_add(tokens),
             Err(e) => {
                 abort_run(&client, server_url, &args.source_slug, start.ingest_run_id, &token)
@@ -822,93 +872,168 @@ fn resolve_admin_bearer_str(token: &str) -> Option<String> {
     }
 }
 
-/// Where the per-batch Voyage embedding call goes. Holds the borrows needed to
-/// (re)construct an [`EmbedSource`] per sub-batch — `EmbedSource` is consumed by
-/// value by [`embed`], so we rebuild it for each window rather than move it.
-enum EmbedCtx<'a> {
-    /// BYOK: call Voyage directly with the supplied embedder.
-    Byok(&'a VoyageEmbedder),
-    /// Server-proxy via `/v1/embeddings`.
-    Server {
-        base_url: &'a str,
-        bearer: Option<&'a str>,
-        /// Admin-only opt-out from the server's site-wide token cap (from
-        /// `--unsafe-no-global-limit`). Meaningless on the BYOK path.
-        no_global_limit: bool,
-    },
+/// The two BYOK Voyage embedders an ingest run holds when a key resolves
+/// (dual embeddings, D1): the GENERAL contextualized embedder
+/// (voyage-context-3) for every chunk, and the flat CODE embedder
+/// (voyage-code-3) for chunks of Code-kind documents.
+struct ByokEmbedders {
+    general: ContextualizedVoyageEmbedder,
+    code: VoyageEmbedder,
 }
 
-impl EmbedCtx<'_> {
-    const fn source(&self) -> EmbedSource<'_> {
-        match self {
-            Self::Byok(v) => EmbedSource::Byok(v),
-            Self::Server {
-                base_url,
-                bearer,
-                no_global_limit,
-            } => EmbedSource::Server {
-                base_url,
-                bearer: *bearer,
-                no_global_limit: *no_global_limit,
-            },
-        }
-    }
-}
-
-/// Embed every chunk of `docs` in place via VoyageAI (`input_type=document`),
-/// using `ctx` (BYOK direct, or the server `/v1/embeddings` proxy), and return
-/// the total VoyageAI tokens consumed across this batch's sub-requests.
+/// Embed every chunk of `docs` in place: general contextualized vectors for
+/// all chunks (per-document context groups, spec §6), plus flat voyage-code-3
+/// vectors for chunks of Code-kind documents when `code` is supplied. Returns
+/// the total Voyage tokens consumed across both models.
 ///
-/// The collected chunk texts are greedily packed into sub-requests bounded by
-/// BOTH [`VOYAGE_MAX_TEXTS_PER_REQUEST`] items AND [`VOYAGE_MAX_TOKENS_PER_REQUEST`]
-/// tokens, using each chunk's recorded token count. `voyage-code-3` returns 400
-/// for requests over ~120K tokens (measured: 500 chunks / 74K tokens = 200 OK;
-/// 1000 chunks / ~148K tokens = 400), so the token bound is the real guard; the
-/// item bound is a secondary safety net. A single chunk that alone exceeds the
-/// token budget is still sent as its own sub-request (never dropped). Input order
-/// is preserved: vectors are concatenated in order before being distributed back
-/// across the docs' chunks, and the per-request `usage.total_tokens` is summed
-/// (both BYOK and server-proxy report it via [`mn_embedding::client::Embedded`]).
+/// General path: each document's chunks are partitioned into context groups
+/// ([`mn_content::context_group::balanced_groups`]) and the groups packed into
+/// Voyage requests by [`plan_group_batches`]. Code path: Code-kind chunks are
+/// flat-embedded in sub-requests bounded by [`plan_subbatches`] (same limits
+/// as before). Input order is preserved on both paths; vectors are distributed
+/// back positionally.
 ///
 /// # Errors
 ///
-/// Errors if any Voyage call fails or the returned vector count does not match
-/// the chunk count.
-async fn embed_batch(ctx: &EmbedCtx<'_>, docs: &mut [DocumentUpload]) -> Result<u64> {
-    // Pair each chunk text with its token count so we can bound sub-requests by
-    // both item count and summed tokens. `token_count` is a non-negative i32;
-    // the `0` fallback only affects budgeting — never vector alignment, which is
-    // positional.
-    let texts: Vec<(String, usize)> = docs
-        .iter()
-        .flat_map(|d| {
-            d.chunks
-                .iter()
-                .map(|c| (c.content.clone(), usize::try_from(c.token_count).unwrap_or(0)))
-        })
-        .collect();
-    if texts.is_empty() {
-        return Ok(0);
-    }
-
-    let token_counts: Vec<usize> = texts.iter().map(|(_, t)| *t).collect();
-    let plan =
-        plan_subbatches(&token_counts, VOYAGE_MAX_TEXTS_PER_REQUEST, VOYAGE_MAX_TOKENS_PER_REQUEST);
-
-    let mut vectors: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
+/// Errors if any Voyage call fails or a returned vector count does not match
+/// the corresponding chunk count.
+async fn embed_batch(
+    general: GeneralEmbedSource<'_>,
+    code: Option<EmbedSource<'_>>,
+    docs: &mut [DocumentUpload],
+) -> Result<u64> {
     let mut tokens = 0u64;
-    let mut chunks = texts.into_iter().map(|(s, _)| s);
-    for size in plan {
-        let sub: Vec<String> = chunks.by_ref().take(size).collect();
-        let embedded = embed(sub, InputType::Document, ctx.source())
-            .await
-            .map_err(|e| anyhow!("embed chunks via Voyage: {e}"))?;
-        tokens = tokens.saturating_add(embedded.total_tokens);
-        vectors.extend(embedded.vectors);
+
+    // ── General: per-document context groups, packed into Voyage requests ──
+    // Each entry: (texts, token_total) for one context group. `token_count` is
+    // a non-negative i32; the `0` fallback only affects budgeting — never
+    // vector alignment, which is positional.
+    let mut groups: Vec<(Vec<String>, usize)> = Vec::new();
+    for d in docs.iter() {
+        let counts: Vec<u32> = d
+            .chunks
+            .iter()
+            .map(|c| u32::try_from(c.token_count).unwrap_or(0))
+            .collect();
+        for r in mn_content::context_group::balanced_groups(
+            &counts,
+            mn_content::context_group::context_group_limit(),
+        ) {
+            let texts: Vec<String> = d.chunks[r.clone()]
+                .iter()
+                .map(|c| c.content.clone())
+                .collect();
+            let total: usize = counts[r].iter().map(|&t| t as usize).sum();
+            groups.push((texts, total));
+        }
+    }
+    if !groups.is_empty() {
+        let plan = plan_group_batches(&groups);
+        let mut general_vectors: Vec<Vec<f32>> = Vec::new();
+        let mut cursor = groups.into_iter();
+        for take in plan {
+            let req_groups: Vec<Vec<String>> =
+                cursor.by_ref().take(take).map(|(texts, _)| texts).collect();
+            let out = mn_embedding::client::embed_general_groups(req_groups, general)
+                .await
+                .map_err(|e| anyhow!("embed context groups via Voyage: {e}"))?;
+            tokens = tokens.saturating_add(out.total_tokens);
+            general_vectors.extend(out.groups.into_iter().flatten());
+        }
+        attach_embeddings(docs, general_vectors)?;
     }
 
-    attach_embeddings(docs, vectors)?;
+    // ── Code: flat embed for Code-kind documents' chunks ──
+    if let Some(code_src) = code {
+        let mut code_texts: Vec<(String, usize)> = Vec::new();
+        for d in docs.iter() {
+            if d.kind == DocumentKind::Code {
+                for c in &d.chunks {
+                    code_texts
+                        .push((c.content.clone(), usize::try_from(c.token_count).unwrap_or(0)));
+                }
+            }
+        }
+        if !code_texts.is_empty() {
+            let counts: Vec<usize> = code_texts.iter().map(|(_, t)| *t).collect();
+            let plan = plan_subbatches(
+                &counts,
+                VOYAGE_MAX_TEXTS_PER_REQUEST,
+                VOYAGE_MAX_TOKENS_PER_REQUEST,
+            );
+            let mut vectors: Vec<Vec<f32>> = Vec::with_capacity(code_texts.len());
+            let mut chunks = code_texts.into_iter().map(|(s, _)| s);
+            for size in plan {
+                let sub: Vec<String> = chunks.by_ref().take(size).collect();
+                let out = mn_embedding::client::embed_code(sub, InputType::Document, code_src)
+                    .await
+                    .map_err(|e| anyhow!("embed code chunks via Voyage: {e}"))?;
+                tokens = tokens.saturating_add(out.total_tokens);
+                vectors.extend(out.vectors);
+            }
+            attach_code_embeddings(docs, vectors)?;
+        }
+    }
     Ok(tokens)
+}
+
+/// Pack context groups into Voyage requests bounded by ≤1 000 input groups,
+/// ≤100 K summed tokens (headroom under Voyage's ~120 K hard limit), and
+/// ≤16 K total chunks per request. Returns group-counts per request, summing
+/// to `groups.len()`. A single group that alone exceeds a bound still goes
+/// out as its own request (never dropped).
+fn plan_group_batches(groups: &[(Vec<String>, usize)]) -> Vec<usize> {
+    const MAX_INPUTS: usize = 1_000;
+    const MAX_TOKENS: usize = 100_000; // headroom under Voyage's 120K
+    const MAX_CHUNKS: usize = 16_000;
+    let mut sizes = Vec::new();
+    let (mut n, mut toks, mut chunks) = (0usize, 0usize, 0usize);
+    for (texts, total) in groups {
+        let over = n > 0
+            && (n >= MAX_INPUTS
+                || toks.saturating_add(*total) > MAX_TOKENS
+                || chunks.saturating_add(texts.len()) > MAX_CHUNKS);
+        if over {
+            sizes.push(n);
+            n = 0;
+            toks = 0;
+            chunks = 0;
+        }
+        n += 1;
+        toks = toks.saturating_add(*total);
+        chunks = chunks.saturating_add(texts.len());
+    }
+    if n > 0 {
+        sizes.push(n);
+    }
+    sizes
+}
+
+/// Distribute one code vector per Code-kind chunk, in document-then-chunk
+/// order. Non-code documents are skipped (their `code_embedding` stays `None`).
+///
+/// # Errors
+///
+/// Errors if `vectors.len()` does not equal the total Code-kind chunk count.
+fn attach_code_embeddings(docs: &mut [DocumentUpload], vectors: Vec<Vec<f32>>) -> Result<()> {
+    let total: usize = docs
+        .iter()
+        .filter(|d| d.kind == DocumentKind::Code)
+        .map(|d| d.chunks.len())
+        .sum();
+    if vectors.len() != total {
+        return Err(anyhow!("code embedder returned {} vectors for {total} chunks", vectors.len()));
+    }
+    let mut it = vectors.into_iter();
+    for d in docs.iter_mut() {
+        if d.kind != DocumentKind::Code {
+            continue;
+        }
+        for c in &mut d.chunks {
+            c.code_embedding = it.next();
+        }
+    }
+    Ok(())
 }
 
 /// Greedily group chunk `token_counts` into sub-request sizes bounded by BOTH
@@ -971,17 +1096,75 @@ mod plan_subbatches_tests {
     }
 }
 
+#[cfg(test)]
+mod plan_group_batches_tests {
+    use super::plan_group_batches;
+
+    /// Build `n` groups, each with `texts` empty strings and `tokens` summed
+    /// tokens. Only the shape matters for the packer.
+    fn mk_groups(n: usize, texts: usize, tokens: usize) -> Vec<(Vec<String>, usize)> {
+        (0..n)
+            .map(|_| (vec![String::new(); texts], tokens))
+            .collect()
+    }
+
+    #[test]
+    fn splits_on_group_cap() {
+        // 1 001 tiny groups, input cap 1 000 -> 1 000 + 1.
+        assert_eq!(plan_group_batches(&mk_groups(1_001, 1, 1)), vec![1_000, 1]);
+    }
+
+    #[test]
+    fn splits_on_token_cap() {
+        // 30k-token groups: three fit (90k); the fourth (120k) starts a new batch.
+        assert_eq!(plan_group_batches(&mk_groups(7, 1, 30_000)), vec![3, 3, 1]);
+    }
+
+    #[test]
+    fn splits_on_chunk_cap() {
+        // 9k-chunk groups: two would be 18k chunks > 16k, so one group per batch.
+        assert_eq!(plan_group_batches(&mk_groups(3, 9_000, 10)), vec![1, 1, 1]);
+    }
+
+    #[test]
+    fn oversized_group_goes_out_alone() {
+        let groups = vec![
+            (vec![String::new()], 10_000),
+            (vec![String::new()], 150_000), // alone exceeds the token cap
+            (vec![String::new()], 10_000),
+        ];
+        assert_eq!(plan_group_batches(&groups), vec![1, 1, 1]);
+    }
+
+    #[test]
+    fn empty_input_yields_no_batches() {
+        assert!(plan_group_batches(&[]).is_empty());
+    }
+
+    #[test]
+    fn sizes_sum_to_group_count() {
+        let sizes = plan_group_batches(&mk_groups(2_345, 2, 500));
+        assert_eq!(sizes.iter().sum::<usize>(), 2_345);
+    }
+}
+
 /// Rough estimate of `doc`'s serialized JSON upload size in bytes, INCLUDING the
 /// embedding vectors attached per chunk before upload (they are `None` at plan
-/// time but dominate the real payload). Intentionally approximate.
+/// time but dominate the real payload). Code-kind chunks count the vector cost
+/// twice — they may also carry a `code_embedding` (dual embeddings, D1); when
+/// code embeddings are opted out this merely over-estimates, which the packer
+/// tolerates by design. Intentionally approximate.
 fn estimated_upload_bytes(doc: &DocumentUpload) -> usize {
+    let vectors_per_chunk = if doc.kind == DocumentKind::Code { 2 } else { 1 };
     EST_PER_DOC_OVERHEAD
         + doc.path.len()
         + doc
             .chunks
             .iter()
             .map(|c| {
-                c.content.len() + EST_PER_CHUNK_OVERHEAD + EST_EMBED_DIM * EST_BYTES_PER_EMBED_FLOAT
+                c.content.len()
+                    + EST_PER_CHUNK_OVERHEAD
+                    + vectors_per_chunk * EST_EMBED_DIM * EST_BYTES_PER_EMBED_FLOAT
             })
             .sum::<usize>()
 }
@@ -1180,6 +1363,12 @@ fn redact_token_like(s: &str) -> String {
 struct StartIngestRunRequest {
     ingest_cli_version: String,
     embedding_model: String,
+    /// Code-embedding wire id (`name@revision`) when this run uploads
+    /// voyage-code-3 vectors (dual embeddings, D1); omitted when code
+    /// embeddings are opted out, which records
+    /// `code_embedding_model_id = NULL` on the source_version.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code_embedding_model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     note: Option<String>,
 }
@@ -1235,6 +1424,10 @@ struct ChunkUpload {
     token_count: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
     embedding: Option<Vec<f32>>,
+    /// Flat voyage-code-3 vector, only for chunks of Code-kind documents when
+    /// code embeddings are enabled (dual embeddings, D1).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code_embedding: Option<Vec<f32>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1465,6 +1658,102 @@ mod tests {
     }
 
     #[test]
+    fn no_code_embeddings_flag_parses_and_defaults_false() {
+        use clap::Parser as _;
+        #[derive(clap::Parser)]
+        struct Wrap {
+            #[command(flatten)]
+            inner: Args,
+        }
+        // Absent → false (code embeddings follow the manifest, default on).
+        let off = Wrap::try_parse_from(["ingest-run", "--source-slug", "s", "m.yaml"]).unwrap();
+        assert!(!off.inner.no_code_embeddings);
+        // Present → true (overrides the manifest's `code_embeddings: true`).
+        let on = Wrap::try_parse_from([
+            "ingest-run",
+            "--source-slug",
+            "s",
+            "--no-code-embeddings",
+            "m.yaml",
+        ])
+        .unwrap();
+        assert!(on.inner.no_code_embeddings);
+    }
+
+    #[test]
+    fn attach_code_embeddings_targets_code_docs_only() {
+        let mut code_a = mk_doc(2, 1);
+        code_a.kind = DocumentKind::Code;
+        let markdown = mk_doc(1, 1);
+        let mut code_b = mk_doc(1, 1);
+        code_b.kind = DocumentKind::Code;
+        let mut docs = vec![code_a, markdown, code_b];
+        // 3 code chunks total (2 + 1); the markdown chunk gets nothing.
+        let vectors = vec![vec![1.0_f32], vec![2.0], vec![3.0]];
+        attach_code_embeddings(&mut docs, vectors).unwrap();
+        assert_eq!(docs[0].chunks[0].code_embedding, Some(vec![1.0]));
+        assert_eq!(docs[0].chunks[1].code_embedding, Some(vec![2.0]));
+        assert_eq!(docs[1].chunks[0].code_embedding, None);
+        assert_eq!(docs[2].chunks[0].code_embedding, Some(vec![3.0]));
+    }
+
+    #[test]
+    fn attach_code_embeddings_rejects_count_mismatch() {
+        let mut doc = mk_doc(2, 1);
+        doc.kind = DocumentKind::Code;
+        let mut docs = vec![doc];
+        // 2 code chunks but only 1 vector → error, nothing partially attached.
+        assert!(attach_code_embeddings(&mut docs, vec![vec![1.0_f32]]).is_err());
+    }
+
+    #[test]
+    fn chunk_upload_skips_code_embedding_when_none() {
+        let c = mk_chunk(0);
+        let s = serde_json::to_string(&c).unwrap();
+        assert!(!s.contains("code_embedding"), "None code_embedding must be omitted: {s}");
+    }
+
+    #[test]
+    fn chunk_upload_serializes_code_embedding_when_present() {
+        let mut c = mk_chunk(0);
+        c.code_embedding = Some(vec![0.25_f32; 4]);
+        let v: serde_json::Value = serde_json::to_value(&c).unwrap();
+        assert_eq!(v["code_embedding"].as_array().map(Vec::len), Some(4));
+    }
+
+    #[test]
+    fn start_run_request_carries_optional_code_embedding_model() {
+        let without = StartIngestRunRequest {
+            ingest_cli_version: "1.0.0".into(),
+            embedding_model: "voyage-context-3@1".into(),
+            code_embedding_model: None,
+            note: None,
+        };
+        let s = serde_json::to_string(&without).unwrap();
+        assert!(!s.contains("code_embedding_model"), "None must be omitted: {s}");
+
+        let with = StartIngestRunRequest {
+            code_embedding_model: Some("voyage-code-3@1".into()),
+            ..without
+        };
+        let v: serde_json::Value = serde_json::to_value(&with).unwrap();
+        assert_eq!(v["code_embedding_model"], "voyage-code-3@1");
+    }
+
+    #[test]
+    fn estimated_upload_bytes_counts_both_vectors_for_code_docs() {
+        // Code-kind chunks carry `embedding` + `code_embedding`, so the
+        // (deliberately conservative) estimate doubles the vector cost.
+        let md = mk_doc(2, 100);
+        let mut code = mk_doc(2, 100);
+        code.kind = DocumentKind::Code;
+        assert_eq!(
+            estimated_upload_bytes(&code) - estimated_upload_bytes(&md),
+            2 * EST_EMBED_DIM * EST_BYTES_PER_EMBED_FLOAT,
+        );
+    }
+
+    #[test]
     fn attach_embeddings_rejects_count_mismatch() {
         let mut docs = vec![DocumentUpload {
             path: "a".into(),
@@ -1496,6 +1785,7 @@ mod tests {
             end_byte: 0,
             token_count: 0,
             embedding: None,
+            code_embedding: None,
         }
     }
 
@@ -1515,6 +1805,7 @@ mod tests {
                 end_byte: 0,
                 token_count: 0,
                 embedding: None,
+                code_embedding: None,
             })
             .collect();
         DocumentUpload {
@@ -1730,6 +2021,7 @@ mod tests {
             end_byte: 1,
             token_count: 0,
             embedding: None,
+            code_embedding: None,
         };
         let s = serde_json::to_string(&c).unwrap();
         assert!(!s.contains("embedding"), "None embedding must be omitted: {s}");
@@ -1765,6 +2057,7 @@ mod tests {
                     end_byte: 1,
                     token_count: 0,
                     embedding: Some(vec![0.5_f32; 1024]),
+                    code_embedding: None,
                 }],
             }],
             batch_index: Some(0),

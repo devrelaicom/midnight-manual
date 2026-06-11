@@ -22,10 +22,13 @@ fn make_request(query: &str, limit: u32) -> SearchRequest {
         queries: vec![QueryPair {
             text: query.to_owned(),
             vector: vec![0.1, 0.2, 0.3],
+            code_vector: Vec::new(),
         }],
         client_embedding_model: "bge-base-en-v1.5@1".to_owned(),
+        client_code_embedding_model: None,
         limit,
         mode: "hybrid".to_owned(),
+        code_mode: None,
         filters: SearchFilters::default(),
         // Non-rerank path: omitted on the wire (skip_serializing_if).
         sort_by: None,
@@ -95,15 +98,19 @@ async fn multi_query_request_sends_all_pairs() {
             QueryPair {
                 text: "primary".to_owned(),
                 vector: vec![0.1, 0.2, 0.3],
+                code_vector: Vec::new(),
             },
             QueryPair {
                 text: "alt one".to_owned(),
                 vector: vec![0.4, 0.5, 0.6],
+                code_vector: Vec::new(),
             },
         ],
         client_embedding_model: "bge-base-en-v1.5@1".to_owned(),
+        client_code_embedding_model: None,
         limit: 10,
         mode: "hybrid".to_owned(),
+        code_mode: None,
         filters: SearchFilters::default(),
         sort_by: None,
     };

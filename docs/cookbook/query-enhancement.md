@@ -50,6 +50,21 @@ indices of the queries that contributed at least one FTS or vector rank to that
 result. Use `matched_queries` to see *which* of your enhanced queries pulled a
 given chunk in.
 
+### code_mode (code-vector fusion)
+
+The corpus carries dual embeddings — a general vector (voyage-context-3) on
+every chunk plus a code vector (voyage-code-3) on code chunks — and the
+`search` tool's optional `code_mode` parameter (`on` | `off` | `exclusive`)
+controls whether the code-vector ranked list joins the RRF fusion. It defaults
+to `on` for `hybrid`/`vector` and is forced `off` for `fts` (sending
+`on`/`exclusive` with `mode=fts` is a 400). Code-heavy queries (function
+names, API signatures, error strings from code) benefit from
+`code_mode=exclusive`, which swaps the general vector list out for the code
+one; conceptual queries should keep the default. `code_mode` composes with
+every pattern below — the enhanced queries are embedded with both models, and
+each per-query record gains `code_vector_candidates` / `code_vector_latency_ms`
+when code search ran.
+
 ---
 
 ## 1. HyDE (Hypothetical Document Embeddings)

@@ -21,13 +21,20 @@ use serde::Serialize;
 use thiserror::Error;
 use url::Url;
 
-/// One `{text, vector}` pair posted to the cloud `/v1/search` endpoint.
+/// One `{text, vector, code_vector}` triple posted to the cloud `/v1/search`
+/// endpoint.
 #[derive(Debug, Clone, Serialize)]
 pub struct QueryPair {
     /// Original query text — kept for FTS / logging on the cloud side.
     pub text: String,
-    /// Locally produced embedding vector (1024 dims for voyage-code-3).
+    /// Locally produced general-model embedding (1024 dims for
+    /// voyage-context-3). Empty in `fts` mode and when `code_mode=exclusive`.
     pub vector: Vec<f32>,
+    /// Locally produced code-model embedding (voyage-code-3); required by the
+    /// cloud iff the effective `code_mode != off`. Empty vectors are omitted
+    /// from the wire so pre-dual-embeddings request bodies are unchanged.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub code_vector: Vec<f32>,
 }
 
 /// Request body for `POST /v1/search` matching `mn-server`'s shape.
@@ -53,6 +60,26 @@ pub struct SearchRequest {
     /// Query mode forwarded to the cloud (`hybrid` | `vector` | `fts`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mode: Option<&'static str>,
+    /// Code-vector fusion mode (`on` | `off` | `exclusive`). `None` lets the
+    /// cloud derive its mode-dependent default (on for hybrid/vector, off for
+    /// fts) — only an explicit caller choice is forwarded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code_mode: Option<&'static str>,
+    /// `{name}@{revision}` wire id of the code-model embedder used for the
+    /// `code_vector`s. Required by the cloud iff the effective
+    /// `code_mode != off`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_code_embedding_model: Option<String>,
+}
+
+/// The corpus's active embedding models, decoded from `GET /v1/models/active`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveModels {
+    /// General-model `{name}@{revision}` wire id (e.g. `voyage-context-3@1`).
+    pub general: String,
+    /// Code-model wire id, when the corpus has one. `None` means code search
+    /// is unavailable server-side.
+    pub code: Option<String>,
 }
 
 /// Errors the cloud client can produce.
@@ -138,19 +165,23 @@ impl CloudClient {
         self.bearer.as_deref()
     }
 
-    /// `GET /v1/models/active` — returns the corpus's active embedding model
-    /// as a `{name}@{revision}` wire id string (e.g. `"voyage-code-3@1"`).
+    /// `GET /v1/models/active` — returns the corpus's active embedding models:
+    /// the general `{name}@{revision}` wire id plus, when the corpus carries
+    /// dual embeddings, the code model's wire id from the response's `code`
+    /// sub-object.
     ///
     /// The response is expected to have at least `name` (string) and `revision`
-    /// (integer) fields; all other fields are ignored.
+    /// (integer) fields. The optional `code` sub-object is decoded leniently —
+    /// absent or malformed means "no code model" (code search unavailable),
+    /// never a decode error, so older servers keep working.
     ///
     /// # Errors
     ///
     /// Returns [`CloudError::Transport`] on a connection failure,
     /// [`CloudError::NotFound`] on a 404, [`CloudError::Status`] for any other
     /// non-2xx response, or [`CloudError::Decode`] for a body that fails to
-    /// parse or is missing the `name`/`revision` fields.
-    pub async fn fetch_active_model(&self) -> Result<String, CloudError> {
+    /// parse or is missing the top-level `name`/`revision` fields.
+    pub async fn fetch_active_model(&self) -> Result<ActiveModels, CloudError> {
         let v = self.get_json("/v1/models/active").await?;
         let name = v
             .get("name")
@@ -164,7 +195,15 @@ impl CloudClient {
             .ok_or_else(|| {
                 CloudError::Decode("/v1/models/active response missing `revision` field".to_owned())
             })?;
-        Ok(format!("{name}@{revision}"))
+        let code = v.get("code").and_then(|c| {
+            let code_name = c.get("name")?.as_str()?;
+            let code_revision = c.get("revision")?.as_i64()?;
+            Some(format!("{code_name}@{code_revision}"))
+        });
+        Ok(ActiveModels {
+            general: format!("{name}@{revision}"),
+            code,
+        })
     }
 
     /// `POST /v1/search`.

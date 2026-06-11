@@ -25,7 +25,8 @@ playbook for using it like a researcher.
 
 - `search` — retrieval. Pass a single `query`, or a `queries` array (1–10) the
   server fuses with Reciprocal Rank Fusion (k=60). Optional `mode`
-  (`hybrid` default | `vector` | `fts`), `rerank` (default on), and a typed
+  (`hybrid` default | `vector` | `fts`), `code_mode` (`on` | `off` |
+  `exclusive`, see *code_mode*), `rerank` (default on), and a typed
   per-facet `filters` object. Every result carries `trust_score`, `confidence`,
   `confidence_factors`, and `scores.matched_queries`.
 - `facets` — list the filterable facets, their types, whether they negate, and
@@ -68,6 +69,36 @@ tokens. Filters are free, and `mode` changes work/latency, not token cost —
 - `vector` — semantic only. Use for purely conceptual questions with no literal
   anchor.
 - `hybrid` (default) — fuses both. Use when unsure.
+
+## code_mode
+
+The corpus carries dual embeddings: every chunk has a general vector
+(voyage-context-3), and code chunks additionally carry a code vector
+(voyage-code-3). `code_mode` controls whether the code-vector ranked list joins
+the RRF fusion:
+
+- `on` (default for `hybrid`/`vector`) — fuse a code-vector ranked list
+  alongside the general results.
+- `off` — general retrieval only.
+- `exclusive` — the code-vector list replaces the general vector list.
+
+| mode | code_mode default | ranked lists fused by RRF (k=60) |
+|---|---|---|
+| hybrid | `on` | general vector + code vector + FTS |
+| hybrid + `off` | — | general vector + FTS (today's behavior) |
+| hybrid + `exclusive` | — | code vector + FTS |
+| vector | `on` | general vector + code vector |
+| vector + `off` | — | general vector |
+| vector + `exclusive` | — | code vector |
+| fts | `off` (forced) | FTS only; `code_mode` `on`/`exclusive` → **400** with explicit error message |
+
+Code-heavy queries (function names, API signatures, error strings from code)
+benefit from `code_mode=exclusive`; conceptual queries should keep the default.
+Chunks without code embeddings can never appear in the code-vector list, so
+`exclusive` also narrows retrieval toward code chunks. When code search ran,
+`search_metadata.per_query` reports `code_vector_candidates` /
+`code_vector_latency_ms` and the top-level metadata carries the effective
+`code_mode`.
 
 ## Match the user's version & freshness
 

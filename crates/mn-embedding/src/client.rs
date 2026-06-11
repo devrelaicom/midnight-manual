@@ -92,102 +92,6 @@ const fn is_retryable(e: &VoyageError) -> bool {
     }
 }
 
-/// Embed `texts`, either directly via Voyage (BYOK) or through the server,
-/// retrying transient failures with exponential backoff.
-///
-/// Voyage's HTTP/2 endpoint and free-tier throttling drop connections
-/// intermittently under load (surfacing as transport errors); a bounded retry
-/// lets a single dropped request recover instead of failing the whole ingest
-/// run — which would otherwise re-embed every prior batch. Retries cover
-/// transport errors, 429, and 5xx; never a 400 (e.g. an over-limit batch) or a
-/// decode error (see `is_retryable`).
-///
-/// # Errors
-///
-/// Returns the last [`VoyageError`] if every attempt fails, or immediately on a
-/// non-retryable error.
-pub async fn embed(
-    texts: Vec<String>,
-    input_type: InputType,
-    src: EmbedSource<'_>,
-) -> Result<Embedded, VoyageError> {
-    let mut attempt = 0usize;
-    loop {
-        attempt += 1;
-        match embed_once(texts.clone(), input_type, src).await {
-            Ok(out) => return Ok(out),
-            Err(e) if attempt < MAX_EMBED_ATTEMPTS && is_retryable(&e) => {
-                backoff_sleep(attempt, &e).await;
-            }
-            Err(e) => return Err(e),
-        }
-    }
-}
-
-/// A single embedding attempt (no retry); [`embed`] wraps this with backoff.
-async fn embed_once(
-    texts: Vec<String>,
-    input_type: InputType,
-    src: EmbedSource<'_>,
-) -> Result<Embedded, VoyageError> {
-    match src {
-        EmbedSource::Byok(v) => {
-            let out = v.embed(texts, input_type).await?;
-            Ok(Embedded {
-                vectors: out.vectors,
-                total_tokens: out.total_tokens,
-            })
-        }
-        EmbedSource::Server {
-            base_url,
-            bearer,
-            no_global_limit,
-        } => {
-            // The server embeds via Voyage on our behalf; a large document batch
-            // can take ~40s, so this client must allow at least as long as the
-            // BYOK embedder (else proxy-mode ingest would hit the same 30s abort
-            // the BYOK path was fixed for).
-            let client = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(DEFAULT_EMBED_TIMEOUT_SECS))
-                .build()
-                .map_err(|e| VoyageError::Http(e.to_string()))?;
-            let it = match input_type {
-                InputType::Query => "query",
-                InputType::Document => "document",
-            };
-            let mut rb = client
-                .post(format!("{}/v1/embeddings", base_url.trim_end_matches('/')))
-                .json(&serde_json::json!({
-                    "input": texts,
-                    "input_type": it,
-                    "no_global_limit": no_global_limit,
-                }));
-            if let Some(b) = bearer {
-                rb = rb.bearer_auth(b);
-            }
-            let resp = rb
-                .send()
-                .await
-                .map_err(|e| VoyageError::Http(e.to_string()))?;
-            let status = resp.status();
-            if !status.is_success() {
-                return Err(VoyageError::Status {
-                    status: status.as_u16(),
-                    body: resp.text().await.unwrap_or_default(),
-                });
-            }
-            let parsed: ServerResp = resp
-                .json()
-                .await
-                .map_err(|e| VoyageError::Decode(e.to_string()))?;
-            Ok(Embedded {
-                vectors: parsed.embeddings,
-                total_tokens: parsed.usage.total_tokens,
-            })
-        }
-    }
-}
-
 #[derive(serde::Serialize)]
 struct ServerEmbedBody<'a, I> {
     input: &'a I,
@@ -232,7 +136,10 @@ async fn server_embed_once<I: serde::Serialize + Sync>(
 }
 
 /// Embed query/document texts with the GENERAL model (voyage-context-3),
-/// each text as its own single-chunk document. Retries like [`embed`].
+/// each text as its own single-chunk document.
+///
+/// Retries transient failures with exponential backoff (transport errors,
+/// 429, 5xx — see `is_retryable`).
 ///
 /// # Errors
 ///
