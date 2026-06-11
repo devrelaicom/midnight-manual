@@ -114,6 +114,15 @@ pub struct ServerConfig {
     /// [`ScoringPolicy::default`] is used when the env var is unset. An invalid
     /// file fails startup (Constitution VI / VIII).
     pub scoring_policy: ScoringPolicy,
+    /// `MIDNIGHT_MANUAL_SERVER_RERANK` — master switch for inline server-side
+    /// reranking in `POST /v1/search` (spec §1 ops kill switch). `"off"`
+    /// disables (searches degrade to RRF order with
+    /// `search_metadata.rerank.reason = "disabled"`); anything else (or unset)
+    /// enables. Default `true`.
+    pub server_rerank_enabled: bool,
+    /// `MIDNIGHT_MANUAL_VOYAGE_BASE_URL` — override the VoyageAI API base URL
+    /// (tests point this at a wiremock; unset in production).
+    pub voyage_base_url: Option<String>,
     /// `VOYAGE_API_KEY` — VoyageAI API key for server-side embedding. When
     /// `None`, `POST /v1/embeddings` returns 503; there is no local embedder
     /// fallback (the fastembed corpus embedder was retired when the corpus
@@ -201,6 +210,8 @@ impl Default for ServerConfig {
             rate_limit_override_refresh_secs: 30,
             max_queries_per_request: 10,
             scoring_policy: ScoringPolicy::default(),
+            server_rerank_enabled: true,
+            voyage_base_url: None,
             voyage_api_key: None,
             voyage_model: "voyage-code-3".into(),
             voyage_context_model: "voyage-context-3".into(),
@@ -308,6 +319,12 @@ impl ServerConfig {
             .and_then(|s| s.parse::<u32>().ok())
             .map_or(10, |v| v.clamp(1, 50));
         let scoring_policy = load_scoring_policy()?;
+        let server_rerank_enabled = env::var("MIDNIGHT_MANUAL_SERVER_RERANK")
+            .map(|v| v != "off")
+            .unwrap_or(true);
+        let voyage_base_url = env::var("MIDNIGHT_MANUAL_VOYAGE_BASE_URL")
+            .ok()
+            .filter(|s| !s.is_empty());
         let voyage_api_key = env::var("VOYAGE_API_KEY").ok().filter(|s| !s.is_empty());
         let voyage_model = env::var("MIDNIGHT_MANUAL_VOYAGE_MODEL")
             .ok()
@@ -379,6 +396,8 @@ impl ServerConfig {
             rate_limit_override_refresh_secs,
             max_queries_per_request,
             scoring_policy,
+            server_rerank_enabled,
+            voyage_base_url,
             voyage_api_key,
             voyage_model,
             voyage_context_model,
