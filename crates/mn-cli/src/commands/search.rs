@@ -37,7 +37,7 @@
 //!    exactly one rerank pass regardless of placement:
 //!    - **local**: candidates are reranked client-side via `VoyageAI`'s
 //!      `/v1/rerank` with the caller's own key; the cloud pool is over-fetched
-//!      to [`RERANK_FETCH`].
+//!      to `RERANK_FETCH`.
 //!    - **server**: the server reranks inline in `/v1/search` with the
 //!      resolved `--rerank-model` and instructions.
 //!    - **off**: no reranking anywhere.
@@ -116,7 +116,7 @@ pub struct Args {
 
     /// Voyage rerank model. rerank-2.5-lite is faster and billed at half rate
     /// server-side. Precedence: this flag > MIDNIGHT_MANUAL_RERANK_MODEL env >
-    /// config [rerank].model.
+    /// config `[rerank].model`.
     #[arg(long = "rerank-model", value_parser = ["rerank-2.5", "rerank-2.5-lite"])]
     pub rerank_model: Option<String>,
 
