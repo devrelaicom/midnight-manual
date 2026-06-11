@@ -6,15 +6,20 @@
 //! actually removed — if the DELETE fails, the rollup rolls back too.
 //!
 //! Retention is configurable via `MIDNIGHT_MANUAL_TELEMETRY_RAW_RETENTION_DAYS`
-//! (default 7). Aggregate rows are retained indefinitely.
+//! (default 90; raised from FR-110's documented default of 7 — the
+//! `telemetry_search_daily` rollup preserves the signal long-term, and 90 days
+//! of raw rows provides a useful granular window). Aggregate rows are retained
+//! indefinitely.
 
 use std::time::Duration;
 
 use sqlx::PgPool;
 
-/// Default retention window for raw telemetry rows, matching the spec
-/// (FR-110). Configurable per-run via `ServerConfig::telemetry_raw_retention_days`.
-pub const DEFAULT_RETENTION_DAYS: i64 = 7;
+/// Default retention window for raw telemetry rows. Configurable per-run via
+/// `ServerConfig::telemetry_raw_retention_days`. Raised from FR-110's documented
+/// default of 7 to 90: the `telemetry_search_daily` rollup preserves the signal
+/// long-term, and 90 days of raw rows provides a useful granular window.
+pub const DEFAULT_RETENTION_DAYS: i64 = 90;
 
 /// How often the sweep job ticks at runtime. One hour is fine for v1 —
 /// retention is per-day, not per-minute, and a missed sweep window cannot
@@ -68,6 +73,37 @@ pub async fn sweep_once(pool: &PgPool, retention_days: i64) -> Result<SweepStats
     .execute(&mut *tx)
     .await?
     .rows_affected();
+
+    // Dimensional rollup: preserve retrieval-quality dimensions for expired
+    // search AND advanced_search events past raw retention (both emit the
+    // same retrieval-quality fields; the rollup has no tool_name dimension,
+    // so rows sharing dimensions merge — intended). Missing fields coalesce
+    // to '' so the primary key is always satisfiable. NOTE: migration 0010's
+    // header comment still says "(tool=search)" — it is an applied migration
+    // and must stay frozen; this comment is the live description.
+    sqlx::query(
+        "WITH expired_search AS (
+             SELECT received_at::date AS day,
+                    COALESCE(fields->>'corpus_model', '') AS corpus_model,
+                    COALESCE(fields->>'top_attribution', '') AS attribution,
+                    COALESCE(fields->>'reranker_used', '') AS reranker,
+                    COALESCE(fields->>'top_source', '') AS top_source,
+                    COALESCE(fields->>'top_confidence', '') AS confidence_bucket,
+                    COUNT(*)::bigint AS c
+             FROM telemetry_event_raw
+             WHERE received_at < now() - make_interval(days => $1::int)
+               AND event_type = 'mcp_tool_call'
+               AND fields->>'tool_name' IN ('search', 'advanced_search')
+             GROUP BY 1, 2, 3, 4, 5, 6
+         )
+         INSERT INTO telemetry_search_daily (day, corpus_model, attribution, reranker, top_source, confidence_bucket, count)
+         SELECT day, corpus_model, attribution, reranker, top_source, confidence_bucket, c FROM expired_search
+         ON CONFLICT (day, corpus_model, attribution, reranker, top_source, confidence_bucket)
+         DO UPDATE SET count = telemetry_search_daily.count + EXCLUDED.count",
+    )
+    .bind(retention_days)
+    .execute(&mut *tx)
+    .await?;
 
     // Delete: ensure the WHERE clause is bit-for-bit identical to the CTE
     // predicate above so a row can't slip between the two queries.

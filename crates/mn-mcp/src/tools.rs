@@ -2,43 +2,46 @@
 //!
 //! Thirteen tools, four categories:
 //!
-//! - `status` / `pull_models` — local-only; talk to the reranker model cache.
-//!   The corpus embedder is VoyageAI (remote), so there is no local embedder to
-//!   load here. No cloud round-trip.
-//! - `search` — embed via VoyageAI (BYOK or server-proxy), post to the cloud
-//!   `/v1/search`, optionally rerank with the local cross-encoder.
-//! - All other tools (`get_chunk` / `get_chunk_next` / `get_chunk_prev` /
+//! - `status` — diagnostics; the assembler lives in [`crate::status`] (cloud
+//!   `/readyz` + `/v1/me` probes, VoyageAI key validity, local reranker
+//!   state). This module only contributes the reranker-loaded marker.
+//! - `search` / `advanced_search` — embed via VoyageAI (BYOK or server-proxy),
+//!   post to the cloud `/v1/search`, optionally rerank with the local
+//!   cross-encoder. `search` is the simple 90% surface (`{query, mode?,
+//!   limit?}`); `advanced_search` exposes multi-query fusion, facet filters,
+//!   and the rerank toggle.
+//! - All other tools (`get_chunks` / `get_chunk_next` / `get_chunk_prev` /
 //!   `get_chunk_neighbors` / `get_chunk_parents` / `get_document` /
-//!   `get_document_full` / `get_document_chunks` / `list_sources`) —
+//!   `get_document_chunks` / `list_sources`) —
 //!   pass-through to the cloud's read endpoints, returning the response JSON
-//!   verbatim. `get_chunk_neighbors` is the only one that fans out to three
+//!   verbatim. `get_chunks` batches 1-20 ids into one `/v1/chunks?ids=` call;
+//!   `get_chunk_neighbors` is the only one that fans out to three
 //!   cloud endpoints concurrently and bundles the results.
 //! - Local install: `install_search_skill` (writes the advanced-search
 //!   `SKILL.md` into the user's AI harness(es)).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
 
 use mn_core::scoring::normalize_rerank;
 use mn_core::scoring_policy::ScoringPolicy;
 use mn_embedding::{
     client as embed_client, contextualized, reranker, reranker_catalog, voyage, LoadedReranker,
 };
-use serde::Serialize;
 use serde_json::json;
 use tokio::sync::OnceCell;
 use uuid::Uuid;
 
 use crate::cloud_client::{CloudClient, CloudError, QueryPair, SearchRequest};
-use crate::protocol::{ToolDescription, ToolsListResult};
+use crate::protocol::{ToolAnnotations, ToolDescription, ToolsListResult};
 use crate::server::ServerConfig;
 
 /// Build the static tool manifest sent in response to `tools/list`.
 ///
-/// All fourteen tools declared in spec.md US5 / contracts/mcp-tools.json.
-/// Schemas here are kept in sync with the canonical document by way of the
-/// contract tests in `tests/`.
+/// All thirteen tools declared in spec.md US5 / contracts/mcp-tools.json, in
+/// canonical registration order (search pair, chunk reads, document reads,
+/// corpus discovery, diagnostics, local install). Schemas here are kept in
+/// sync with the canonical document by way of the contract tests in `tests/`.
 #[must_use]
 // A flat manifest of `ToolDescription` literals: length is inherent to the
 // data (one entry per tool), so splitting it would hurt readability without
@@ -50,102 +53,139 @@ pub fn list() -> ToolsListResult {
             ToolDescription {
                 name: "search",
                 description:
-                    "Hybrid (FTS + vector) retrieval over the Midnight corpus, with optional cross-encoder reranking and trust-aware confidence scoring. Provide the single-query `{query, vector}` form, or a `queries` array of 1-10 `{text, vector}` pairs that RRF fuses across. The caller embeds each text (except in `fts` mode). Rate-limit cost is max(1, distinct queries) tokens (D25).\n\nPatterns (full worked examples in docs/cookbook/query-enhancement.md):\n- hyde: send the question plus a hypothetical answer as a second query, e.g. queries=[\"<the user's question>\", \"<a 1-2 sentence hypothetical answer the agent drafts>\"]. Lifts recall when the question is short or jargon-light.\n- multi_query: send 2-3 paraphrases varying vocabulary and breadth, e.g. queries=[\"compile a contract\", \"build source into a deployable artifact\", \"smart-contract build step\"]. Helps when synonyms matter.\n- step_back: send the question plus a more abstract framing, e.g. queries=[\"why did this specific call fail?\", \"how does the platform validate calls?\"]. Helps when the question is over-specific.\n\nCode-heavy queries (function names, API signatures, error strings from code) benefit from code_mode=exclusive; conceptual queries should keep the default.",
+                    "Search the Midnight Network documentation and code corpus (docs, SDK references, Compact language material, code examples). Returns ranked excerpts with confidence scores and source attribution. Use it whenever you need facts about Midnight, Compact, or the Midnight SDK. Code-heavy queries (function names, API signatures, error strings from code) benefit from code_mode=exclusive; conceptual queries should keep the default. For multi-query strategies, facet filters, or rerank control, use advanced_search.",
                 input_schema: search_input_schema(),
+                output_schema: Some(crate::schemas::search_output_schema()),
+                annotations: ToolAnnotations::read_only(),
             },
             ToolDescription {
-                name: "get_chunk",
+                name: "advanced_search",
                 description:
-                    "Fetch one chunk by id. Returns the chunk row (id, content, chunk_index, total_chunks, content_hash, embedding_model_id, heading_path, symbol_path, start_byte, end_byte, token_count, status, created_at, document_id, source_version_id, node_id) plus a small `document` sub-object (id, source_path, published_url, source_url, language, kind, provenance) and a `source` sub-object (slug). For the chunk's parent chain call get_chunk_parents; for adjacent chunks call get_chunk_next/get_chunk_prev.",
-                input_schema: id_only_schema(),
+                    "Full-control search over the Midnight corpus: fuse multiple queries (HyDE, expansion, step-back), restrict by facet filters, switch retrieval mode, and toggle reranking. Use when basic search comes up short or when the midnight-advanced-search skill prescribes a pattern. Call facets first to discover valid filter values.",
+                input_schema: advanced_search_input_schema(),
+                output_schema: Some(crate::schemas::search_output_schema()),
+                annotations: ToolAnnotations::read_only(),
+            },
+            ToolDescription {
+                name: "get_chunks",
+                description:
+                    "Fetch the full content of one or more chunks by id, typically ids returned by search. Use this to read the actual text behind search results.",
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "ids": { "type": "array", "minItems": 1, "maxItems": 20,
+                            "items": { "type": "string", "format": "uuid" },
+                            "description": "Chunk ids to fetch, 1-20 per call. One id is a one-element array." }
+                    },
+                    "required": ["ids"],
+                    "additionalProperties": false
+                }),
+                output_schema: Some(crate::schemas::chunks_output_schema()),
+                annotations: ToolAnnotations::read_only(),
             },
             ToolDescription {
                 name: "get_chunk_next",
                 description:
-                    "Fetch up to `count` chunks immediately following the given chunk in chunk_index order, scoped to the same document. Returns `{chunks: ChunkWithContext[]}` sorted ascending. Returns `{chunks: []}` (not 404) when called on the last chunk. `embed_failed` chunks are skipped, so the returned chunk_index sequence may have gaps. count defaults to 5 and must be in [1, 100]; out-of-range values are rejected as InvalidParams before the call reaches the cloud.",
+                    "Fetch chunks that immediately follow a given chunk in its document's reading order. Use to continue reading past the end of a chunk you already have.",
                 input_schema: chunk_nav_schema(),
+                output_schema: Some(crate::schemas::chunk_list_output_schema()),
+                annotations: ToolAnnotations::read_only(),
             },
             ToolDescription {
                 name: "get_chunk_prev",
                 description:
-                    "Fetch up to `count` chunks immediately preceding the given chunk in chunk_index order, scoped to the same document. Returns `{chunks: ChunkWithContext[]}` sorted ascending (reading order). Returns `{chunks: []}` (not 404) when called on the first chunk. `embed_failed` chunks are skipped, so the returned chunk_index sequence may have gaps. count defaults to 5 and must be in [1, 100]; out-of-range values are rejected as InvalidParams before the call reaches the cloud.",
+                    "Fetch chunks that immediately precede a given chunk in its document's reading order. Use to read the context leading up to a chunk you already have.",
                 input_schema: chunk_nav_schema(),
+                output_schema: Some(crate::schemas::chunk_list_output_schema()),
+                annotations: ToolAnnotations::read_only(),
             },
             ToolDescription {
                 name: "get_chunk_neighbors",
                 description:
-                    "Bundle `get_chunk_prev` + `get_chunk` + `get_chunk_next` in one round-trip. Returns `{prev: {chunks: ChunkWithContext[]}, chunk: ChunkWithContext, next: {chunks: ChunkWithContext[]}}` where `prev`/`next` are the same envelopes the standalone tools return (so an empty corpus edge yields `chunks: []`, not 404). The three cloud calls are issued in parallel, so latency is roughly that of the slowest leg. `count` defaults to 2 (chunks on each side) and must be in [1, 100]; out-of-range values are rejected as InvalidParams before any wire call. A 404 on the anchor chunk surfaces the same not-found envelope a plain `get_chunk` would.",
+                    "Fetch the chunks immediately before and after a given chunk in one call. Use when a search hit needs surrounding context to be understood.",
                 input_schema: chunk_neighbors_schema(),
+                output_schema: Some(crate::schemas::neighbors_output_schema()),
+                annotations: ToolAnnotations::read_only(),
             },
             ToolDescription {
                 name: "get_chunk_parents",
                 description:
-                    "Walk the parent chain from a chunk up to its source-version root. Returns nodes from immediate parent to root.",
+                    "Show where a chunk sits in its source's structure: the chain of containing nodes (document, folders) up to the source root. Use to orient a chunk within its source and find its containing document.",
                 input_schema: id_only_schema(),
+                output_schema: Some(crate::schemas::parents_output_schema()),
+                annotations: ToolAnnotations::read_only(),
             },
             ToolDescription {
                 name: "get_document",
                 description:
-                    "Document overview: metadata (id, source_version_id, node_id, source_path, published_url, source_url, language, kind, content_hash, char_count, token_count, source_modified_at, created_at, frontmatter, provenance, package_id), the source `{slug}`, and an ordered `chunk_ids` array of every ready chunk. No chunk bodies. Use get_document_full for inline bodies or get_document_chunks for a windowed slice.",
+                    "Fetch a document's metadata plus an ordered skeleton of its chunks (ids, positions, token counts — no bodies). Use to size up a document before reading it with get_document_chunks.",
                 input_schema: id_only_schema(),
-            },
-            ToolDescription {
-                name: "get_document_full",
-                description:
-                    "Complete document: every overview field except chunk_ids, plus a `chunks` array with each chunk's `{chunk_id, chunk_index, content, heading_path, token_count}` inline (no per-chunk document/source sub-objects). Capped at 500 ready chunks. For documents over the cap the call fails with a structured `too_many_chunks` error (see error.data.next_tool); fall back to get_document_chunks.",
-                input_schema: id_only_schema(),
+                output_schema: Some(crate::schemas::document_output_schema()),
+                annotations: ToolAnnotations::read_only(),
             },
             ToolDescription {
                 name: "get_document_chunks",
                 description:
-                    "Position-windowed chunk slice of a document. Returns `{chunks: ChunkBody[], from, limit, total_chunks}`. from defaults to 0 (must be >= 0); limit defaults to 20 and must be in [1, 100]. Out-of-range values are rejected as InvalidParams before the call reaches the cloud. `from` past the end returns `chunks: []` with accurate `total_chunks` (not 404). Use to page through documents larger than get_document_full's 500-chunk cap or to read a known offset.",
+                    "Read a window of a document's chunk bodies by position. Use after get_document to read a document section by section.",
                 input_schema: document_chunks_schema(),
+                output_schema: Some(crate::schemas::document_output_schema()),
+                annotations: ToolAnnotations::read_only(),
             },
             ToolDescription {
                 name: "list_sources",
                 description:
-                    "Enumerate the corpus's available sources so an agent can narrow filters.",
+                    "List the sources that make up the corpus (paginated). Use to discover what material exists and to get source slugs for advanced_search filters.",
                 input_schema: json!({
                     "type": "object",
-                    "properties": {},
+                    "properties": {
+                        "cursor": { "type": "string", "description": "Opaque pagination token from a previous response's next_cursor." },
+                        "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 },
+                        "created_after": { "type": "string", "format": "date-time", "description": "Only sources registered after this RFC3339 instant." },
+                        "created_before": { "type": "string", "format": "date-time", "description": "Only sources registered before this RFC3339 instant." },
+                        "kind": { "type": "string", "enum": ["docs_site", "code_repo", "standalone", "mixed"] },
+                        "retired": { "type": "boolean", "default": false, "description": "Include retired sources." }
+                    },
                     "additionalProperties": false,
                 }),
+                output_schema: Some(crate::schemas::sources_output_schema()),
+                annotations: ToolAnnotations::read_only(),
             },
             ToolDescription {
                 name: "facets",
                 description:
-                    "List the filterable facets for `search`, their types, whether they support exclusion (none_of), and the values present in the active corpus (languages, tags, sources, packages). Call this before constructing a `filters` object to learn valid values. Closed-enum facets (kind, content_type, attribution, source_kind) carry their full value list; high-cardinality sets (tags, package) are top-N with `truncated`/`total`.",
+                    "Discover the filter dimensions available to advanced_search and the values present in the corpus. Call without arguments for an overview; pass a facet name to page through all values of one dimension.",
                 input_schema: json!({
                     "type": "object",
-                    "properties": {},
+                    "properties": {
+                        "facet": { "type": "string", "enum": ["source_slug", "language", "tags", "package"],
+                            "description": "Drill into one open-set facet's full value list. Omit for the overview." },
+                        "cursor": { "type": "string", "description": "Opaque token from a previous drill-down response." },
+                        "limit": { "type": "integer", "minimum": 1, "maximum": 200, "default": 50 }
+                    },
                     "additionalProperties": false,
                 }),
-            },
-            ToolDescription {
-                name: "pull_models",
-                description:
-                    "Download / load the reranker (bge-reranker-base) into the local model cache. Required on first use of `search` with reranking enabled. The corpus embedder is VoyageAI (remote — BYOK or the server's /v1/embeddings proxy), so no embedder is downloaded.",
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": false,
-                }),
+                output_schema: Some(crate::schemas::facets_output_schema()),
+                annotations: ToolAnnotations::read_only(),
             },
             ToolDescription {
                 name: "status",
                 description:
-                    "Report health and model state. Works without models loaded.",
+                    "Diagnose the retrieval setup: cloud reachability, authentication and rate-limit state, VoyageAI key validity, and reranker readiness. Call when searches fail, return errors, or before starting a long session.",
                 input_schema: json!({
                     "type": "object",
                     "properties": {},
                     "additionalProperties": false,
                 }),
+                output_schema: Some(crate::schemas::status_output_schema()),
+                annotations: ToolAnnotations::read_only(),
             },
             ToolDescription {
                 name: "install_search_skill",
                 description:
-                    "Install the midnight-advanced-search Agent Skill (a persistent retrieval playbook) into the user's AI harness(es). Writes the same SKILL.md to each detected harness's native skills directory; re-running updates in place. Returns, per harness, the scope, the exact path written, the action (created/updated/unchanged), and the reload step to relay to the user. Optional `harness` (subset of claude-code/codex/opencode/cursor) forces specific targets; omit to auto-detect. Optional `scope` is user (default) or project.",
+                    "Install (or update) the midnight-advanced-search skill — a retrieval playbook teaching effective corpus search patterns — into the user's AI harness(es). Use when search results are poor or the user asks for better search guidance.",
                 input_schema: install_search_skill_schema(),
+                output_schema: Some(crate::schemas::install_output_schema()),
+                annotations: ToolAnnotations::idempotent_writer(),
             },
         ],
     }
@@ -167,8 +207,10 @@ fn chunk_nav_schema() -> serde_json::Value {
         "type": "object",
         "required": ["id"],
         "properties": {
-            "id": { "type": "string", "format": "uuid" },
-            "count": { "type": "integer", "minimum": 1, "maximum": 100, "default": 5 },
+            "id": { "type": "string", "format": "uuid",
+                "description": "Anchor chunk id (from search results or another chunk tool)." },
+            "count": { "type": "integer", "minimum": 1, "maximum": 100, "default": 5,
+                "description": "Number of chunks to return; must be in [1, 100] (defaults to 5). Out-of-range values are rejected before any network call. Calling past the document edge returns an empty list, not an error." },
         },
         "additionalProperties": false,
     })
@@ -179,8 +221,10 @@ fn chunk_neighbors_schema() -> serde_json::Value {
         "type": "object",
         "required": ["id"],
         "properties": {
-            "id": { "type": "string", "format": "uuid" },
-            "count": { "type": "integer", "minimum": 1, "maximum": 100, "default": 2 },
+            "id": { "type": "string", "format": "uuid",
+                "description": "Anchor chunk id (from search results or another chunk tool)." },
+            "count": { "type": "integer", "minimum": 1, "maximum": 100, "default": 2,
+                "description": "Chunks to fetch on each side of the anchor; must be in [1, 100] (defaults to 2). Out-of-range values are rejected before any network call. A side past the document edge comes back empty, not as an error." },
         },
         "additionalProperties": false,
     })
@@ -191,16 +235,68 @@ fn document_chunks_schema() -> serde_json::Value {
         "type": "object",
         "required": ["id"],
         "properties": {
-            "id": { "type": "string", "format": "uuid" },
-            "from": { "type": "integer", "minimum": 0, "default": 0 },
-            "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 },
+            "id": { "type": "string", "format": "uuid",
+                "description": "Document id (from search results or get_document)." },
+            "from": { "type": "integer", "minimum": 0, "default": 0,
+                "description": "Zero-based chunk position to start from; must be >= 0 (defaults to 0). A position past the end returns an empty window with accurate total_chunks, not an error." },
+            "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20,
+                "description": "Number of chunk bodies to return; must be in [1, 100] (defaults to 20)." },
         },
         "additionalProperties": false,
     })
 }
 
-#[allow(clippy::too_many_lines)]
+/// Input schema for the basic `search` tool: the simple 90% surface.
 fn search_input_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "query": { "type": "string", "minLength": 1,
+                "description": "What you want to find, as natural language or code terms." },
+            "mode": { "type": "string", "enum": ["hybrid", "vector", "fts"], "default": "hybrid",
+                "description": "hybrid (default) fuses keyword + semantic; fts is keyword-only (lowest latency); vector is semantic-only." },
+            "code_mode": code_mode_schema(),
+            "limit": { "type": "integer", "minimum": 1, "maximum": 50, "default": 10,
+                "description": "Max results returned." }
+        },
+        "required": ["query"],
+        "additionalProperties": false
+    })
+}
+
+/// The shared `code_mode` property schema (dual embeddings), referenced by
+/// both `search` and `advanced_search`.
+fn code_mode_schema() -> serde_json::Value {
+    json!({ "type": "string", "enum": ["on", "off", "exclusive"],
+        "description": "Code-vector fusion (dual embeddings): on (default for hybrid/vector) fuses a voyage-code-3 ranked list alongside the general results; off = general retrieval only; exclusive = code vectors replace the general vector list (best for API-shaped / code-identifier queries). Incompatible with mode=fts." })
+}
+
+/// Input schema for `advanced_search`: multi-query fusion, facet filters,
+/// mode switch, and the rerank toggle.
+fn advanced_search_input_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "queries": { "type": "array", "minItems": 1, "maxItems": 10,
+                "items": { "type": "string", "minLength": 1 },
+                "description": "1-10 query variants fused with RRF (HyDE, expansion, step-back). One query = one-element array. Rate-limit cost is one token per distinct query." },
+            "mode": { "type": "string", "enum": ["hybrid", "vector", "fts"], "default": "hybrid",
+                "description": "hybrid (default) fuses keyword + semantic; fts is keyword-only; vector is semantic-only." },
+            "code_mode": code_mode_schema(),
+            "limit": { "type": "integer", "minimum": 1, "maximum": 50, "default": 10,
+                "description": "Max results returned." },
+            "rerank": { "type": "boolean", "default": true,
+                "description": "Apply cross-encoder reranking against the first query. Disable for lowest latency." },
+            "filters": filters_schema()
+        },
+        "required": ["queries"],
+        "additionalProperties": false
+    })
+}
+
+/// The per-facet `filters` schema, referenced only by `advanced_search`.
+#[allow(clippy::too_many_lines)]
+fn filters_schema() -> serde_json::Value {
     use mn_retrieval::facets;
     let set_of = |values: Option<&[&str]>| {
         let items = values.map_or_else(
@@ -215,19 +311,8 @@ fn search_input_schema() -> serde_json::Value {
     };
     json!({
         "type": "object",
+        "additionalProperties": false,
         "properties": {
-            "query": { "type": "string", "minLength": 1, "description": "Single-query convenience form (mutually exclusive with queries)." },
-            "queries": { "type": "array", "minItems": 1, "maxItems": 50, "items": { "type": "string", "minLength": 1 }, "description": "Multi-query input for HyDE / expansion / step-back patterns." },
-            "limit": { "type": "integer", "minimum": 1, "maximum": 50, "default": 10, "description": "Max results returned to the caller. Capped at 50." },
-            "rerank": { "type": "boolean", "default": true, "description": "Apply local cross-encoder reranking. Disable for ultra-low-latency callers." },
-            "mode": { "type": "string", "enum": ["hybrid", "vector", "fts"], "default": "hybrid",
-                      "description": "fts skips embedding entirely (lowest latency); vector is semantic-only; hybrid (default) fuses both." },
-            "code_mode": { "type": "string", "enum": ["on", "off", "exclusive"],
-                "description": "Code-vector fusion (dual embeddings): on (default for hybrid/vector) fuses a voyage-code-3 ranked list into RRF alongside the general results; off = general retrieval only; exclusive = code vectors replace the general vector list (use for API-shaped/code-identifier queries). Incompatible with mode=fts." },
-            "filters": {
-                "type": "object",
-                "additionalProperties": false,
-                "properties": {
                     "kind":         set_of(Some(facets::KIND_VALUES)),
                     "source_kind":  set_of(Some(facets::SOURCE_KIND_VALUES)),
                     "attribution":  set_of(Some(facets::ATTRIBUTION_VALUES)),
@@ -257,11 +342,8 @@ fn search_input_schema() -> serde_json::Value {
                     "ingested_at": { "type": "object", "properties": { "after": { "type": "string", "format": "date" }, "before": { "type": "string", "format": "date" } }, "additionalProperties": false },
                     "source_modified_at": { "type": "object", "properties": { "after": { "type": "string", "format": "date" }, "before": { "type": "string", "format": "date" } }, "additionalProperties": false },
                     "token_count": { "type": "object", "properties": { "min": { "type": "integer" }, "max": { "type": "integer" } }, "additionalProperties": false }
-                },
-                "description": "Per-facet filters. AND across keys, OR within any_of, exclude none_of. See the `facets` tool for corpus-derived values."
-            }
         },
-        "oneOf": [ { "required": ["query"] }, { "required": ["queries"] } ]
+        "description": "Per-facet filters. AND across keys, OR within any_of, exclude none_of. See the `facets` tool for corpus-derived values."
     })
 }
 
@@ -350,61 +432,22 @@ pub(crate) fn run_install_search_skill_in(
 }
 
 // ---------------------------------------------------------------------------
-// status (local)
+// status (reranker-loaded marker; report assembly lives in crate::status)
 // ---------------------------------------------------------------------------
 
-/// `status` tool response payload.
-#[derive(Debug, Serialize)]
-pub struct StatusOutput {
-    /// mn-mcp crate version.
-    pub server_version: &'static str,
-    /// Reranker model identifier. The corpus embedder is VoyageAI (remote), so
-    /// no local embedder is reported.
-    pub reranker: &'static str,
-    /// Current model state.
-    pub model_state: ModelState,
-    /// Resolved on-disk model cache directory, if any.
-    pub cache_dir: Option<String>,
-}
-
-/// Coarse model-state values reported by `status`.
-#[derive(Debug, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum ModelState {
-    /// Reranker not yet loaded for this process.
-    Missing,
-    /// Reranker loaded and ready to use.
-    Ready,
-}
-
-/// Dispatch the `status` tool.
-#[must_use]
-pub fn run_status(cache_dir: Option<&PathBuf>) -> StatusOutput {
-    StatusOutput {
-        server_version: crate::VERSION,
-        reranker: mn_embedding::RERANKER_MODEL_NAME,
-        // Only the reranker is a local model now; the embedder is remote Voyage.
-        model_state: if reranker_loaded() {
-            ModelState::Ready
-        } else {
-            ModelState::Missing
-        },
-        cache_dir: cache_dir.map(|p| p.display().to_string()),
-    }
-}
-
-fn reranker_loaded() -> bool {
+/// Whether a reranker has been loaded into this process (coarse "rerank
+/// capability is warm" signal consumed by the `status` report assembler).
+pub(crate) fn reranker_loaded() -> bool {
     LOADED_MARKERS.load_relaxed_reranker()
 }
 
 mod markers {
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    /// Process-wide marker tracking whether *a* reranker has been loaded — the
-    /// local `bge` cross-encoder (`pull_models`) or whichever reranker the
-    /// configured catalog id selects on the first reranking `search` (local
-    /// fastembed or remote Voyage). It is a coarse "rerank capability is warm"
-    /// signal for `status`, not a model identity.
+    /// Process-wide marker tracking whether *a* reranker has been loaded —
+    /// whichever reranker the configured catalog id selects on the first
+    /// reranking `search` (local fastembed or remote Voyage). It is a coarse
+    /// "rerank capability is warm" signal for `status`, not a model identity.
     pub struct LoadedMarkers {
         reranker: AtomicBool,
     }
@@ -446,8 +489,8 @@ static LOADED_RERANKER: OnceCell<Arc<LoadedReranker>> = OnceCell::const_new();
 /// call. Subsequent calls return the cached [`Arc`] regardless of the arguments
 /// (the reranker config is read once, on the first reranking search of the
 /// process — the same single-read semantics the old `bge` singleton had). On a
-/// successful first load this also flips the `status`/`pull_models`
-/// "reranker loaded" marker.
+/// successful first load this also flips the `status` "reranker loaded"
+/// marker.
 ///
 /// `reranker_id` is the catalog id (resolved by the caller via
 /// [`mn_core::config::resolve_reranker`]); `reranker_path` backs the `custom`
@@ -489,49 +532,6 @@ pub async fn load_configured_reranker(
 }
 
 // ---------------------------------------------------------------------------
-// pull_models (local)
-// ---------------------------------------------------------------------------
-
-/// `pull_models` response payload.
-#[derive(Debug, Serialize)]
-pub struct PullModelsOutput {
-    /// Reranker model identifier. The corpus embedder is VoyageAI (remote), so
-    /// `pull_models` only fetches the reranker.
-    pub reranker: &'static str,
-    /// Whether the reranker was loaded by this call (false = cached).
-    pub reranker_loaded: bool,
-    /// Total milliseconds spent in this call.
-    pub took_ms: u128,
-}
-
-/// Dispatch the `pull_models` tool. Fetches the reranker into the local cache;
-/// the corpus embedder is VoyageAI (remote) so nothing is downloaded for it.
-/// Returns once the reranker `OnceCell` is filled.
-///
-/// # Errors
-///
-/// Returns a string error message if the reranker fails to initialize.
-pub async fn run_pull_models(cache_dir: PathBuf) -> Result<PullModelsOutput, String> {
-    let t0 = Instant::now();
-    let reranker_was_loaded = LOADED_MARKERS.load_relaxed_reranker();
-
-    // NOTE (Task 9.4): `pull_models` still pre-fetches the local `bge` reranker
-    // via the singleton. Pre-pulling the *configured* catalog reranker (e.g. a
-    // Voyage id, which has nothing to download) is intentionally out of scope
-    // here; `search` loads whatever the config selects lazily on first use.
-    reranker::global(cache_dir)
-        .await
-        .map_err(|e| format!("reranker init failed: {e}"))?;
-    LOADED_MARKERS.mark_reranker();
-
-    Ok(PullModelsOutput {
-        reranker: mn_embedding::RERANKER_MODEL_NAME,
-        reranker_loaded: !reranker_was_loaded,
-        took_ms: t0.elapsed().as_millis(),
-    })
-}
-
-// ---------------------------------------------------------------------------
 // search (cloud + local embed + optional local rerank)
 // ---------------------------------------------------------------------------
 
@@ -539,11 +539,9 @@ pub async fn run_pull_models(cache_dir: PathBuf) -> Result<PullModelsOutput, Str
 /// them to the right MCP error code.
 #[derive(Debug)]
 pub enum SearchError {
-    /// Caller-supplied arguments are malformed (oneOf violation, type
-    /// mismatch, etc.).
-    InvalidInput(String),
     /// Cloud returned an embedding-model mismatch — the JSON-RPC error layer
-    /// turns this into a typed response with `data.next_tool = "pull_models"`.
+    /// turns this into a typed `EMBEDDING_MODEL_MISMATCH` response carrying
+    /// the cloud-provided remediation.
     Mismatch {
         /// Corpus's active `{name}@{revision}`.
         corpus_model: String,
@@ -560,28 +558,30 @@ pub enum SearchError {
 
 const DEFAULT_LIMIT: u32 = 10;
 const MAX_LIMIT: u32 = 50;
+/// `advanced_search` accepts at most this many query variants (RRF fusion).
+const MAX_QUERIES: usize = 10;
 /// When rerank is on, we always fetch up to this many candidates from the
 /// cloud so the cross-encoder has signal to work with.
 const RERANK_FETCH: u32 = 50;
 
-/// Dispatch the `search` tool.
+/// Dispatch the `search` / `advanced_search` tools.
 ///
-/// Embeds each query locally (except in `fts` mode, which skips embedding
-/// entirely), posts the resulting `{text, vector}` pairs to the cloud's
-/// `/v1/search`, optionally reranks the returned chunks against the first
-/// query, and truncates to the caller's `limit`. When rerank is on each
+/// Takes already-parsed arguments (see [`parse_basic_search_args`] /
+/// [`parse_advanced_search_args`]; the dispatcher picks the parser by tool
+/// name). Embeds each query locally (except in `fts` mode, which skips
+/// embedding entirely), posts the resulting `{text, vector}` pairs to the
+/// cloud's `/v1/search`, optionally reranks the returned chunks against the
+/// first query, and truncates to the caller's `limit`. When rerank is on each
 /// returned result gains a `rerank_score` field.
 ///
 /// # Errors
 ///
 /// See [`SearchError`].
 pub async fn run_search(
-    args: &serde_json::Value,
+    parsed: &ParsedSearchArgs,
     cfg: &ServerConfig,
     cloud: &Arc<CloudClient>,
 ) -> Result<serde_json::Value, SearchError> {
-    let parsed = parse_search_args(args).map_err(SearchError::InvalidInput)?;
-
     // Resolve the Voyage API key + the reranker selection from env / config
     // (MCP has no CLI flag, so every `flag` is `None`). The base-url override is
     // read through the same `ConfigEnv` abstraction as the other
@@ -609,7 +609,7 @@ pub async fn run_search(
                 .collect();
             (pairs, String::new(), None)
         } else {
-            build_embedded_pairs(&parsed, &core_cfg.models, voyage_key.as_deref(), cfg, cloud)
+            build_embedded_pairs(parsed, &core_cfg.models, voyage_key.as_deref(), cfg, cloud)
                 .await?
         };
 
@@ -847,38 +847,98 @@ async fn embed_code_queries(
     Ok(embedded.vectors)
 }
 
-struct ParsedSearchArgs {
-    queries: Vec<String>,
-    limit: u32,
-    rerank: bool,
-    filters: Option<serde_json::Value>,
-    mode: &'static str,
-    /// Code-vector fusion mode. `None` = caller didn't choose; the cloud
-    /// applies its mode-derived default (on for hybrid/vector, off for fts).
-    code_mode: Option<&'static str>,
+/// Validated arguments for `search` / `advanced_search`, produced by
+/// [`parse_basic_search_args`] / [`parse_advanced_search_args`] and consumed
+/// by [`run_search`].
+#[derive(Debug, Clone)]
+pub struct ParsedSearchArgs {
+    /// 1-10 query texts (basic search always has exactly one).
+    pub queries: Vec<String>,
+    /// Max results returned to the caller (1..=50).
+    pub limit: u32,
+    /// Whether to apply cross-encoder reranking (basic search: always true).
+    pub rerank: bool,
+    /// Pre-validated per-facet filters (basic search: always `None`).
+    pub filters: Option<serde_json::Value>,
+    /// Retrieval mode (`hybrid` | `vector` | `fts`).
+    pub mode: &'static str,
+    /// Code-vector fusion mode (`on` | `off` | `exclusive`). `None` = caller
+    /// didn't choose; the cloud applies its mode-derived default (on for
+    /// hybrid/vector, off for fts).
+    pub code_mode: Option<&'static str>,
 }
 
-fn parse_search_args(v: &serde_json::Value) -> Result<ParsedSearchArgs, String> {
+/// Parse arguments for the basic `search` tool: `{query, mode?, limit?}`.
+/// Advanced-only keys (`queries`, `rerank`, `filters`) are rejected with a
+/// pointer at `advanced_search`. `rerank` is fixed to `true`; `filters` is
+/// always `None`.
+///
+/// # Errors
+///
+/// A human-readable message on any malformed or advanced-only argument.
+pub fn parse_basic_search_args(v: &serde_json::Value) -> Result<ParsedSearchArgs, String> {
     let obj = v
         .as_object()
         .ok_or_else(|| "arguments must be a JSON object".to_owned())?;
 
-    let queries: Vec<String> = match (obj.get("query"), obj.get("queries")) {
-        (Some(_), Some(_)) => {
-            return Err("`query` and `queries` are mutually exclusive".to_owned());
+    for key in ["queries", "rerank", "filters"] {
+        if obj.contains_key(key) {
+            return Err(format!(
+                "`{key}` is not supported by `search` — use `advanced_search` for multi-query \
+                 fusion, facet filters, and rerank control"
+            ));
         }
-        (Some(serde_json::Value::String(s)), None) => {
+    }
+
+    let query = match obj.get("query") {
+        Some(serde_json::Value::String(s)) => {
             if s.is_empty() {
                 return Err("`query` must not be empty".to_owned());
             }
-            vec![s.clone()]
+            s.clone()
         }
-        (None, Some(serde_json::Value::Array(arr))) => {
+        Some(_) => return Err("`query` must be a string".to_owned()),
+        None => return Err("`query` (string) is required".to_owned()),
+    };
+
+    let mode = parse_mode_arg(obj)?;
+    Ok(ParsedSearchArgs {
+        queries: vec![query],
+        limit: parse_limit_arg(obj)?,
+        rerank: true,
+        filters: None,
+        mode,
+        code_mode: parse_code_mode_arg(obj, mode)?,
+    })
+}
+
+/// Parse arguments for `advanced_search`:
+/// `{queries[1-10], mode?, limit?, rerank?, filters?}`. The single-query
+/// `query` key is rejected (one query = one-element `queries` array).
+///
+/// # Errors
+///
+/// A human-readable message on any malformed argument or invalid filter.
+pub fn parse_advanced_search_args(v: &serde_json::Value) -> Result<ParsedSearchArgs, String> {
+    let obj = v
+        .as_object()
+        .ok_or_else(|| "arguments must be a JSON object".to_owned())?;
+
+    if obj.contains_key("query") {
+        return Err(
+            "`query` is not supported by `advanced_search` — pass `queries` (an array of 1-10 \
+             strings; one query = one-element array)"
+                .to_owned(),
+        );
+    }
+
+    let queries: Vec<String> = match obj.get("queries") {
+        Some(serde_json::Value::Array(arr)) => {
             if arr.is_empty() {
                 return Err("`queries` must not be empty".to_owned());
             }
-            if arr.len() > MAX_LIMIT as usize {
-                return Err(format!("`queries` length must be <= {MAX_LIMIT}"));
+            if arr.len() > MAX_QUERIES {
+                return Err(format!("`queries` length must be <= {MAX_QUERIES}"));
             }
             let mut out = Vec::with_capacity(arr.len());
             for (i, item) in arr.iter().enumerate() {
@@ -892,23 +952,8 @@ fn parse_search_args(v: &serde_json::Value) -> Result<ParsedSearchArgs, String> 
             }
             out
         }
-        _ => return Err("supply either `query` (string) or `queries` (array)".to_owned()),
-    };
-
-    // Honour omitted `limit` as the default; reject any present-but-not-integer
-    // value rather than quietly defaulting (silent-default would let callers
-    // ship a typo like `limit: "five"` and never notice).
-    let limit = match obj.get("limit") {
-        None => DEFAULT_LIMIT,
-        Some(v) => {
-            let Some(n) = v.as_i64() else {
-                return Err("`limit` must be an integer".to_owned());
-            };
-            if !(1..=i64::from(MAX_LIMIT)).contains(&n) {
-                return Err(format!("`limit` must be 1..={MAX_LIMIT}"));
-            }
-            u32::try_from(n).expect("validated above")
-        }
+        Some(_) => return Err("`queries` must be an array of strings".to_owned()),
+        None => return Err("`queries` (array of 1-10 strings) is required".to_owned()),
     };
 
     let rerank = obj
@@ -917,18 +962,68 @@ fn parse_search_args(v: &serde_json::Value) -> Result<ParsedSearchArgs, String> 
         .unwrap_or(true);
     let filters = obj.get("filters").cloned();
 
-    let mode: &'static str = match obj.get("mode") {
-        None => "hybrid",
-        Some(serde_json::Value::String(s)) => match s.as_str() {
-            "hybrid" => "hybrid",
-            "vector" => "vector",
-            "fts" => "fts",
-            other => return Err(format!("unknown mode `{other}` (expected hybrid|vector|fts)")),
-        },
-        Some(_) => return Err("`mode` must be a string".to_owned()),
-    };
+    // Validate the filters object against the registry before forwarding (fail fast).
+    if let Some(fv) = &filters {
+        let parsed: mn_retrieval::filters::SearchFilters =
+            serde_json::from_value(fv.clone()).map_err(|e| format!("invalid filters: {e}"))?;
+        parsed
+            .validate()
+            .map_err(|e| format!("invalid filter `{}`: {}", e.facet, e.message))?;
+    }
 
-    let code_mode: Option<&'static str> = match obj.get("code_mode") {
+    let mode = parse_mode_arg(obj)?;
+    Ok(ParsedSearchArgs {
+        queries,
+        limit: parse_limit_arg(obj)?,
+        rerank,
+        filters,
+        mode,
+        code_mode: parse_code_mode_arg(obj, mode)?,
+    })
+}
+
+/// Honour an omitted `limit` as the default; reject any present-but-not-integer
+/// value rather than quietly defaulting (silent-default would let callers ship
+/// a typo like `limit: "five"` and never notice).
+fn parse_limit_arg(obj: &serde_json::Map<String, serde_json::Value>) -> Result<u32, String> {
+    match obj.get("limit") {
+        None => Ok(DEFAULT_LIMIT),
+        Some(v) => {
+            let Some(n) = v.as_i64() else {
+                return Err("`limit` must be an integer".to_owned());
+            };
+            if !(1..=i64::from(MAX_LIMIT)).contains(&n) {
+                return Err(format!("`limit` must be 1..={MAX_LIMIT}"));
+            }
+            Ok(u32::try_from(n).expect("validated above"))
+        }
+    }
+}
+
+/// Parse the shared `mode` argument (`hybrid` default).
+fn parse_mode_arg(
+    obj: &serde_json::Map<String, serde_json::Value>,
+) -> Result<&'static str, String> {
+    match obj.get("mode") {
+        None => Ok("hybrid"),
+        Some(serde_json::Value::String(s)) => match s.as_str() {
+            "hybrid" => Ok("hybrid"),
+            "vector" => Ok("vector"),
+            "fts" => Ok("fts"),
+            other => Err(format!("unknown mode `{other}` (expected hybrid|vector|fts)")),
+        },
+        Some(_) => Err("`mode` must be a string".to_owned()),
+    }
+}
+
+/// Parse the shared optional `code_mode` argument, failing fast on the fts
+/// incompatibility (mirrors the cloud's 400, D5/D6: fts forces code_mode off)
+/// before any embedding or wire call.
+fn parse_code_mode_arg(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    mode: &'static str,
+) -> Result<Option<&'static str>, String> {
+    let code_mode = match obj.get("code_mode") {
         None => None,
         Some(serde_json::Value::String(s)) => match s.as_str() {
             "on" => Some("on"),
@@ -940,31 +1035,14 @@ fn parse_search_args(v: &serde_json::Value) -> Result<ParsedSearchArgs, String> 
         },
         Some(_) => return Err("`code_mode` must be a string".to_owned()),
     };
-    // Mirror the cloud's 400 (D5): fts forces code_mode off — fail fast
-    // before any embedding or wire call.
     if mode == "fts" && matches!(code_mode, Some("on" | "exclusive")) {
         return Err(
-            "code_mode on/exclusive is incompatible with mode=fts (drop code_mode, or use mode=hybrid/vector)"
+            "code_mode on/exclusive is incompatible with mode=fts (drop code_mode, or use \
+             mode=hybrid/vector)"
                 .to_owned(),
         );
     }
-    // Validate the filters object against the registry before forwarding (fail fast).
-    if let Some(fv) = obj.get("filters") {
-        let parsed: mn_retrieval::filters::SearchFilters =
-            serde_json::from_value(fv.clone()).map_err(|e| format!("invalid filters: {e}"))?;
-        parsed
-            .validate()
-            .map_err(|e| format!("invalid filter `{}`: {}", e.facet, e.message))?;
-    }
-
-    Ok(ParsedSearchArgs {
-        queries,
-        limit,
-        rerank,
-        filters,
-        mode,
-        code_mode,
-    })
+    Ok(code_mode)
 }
 
 /// The owned reranker selection resolved from config + env, held by
@@ -1142,14 +1220,10 @@ fn recompute_confidence(
 /// Which cloud endpoint a pass-through tool should hit.
 #[derive(Debug, Clone, Copy)]
 pub enum PassthroughKind {
-    /// `/v1/chunks/:id`
-    Chunk,
     /// `/v1/chunks/:id/parents`
     Parents,
     /// `/v1/documents/:id`
     Document,
-    /// `/v1/documents/:id/full` (may return [`PassthroughError::TooManyChunks`]).
-    DocumentFull,
 }
 
 /// Errors for the chunk pass-through tools.
@@ -1159,15 +1233,6 @@ pub enum PassthroughError {
     InvalidInput(String),
     /// Cloud returned 404.
     NotFound(String),
-    /// Cloud returned `412 too_many_chunks` (document-full only).
-    TooManyChunks {
-        /// Reported ready-chunk count for the document.
-        chunk_count: u32,
-        /// Server's configured cap.
-        cap: u32,
-        /// Operator-facing hint from the cloud.
-        hint: String,
-    },
     /// Cloud / transport / decode failure.
     Cloud(String),
 }
@@ -1243,9 +1308,7 @@ const CHUNK_NEIGHBORS_DEFAULT_COUNT: u32 = 2;
 /// the UUID and range, then asks the cloud client to fan out three parallel
 /// requests.
 ///
-/// `count` is applied symmetrically to prev and next. The `too_many_chunks`
-/// envelope is unreachable here (neither `/next`, `/prev`, nor `/:id` raises
-/// 412), so we exhaustively match it as an internal-error sanity gate.
+/// `count` is applied symmetrically to prev and next.
 ///
 /// # Errors
 ///
@@ -1356,7 +1419,8 @@ pub async fn run_document_chunks(
         })
 }
 
-/// Dispatch any of the `get_chunk*` tools. Returns the cloud's JSON verbatim.
+/// Dispatch the single-id pass-through tools (`get_chunk_parents` /
+/// `get_document`). Returns the cloud's JSON verbatim.
 ///
 /// # Errors
 ///
@@ -1373,18 +1437,124 @@ pub async fn run_passthrough_id(
     Uuid::parse_str(id_str)
         .map_err(|e| PassthroughError::InvalidInput(format!("`id` is not a valid UUID: {e}")))?;
     let r = match kind {
-        PassthroughKind::Chunk => cloud.get_chunk(id_str).await,
         PassthroughKind::Parents => cloud.get_chunk_parents(id_str).await,
         PassthroughKind::Document => cloud.get_document(id_str).await,
-        PassthroughKind::DocumentFull => cloud.get_document_full(id_str).await,
     };
     r.map_err(|e| match e {
         CloudError::NotFound(msg) => PassthroughError::NotFound(msg),
-        CloudError::TooManyChunks { chunk_count, cap, hint } => {
-            PassthroughError::TooManyChunks { chunk_count, cap, hint }
-        }
         other => PassthroughError::Cloud(other.to_string()),
     })
+}
+
+/// Maximum number of ids accepted by one `get_chunks` call.
+const GET_CHUNKS_MAX_IDS: usize = 20;
+
+/// Dispatch `get_chunks`. Parses `{ids: [uuid, ..]}` — an array of 1 to
+/// `GET_CHUNKS_MAX_IDS` UUID strings — and calls the cloud batch endpoint
+/// (`GET /v1/chunks?ids=`). Returns the cloud's `{chunks, missing}` envelope
+/// verbatim; unknown ids land in `missing` (the cloud answers 200, not 404).
+///
+/// # Errors
+///
+/// See [`PassthroughError`]. All shape violations (missing/empty/oversized
+/// array, non-string entry, malformed UUID) are rejected as `InvalidInput`
+/// before any wire call.
+pub async fn run_get_chunks(
+    args: &serde_json::Value,
+    cloud: &Arc<CloudClient>,
+) -> Result<serde_json::Value, PassthroughError> {
+    let arr = args
+        .get("ids")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            PassthroughError::InvalidInput(
+                "`ids` (array of 1-20 UUID strings) is required".to_owned(),
+            )
+        })?;
+    if arr.is_empty() {
+        return Err(PassthroughError::InvalidInput("`ids` must contain at least 1 id".to_owned()));
+    }
+    if arr.len() > GET_CHUNKS_MAX_IDS {
+        return Err(PassthroughError::InvalidInput(format!(
+            "`ids` accepts at most {GET_CHUNKS_MAX_IDS} ids per call, got {}",
+            arr.len()
+        )));
+    }
+    let mut ids = Vec::with_capacity(arr.len());
+    for (i, v) in arr.iter().enumerate() {
+        let s = v.as_str().ok_or_else(|| {
+            PassthroughError::InvalidInput(format!("`ids[{i}]` must be a string"))
+        })?;
+        Uuid::parse_str(s).map_err(|e| {
+            PassthroughError::InvalidInput(format!("`ids[{i}]` is not a valid UUID: {e}"))
+        })?;
+        ids.push(s.to_owned());
+    }
+    cloud.get_chunks(&ids).await.map_err(|e| match e {
+        CloudError::NotFound(msg) => PassthroughError::NotFound(msg),
+        other => PassthroughError::Cloud(other.to_string()),
+    })
+}
+
+/// Dispatch `list_sources`. Forwards the pagination/filter arguments
+/// (`cursor`, `limit`, `created_after`, `created_before`, `kind`, `retired`)
+/// to `GET /v1/sources` as query params — only keys present in `args` are
+/// sent. Non-string JSON scalars are rendered in their query-string form
+/// (`true`, `20`); the input schema forbids object/array values, so no
+/// further validation happens here.
+///
+/// # Errors
+///
+/// Propagates any [`CloudError`] from the transport / status mapping.
+pub async fn run_list_sources(
+    args: &serde_json::Value,
+    cloud: &Arc<CloudClient>,
+) -> Result<serde_json::Value, CloudError> {
+    let mut params: Vec<(&str, String)> = Vec::new();
+    for key in [
+        "cursor",
+        "limit",
+        "created_after",
+        "created_before",
+        "kind",
+        "retired",
+    ] {
+        if let Some(v) = args.get(key) {
+            let s = match v {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            params.push((key, s));
+        }
+    }
+    cloud.list_sources(&params).await
+}
+
+/// Dispatch `facets`. Forwards the drill-down arguments (`facet`, `cursor`,
+/// `limit`) to `GET /v1/facets` as query params — only keys present in
+/// `args` are sent, so a no-argument call yields the overview shape.
+/// Non-string JSON scalars are rendered in their query-string form (`50`);
+/// the input schema forbids object/array values, so no further validation
+/// happens here.
+///
+/// # Errors
+///
+/// Propagates any [`CloudError`] from the transport / status mapping.
+pub async fn run_facets(
+    args: &serde_json::Value,
+    cloud: &Arc<CloudClient>,
+) -> Result<serde_json::Value, CloudError> {
+    let mut params: Vec<(&str, String)> = Vec::new();
+    for key in ["facet", "cursor", "limit"] {
+        if let Some(v) = args.get(key) {
+            let s = match v {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            params.push((key, s));
+        }
+    }
+    cloud.get_facets(&params).await
 }
 
 #[cfg(test)]
@@ -1392,28 +1562,59 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tool_list_has_all_fourteen_tools() {
+    fn tools_list_has_13_tools_with_annotations() {
         let m = list();
-        let names: Vec<_> = m.tools.iter().map(|t| t.name).collect();
-        for expected in [
-            "search",
-            "get_chunk",
-            "get_chunk_next",
-            "get_chunk_prev",
-            "get_chunk_neighbors",
-            "get_chunk_parents",
-            "get_document",
-            "get_document_full",
-            "get_document_chunks",
-            "list_sources",
-            "facets",
-            "pull_models",
-            "status",
-            "install_search_skill",
-        ] {
-            assert!(names.contains(&expected), "missing tool: {expected}");
+        // Exact-order equality pins the canonical registration order AND the
+        // exact membership (so retired names like `get_chunk` / `pull_models`
+        // cannot reappear without failing here).
+        let names: Vec<&str> = m.tools.iter().map(|t| t.name).collect();
+        assert_eq!(
+            names,
+            [
+                "search",
+                "advanced_search",
+                "get_chunks",
+                "get_chunk_next",
+                "get_chunk_prev",
+                "get_chunk_neighbors",
+                "get_chunk_parents",
+                "get_document",
+                "get_document_chunks",
+                "list_sources",
+                "facets",
+                "status",
+                "install_search_skill",
+            ]
+        );
+        for t in &m.tools {
+            let v = serde_json::to_value(t).unwrap();
+            assert!(
+                v["annotations"]["readOnlyHint"].is_boolean(),
+                "{} missing annotations",
+                t.name
+            );
+            // Description hygiene: what/when prose only — no repo paths, no
+            // spec/decision numbers (mechanical constraints live in schemas).
+            assert!(
+                !t.description.contains("docs/"),
+                "{} description references a repo path",
+                t.name
+            );
+            assert!(
+                !t.description.contains("FR-"),
+                "{} description references a spec number",
+                t.name
+            );
         }
-        assert_eq!(names.len(), 14, "expected 14 tools, got {}", names.len());
+        let install = m
+            .tools
+            .iter()
+            .find(|t| t.name == "install_search_skill")
+            .unwrap();
+        let v = serde_json::to_value(install).unwrap();
+        assert_eq!(v["annotations"]["readOnlyHint"], false);
+        assert_eq!(v["annotations"]["idempotentHint"], true);
+        assert_eq!(v["annotations"]["destructiveHint"], false);
     }
 
     #[test]
@@ -1424,7 +1625,6 @@ mod tests {
             "get_chunk_prev",
             "get_chunk_neighbors",
             "get_document",
-            "get_document_full",
             "get_document_chunks",
         ] {
             let tool = m
@@ -1441,61 +1641,117 @@ mod tests {
     }
 
     #[test]
-    fn parse_search_args_accepts_single_query() {
-        let v = json!({ "query": "hello", "limit": 5, "rerank": false });
-        let p = parse_search_args(&v).unwrap();
+    fn parse_basic_accepts_query_mode_limit() {
+        let v = json!({ "query": "hello", "limit": 5, "mode": "fts" });
+        let p = parse_basic_search_args(&v).unwrap();
         assert_eq!(p.queries, vec!["hello".to_owned()]);
         assert_eq!(p.limit, 5);
+        assert_eq!(p.mode, "fts");
+        assert!(p.rerank, "basic search must fix rerank to true");
+        assert!(p.filters.is_none(), "basic search must carry no filters");
+    }
+
+    #[test]
+    fn parse_basic_rejects_advanced_only_keys() {
+        for args in [
+            json!({ "query": "x", "queries": ["y"] }),
+            json!({ "queries": ["y"] }),
+            json!({ "query": "x", "rerank": false }),
+            json!({ "query": "x", "filters": { "kind": { "any_of": ["code"] } } }),
+        ] {
+            let err = parse_basic_search_args(&args).unwrap_err();
+            assert!(err.contains("advanced_search"), "error must point at advanced_search: {err}");
+        }
+    }
+
+    #[test]
+    fn parse_basic_rejects_empty_or_missing_query() {
+        assert!(parse_basic_search_args(&json!({})).is_err());
+        assert!(parse_basic_search_args(&json!({"query": ""})).is_err());
+        assert!(parse_basic_search_args(&json!({"query": 5})).is_err());
+    }
+
+    #[test]
+    fn parse_advanced_accepts_multi_query() {
+        let v = json!({ "queries": ["a", "b", "c"], "rerank": false });
+        let p = parse_advanced_search_args(&v).unwrap();
+        assert_eq!(p.queries.len(), 3);
+        assert_eq!(p.limit, DEFAULT_LIMIT);
         assert!(!p.rerank);
     }
 
     #[test]
-    fn parse_search_args_accepts_multi_query() {
-        let v = json!({ "queries": ["a", "b", "c"] });
-        let p = parse_search_args(&v).unwrap();
-        assert_eq!(p.queries.len(), 3);
-        assert_eq!(p.limit, DEFAULT_LIMIT);
+    fn parse_advanced_rerank_defaults_true() {
+        let p = parse_advanced_search_args(&json!({ "queries": ["a"] })).unwrap();
         assert!(p.rerank);
     }
 
     #[test]
-    fn parse_search_args_rejects_both_forms() {
-        let v = json!({ "query": "a", "queries": ["b"] });
-        assert!(parse_search_args(&v).is_err());
+    fn parse_advanced_rejects_query_key() {
+        let err = parse_advanced_search_args(&json!({ "query": "a" })).unwrap_err();
+        assert!(err.contains("queries"), "error must point at `queries`: {err}");
+        assert!(parse_advanced_search_args(&json!({ "query": "a", "queries": ["b"] })).is_err());
     }
 
     #[test]
-    fn parse_search_args_rejects_empty() {
-        assert!(parse_search_args(&json!({})).is_err());
-        assert!(parse_search_args(&json!({"query": ""})).is_err());
-        assert!(parse_search_args(&json!({"queries": []})).is_err());
+    fn parse_advanced_accepts_ten_queries_rejects_eleven() {
+        let ten: Vec<String> = (0..10).map(|i| format!("q{i}")).collect();
+        assert!(parse_advanced_search_args(&json!({ "queries": ten })).is_ok());
+        let eleven: Vec<String> = (0..11).map(|i| format!("q{i}")).collect();
+        assert!(parse_advanced_search_args(&json!({ "queries": eleven })).is_err());
     }
 
     #[test]
-    fn parse_search_args_clamps_limit() {
-        let v = json!({ "query": "x", "limit": 0 });
-        assert!(parse_search_args(&v).is_err());
-        let v = json!({ "query": "x", "limit": 51 });
-        assert!(parse_search_args(&v).is_err());
+    fn parse_advanced_rejects_empty() {
+        assert!(parse_advanced_search_args(&json!({})).is_err());
+        assert!(parse_advanced_search_args(&json!({"queries": []})).is_err());
+        assert!(parse_advanced_search_args(&json!({"queries": [""]})).is_err());
+        assert!(parse_advanced_search_args(&json!({"queries": [5]})).is_err());
     }
 
     #[test]
-    fn search_input_schema_is_object_with_oneof() {
-        let s = search_input_schema();
-        assert_eq!(s["type"], "object");
-        assert!(s.get("oneOf").is_some());
+    fn parse_limit_rejects_out_of_range_in_both_parsers() {
+        assert!(parse_basic_search_args(&json!({ "query": "x", "limit": 0 })).is_err());
+        assert!(parse_basic_search_args(&json!({ "query": "x", "limit": 51 })).is_err());
+        assert!(parse_advanced_search_args(&json!({ "queries": ["x"], "limit": 0 })).is_err());
+        assert!(parse_advanced_search_args(&json!({ "queries": ["x"], "limit": 51 })).is_err());
     }
 
     #[test]
-    fn search_input_schema_has_code_mode_enum() {
-        let s = search_input_schema();
-        let cm = &s["properties"]["code_mode"];
-        assert_eq!(cm["type"], "string");
-        assert_eq!(cm["enum"], json!(["on", "off", "exclusive"]));
-        assert!(
-            cm["description"].as_str().unwrap_or("").contains("fts"),
-            "code_mode description must document the fts incompatibility"
-        );
+    fn search_schemas_are_strict_objects() {
+        let basic = search_input_schema();
+        assert_eq!(basic["type"], "object");
+        assert_eq!(basic["required"], json!(["query"]));
+        assert_eq!(basic["additionalProperties"], false);
+        assert!(basic["properties"].get("filters").is_none(), "basic must not expose filters");
+        assert!(basic["properties"].get("rerank").is_none(), "basic must not expose rerank");
+
+        let advanced = advanced_search_input_schema();
+        assert_eq!(advanced["type"], "object");
+        assert_eq!(advanced["required"], json!(["queries"]));
+        assert_eq!(advanced["additionalProperties"], false);
+        assert_eq!(advanced["properties"]["queries"]["maxItems"], MAX_QUERIES);
+        assert!(advanced["properties"]["filters"].is_object());
+        assert!(advanced["properties"].get("query").is_none(), "advanced must not expose query");
+
+        // The advertised limit bounds must track the parser's constants.
+        for schema in [&basic, &advanced] {
+            assert_eq!(schema["properties"]["limit"]["maximum"], MAX_LIMIT);
+            assert_eq!(schema["properties"]["limit"]["default"], DEFAULT_LIMIT);
+        }
+    }
+
+    #[test]
+    fn both_search_input_schemas_have_code_mode_enum() {
+        for s in [search_input_schema(), advanced_search_input_schema()] {
+            let cm = &s["properties"]["code_mode"];
+            assert_eq!(cm["type"], "string");
+            assert_eq!(cm["enum"], json!(["on", "off", "exclusive"]));
+            assert!(
+                cm["description"].as_str().unwrap_or("").contains("fts"),
+                "code_mode description must document the fts incompatibility"
+            );
+        }
     }
 
     #[test]
@@ -1513,47 +1769,64 @@ mod tests {
     }
 
     #[test]
-    fn parse_search_args_accepts_code_mode_values() {
+    fn both_parsers_accept_code_mode_values() {
         for v in ["on", "off", "exclusive"] {
-            let p = parse_search_args(&json!({ "query": "x", "code_mode": v })).unwrap();
-            assert_eq!(p.code_mode, Some(v));
+            let b = parse_basic_search_args(&json!({ "query": "x", "code_mode": v })).unwrap();
+            assert_eq!(b.code_mode, Some(v));
+            let a =
+                parse_advanced_search_args(&json!({ "queries": ["x"], "code_mode": v })).unwrap();
+            assert_eq!(a.code_mode, Some(v));
         }
         // Absent means "let the server apply its mode-derived default".
-        let p = parse_search_args(&json!({ "query": "x" })).unwrap();
-        assert_eq!(p.code_mode, None);
+        let b = parse_basic_search_args(&json!({ "query": "x" })).unwrap();
+        assert_eq!(b.code_mode, None);
+        let a = parse_advanced_search_args(&json!({ "queries": ["x"] })).unwrap();
+        assert_eq!(a.code_mode, None);
     }
 
     #[test]
-    fn parse_search_args_rejects_bad_code_mode() {
-        assert!(parse_search_args(&json!({ "query": "x", "code_mode": "auto" })).is_err());
-        assert!(parse_search_args(&json!({ "query": "x", "code_mode": 1 })).is_err());
+    fn both_parsers_reject_bad_code_mode() {
+        assert!(parse_basic_search_args(&json!({ "query": "x", "code_mode": "auto" })).is_err());
+        assert!(parse_basic_search_args(&json!({ "query": "x", "code_mode": 1 })).is_err());
+        assert!(
+            parse_advanced_search_args(&json!({ "queries": ["x"], "code_mode": "auto" })).is_err()
+        );
+        assert!(parse_advanced_search_args(&json!({ "queries": ["x"], "code_mode": 1 })).is_err());
     }
 
     #[test]
-    fn parse_search_args_rejects_fts_with_code_mode_on_or_exclusive() {
+    fn both_parsers_reject_fts_with_code_mode_on_or_exclusive() {
         // Mirrors the server's 400: fts forces code_mode off (D5).
         for v in ["on", "exclusive"] {
             assert!(
-                parse_search_args(&json!({ "query": "x", "mode": "fts", "code_mode": v })).is_err(),
-                "fts + code_mode={v} must be rejected client-side"
+                parse_basic_search_args(&json!({ "query": "x", "mode": "fts", "code_mode": v }))
+                    .is_err(),
+                "basic: fts + code_mode={v} must be rejected client-side"
+            );
+            assert!(
+                parse_advanced_search_args(
+                    &json!({ "queries": ["x"], "mode": "fts", "code_mode": v })
+                )
+                .is_err(),
+                "advanced: fts + code_mode={v} must be rejected client-side"
             );
         }
-        assert!(
-            parse_search_args(&json!({ "query": "x", "mode": "fts", "code_mode": "off" })).is_ok()
-        );
+        assert!(parse_basic_search_args(
+            &json!({ "query": "x", "mode": "fts", "code_mode": "off" })
+        )
+        .is_ok());
     }
 
     #[test]
     fn parse_rejects_unknown_mode_and_bad_filter() {
         let bad_mode = serde_json::json!({ "query": "x", "mode": "fuzzy" });
-        assert!(parse_search_args(&bad_mode).is_err());
+        assert!(parse_basic_search_args(&bad_mode).is_err());
         let non_string_mode = serde_json::json!({ "query": "x", "mode": 5 });
-        assert!(parse_search_args(&non_string_mode).is_err());
-        let bad_filter =
-            serde_json::json!({ "query": "x", "filters": { "kind": { "any_of": ["binary"] } } });
-        assert!(parse_search_args(&bad_filter).is_err());
-        let ok = serde_json::json!({ "query": "x", "mode": "fts", "filters": { "kind": { "any_of": ["code"] } } });
-        assert!(parse_search_args(&ok).is_ok());
+        assert!(parse_basic_search_args(&non_string_mode).is_err());
+        let bad_filter = serde_json::json!({ "queries": ["x"], "filters": { "kind": { "any_of": ["binary"] } } });
+        assert!(parse_advanced_search_args(&bad_filter).is_err());
+        let ok = serde_json::json!({ "queries": ["x"], "mode": "fts", "filters": { "kind": { "any_of": ["code"] } } });
+        assert!(parse_advanced_search_args(&ok).is_ok());
     }
 
     fn result_with_trust(chunk: &str, trust: f64) -> serde_json::Value {
@@ -1637,10 +1910,10 @@ mod tests {
     }
 
     #[test]
-    fn status_reports_models() {
-        let s = run_status(None);
-        assert_eq!(s.reranker, "bge-reranker-base");
-        assert!(matches!(s.model_state, ModelState::Missing | ModelState::Ready));
+    fn every_tool_advertises_output_schema() {
+        for t in list().tools {
+            assert!(t.output_schema.is_some(), "tool {} missing outputSchema", t.name);
+        }
     }
 }
 

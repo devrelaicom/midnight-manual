@@ -30,15 +30,21 @@ fn render_overview(body: &str) -> Result<()> {
     let slug = v["source"]["slug"].as_str().unwrap_or("?");
     let url = v["published_url"].as_str().unwrap_or("(none)");
     let lang = v["language"].as_str().unwrap_or("?");
-    let chunk_ids = v["chunk_ids"].as_array().cloned().unwrap_or_default();
+    let chunks = v["chunks"].as_array().cloned().unwrap_or_default();
 
     println!("document: {slug}/{path}");
     println!("URL:      {url}");
     println!("language: {lang}");
-    println!("chunks:   {} chunks", chunk_ids.len());
+    println!("chunks:   {} chunks", chunks.len());
     println!();
-    for (i, id) in chunk_ids.iter().enumerate() {
-        println!("  {}. chunk_index={i}  id={}", i + 1, id.as_str().unwrap_or(""));
+    for (i, c) in chunks.iter().enumerate() {
+        let chunk_index = c["chunk_index"].as_i64().unwrap_or(0);
+        let tokens = c["token_count"].as_i64().unwrap_or(0);
+        println!(
+            "  {}. chunk_index={chunk_index}  tokens={tokens}  id={}",
+            i + 1,
+            c["id"].as_str().unwrap_or(""),
+        );
     }
     Ok(())
 }

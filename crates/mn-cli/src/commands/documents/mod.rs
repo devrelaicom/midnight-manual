@@ -5,7 +5,6 @@ use clap::{Args as ClapArgs, Subcommand};
 use mn_telemetry::TelemetryClient;
 
 pub mod chunks;
-pub mod full;
 pub mod show;
 
 /// Documents namespace arguments.
@@ -19,10 +18,8 @@ pub struct Args {
 /// Documents subcommands.
 #[derive(Debug, Subcommand)]
 pub enum DocumentsCmd {
-    /// Render the document overview with ordered chunk IDs.
+    /// Render the document overview with the ordered chunk skeleton.
     Show(show::Args),
-    /// Render the complete document with every chunk inline.
-    Full(full::Args),
     /// Render a windowed slice of the document's chunks.
     Chunks(chunks::Args),
 }
@@ -37,13 +34,11 @@ pub async fn run(
 ) -> Result<()> {
     match args.cmd {
         DocumentsCmd::Show(a) => show::run(a, server, json).await,
-        DocumentsCmd::Full(a) => full::run(a, server, json).await,
         DocumentsCmd::Chunks(a) => chunks::run(a, server, json).await,
     }
 }
 
-/// Shared GET helper used by show + chunks (full has its own because it
-/// handles 412 specially).
+/// Shared GET helper used by show + chunks.
 pub(super) async fn fetch(url: &str) -> Result<String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))

@@ -23,6 +23,18 @@ pub use install::{
 /// requires the two to match).
 pub const SKILL_NAME: &str = "midnight-advanced-search";
 
+/// `true` when the bundled skill's `SKILL.md` exists for ANY harness at user
+/// scope. Used by the MCP search projector's low-result nudge.
+#[must_use]
+pub fn installed_anywhere(env: &impl SkillEnv) -> bool {
+    let Ok(base) = base_dir(Scope::User, env) else {
+        return false;
+    };
+    Harness::ALL
+        .into_iter()
+        .any(|h| h.skill_file(Scope::User, &base).exists())
+}
+
 /// The three skill files, embedded at build time, as `(relative path, body)`.
 /// This is the bundle the installer ships verbatim into every harness. `SKILL.md`
 /// is always entry 0.
@@ -136,6 +148,44 @@ mod tests {
         for (path, body) in skill_files() {
             assert!(!body.trim().is_empty(), "{path} is empty");
         }
+    }
+}
+
+#[cfg(test)]
+mod installed_anywhere_tests {
+    use super::*;
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+
+    /// Temp-dir fake mirroring the `FakeEnv` the install tests use.
+    struct FakeEnv {
+        home: PathBuf,
+    }
+    impl SkillEnv for FakeEnv {
+        fn home_dir(&self) -> Option<PathBuf> {
+            Some(self.home.clone())
+        }
+        fn current_dir(&self) -> Option<PathBuf> {
+            Some(self.home.clone())
+        }
+    }
+
+    #[test]
+    fn false_on_empty_home() {
+        let tmp = TempDir::new().unwrap();
+        let env = FakeEnv { home: tmp.path().to_path_buf() };
+        assert!(!installed_anywhere(&env));
+    }
+
+    #[test]
+    fn true_after_writing_skill_file_for_one_harness() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().to_path_buf();
+        let file = Harness::ClaudeCode.skill_file(Scope::User, &home);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, skill_markdown()).unwrap();
+        let env = FakeEnv { home };
+        assert!(installed_anywhere(&env));
     }
 }
 

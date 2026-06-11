@@ -39,6 +39,20 @@ pub fn not_found(message: impl Into<String>, request_id: impl Into<String>) -> R
     into_response(err, request_id)
 }
 
+/// Convenience for the common 400 path: the typed `invalid_request` envelope.
+#[must_use]
+pub fn bad_request(
+    message: impl Into<String>,
+    remediation: impl Into<String>,
+    request_id: impl Into<String>,
+) -> Response {
+    let err = CoreError::builder(ErrorCode::InvalidRequest)
+        .message(message)
+        .remediation(remediation)
+        .build();
+    into_response(err, request_id)
+}
+
 /// Convenience for the 503 path used when the DB is briefly unavailable.
 #[must_use]
 pub fn service_unavailable(reason: impl Into<String>, request_id: impl Into<String>) -> Response {

@@ -2969,6 +2969,7 @@ dependencies = [
 name = "mn-mcp"
 version = "0.1.0"
 dependencies = [
+ "jsonschema",
  "mn-core",
  "mn-embedding",
  "mn-retrieval",

@@ -340,6 +340,29 @@ fn make_server_cfg(cloud_url: &str) -> ServerConfig {
     cfg
 }
 
+/// Single-query, no-rerank `ParsedSearchArgs` (the shape these wiremock tests
+/// always drive `run_search` with). `rerank: false` keeps the reranker model
+/// out of the test path (the public parsers force `rerank` on for basic
+/// search, so these tests construct the struct directly).
+fn single_query_args(query: &str) -> mn_mcp::tools::ParsedSearchArgs {
+    single_query_args_with(query, None)
+}
+
+/// [`single_query_args`] with an explicit `code_mode` override.
+fn single_query_args_with(
+    query: &str,
+    code_mode: Option<&'static str>,
+) -> mn_mcp::tools::ParsedSearchArgs {
+    mn_mcp::tools::ParsedSearchArgs {
+        queries: vec![query.to_owned()],
+        limit: 10,
+        rerank: false,
+        filters: None,
+        mode: "hybrid",
+        code_mode,
+    }
+}
+
 #[tokio::test]
 async fn run_search_uses_corpus_wire_id_as_client_embedding_model() {
     // Mount /v1/models/active with wire id "voyage-code-3@1".
@@ -395,13 +418,9 @@ async fn run_search_uses_corpus_wire_id_as_client_embedding_model() {
     let cfg = make_server_cfg(&server.uri());
     let cloud = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
 
-    let result = run_search(
-        &json!({ "query": "how to compile a Compact contract", "rerank": false }),
-        &cfg,
-        &cloud,
-    )
-    .await
-    .expect("run_search should succeed with corpus wire id");
+    let result = run_search(&single_query_args("how to compile a Compact contract"), &cfg, &cloud)
+        .await
+        .expect("run_search should succeed with corpus wire id");
 
     // The response must carry the corpus wire id as corpus_embedding_model.
     assert_eq!(
@@ -481,10 +500,9 @@ async fn run_search_server_embed_end_to_end_when_byok_absent() {
     let cfg = make_server_cfg(&server.uri());
     let cloud = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
 
-    let result =
-        run_search(&json!({ "query": "zero knowledge proof", "rerank": false }), &cfg, &cloud)
-            .await
-            .expect("run_search must succeed in server-embed mode");
+    let result = run_search(&single_query_args("zero knowledge proof"), &cfg, &cloud)
+        .await
+        .expect("run_search must succeed in server-embed mode");
 
     // The corpus wire id must be correct.
     assert_eq!(result["corpus_embedding_model"], "voyage-code-3@1");
@@ -520,7 +538,7 @@ async fn run_search_propagates_active_model_fetch_failure() {
     let cfg = make_server_cfg(&server.uri());
     let cloud = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
 
-    let err = run_search(&json!({ "query": "test query", "rerank": false }), &cfg, &cloud)
+    let err = run_search(&single_query_args("test query"), &cfg, &cloud)
         .await
         .unwrap_err();
 
@@ -615,10 +633,9 @@ async fn run_search_default_sends_code_vector_and_code_model() {
 
     let cfg = make_server_cfg(&server.uri());
     let cloud = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
-    let result =
-        run_search(&json!({ "query": "fn deploy_contract", "rerank": false }), &cfg, &cloud)
-            .await
-            .expect("run_search ok");
+    let result = run_search(&single_query_args("fn deploy_contract"), &cfg, &cloud)
+        .await
+        .expect("run_search ok");
 
     let body = last_search_body(&server).await;
     // Both halves embedded, each from its own type-tagged /v1/embeddings call.
@@ -646,13 +663,10 @@ async fn run_search_code_mode_off_omits_code_fields() {
 
     let cfg = make_server_cfg(&server.uri());
     let cloud = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
-    let result = run_search(
-        &json!({ "query": "what is a zk proof", "code_mode": "off", "rerank": false }),
-        &cfg,
-        &cloud,
-    )
-    .await
-    .expect("run_search ok");
+    let result =
+        run_search(&single_query_args_with("what is a zk proof", Some("off")), &cfg, &cloud)
+            .await
+            .expect("run_search ok");
 
     let body = last_search_body(&server).await;
     // Explicit off IS forwarded (the caller overrode the server default).
@@ -684,13 +698,10 @@ async fn run_search_code_mode_exclusive_skips_general_embedding() {
 
     let cfg = make_server_cfg(&server.uri());
     let cloud = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
-    let result = run_search(
-        &json!({ "query": "VoyageEmbedder::new", "code_mode": "exclusive", "rerank": false }),
-        &cfg,
-        &cloud,
-    )
-    .await
-    .expect("run_search ok");
+    let result =
+        run_search(&single_query_args_with("VoyageEmbedder::new", Some("exclusive")), &cfg, &cloud)
+            .await
+            .expect("run_search ok");
 
     let body = last_search_body(&server).await;
     assert_eq!(body["code_mode"], "exclusive");
@@ -717,7 +728,7 @@ async fn run_search_falls_back_to_config_code_wire_when_active_has_none() {
 
     let cfg = make_server_cfg(&server.uri());
     let cloud = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
-    run_search(&json!({ "query": "fn main", "rerank": false }), &cfg, &cloud)
+    run_search(&single_query_args("fn main"), &cfg, &cloud)
         .await
         .expect("run_search ok");
 
@@ -726,29 +737,13 @@ async fn run_search_falls_back_to_config_code_wire_when_active_has_none() {
     assert_eq!(body["client_code_embedding_model"], "voyage-code-3@1");
 }
 
-#[tokio::test]
-async fn run_search_rejects_fts_with_code_mode_on() {
-    // Pure validation: no mocks needed; must fail before any wire call.
-    let server = MockServer::start().await;
-    let cfg = make_server_cfg(&server.uri());
-    let cloud = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
-    let err = run_search(
-        &json!({ "query": "x", "mode": "fts", "code_mode": "on", "rerank": false }),
-        &cfg,
-        &cloud,
-    )
-    .await
+#[test]
+fn fts_with_code_mode_on_is_rejected_at_parse_time() {
+    // The fts/code_mode incompatibility fails in the parsers (before
+    // run_search and any embedding or wire call) — mirrors the cloud's 400.
+    let err = mn_mcp::tools::parse_basic_search_args(&json!({
+        "query": "x", "mode": "fts", "code_mode": "on"
+    }))
     .unwrap_err();
-    assert!(
-        matches!(err, mn_mcp::tools::SearchError::InvalidInput(_)),
-        "fts + code_mode=on must be InvalidInput, got {err:?}"
-    );
-    assert!(
-        server
-            .received_requests()
-            .await
-            .expect("recording")
-            .is_empty(),
-        "validation must fail before any wire call"
-    );
+    assert!(err.contains("code_mode"), "got: {err}");
 }

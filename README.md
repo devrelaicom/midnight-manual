@@ -150,7 +150,8 @@ It exposes **13 tools**, grouped by what they do:
 
 | Tool | What it does |
 | --- | --- |
-| **`search`** | Hybrid full-text + vector retrieval. Supports a single `query` or an array of `queries` (for HyDE / query-expansion fusion), optional cross-encoder `rerank`, and a `filters` object (by source, attribution tier, language, or package). `limit` defaults to 10, capped at 50. Every hit carries a confidence score and per-factor trust breakdown. |
+| **`search`** | The simple surface: hybrid full-text + vector retrieval from a single `query` (switch `mode` to `fts` or `vector` to pin one half). `limit` defaults to 10, capped at 50. Every hit carries a confidence score and per-factor trust breakdown. |
+| **`advanced_search`** | Full-control retrieval: fuses 1–10 `queries` via RRF (HyDE / expansion / step-back), restricts by per-facet `filters` (source, attribution tier, language, package, symbol, freshness, …), switches `mode`, and toggles cross-encoder `rerank` (on by default). Call `facets` first to discover valid filter values. |
 
 ### Read a hit in context
 
@@ -158,29 +159,28 @@ A search result is a chunk. These tools let your assistant pull exactly as much 
 
 | Tool | What it does |
 | --- | --- |
-| **`get_chunk`** | Fetch one chunk by id, plus its parent document metadata and source slug. |
+| **`get_chunks`** | Fetch the full content of 1–20 chunks by id in one batched call — the way to read the actual text behind search results. |
 | **`get_chunk_next`** / **`get_chunk_prev`** | Walk forward/backward `count` chunks (default 5, max 100). Skips `embed_failed` gaps. |
 | **`get_chunk_neighbors`** | Fetch a chunk plus `count` neighbours on each side (default 2, max 100) — `prev` + the chunk + `next` — in one round-trip. |
 | **`get_chunk_parents`** | Walk the parent chain up to the source-version root — great for "where does this live?". |
-| **`get_document`** | Document metadata + the ordered list of its chunk ids (no bodies). |
-| **`get_document_full`** | The whole document with chunks inlined (capped at 500 ready chunks; over that it points you to `get_document_chunks`). |
-| **`get_document_chunks`** | A windowed slice of a document's chunks with `from` / `limit` pagination. |
+| **`get_document`** | Document metadata + an ordered skeleton of its chunks (`{id, chunk_index, token_count}` — no bodies). Size a document up before reading it with `get_document_chunks`. |
+| **`get_document_chunks`** | A windowed slice of a document's chunk bodies with `from` / `limit` pagination. |
 
-### Corpus & models
+### Corpus & diagnostics
 
 | Tool | What it does |
 | --- | --- |
-| **`list_sources`** | Enumerate corpus sources — slug, display name, kind, active revision. |
-| **`pull_models`** | Download the reranker on demand; reports load state and timing. (The embedder is remote VoyageAI.) |
-| **`status`** | Health report: server version, model names, `ready`/`missing` state, cache dir. |
+| **`list_sources`** | Enumerate corpus sources (paginated) — slug, display name, kind, active revision. The slugs feed `advanced_search` filters. |
+| **`facets`** | Discover the filter dimensions `advanced_search` accepts and the values present in the corpus — call it bare for the overview, or drill into one facet's full value list. |
+| **`status`** | Diagnose the retrieval setup: cloud reachability, auth state, both limit families (request rate + token budget), VoyageAI key validity, and reranker readiness. Call it when searches misbehave. |
 | **`install_search_skill`** | Install the Advanced Search Skill (`SKILL.md`) into your detected AI harness(es); reports the paths written and the per-harness reload step. |
 
 ### Why it's good
 
 - **Hybrid retrieval, not just vectors.** Lexical (PostgreSQL full-text) and semantic (pgvector) results are fused with [Reciprocal Rank Fusion](#deep-dives) so exact-term matches and conceptual matches both surface.
-- **Optional cross-encoder reranking.** Flip `rerank: true` and a `bge-reranker-base` cross-encoder re-scores the candidate set for precision on hard queries.
+- **Cross-encoder reranking.** `advanced_search` re-scores the candidate set with a local cross-encoder (`bge-reranker-base` by default — [swappable](#models)) for precision on hard queries. It's on by default; flip `rerank: false` for lowest latency.
 - **Confidence you can reason about.** Each result blends a **trust score** (source attribution, verification, freshness, deprecation, version-match) with relevance — and returns the factor breakdown so your assistant can say *why* a passage is trustworthy without another round-trip.
-- **Structured errors that self-correct.** If the corpus's embedding model has rolled forward, `search` returns an `embedding_model_mismatch` envelope that tells the client to call `pull_models` — no cryptic failures.
+- **Structured errors that self-correct.** Failures come back as machine-readable envelopes with remediation guidance and `suggested_next_actions` (a stale chunk id, say, suggests a fresh `search`); if the corpus's embedding model has rolled forward, `search` returns an `embedding_model_mismatch` envelope naming both models and the fix — no cryptic failures.
 
 ---
 
@@ -207,7 +207,7 @@ The agent checks whether the skill is already present and, if not, installs it t
 | Technique | How it works | Why it helps |
 | --- | --- | --- |
 | **HyDE** (pseudo-answer) | The agent drafts a 1–2 sentence hypothetical answer and searches with it alongside the question; both embeddings fuse via RRF. | Lifts recall when the question is short or uses different words than the docs. |
-| **Multi-query** | 2–3 paraphrases varying vocabulary and breadth, fused in a single `search` call. | Beats synonym mismatch between your phrasing and the corpus's. |
+| **Multi-query** | 2–3 paraphrases varying vocabulary and breadth, fused in a single `advanced_search` call. | Beats synonym mismatch between your phrasing and the corpus's. |
 | **Step-back** | Pairs the specific question with a more abstract framing. | Rescues over-specific questions and raw error messages. |
 | **Lexical anchoring** | Sends exact identifiers / error codes verbatim so the full-text half of hybrid search nails exact matches. | Catches the precise symbol, flag, or error the vector half would blur. |
 | **Symbol-aware code search** | Scopes by `package` / `language`, then navigates hits by their structured `symbol_path`. | Lands on the *named* circuit, contract, or function — not an arbitrary window. |
@@ -308,15 +308,16 @@ Overrides are time-boxed (they expire on their `--ttl`) and the server refreshes
 mnm search   "<query>"                 ad-hoc hybrid search
 mnm sources  list | show               browse corpus sources
 mnm versions list | show | promote …   inspect source versions
-mnm chunks   show | next | prev        walk the chunk graph by id
-mnm documents show | full | chunks     read documents, windowed
-mnm models   pull | list | prune       manage the local reranker
+mnm chunks   show | next | prev | neighbors  walk the chunk graph by id
+mnm documents show | chunks            read documents, windowed
+mnm models   pull | active             local reranker / active embed model
 mnm config   show | edit | defaults    resolved configuration
 mnm telemetry disable | enable | status opt out (or back in)
 mnm auth     github | status           GitHub OAuth for rate-limit uplift
 mnm manifest init | check | generate   author ingestion manifests
 mnm mcp      serve | install            run / wire up the MCP server
 mnm doctor                             environment & connectivity report
+mnm status                             connectivity, auth & model readiness
 mnm version                            build metadata
 ```
 
@@ -329,14 +330,13 @@ mnm search "nullifier double-spend prevention" --limit 5 --json
 # Follow a chunk's neighbours to read around a hit
 mnm chunks next <chunk-id> --count 10
 
-# Read a whole document, or a window of it
-mnm documents full <doc-id>
+# Size a document up, then read it window by window
+mnm documents show <doc-id>
 mnm documents chunks <doc-id> --from 0 --limit 20
 
 # Manage the local reranker (the embedder is remote VoyageAI)
 mnm models pull          # fetch the reranker
-mnm models list          # what's cached
-mnm models prune --keep bge-reranker-base
+mnm models active        # the corpus's active embedding model
 ```
 
 ### Global flags
@@ -365,7 +365,7 @@ mnm models prune --keep bge-reranker-base
 
 - **Reranker powered by [`fastembed`](https://github.com/Anush008/fastembed-rs)** over the ONNX runtime — no Python, no GPU required. The embedder is remote (VoyageAI), so there is nothing to download for it.
 - **Lazy & cached.** The reranker downloads on first use into `$XDG_DATA_HOME/midnight-manual/models/` (override with `models.cache_dir`). Subsequent runs load from disk; the MCP server only loads it when a reranking query needs it.
-- **Pin & prune.** `mnm models pull` (reranker), `mnm models list`, and `mnm models prune --keep <name>` give you full control of what's on disk.
+- **Pull & inspect.** `mnm models pull` fetches the reranker ahead of time; `mnm models active` shows which embedding model the corpus is on.
 - **Version-aware.** The corpus advertises its active embedding model as `name@revision` (e.g. `voyage-code-3@1`). If the corpus rolls forward, clients are told to re-embed against the new model rather than silently returning mis-scored results.
 
 ---
@@ -581,7 +581,7 @@ Six event types, each a fixed shape of coarse scalars and closed enums:
 | `mcp_tool_call` | `tool_name`, `latency_ms`, `result_count`, `model_state`, `rerank_on`, `outcome` | MCP |
 | `cli_command` | `command`, `duration_ms`, `outcome` | CLI |
 | `ingest_complete` | `documents_added/updated/skipped`, `duration_ms`, `outcome` | CLI (admin) |
-| `pull_models` | `embedder_downloaded`, `reranker_downloaded`, `duration_ms`, `outcome` | CLI / MCP |
+| `pull_models` | `embedder_downloaded`, `reranker_downloaded`, `duration_ms`, `outcome` | CLI |
 | `mcp_startup` | `startup_ms`, `model_state` | MCP |
 | `mcp_shutdown` | `uptime_s`, `tools_served` | MCP |
 

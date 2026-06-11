@@ -126,9 +126,16 @@ async fn run_pull(
     std::fs::create_dir_all(&cache_dir)
         .with_context(|| format!("create model cache dir at {}", cache_dir.display()))?;
 
-    let result = mn_mcp::tools::run_pull_models(cache_dir.clone())
+    // Load the bge reranker singleton directly (the MCP `pull_models` tool
+    // that used to wrap this was removed — MCP-side the reranker loads lazily
+    // on the first reranking search). Loading fetches the ONNX bundle into
+    // `cache_dir` if it isn't already on disk.
+    mn_embedding::reranker::global(cache_dir.clone())
         .await
-        .map_err(|e| anyhow!("{e}"))?;
+        .map_err(|e| anyhow!("reranker init failed: {e}"))?;
+    // This is a fresh CLI process, so the load always happened in this call
+    // (the files may still have come from the on-disk cache).
+    let reranker_loaded = true;
 
     let duration_ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
     telemetry
@@ -136,10 +143,10 @@ async fn run_pull(
             Component::Cli,
             cli_version,
             EventPayload::PullModels {
-                // The corpus embedder is remote VoyageAI; `pull_models` never
+                // The corpus embedder is remote VoyageAI; `models pull` never
                 // downloads a local embedder, so this is always false.
                 embedder_downloaded: false,
-                reranker_downloaded: result.reranker_loaded,
+                reranker_downloaded: reranker_loaded,
                 duration_ms,
                 outcome: Outcome::Ok,
             },
@@ -148,7 +155,13 @@ async fn run_pull(
 
     println!(
         "{}",
-        format_pull_output(result.reranker, result.reranker_loaded, duration_ms, &cache_dir, json)
+        format_pull_output(
+            mn_embedding::RERANKER_MODEL_NAME,
+            reranker_loaded,
+            duration_ms,
+            &cache_dir,
+            json
+        )
     );
     Ok(())
 }

@@ -22,6 +22,7 @@ pub mod corpus_model;
 pub mod error;
 pub mod jobs;
 pub mod middleware;
+pub mod pagination;
 pub mod ratelimit;
 pub mod routes;
 pub mod tokenlimit;

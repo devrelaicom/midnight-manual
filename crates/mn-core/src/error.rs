@@ -42,7 +42,8 @@ pub enum ErrorCode {
     ServiceUnavailable,
     /// 503 — MCP-tool-side: the local cloud client could not reach the server.
     CloudUnreachable,
-    /// 503 — MCP-tool-side: local ML model file missing or corrupt; remediation: `pull_models`.
+    /// 503 — MCP-tool-side: local ML model file missing or corrupt; remediation: retry — the
+    /// reranker loads lazily on first use (or pre-fetch via `mnm models pull`).
     ModelsMissing,
     /// 500 — telemetry event failed schema validation; dropped server-side (FR-109).
     TelemetrySchemaInvalid,

@@ -155,7 +155,7 @@ pub async fn run(args: Args, server: Option<&str>, json: bool) -> Result<()> {
     match args.cmd {
         SourcesCmd::List => {
             let value = get_json(&client, &format!("{server_url}/v1/sources"), None).await?;
-            emit_value(&value, json);
+            emit_list(&value, json);
         }
         SourcesCmd::Show { slug } => {
             let value = get_json(&client, &format!("{server_url}/v1/sources/{slug}"), None).await?;
@@ -386,6 +386,29 @@ fn emit_value(v: &serde_json::Value, json: bool) {
         }
     } else {
         print_show(v);
+    }
+}
+
+/// Render the paginated `GET /v1/sources` object (`{sources, total,
+/// next_cursor}`). In `--json` mode the whole envelope is printed verbatim so
+/// scripts can drive `next_cursor` themselves.
+fn emit_list(v: &serde_json::Value, json: bool) {
+    if json {
+        if let Ok(s) = serde_json::to_string_pretty(v) {
+            println!("{s}");
+        }
+        return;
+    }
+    let Some(rows) = v["sources"].as_array() else {
+        println!("(unexpected response shape)");
+        return;
+    };
+    for row in rows {
+        print_row(row);
+    }
+    if !v["next_cursor"].is_null() {
+        let total = v["total"].as_i64().unwrap_or(0);
+        println!("  … showing {} of {total} (more pages available)", rows.len());
     }
 }
 

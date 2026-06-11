@@ -127,6 +127,13 @@ async fn end_to_end_canary_pipeline_leaves_no_canary_strings() {
                 model_state: ModelState::Ready,
                 rerank_on: false,
                 outcome: Outcome::Ok,
+                corpus_model: None,
+                reranker_used: None,
+                top_confidence: None,
+                top_attribution: None,
+                top_source: None,
+                filtered_by_confidence: None,
+                deduplicated_count: None,
             },
         ))
         .await;

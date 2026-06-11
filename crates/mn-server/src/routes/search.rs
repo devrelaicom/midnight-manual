@@ -188,6 +188,22 @@ pub struct SearchResult {
     pub total_chunks: i32,
     /// Created-at timestamp.
     pub created_at: OffsetDateTime,
+    /// URL-safe source handle.
+    pub source_slug: String,
+    /// Human-readable source name.
+    pub source_display_name: String,
+    /// Source-relative path of the parent document, e.g. `docs/intro.md`.
+    pub source_path: String,
+    /// Canonical published URL, when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub published_url: Option<String>,
+    /// Original source URL, when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_url: Option<String>,
+    /// Markdown heading breadcrumb for this chunk.
+    pub heading_path: Vec<String>,
+    /// Code symbol breadcrumb for this chunk.
+    pub symbol_path: Vec<String>,
     /// Per-result scores. Omitted when the request sets `include_scores=false`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scores: Option<ScoreBreakdown>,
@@ -747,6 +763,13 @@ async fn search(
             matched_queries,
             relevance,
             score,
+            source_slug: row.source_slug.clone(),
+            source_display_name: row.source_display_name.clone(),
+            source_path: row.source_path.clone(),
+            published_url: row.published_url.clone(),
+            source_url: row.source_url.clone(),
+            heading_path: row.heading_path.clone(),
+            symbol_path: row.symbol_path.clone(),
         });
     }
 
@@ -808,6 +831,13 @@ struct ScoredCandidate {
     /// Normalized RRF relevance term (used when `sort_by = relevance`).
     relevance: f64,
     score: ScoreResult,
+    source_slug: String,
+    source_display_name: String,
+    source_path: String,
+    published_url: Option<String>,
+    source_url: Option<String>,
+    heading_path: Vec<String>,
+    symbol_path: Vec<String>,
 }
 
 impl ScoredCandidate {
@@ -834,6 +864,13 @@ impl ScoredCandidate {
             chunk_index: self.chunk_index,
             total_chunks: self.total_chunks,
             created_at: self.created_at,
+            source_slug: self.source_slug,
+            source_display_name: self.source_display_name,
+            source_path: self.source_path,
+            published_url: self.published_url,
+            source_url: self.source_url,
+            heading_path: self.heading_path,
+            symbol_path: self.symbol_path,
             scores,
         }
     }
@@ -896,6 +933,13 @@ struct ScoringRow {
     provenance: Provenance,
     source_modified_at: Option<OffsetDateTime>,
     ingested_at: OffsetDateTime,
+    source_slug: String,
+    source_display_name: String,
+    source_path: String,
+    published_url: Option<String>,
+    source_url: Option<String>,
+    heading_path: Vec<String>,
+    symbol_path: Vec<String>,
 }
 
 /// Batch-fetch the scoring rows for a set of chunk ids, keyed by chunk id.
@@ -915,11 +959,15 @@ async fn fetch_scoring_rows(
     let rows = sqlx::query(
         "SELECT chunk.id, chunk.document_id, chunk.source_version_id, chunk.chunk_index, \
                 chunk.total_chunks, chunk.start_byte, chunk.end_byte, chunk.content, chunk.created_at, \
+                chunk.heading_path AS heading_path, chunk.symbol_path AS symbol_path, \
                 d.provenance AS provenance, d.source_modified_at AS source_modified_at, \
+                d.source_path AS source_path, d.published_url AS published_url, d.source_url AS source_url, \
+                s.slug AS source_slug, s.display_name AS source_display_name, \
                 sv.ingested_at AS ingested_at \
          FROM chunk \
          JOIN document d ON d.id = chunk.document_id \
          JOIN source_version sv ON sv.id = chunk.source_version_id \
+         JOIN source s ON s.id = sv.source_id \
          WHERE chunk.id = ANY($1)",
     )
     .bind(ids)
@@ -931,6 +979,17 @@ async fn fetch_scoring_rows(
         let id: Uuid = r.try_get("id")?;
         let provenance_json: serde_json::Value = r.try_get("provenance")?;
         let provenance: Provenance = serde_json::from_value(provenance_json).unwrap_or_default();
+        // symbol_path is JSONB [{kind,name}] (unlike heading_path's native text[]); the wire breadcrumb only needs the name strings, so kind is intentionally dropped.
+        let symbol_json: serde_json::Value =
+            r.try_get("symbol_path").unwrap_or(serde_json::Value::Null);
+        let symbol_path: Vec<String> = symbol_json
+            .as_array()
+            .map(|segs| {
+                segs.iter()
+                    .filter_map(|s| s.get("name").and_then(|n| n.as_str()).map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
         map.insert(
             id,
             ScoringRow {
@@ -945,6 +1004,13 @@ async fn fetch_scoring_rows(
                 provenance,
                 source_modified_at: r.try_get("source_modified_at")?,
                 ingested_at: r.try_get("ingested_at")?,
+                source_slug: r.try_get("source_slug")?,
+                source_display_name: r.try_get("source_display_name")?,
+                source_path: r.try_get("source_path")?,
+                published_url: r.try_get("published_url")?,
+                source_url: r.try_get("source_url")?,
+                heading_path: r.try_get("heading_path")?,
+                symbol_path,
             },
         );
     }
@@ -1447,8 +1513,14 @@ mod code_mode_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_queries, CodeMode, QueryPair, SearchMode, SearchRequest, SortBy};
+    use super::{
+        normalize_queries, CodeMode, QueryPair, ScoredCandidate, SearchMode, SearchRequest, SortBy,
+    };
+    use mn_core::provenance::Attribution;
+    use mn_core::scoring::{ConfidenceFactors, RelevanceSource, ScoreResult};
     use mn_retrieval::filters::{NumericRange, SearchFilters, SetMatch};
+    use time::OffsetDateTime;
+    use uuid::Uuid;
 
     fn req(
         queries: Vec<QueryPair>,
@@ -1639,5 +1711,72 @@ mod tests {
         };
         let sql = built_sql(&f);
         assert!(sql.contains("chunk.token_count >="), "got: {sql}");
+    }
+
+    #[test]
+    fn into_result_carries_readable_identity() {
+        let c = ScoredCandidate {
+            chunk_id: Uuid::nil(),
+            content: "x".into(),
+            document_id: Uuid::nil(),
+            source_version_id: Uuid::nil(),
+            chunk_index: 0,
+            total_chunks: 1,
+            start_byte: 0,
+            end_byte: 1,
+            created_at: OffsetDateTime::UNIX_EPOCH,
+            rrf_score: 0.0,
+            vector_similarity: 0.0,
+            matched_queries: vec![],
+            relevance: 0.0,
+            score: ScoreResult {
+                trust_score: 0.0,
+                confidence: 0.0,
+                factors: ConfidenceFactors {
+                    attribution: Attribution::Unknown,
+                    attribution_multiplier: 0.0,
+                    verified: false,
+                    verified_by: None,
+                    verification_multiplier: 1.0,
+                    age_days: 0,
+                    freshness_multiplier: 1.0,
+                    deprecation: false,
+                    deprecation_multiplier: 1.0,
+                    language_target_query: None,
+                    language_targets_chunk: vec![],
+                    version_match_multiplier: 1.0,
+                    relevance_source: RelevanceSource::Rrf,
+                    relevance_multiplier: 0.0,
+                },
+            },
+            source_slug: "compact-docs".into(),
+            source_display_name: "Compact Docs".into(),
+            source_path: "docs/intro.md".into(),
+            published_url: Some("https://x/intro".into()),
+            source_url: None,
+            heading_path: vec!["Compiling".into(), "Witnesses".into()],
+            symbol_path: vec![],
+        };
+        let r = c.into_result(false);
+        assert_eq!(r.source_path, "docs/intro.md");
+        assert_eq!(r.source_display_name, "Compact Docs");
+        assert_eq!(r.heading_path, vec!["Compiling".to_string(), "Witnesses".to_string()]);
+    }
+
+    #[test]
+    fn symbol_path_name_extraction_skips_malformed() {
+        let json = serde_json::json!([
+            {"kind": "impl", "name": "Foo"},
+            {"kind": "fn",   "name": "bar"},
+            {},            // no "name"
+            {"kind": "fn"} // "name" missing
+        ]);
+        let names: Vec<String> = json
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|s| s.get("name").and_then(|n| n.as_str()).map(str::to_owned))
+            .collect();
+        assert_eq!(names, vec!["Foo".to_string(), "bar".to_string()]);
     }
 }

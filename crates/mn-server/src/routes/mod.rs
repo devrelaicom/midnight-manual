@@ -13,6 +13,7 @@ pub mod embeddings;
 pub mod facets;
 pub mod github;
 pub mod health;
+pub mod me;
 pub mod metrics;
 pub mod models;
 pub mod search;

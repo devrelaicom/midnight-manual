@@ -45,8 +45,10 @@ pub struct DocumentSummary {
 /// Source subset bundled into chunk read responses.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceSummary {
-    /// Source slug (human-readable unique identifier).
+    /// URL-safe stable handle, e.g. `compact-docs`.
     pub slug: String,
+    /// Human-readable name, e.g. `Compact Docs`.
+    pub display_name: String,
 }
 
 /// Chunk + bundled document + source context returned by the navigation
@@ -341,7 +343,7 @@ pub async fn list_next(pool: &PgPool, anchor: Uuid, count: usize) -> Result<Vec<
             d.source_path AS d_source_path, d.published_url AS d_published_url, \
             d.source_url AS d_source_url, d.language AS d_language, d.kind AS d_kind, \
             d.provenance AS d_provenance, \
-            s.slug AS s_slug \
+            s.slug AS s_slug, s.display_name AS s_display_name \
          FROM chunk c \
          JOIN document d ON c.document_id = d.id \
          JOIN source_version sv ON c.source_version_id = sv.id \
@@ -379,7 +381,7 @@ pub async fn list_prev(pool: &PgPool, anchor: Uuid, count: usize) -> Result<Vec<
             d.source_path AS d_source_path, d.published_url AS d_published_url, \
             d.source_url AS d_source_url, d.language AS d_language, d.kind AS d_kind, \
             d.provenance AS d_provenance, \
-            s.slug AS s_slug \
+            s.slug AS s_slug, s.display_name AS s_display_name \
          FROM chunk c \
          JOIN document d ON c.document_id = d.id \
          JOIN source_version sv ON c.source_version_id = sv.id \
@@ -414,7 +416,7 @@ pub async fn get_with_context(pool: &PgPool, id: Uuid) -> Result<ChunkWithContex
             d.source_path AS d_source_path, d.published_url AS d_published_url, \
             d.source_url AS d_source_url, d.language AS d_language, d.kind AS d_kind, \
             d.provenance AS d_provenance, \
-            s.slug AS s_slug \
+            s.slug AS s_slug, s.display_name AS s_display_name \
          FROM chunk c \
          JOIN document d ON c.document_id = d.id \
          JOIN source_version sv ON c.source_version_id = sv.id \
@@ -426,6 +428,36 @@ pub async fn get_with_context(pool: &PgPool, id: Uuid) -> Result<ChunkWithContex
     .await?
     .ok_or(StoreError::NotFound)?;
     row.try_into()
+}
+
+/// Fetch many chunks (each with document + source context) in one query.
+///
+/// Rows come back in arbitrary DB order; callers re-order by input order.
+/// Ids that don't exist (or are `embed_failed`) are simply absent.
+///
+/// # Errors
+///
+/// Returns `StoreError::Database` on any SQL failure.
+pub async fn get_many_with_context(pool: &PgPool, ids: &[Uuid]) -> Result<Vec<ChunkWithContext>> {
+    let rows = sqlx::query_as::<_, ChunkWithContextRow>(
+        "SELECT \
+            c.id, c.source_version_id, c.document_id, c.node_id, c.chunk_index, c.total_chunks, \
+            c.content, c.content_hash, c.embedding_model_id, c.heading_path, c.symbol_path, \
+            c.start_byte, c.end_byte, c.token_count, c.status, c.created_at, \
+            d.source_path AS d_source_path, d.published_url AS d_published_url, \
+            d.source_url AS d_source_url, d.language AS d_language, d.kind AS d_kind, \
+            d.provenance AS d_provenance, \
+            s.slug AS s_slug, s.display_name AS s_display_name \
+         FROM chunk c \
+         JOIN document d ON c.document_id = d.id \
+         JOIN source_version sv ON c.source_version_id = sv.id \
+         JOIN source s ON sv.source_id = s.id \
+         WHERE c.id = ANY($1) AND c.status <> 'embed_failed'",
+    )
+    .bind(ids)
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter().map(TryInto::try_into).collect()
 }
 
 #[derive(sqlx::FromRow)]
@@ -454,8 +486,9 @@ struct ChunkWithContextRow {
     d_language: Option<String>,
     d_kind: String,
     d_provenance: serde_json::Value,
-    // 1 source column:
+    // 2 source columns:
     s_slug: String,
+    s_display_name: String,
 }
 
 impl TryFrom<ChunkWithContextRow> for ChunkWithContext {
@@ -498,7 +531,10 @@ impl TryFrom<ChunkWithContextRow> for ChunkWithContext {
                 kind: doc_kind,
                 provenance: r.d_provenance,
             },
-            source: SourceSummary { slug: r.s_slug },
+            source: SourceSummary {
+                slug: r.s_slug,
+                display_name: r.s_display_name,
+            },
         })
     }
 }
