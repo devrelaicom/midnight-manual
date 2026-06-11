@@ -1,4 +1,4 @@
-//! Wiremock-backed smoke tests for `mnm documents {show, full, chunks}`.
+//! Wiremock-backed smoke tests for `mnm documents {show, chunks}`.
 
 use std::process::Command;
 use wiremock::matchers::{method, path, path_regex, query_param};
@@ -23,9 +23,9 @@ fn overview_json() -> serde_json::Value {
         "provenance": {},
         "package_id": null,
         "source": { "slug": "smoke" },
-        "chunk_ids": [
-            "11111111-1111-1111-1111-111111111111",
-            "11111111-1111-1111-1111-111111111112"
+        "chunks": [
+            { "id": "11111111-1111-1111-1111-111111111111", "chunk_index": 0, "token_count": 8 },
+            { "id": "11111111-1111-1111-1111-111111111112", "chunk_index": 1, "token_count": 12 }
         ]
     })
 }
@@ -52,43 +52,7 @@ async fn documents_show_renders_overview() {
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("welcome.md"));
-    assert!(stdout.contains("2 chunks") || stdout.contains("chunk_ids"));
-}
-
-#[tokio::test]
-async fn documents_full_translates_412_to_friendly_error() {
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path_regex(r"^/v1/documents/[0-9a-f-]+/full$"))
-        .respond_with(
-            ResponseTemplate::new(412).set_body_json(serde_json::json!({
-                "error": "too_many_chunks",
-                "chunk_count": 1240,
-                "cap": 500,
-                "hint": "Use GET /v1/documents/33333333-3333-3333-3333-333333333333/chunks?from=K&limit=L (default L=20)"
-            }))
-        )
-        .mount(&server)
-        .await;
-
-    let out = Command::new(env!("CARGO_BIN_EXE_mnm"))
-        .args([
-            "--server",
-            &server.uri(),
-            "documents",
-            "full",
-            "33333333-3333-3333-3333-333333333333",
-        ])
-        .output()
-        .unwrap();
-    assert!(!out.status.success(), "expected non-zero exit");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), stderr);
-    assert!(combined.contains("1240"), "expected chunk count in error: {combined}");
-    assert!(
-        combined.contains("--from") || combined.contains("documents chunks"),
-        "expected window suggestion: {combined}"
-    );
+    assert!(stdout.contains("2 chunks"));
 }
 
 #[tokio::test]

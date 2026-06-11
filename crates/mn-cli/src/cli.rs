@@ -74,6 +74,8 @@ pub enum Command {
     Version,
     /// Diagnostic report.
     Doctor(commands::doctor::Args),
+    /// Connectivity, auth, and model readiness check.
+    Status(commands::status::Args),
     /// Ad-hoc retrieval — `mnm search <query>`.
     Search(commands::search::Args),
     /// Print the corpus's filterable facets (modes + filter keys/values).
@@ -108,7 +110,7 @@ pub enum Command {
     Manifest(commands::manifest::Args),
     /// Inspect chunks: show, next, prev, neighbors.
     Chunks(commands::chunks::Args),
-    /// Inspect documents: show, full, chunks.
+    /// Inspect documents: show, chunks.
     Documents(commands::documents::Args),
     /// Install the advanced-search skill into your AI harness(es).
     Skills(commands::skills::Args),
@@ -164,6 +166,15 @@ pub async fn run() -> Result<()> {
     let result = match cli.cmd {
         Command::Version => commands::version::run(cli.json),
         Command::Doctor(args) => commands::doctor::run(args, cli.json).await,
+        Command::Status(args) => {
+            commands::status::run(
+                args,
+                cli.server.as_deref(),
+                cli.voyage_api_key.as_deref(),
+                cli.json,
+            )
+            .await
+        }
         Command::Search(args) => {
             commands::search::run(
                 args,
@@ -266,6 +277,7 @@ const fn cli_command_name(cmd: &Command) -> CliCommandName {
     match cmd {
         Command::Version => CliCommandName::Version,
         Command::Doctor(_) => CliCommandName::Doctor,
+        Command::Status(_) => CliCommandName::Status,
         // No dedicated `Sources` variant in the closed enum yet — emit as
         // `sources` via the dedicated CliCommandName::Sources discriminant.
         Command::Search(_) => CliCommandName::Search,

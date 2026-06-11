@@ -18,21 +18,22 @@ fn cfg() -> ServerConfig {
     ServerConfig::default()
 }
 
-/// Oneshot `GET /v1/facets` -> parsed JSON body.
-async fn get_facets_body(app: Router) -> serde_json::Value {
+/// Oneshot `GET <uri>` -> `(status, parsed JSON body)`.
+async fn get(app: Router, uri: &str) -> (StatusCode, serde_json::Value) {
     let resp = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/v1/facets")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+    let status = resp.status();
     let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
-    serde_json::from_slice(&bytes).unwrap()
+    (status, serde_json::from_slice(&bytes).unwrap())
+}
+
+/// Oneshot `GET /v1/facets` -> parsed JSON body (asserts 200).
+async fn get_facets_body(app: Router) -> serde_json::Value {
+    let (status, body) = get(app, "/v1/facets").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    body
 }
 
 /// Seed one finalized (active) `source_version` with one document per supplied
@@ -133,10 +134,10 @@ async fn language_values_include_seeded() {
 }
 
 #[tokio::test]
-async fn tags_truncated_when_over_cap() {
+async fn tags_overview_samples_and_drilldown_paginates() {
     let h = common::boot().await;
-    // Seed one finalized document with 205 distinct tags (> VALUE_CAP = 200).
-    let tags: Vec<String> = (0..205).map(|i| format!("tag{i:03}")).collect();
+    // Seed one finalized document with 15 distinct tags (> SAMPLE_CAP = 10).
+    let tags: Vec<String> = (0..15).map(|i| format!("tag{i:02}")).collect();
     let provenance = Provenance {
         tags: tags.clone(),
         ..Default::default()
@@ -146,7 +147,11 @@ async fn tags_truncated_when_over_cap() {
     let app = app::build_resolved(h.pool.clone(), cfg())
         .await
         .expect("build app");
-    let body = get_facets_body(app).await;
+
+    // Overview: 10-value sample, exact total, truncated flag. This also
+    // populates the overview cache BEFORE the drill-down calls below, proving
+    // a drill-down request is never answered from the cached overview body.
+    let body = get_facets_body(app.clone()).await;
     let facet = body["filters"]
         .as_array()
         .unwrap()
@@ -154,9 +159,47 @@ async fn tags_truncated_when_over_cap() {
         .find(|f| f["key"] == "tags")
         .expect("tags facet");
     assert_eq!(facet["truncated"], serde_json::json!(true), "got {facet}");
-    // total is capped at VALUE_CAP + 1 = 201 ("201 or more"); values capped at 200.
-    assert_eq!(facet["total"], serde_json::json!(201));
-    assert_eq!(facet["values"].as_array().unwrap().len(), 200);
+    assert_eq!(facet["total"], serde_json::json!(15), "got {facet}");
+    assert_eq!(facet["values"].as_array().unwrap().len(), 10, "got {facet}");
+
+    // Drill-down page 1: first 10 values in text order + a resume cursor.
+    let (status, page1) = get(app.clone(), "/v1/facets?facet=tags&limit=10").await;
+    assert_eq!(status, StatusCode::OK, "{page1}");
+    assert_eq!(page1["facet"], "tags", "{page1}");
+    assert_eq!(page1["total"], 15, "{page1}");
+    assert_eq!(page1["values"], serde_json::json!(&tags[..10]), "{page1}");
+    let cursor = page1["next_cursor"]
+        .as_str()
+        .expect("page 1 has next_cursor");
+
+    // Drill-down page 2: the remaining 5, no further pages.
+    let (status, page2) =
+        get(app.clone(), &format!("/v1/facets?facet=tags&limit=10&cursor={cursor}")).await;
+    assert_eq!(status, StatusCode::OK, "{page2}");
+    assert_eq!(page2["total"], 15, "{page2}");
+    assert_eq!(page2["values"], serde_json::json!(&tags[10..]), "{page2}");
+    assert!(page2["next_cursor"].is_null(), "{page2}");
+}
+
+#[tokio::test]
+async fn drilldown_invalid_params_return_typed_400() {
+    let h = common::boot().await;
+    let app = app::build_resolved(h.pool.clone(), cfg())
+        .await
+        .expect("build app");
+
+    for uri in [
+        "/v1/facets?facet=kind",  // closed enum: not drillable
+        "/v1/facets?facet=bogus", // unknown facet
+        "/v1/facets?facet=tags&limit=0",
+        "/v1/facets?facet=tags&limit=201",
+        "/v1/facets?facet=tags&cursor=!!!not-base64!!!",
+    ] {
+        let (status, v) = get(app.clone(), uri).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri} → {v}");
+        assert_eq!(v["error"]["code"], "invalid_request", "{uri} → {v}");
+        assert!(v["error"]["remediation"].is_string(), "{uri} → {v}");
+    }
 }
 
 #[tokio::test]

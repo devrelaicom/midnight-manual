@@ -202,3 +202,89 @@ async fn sweep_does_not_touch_fresh_rows() {
     sweep_once(&h.pool, 7).await.unwrap();
     assert_eq!(raw_count(&h.pool, &s).await, 2, "fresh sentinel rows must remain");
 }
+
+#[tokio::test]
+async fn sweep_rolls_up_search_dimensions_into_telemetry_search_daily() {
+    let _g = lock().lock().await;
+    let h = common::boot().await;
+
+    // Insert an expired mcp_tool_call/search event with known dimensions.
+    sqlx::query(
+        "INSERT INTO telemetry_event_raw (id, received_at, event_type, component, version, fields, request_id) \
+         VALUES (gen_random_uuid(), now() - interval '1 day', 'mcp_tool_call', 'mcp', $1, $2, NULL)",
+    )
+    .bind(sentinel())
+    .bind(json!({
+        "event_type": "mcp_tool_call",
+        "tool_name": "search",
+        "corpus_model": "voyage-code-3@1",
+        "top_attribution": "foundation",
+        "reranker_used": "bge-reranker-base",
+        "top_source": "Compact Docs",
+        "top_confidence": "high"
+    }))
+    .execute(&h.pool)
+    .await
+    .expect("insert search telemetry row");
+
+    sweep_once(&h.pool, 0).await.expect("sweep");
+
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count FROM telemetry_search_daily \
+         WHERE corpus_model = 'voyage-code-3@1' AND attribution = 'foundation' \
+           AND reranker = 'bge-reranker-base' AND top_source = 'Compact Docs' \
+           AND confidence_bucket = 'high'",
+    )
+    .fetch_one(&h.pool)
+    .await
+    .expect("fetch telemetry_search_daily row");
+
+    assert_eq!(count, 1, "search dimensions must be rolled up with count=1");
+}
+
+#[tokio::test]
+async fn sweep_rollup_includes_advanced_search_and_merges_shared_dimensions() {
+    let _g = lock().lock().await;
+    let h = common::boot().await;
+
+    // One `search` and one `advanced_search` row with IDENTICAL dimensions:
+    // the rollup predicate must include both wire names (advanced_search
+    // events would otherwise silently drop out of telemetry_search_daily)
+    // and merge them into a single dimensional bucket.
+    for tool_name in ["search", "advanced_search"] {
+        sqlx::query(
+            "INSERT INTO telemetry_event_raw (id, received_at, event_type, component, version, fields, request_id) \
+             VALUES (gen_random_uuid(), now() - interval '1 day', 'mcp_tool_call', 'mcp', $1, $2, NULL)",
+        )
+        .bind(sentinel())
+        .bind(json!({
+            "event_type": "mcp_tool_call",
+            "tool_name": tool_name,
+            "corpus_model": "voyage-code-3@1",
+            "top_attribution": "community",
+            "reranker_used": "bge-reranker-base",
+            "top_source": "Midnight JS",
+            "top_confidence": "medium"
+        }))
+        .execute(&h.pool)
+        .await
+        .expect("insert telemetry row");
+    }
+
+    sweep_once(&h.pool, 0).await.expect("sweep");
+
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count FROM telemetry_search_daily \
+         WHERE corpus_model = 'voyage-code-3@1' AND attribution = 'community' \
+           AND reranker = 'bge-reranker-base' AND top_source = 'Midnight JS' \
+           AND confidence_bucket = 'medium'",
+    )
+    .fetch_one(&h.pool)
+    .await
+    .expect("fetch telemetry_search_daily row");
+
+    assert_eq!(
+        count, 2,
+        "search + advanced_search with shared dimensions must merge to count=2"
+    );
+}

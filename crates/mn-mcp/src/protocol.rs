@@ -119,7 +119,7 @@ pub struct JsonRpcError {
 }
 
 /// JSON-RPC standard error codes plus MCP-extension space.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
 pub enum ErrorCode {
     /// Parse error (invalid JSON).
@@ -187,6 +187,47 @@ pub struct ServerInfo {
     pub version: &'static str,
 }
 
+/// MCP tool annotations (behavior hints for clients).
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct ToolAnnotations {
+    /// Tool does not modify its environment.
+    #[serde(rename = "readOnlyHint")]
+    pub read_only_hint: bool,
+    /// Tool may perform destructive updates (only meaningful when not read-only).
+    #[serde(rename = "destructiveHint", skip_serializing_if = "Option::is_none")]
+    pub destructive_hint: Option<bool>,
+    /// Repeated identical calls have no additional effect.
+    #[serde(rename = "idempotentHint", skip_serializing_if = "Option::is_none")]
+    pub idempotent_hint: Option<bool>,
+    /// Tool interacts with an open world of external entities.
+    #[serde(rename = "openWorldHint")]
+    pub open_world_hint: bool,
+}
+
+impl ToolAnnotations {
+    /// Read-only, closed-world (every corpus/read tool).
+    #[must_use]
+    pub const fn read_only() -> Self {
+        Self {
+            read_only_hint: true,
+            destructive_hint: None,
+            idempotent_hint: None,
+            open_world_hint: false,
+        }
+    }
+
+    /// Local writer that only touches its own files, safely re-runnable.
+    #[must_use]
+    pub const fn idempotent_writer() -> Self {
+        Self {
+            read_only_hint: false,
+            destructive_hint: Some(false),
+            idempotent_hint: Some(true),
+            open_world_hint: false,
+        }
+    }
+}
+
 /// One tool declaration in `tools/list` response.
 #[derive(Debug, Serialize)]
 pub struct ToolDescription {
@@ -197,6 +238,11 @@ pub struct ToolDescription {
     /// JSON Schema for the tool's input parameters.
     #[serde(rename = "inputSchema")]
     pub input_schema: serde_json::Value,
+    /// JSON Schema for the tool's `structuredContent`.
+    #[serde(rename = "outputSchema", skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<serde_json::Value>,
+    /// Behavior hints (read-only / idempotent / open-world).
+    pub annotations: ToolAnnotations,
 }
 
 /// `tools/list` response payload.
@@ -278,6 +324,9 @@ pub struct ToolCallParams {
 pub struct ToolCallResult {
     /// Output content blocks (we always emit a single `text` block).
     pub content: Vec<ContentBlock>,
+    /// Machine-readable result; conforms to the tool's `outputSchema` on success.
+    #[serde(rename = "structuredContent", skip_serializing_if = "Option::is_none")]
+    pub structured_content: Option<serde_json::Value>,
     /// Set when the tool reported an error condition (vs. a hard JSON-RPC error).
     #[serde(rename = "isError", skip_serializing_if = "std::ops::Not::not")]
     pub is_error: bool,
@@ -337,5 +386,51 @@ mod tests {
             serde_json::from_str::<Incoming>(n_json).unwrap(),
             Incoming::Notification(_)
         ));
+    }
+
+    #[test]
+    fn tool_call_result_serializes_structured_content() {
+        let r = ToolCallResult {
+            content: vec![ContentBlock::Text { text: "hi".into() }],
+            structured_content: Some(serde_json::json!({ "k": 1 })),
+            is_error: false,
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["structuredContent"]["k"], 1);
+        assert!(v.get("isError").is_none()); // false is skipped
+    }
+
+    #[test]
+    fn tool_description_serializes_output_schema() {
+        let d = ToolDescription {
+            name: "x",
+            description: "y",
+            input_schema: serde_json::json!({}),
+            output_schema: Some(serde_json::json!({ "type": "object" })),
+            annotations: ToolAnnotations::read_only(),
+        };
+        let v = serde_json::to_value(&d).unwrap();
+        assert_eq!(v["outputSchema"]["type"], "object");
+        assert_eq!(v["annotations"]["readOnlyHint"], true);
+    }
+
+    #[test]
+    fn read_only_annotations_omit_optional_hints() {
+        // skip_serializing_if must drop the two Option hints entirely — a
+        // read-only tool advertises only readOnlyHint + openWorldHint.
+        let v = serde_json::to_value(ToolAnnotations::read_only()).unwrap();
+        assert_eq!(v["readOnlyHint"], true);
+        assert_eq!(v["openWorldHint"], false);
+        assert!(v.get("destructiveHint").is_none());
+        assert!(v.get("idempotentHint").is_none());
+    }
+
+    #[test]
+    fn idempotent_writer_annotations_carry_both_hints() {
+        let v = serde_json::to_value(ToolAnnotations::idempotent_writer()).unwrap();
+        assert_eq!(v["readOnlyHint"], false);
+        assert_eq!(v["destructiveHint"], false);
+        assert_eq!(v["idempotentHint"], true);
+        assert_eq!(v["openWorldHint"], false);
     }
 }

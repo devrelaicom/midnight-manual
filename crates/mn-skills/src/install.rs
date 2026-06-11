@@ -49,6 +49,8 @@ pub struct InstallReport {
     pub scope: String,
     /// One entry per harness written.
     pub installed: Vec<HarnessInstall>,
+    /// Harness ids written to (forced or auto-detected).
+    pub detected: Vec<String>,
     /// Harness ids probed but not detected (empty when `--harness` was forced).
     pub not_detected: Vec<String>,
 }
@@ -166,6 +168,7 @@ pub fn install(
 ) -> Result<InstallReport, SkillError> {
     let base = base_dir(scope, env)?;
     let (targets, not_detected) = resolve_targets(explicit, scope, env)?;
+    let detected: Vec<String> = targets.iter().map(|h| h.id().to_owned()).collect();
     let files = skill_files();
     let mut installed = Vec::with_capacity(targets.len());
     for h in targets {
@@ -216,6 +219,7 @@ pub fn install(
         skill_name: SKILL_NAME.to_owned(),
         scope: scope.as_str().to_owned(),
         installed,
+        detected,
         not_detected,
     })
 }
@@ -418,7 +422,16 @@ mod tests {
         let report = install(Some(&[Harness::Cursor]), Scope::User, &env).unwrap();
         assert_eq!(report.installed.len(), 1);
         assert_eq!(report.installed[0].harness, "cursor");
+        assert_eq!(report.detected, vec!["cursor".to_owned()], "forced targets fill `detected`");
         assert!(report.not_detected.is_empty());
+    }
+
+    #[test]
+    fn forced_claude_code_install_reports_detected() {
+        let tmp = TempDir::new().unwrap();
+        let env = FakeEnv { home: tmp.path().to_path_buf() };
+        let report = install(Some(&[Harness::ClaudeCode]), Scope::User, &env).unwrap();
+        assert_eq!(report.detected, vec!["claude-code".to_owned()]);
     }
 
     #[test]
@@ -434,6 +447,11 @@ mod tests {
         let (_tmp, env) = env_with_marker(Harness::ClaudeCode);
         let report = install(None, Scope::User, &env).unwrap();
         assert_eq!(report.installed.len(), 1);
+        assert_eq!(
+            report.detected,
+            vec!["claude-code".to_owned()],
+            "auto-detect fills `detected` with the detected set"
+        );
         let mut nd = report.not_detected;
         nd.sort();
         let mut expected: Vec<String> = Harness::ALL
@@ -508,6 +526,8 @@ mod tests {
         assert_eq!(v["installed"][0]["harness"], "claude-code");
         assert_eq!(v["installed"][0]["action"], "created");
         assert!(v["installed"][0]["reload_step"].is_string());
+        assert_eq!(v["detected"], serde_json::json!(["claude-code"]));
+        assert!(v["not_detected"].is_array());
     }
 
     #[test]

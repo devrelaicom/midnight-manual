@@ -12,10 +12,10 @@
 //! 3. `PATCH  /v1/admin/tokenlimits/:id` — extend / adjust one.
 //! 4. `DELETE /v1/admin/tokenlimits/:id` — hard-delete one.
 //!
-//! The validation helpers (`admin_reject`, `sub_of`, `bad_request`,
-//! `parse_future_timestamp`, `validate_cidr`) are shared with
-//! [`crate::routes::admin_ratelimits`] to keep the two admin-override surfaces
-//! behaving identically.
+//! The validation helpers (`admin_reject`, `sub_of`, `parse_future_timestamp`,
+//! `validate_cidr`) are shared with [`crate::routes::admin_ratelimits`] to keep
+//! the two admin-override surfaces behaving identically; the 400 envelope comes
+//! from [`crate::error::bad_request`].
 
 use axum::extract::{Extension, Path, State};
 use axum::http::StatusCode;
@@ -28,11 +28,11 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::app::AppState;
-use crate::error;
+use crate::error::{self, bad_request};
 use crate::middleware::bearer::AuthContext;
 use crate::middleware::request_id::RequestId;
 use crate::routes::admin_ratelimits::{
-    admin_reject, bad_request, parse_future_timestamp, sub_of, validate_cidr,
+    admin_reject, parse_future_timestamp, sub_of, validate_cidr,
 };
 
 /// Mount the admin token-limit routes.

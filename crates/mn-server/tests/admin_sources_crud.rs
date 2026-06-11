@@ -427,7 +427,7 @@ async fn retire_source_happy_path() {
     // The public list endpoint must filter it out…
     let (s_pub, pub_body) = call(app.clone(), "GET", "/v1/sources", None, None).await;
     assert_eq!(s_pub, StatusCode::OK);
-    let present = pub_body
+    let present = pub_body["sources"]
         .as_array()
         .unwrap()
         .iter()

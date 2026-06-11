@@ -152,6 +152,7 @@ pub async fn run(args: Args, json: bool) -> Result<()> {
 fn print_human(report: &Report, had_admin_token: bool) {
     println!("mnm doctor");
     println!("  version:           {} ({})", report.cli.version, report.cli.host);
+    println!("  (for connectivity/auth checks, run `mnm status`)");
     println!(
         "  config file:       {}",
         report

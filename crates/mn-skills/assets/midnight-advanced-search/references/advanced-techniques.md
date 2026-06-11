@@ -1,7 +1,9 @@
 # Advanced search techniques
 
-Recipes that combine `mode` + `filters` + multi-query. Shapes and the facet
-catalog live in `filters-and-modes.md`. Every concrete value here is
+Recipes that combine `mode` + `filters` + multi-query. Everything multi-query
+or filtered runs on `advanced_search` (`queries` is an array even for one
+query); plain one-question lookups can stay on basic `search`. Shapes and the
+facet catalog live in `filters-and-modes.md`. Every concrete value here is
 illustrative — confirm real values with the `facets` tool.
 
 ## A. Mode-tiered cost escalation
@@ -9,10 +11,12 @@ illustrative — confirm real values with the `facets` tool.
 Pick the cheapest mode that can answer, escalate only if it can't.
 
 - **Known literal** (a symbol, CLI flag, error string)? Start in `fts` — it
-  skips embedding entirely, so it is the fastest path and nails exact matches:
+  skips embedding entirely, so it is the fastest path and nails exact matches.
+  Basic `search` is enough when it's one query:
   `{ "query": "potential witness-value disclosure must be declared", "mode": "fts" }`
 - **Thin recall** from `fts`? Escalate the same query to `hybrid` to add
-  semantic matches.
+  semantic matches (watch `search_metadata.total_candidates` — a low count is
+  the signal to broaden).
 - **Purely conceptual** ("how does X relate to Y", no literal anchor)? Go
   straight to `vector` (or `hybrid`).
 
@@ -26,9 +30,12 @@ wrong toolchain, constrain to *their* version and to current material.
 - **Pin to the user's toolchain** with `version_satisfies`:
 
   ```jsonc
-  "filters": {
-    "language_target": { "any_of": [{ "name": "compact", "version_satisfies": ">=0.23" }] },
-    "sdk_dependency":  { "any_of": [{ "kind": "npm", "name": "@midnight-ntwrk/midnight-js", "version_satisfies": "^1.0" }] }
+  {
+    "queries": ["how do I deploy a contract"],
+    "filters": {
+      "language_target": { "any_of": [{ "name": "compact", "version_satisfies": ">=0.23" }] },
+      "sdk_dependency":  { "any_of": [{ "kind": "npm", "name": "@midnight-ntwrk/midnight-js", "version_satisfies": "^1.0" }] }
+    }
   }
   ```
 
@@ -46,11 +53,14 @@ wrong toolchain, constrain to *their* version and to current material.
 ## C. Discovery & self-correction
 
 - **Discover before you filter.** Call `facets` first to learn the corpus's real
-  languages, tags, sources, and package names. Guessing a value that isn't there
-  returns an empty set that *looks* like "no answer".
-- **Recover from a 400.** A bad filter returns a `400` naming the facet + a
-  pointer to `facets`. Loop: read the message → call `facets` → fix the
-  key/value → retry. Never silently give up on a filtered search.
+  languages, tags, sources, and package names. The overview samples open-set
+  values (≤10 each, with exact totals); drill into `source_slug` / `language` /
+  `tags` / `package` to page the full list when the sample isn't enough.
+  Guessing a value that isn't there returns an empty set that *looks* like
+  "no answer".
+- **Recover from a rejected filter.** A bad filter is rejected immediately with
+  an error naming the offending facet. Loop: read the message → call `facets`
+  → fix the key/value → retry. Never silently give up on a filtered search.
 - **Filter ladder (progressive relaxation).** Start tight (version + verified +
   recency + language). If you get too few results, relax ONE facet at a time,
   least-load-bearing first — typically recency, then `verified`, then version —
@@ -60,10 +70,11 @@ wrong toolchain, constrain to *their* version and to current material.
 ## D. Trust-stratified, differential & symbol-anchored
 
 Heavier patterns that spend several searches — use when correctness matters more
-than latency.
+than latency. Each stratum is one `advanced_search` call.
 
-- **Differential / trust-stratified search.** Run the *same* query across strata
-  and diff the result sets; the server does not detect contradictions for you.
+- **Differential / trust-stratified search.** Run the *same* `queries` across
+  strata and diff the result sets; the server does not detect contradictions
+  for you.
   - authority: `attribution: { any_of: ["foundation"] }` vs
     `attribution: { any_of: ["community"] }`
   - vetting: `verified: true` vs unfiltered
@@ -71,7 +82,7 @@ than latency.
   Where the strata disagree, surface the disagreement and say which source is
   more authoritative / version-matched.
 - **Symbol-anchored code landing.** To land on a named circuit/function/type:
-  `{ "query": "deployContract", "mode": "fts",
+  `{ "queries": ["deployContract"], "mode": "fts",
      "filters": { "kind": { "any_of": ["code"] },
                   "symbol": { "any_of": [{ "name": "deployContract" }] } } }`
   then read scope and body with `get_chunk_parents` (enclosing scope) and
@@ -85,8 +96,25 @@ than latency.
   (e.g. a "Troubleshooting" or "API" heading) when you know where the answer
   lives.
 
+## E. Efficient deep reading
+
+Once a search has found the right neighbourhood, read it without burning calls:
+
+- **Batch the top hits.** Collect the `chunk_id` of each promising result and
+  fetch them in ONE `get_chunks` call (`ids` takes 1–20 uuids). Unknown ids
+  come back in a `missing` list rather than failing the batch.
+- **Skeleton first, bodies second.** For a whole document, `get_document`
+  returns metadata plus the chunk skeleton (ids, positions, token counts — no
+  bodies). Use the token counts to plan, then page the bodies with
+  `get_document_chunks` (`{id, from?, limit?}`) window by window — there is no
+  document-size cap.
+- **Climb to the document.** From any chunk, `get_chunk_parents` returns the
+  containing structure; the document-kind parent carries the `document_id` to
+  feed `get_document`.
+
 ## Composition
 
 These stack. A precision query is a funnel — version + `verified` + recency +
-`language` + `content_type` — AND-ed together. When a funnel returns nothing,
-switch to the filter ladder (technique C) and relax it one facet at a time.
+`language` + `content_type` — AND-ed together in one `advanced_search`. When a
+funnel returns nothing, switch to the filter ladder (technique C) and relax it
+one facet at a time.

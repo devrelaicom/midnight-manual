@@ -1,7 +1,8 @@
 //! Integration tests for `mnm models active` driven against a `wiremock`
 //! mock of `GET /v1/models/active`. `mnm models pull` is not tested here —
 //! pulling the ONNX bundle in CI would be slow and flaky, and the underlying
-//! pipeline is exercised by `mn-mcp::tools::run_pull_models`'s own tests.
+//! load path (`mn_embedding::reranker::global`) is exercised by
+//! `mn-embedding`'s own tests.
 
 use mn_cli::commands::models::fetch_active;
 use serde_json::json;

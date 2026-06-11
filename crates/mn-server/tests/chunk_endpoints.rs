@@ -1,4 +1,4 @@
-//! Integration tests for `GET /v1/chunks/:id` + `/parents`.
+//! Integration tests for `GET /v1/chunks?ids=` + `/v1/chunks/:id` + `/parents`.
 
 #![cfg(feature = "integration")]
 #![allow(
@@ -18,8 +18,18 @@ use mn_store::entities::{chunk, document, embedding_model, node, source, source_
 use tower::ServiceExt;
 use uuid::Uuid;
 
-async fn seed_two_chunks(pool: &sqlx::PgPool) -> (Uuid, Uuid, Uuid) {
-    // Returns (root_node_id, chunk_a_id, chunk_b_id).
+struct Seed {
+    /// Source slug (unique per test run).
+    slug: String,
+    /// The seeded document's id.
+    doc_id: Uuid,
+    /// First chunk id (`chunk_index` 0).
+    chunk_a: Uuid,
+    /// Second chunk id (`chunk_index` 1).
+    chunk_b: Uuid,
+}
+
+async fn seed_two_chunks(pool: &sqlx::PgPool) -> Seed {
     let model_id = embedding_model::upsert(pool, "bge-base-en-v1.5", 1, 768, "baai")
         .await
         .unwrap();
@@ -112,7 +122,12 @@ async fn seed_two_chunks(pool: &sqlx::PgPool) -> (Uuid, Uuid, Uuid) {
     .await
     .unwrap();
     source_version::finalize(pool, sv_id).await.unwrap();
-    (root, a, b)
+    Seed {
+        slug,
+        doc_id,
+        chunk_a: a,
+        chunk_b: b,
+    }
 }
 
 fn cfg() -> ServerConfig {
@@ -122,7 +137,7 @@ fn cfg() -> ServerConfig {
 #[tokio::test]
 async fn get_chunk_round_trips() {
     let h = common::boot().await;
-    let (_, a, _) = seed_two_chunks(&h.pool).await;
+    let a = seed_two_chunks(&h.pool).await.chunk_a;
     let app = app::build(h.pool.clone(), cfg()).expect("build app");
     let resp = app
         .oneshot(
@@ -158,9 +173,55 @@ async fn get_chunk_returns_404_for_unknown_id() {
 }
 
 #[tokio::test]
-async fn get_chunk_parents_walks_to_root() {
+async fn get_chunks_batch_preserves_input_order_and_reports_missing() {
     let h = common::boot().await;
-    let (_root, a, _b) = seed_two_chunks(&h.pool).await;
+    let seed = seed_two_chunks(&h.pool).await;
+    let (a, b) = (seed.chunk_a, seed.chunk_b);
+    let app = app::build(h.pool.clone(), cfg()).expect("build app");
+    let unknown = Uuid::new_v4();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/chunks?ids={b},{a},{unknown}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let chunks = v["chunks"].as_array().unwrap();
+    assert_eq!(chunks.len(), 2);
+    // Input order preserved: b was requested first.
+    assert_eq!(chunks[0]["id"].as_str().unwrap(), b.to_string());
+    assert_eq!(chunks[1]["id"].as_str().unwrap(), a.to_string());
+    let missing = v["missing"].as_array().unwrap();
+    assert_eq!(missing.len(), 1);
+    assert_eq!(missing[0].as_str().unwrap(), unknown.to_string());
+}
+
+#[tokio::test]
+async fn get_chunks_batch_rejects_invalid_ids_with_400() {
+    let h = common::boot().await;
+    let app = app::build(h.pool.clone(), cfg()).expect("build app");
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/chunks?ids=not-a-uuid")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn get_chunk_parents_walks_to_root_with_document_ids_and_source() {
+    let h = common::boot().await;
+    let seed = seed_two_chunks(&h.pool).await;
+    let a = seed.chunk_a;
     let app = app::build(h.pool.clone(), cfg()).expect("build app");
     let resp = app
         .oneshot(
@@ -174,10 +235,24 @@ async fn get_chunk_parents_walks_to_root() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = to_bytes(resp.into_body(), 16 * 1024).await.unwrap();
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    let arr = v.as_array().unwrap();
+    // Response is an object, not the old bare array.
+    assert!(v.is_object());
+    let parents = v["parents"].as_array().unwrap();
     // chunk -> doc.md -> guides -> root
-    assert_eq!(arr.len(), 3);
-    assert_eq!(arr[0]["name"], "doc.md");
-    assert_eq!(arr[1]["name"], "guides");
-    assert_eq!(arr[2]["name"], "root");
+    assert_eq!(parents.len(), 3);
+    // First entry is the document node carrying the fetchable document id.
+    assert_eq!(parents[0]["kind"], "document");
+    assert_eq!(parents[0]["name"], "doc.md");
+    assert_eq!(parents[0]["document_id"].as_str().unwrap(), seed.doc_id.to_string());
+    // Group node has no document id.
+    assert_eq!(parents[1]["kind"], "group");
+    assert_eq!(parents[1]["name"], "guides");
+    assert!(parents[1]["document_id"].is_null());
+    // Last entry is the root, with no document id.
+    assert_eq!(parents[2]["kind"], "root");
+    assert_eq!(parents[2]["name"], "root");
+    assert!(parents[2]["document_id"].is_null());
+    // Owning source rides along at the top level.
+    assert_eq!(v["source"]["slug"].as_str().unwrap(), seed.slug);
+    assert_eq!(v["source"]["display_name"], "Chunks");
 }

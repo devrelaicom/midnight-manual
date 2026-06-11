@@ -123,9 +123,10 @@ async fn initialize_response_is_newline_framed_no_content_length() {
 #[tokio::test]
 async fn tools_list_returns_two_phase_5b_tools() {
     let list = mn_mcp::tools::list();
-    let names: Vec<_> = list.tools.iter().map(|t| t.name).collect();
-    assert!(names.contains(&"status"), "status tool must be in the manifest");
-    assert!(names.contains(&"pull_models"), "pull_models tool must be in the manifest");
+    assert!(
+        list.tools.iter().any(|t| t.name == "status"),
+        "status tool must be in the manifest"
+    );
     // Each tool must declare a valid JSON-schema input_schema.
     for tool in &list.tools {
         assert_eq!(
@@ -138,39 +139,48 @@ async fn tools_list_returns_two_phase_5b_tools() {
 
 #[tokio::test]
 async fn status_tool_works_without_model_load() {
-    // The status tool MUST NOT trigger model load (US5 acceptance #9). It
-    // reports model_state without forcing the reranker singleton.
-    let out = mn_mcp::tools::run_status(None);
-    assert_eq!(out.reranker, "bge-reranker-base");
+    // The status tool MUST NOT trigger model load (US5 acceptance #9). The
+    // assembler reads the reranker-loaded marker without forcing the
+    // singleton, and degrades cloud sections instead of failing when the
+    // server is unreachable. The Voyage key is passed explicitly (None →
+    // proxy mode), so an exported VOYAGE_API_KEY cannot leak in.
+    let cloud = mn_mcp::CloudClient::new("http://127.0.0.1:9", None).unwrap();
+    let report = mn_mcp::status::assemble(&cloud, None).await;
+    assert_eq!(report.reranker, "bge-reranker-base");
     // The shape is well-formed regardless of whether sibling tests have
     // loaded models.
-    let json = serde_json::to_value(&out).unwrap();
-    assert!(json["model_state"].is_string());
+    let json = serde_json::to_value(&report).unwrap();
+    assert_eq!(json["cloud"], "unreachable");
+    assert_eq!(json["auth_type"], "anonymous");
+    assert_eq!(json["permission_level"], "read");
+    assert_eq!(json["voyage"], "not_configured");
+    assert!(json["reranker_loaded"].is_boolean());
 }
 
+/// The public `tools/list` surface: all thirteen tools, in the canonical
+/// registration order (exact-order equality also pins exact membership).
 #[tokio::test]
-async fn tools_list_contains_all_fourteen() {
+async fn tools_list_is_canonically_ordered() {
     let list = mn_mcp::tools::list();
-    let names: Vec<_> = list.tools.iter().map(|t| t.name).collect();
-    for expected in [
-        "search",
-        "get_chunk",
-        "get_chunk_next",
-        "get_chunk_prev",
-        "get_chunk_neighbors",
-        "get_chunk_parents",
-        "get_document",
-        "get_document_full",
-        "get_document_chunks",
-        "list_sources",
-        "facets",
-        "pull_models",
-        "status",
-        "install_search_skill",
-    ] {
-        assert!(names.contains(&expected), "missing tool: {expected}");
-    }
-    assert_eq!(names.len(), 14);
+    let names: Vec<&str> = list.tools.iter().map(|t| t.name).collect();
+    assert_eq!(
+        names,
+        [
+            "search",
+            "advanced_search",
+            "get_chunks",
+            "get_chunk_next",
+            "get_chunk_prev",
+            "get_chunk_neighbors",
+            "get_chunk_parents",
+            "get_document",
+            "get_document_chunks",
+            "list_sources",
+            "facets",
+            "status",
+            "install_search_skill",
+        ]
+    );
 }
 
 /// Drive `prompts/list` and `prompts/get` through the same framed-I/O harness
@@ -275,7 +285,6 @@ async fn new_navigation_tool_schemas_are_well_formed() {
         "get_chunk_prev",
         "get_chunk_neighbors",
         "get_document",
-        "get_document_full",
         "get_document_chunks",
     ] {
         let t = list
