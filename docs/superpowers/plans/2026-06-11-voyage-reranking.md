@@ -22,7 +22,7 @@
 - Create: `crates/mn-core/src/rerank.rs`
 - Modify: `crates/mn-core/src/lib.rs` (add `pub mod rerank;` alongside the existing module list)
 
-- [ ] **Step 1: Write the failing tests** (inside `crates/mn-core/src/rerank.rs`, module skeleton + tests first)
+- [x] **Step 1: Write the failing tests** (inside `crates/mn-core/src/rerank.rs`, module skeleton + tests first)
 
 ```rust
 //! Shared reranking vocabulary (spec: docs/superpowers/specs/2026-06-11-voyage-reranking-design.md).
@@ -105,12 +105,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `cargo test -p mn-core rerank`
 Expected: compile FAIL — `RerankParam` etc. not defined.
 
-- [ ] **Step 3: Implement the module** (above the `tests` module)
+- [x] **Step 3: Implement the module** (above the `tests` module)
 
 ```rust
 /// Hard cap on agent-supplied rerank instructions, in characters. The
@@ -220,12 +220,12 @@ pub fn compose_rerank_query(query: &str, instruction: Option<&str>) -> String {
 
 Add `pub mod rerank;` to `crates/mn-core/src/lib.rs` next to `pub mod scoring;`.
 
-- [ ] **Step 4: Run to verify pass**
+- [x] **Step 4: Run to verify pass**
 
 Run: `cargo test -p mn-core rerank`
 Expected: all 6 tests PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/mn-core/src/rerank.rs crates/mn-core/src/lib.rs
@@ -241,7 +241,7 @@ The old `[models].reranker` / `resolve_reranker` are removed later (Task 8), aft
 **Files:**
 - Modify: `crates/mn-core/src/config.rs`
 
-- [ ] **Step 1: Write the failing tests** (append to the existing `tests` module in `config.rs`, which already has a `FakeEnv` helper — see the `resolve_reranker_prefers_flag_then_env_then_config` test around line 458 for the pattern)
+- [x] **Step 1: Write the failing tests** (append to the existing `tests` module in `config.rs`, which already has a `FakeEnv` helper — see the `resolve_reranker_prefers_flag_then_env_then_config` test around line 458 for the pattern)
 
 ```rust
 #[test]
@@ -293,12 +293,12 @@ fn resolve_rerank_model_precedence_and_default() {
 }
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `cargo test -p mn-core config`
 Expected: compile FAIL — `RerankConfig` / `RerankPlacement` not defined.
 
-- [ ] **Step 3: Implement.** Add next to `ModelsConfig` (match its serde style — the `Config` struct has `#[serde(default)]` per section; add a `pub rerank: RerankConfig` field to `Config` with `#[serde(default)]`):
+- [x] **Step 3: Implement.** Add next to `ModelsConfig` (match its serde style — the `Config` struct has `#[serde(default)]` per section; add a `pub rerank: RerankConfig` field to `Config` with `#[serde(default)]`):
 
 ```rust
 /// `[rerank]` — client-side rerank placement and model selection (spec §4).
@@ -373,12 +373,12 @@ pub fn resolve_rerank_model(
 
 Note: if `FakeEnv::set` filters empty strings differently, mirror how `resolve_reranker` treats empties (`.filter(|s| !s.is_empty())` on env reads) — check the existing resolver at config.rs:254 and copy its empty-string handling into both resolvers.
 
-- [ ] **Step 4: Run to verify pass**
+- [x] **Step 4: Run to verify pass**
 
 Run: `cargo test -p mn-core config`
 Expected: PASS (new tests + all pre-existing config tests).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/mn-core/src/config.rs
@@ -392,7 +392,7 @@ git commit -m "feat(mn-core): [rerank] config section + placement/model resoluti
 **Files:**
 - Modify: `crates/mn-server/src/config.rs` (struct `ServerConfig` ~line 13; follow the exact doc-comment + env-parsing pattern of `rate_limit_enabled` / `voyage_api_key` — read the `from_env`/builder section before editing)
 
-- [ ] **Step 1: Add two fields to `ServerConfig`** (doc style mirrors siblings):
+- [x] **Step 1: Add two fields to `ServerConfig`** (doc style mirrors siblings):
 
 ```rust
 /// `MIDNIGHT_MANUAL_SERVER_RERANK` — master switch for inline server-side
@@ -417,12 +417,12 @@ voyage_base_url: std::env::var("MIDNIGHT_MANUAL_VOYAGE_BASE_URL").ok().filter(|s
 
 (If `ServerConfig` is built by a test-visible `Default`/builder used in `tests/common`, set `server_rerank_enabled: true`, `voyage_base_url: None` there too.)
 
-- [ ] **Step 2: Build**
+- [x] **Step 2: Build**
 
 Run: `cargo build -p mn-server`
 Expected: compiles (struct-literal sites in tests may need the new fields — fix them).
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add crates/mn-server/src/config.rs crates/mn-server/tests
@@ -437,7 +437,7 @@ git commit -m "feat(mn-server): config for rerank kill switch + Voyage base-url 
 - Modify: `crates/mn-server/src/routes/search.rs`
 - Create: `crates/mn-server/tests/search_rerank.rs` (integration; CI-verified)
 
-- [ ] **Step 1: Write failing unit tests** (append to `search.rs`'s `#[cfg(test)] mod tests` if one exists, else create one at the bottom of the file):
+- [x] **Step 1: Write failing unit tests** (append to `search.rs`'s `#[cfg(test)] mod tests` if one exists, else create one at the bottom of the file):
 
 ```rust
 #[cfg(test)]
@@ -488,12 +488,12 @@ mod rerank_tests {
 }
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `cargo test -p mn-server rerank`
 Expected: compile FAIL.
 
-- [ ] **Step 3: Implement the request/response surface.** In `SearchRequest` (after `code_vector`, search.rs:89):
+- [x] **Step 3: Implement the request/response surface.** In `SearchRequest` (after `code_vector`, search.rs:89):
 
 ```rust
 /// Server-side rerank model, or `"none"` to skip (spec §1). Omitted ⇒
@@ -555,7 +555,7 @@ Add `pub rerank: RerankMetadata` to `SearchMetadata` (with a doc comment), and a
   ```
 - `ScoredCandidate`: add `rerank_score: Option<f64>` (init `None` at the construction site in the scoring loop) and pass it through in `into_result()`.
 
-- [ ] **Step 4: Implement the rerank stage.** Handler signature gains header/auth extractors (body extractor stays last):
+- [x] **Step 4: Implement the rerank stage.** Handler signature gains header/auth extractors (body extractor stays last):
 
 ```rust
 async fn search(
@@ -749,12 +749,12 @@ if rerank_meta.meta.applied {
 
 and add `rerank: rerank_meta.meta` to the `SearchMetadata` literal. Also note Borrow-checker detail: `rerank_stage` takes `&mut [ScoredCandidate]` post-truncate; restructure the handler so pool sort/dedup/truncate happen inline (as sketched in the call site above) — adjust until clean, keeping the **non-rerank path's behavior and wire output identical except for the new `rerank` metadata object**. Update the module-header doc comment (line 8) — reranking no longer "lands in later phases."
 
-- [ ] **Step 5: Run unit tests**
+- [x] **Step 5: Run unit tests**
 
 Run: `cargo test -p mn-server rerank && cargo build -p mn-server`
 Expected: PASS / compiles.
 
-- [ ] **Step 6: Integration test** — create `crates/mn-server/tests/search_rerank.rs`, modeled on `tests/search_route.rs` (app boot + corpus seeding via `tests/common` + `fixtures.rs`) and `tests/code_ingest_e2e.rs` (`voyage_mock()` wiremock pattern, ~line 112). Cover four scenarios:
+- [x] **Step 6: Integration test** — create `crates/mn-server/tests/search_rerank.rs`, modeled on `tests/search_route.rs` (app boot + corpus seeding via `tests/common` + `fixtures.rs`) and `tests/code_ingest_e2e.rs` (`voyage_mock()` wiremock pattern, ~line 112). Cover four scenarios:
 
 ```rust
 //! POST /v1/search inline rerank (spec §1–2): applied path, token-budget
@@ -814,12 +814,12 @@ async fn rerank_mock() -> MockServer {
 
 Write all four tests fully against the actual helper names found in `tests/search_route.rs` / `tests/common/` — the seeding/boot APIs there are the source of truth; the comments above define the assertions each must make.
 
-- [ ] **Step 7: Compile integration tests, then run unit suite**
+- [x] **Step 7: Compile integration tests, then run unit suite**
 
 Run: `cargo test -p mn-server --no-run` (with whatever feature flag sibling integration tests use, e.g. `--features integration`) and `cargo test -p mn-server`
 Expected: integration tests compile (CI runs them); unit tests PASS.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add crates/mn-server/src/routes/search.rs crates/mn-server/tests/search_rerank.rs
@@ -835,7 +835,7 @@ git commit -m "feat(mn-server): inline Voyage rerank in /v1/search with token ac
 - Modify: `specs/001-rag-platform/contracts/mcp-tools.json` (`advanced_search` input schema, ~line 616; `search`/`advanced_search`/`status` descriptions referencing "cross-encoder")
 - Modify: `crates/mn-mcp/src/tools.rs` (the inline tool manifest, ~lines 56/64/173/288 — must stay byte-identical with mcp-tools.json per `crates/mn-mcp/tests/contract_sync.rs`)
 
-- [ ] **Step 1: openapi.yaml.** In the `/v1/search` request schema add:
+- [x] **Step 1: openapi.yaml.** In the `/v1/search` request schema add:
 
 ```yaml
 rerank:
@@ -869,7 +869,7 @@ rerank:
 
 and add `rerank_score: { type: number }` to the per-result `scores` schema. Match the file's existing indentation/style exactly.
 
-- [ ] **Step 2: mcp-tools.json + the mirrored manifest in `mn-mcp/src/tools.rs`.** In `advanced_search.inputSchema.properties`, alongside the existing `rerank` boolean (which keeps its shape), add:
+- [x] **Step 2: mcp-tools.json + the mirrored manifest in `mn-mcp/src/tools.rs`.** In `advanced_search.inputSchema.properties`, alongside the existing `rerank` boolean (which keeps its shape), add:
 
 ```json
 "rerank_instructions": {
@@ -883,12 +883,12 @@ Update the `rerank` boolean's description (both files, identical bytes):
 `"Apply VoyageAI reranking against the first query (server-side, or locally with your own VOYAGE_API_KEY). Disable for lowest latency."`
 Update the three descriptions that say "cross-encoder"/"reranker readiness" (`search` ~line 56 mentions advanced_search for rerank control — fine; `advanced_search` ~line 64 keep; `status` ~line 173: change "reranker readiness" to "rerank configuration") — whatever you change, change in BOTH files identically.
 
-- [ ] **Step 3: Run the contract sync test**
+- [x] **Step 3: Run the contract sync test**
 
 Run: `cargo test -p mn-mcp --test contract_sync`
 Expected: PASS (it diff-checks tools.rs against mcp-tools.json).
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add specs/001-rag-platform/contracts/ crates/mn-mcp/src/tools.rs
@@ -903,7 +903,7 @@ git commit -m "feat(contracts): rerank + rerank_instructions on /v1/search and a
 - Modify: `crates/mn-cli/src/commands/search.rs`
 - Check/Modify: wherever `Args` help text is asserted (grep `mn-cli` tests for `--rerank`)
 
-- [ ] **Step 1: Write failing unit tests** (append to the existing tests module in `commands/search.rs`; it already unit-tests `apply_rerank` / `build_search_request` — follow that style):
+- [x] **Step 1: Write failing unit tests** (append to the existing tests module in `commands/search.rs`; it already unit-tests `apply_rerank` / `build_search_request` — follow that style):
 
 ```rust
 #[test]
@@ -954,12 +954,12 @@ fn build_search_request_rerank_wire_matrix() {
 }
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `VOYAGE_API_KEY= cargo test -p mn-cli rerank_wire`
 Expected: compile FAIL.
 
-- [ ] **Step 3: Implement.**
+- [x] **Step 3: Implement.**
 
 In `Args` — replace the `rerank: bool` and `reranker: Option<String>` fields (lines 107–119) with:
 
@@ -1072,12 +1072,12 @@ let reordered = apply_rerank(resp.results, &out.results, limit);
 
 (`apply_rerank` and `stamp_rerank_score` are unchanged — the stamped score is now a 0–1 relevance, which is what we want. Update their doc comments: "raw reranker logit" → "Voyage relevance score (0–1)".) `dispatch_search` routes on placement: `Local` → rerank path, `Server`/`Off` → plain `search_via_http`. Update the module header doc (lines 33–38) and `DispatchSearch` fields accordingly. Remove the now-unused `resolve_reranker`/`reranker_path`/`cache_dir` plumbing from this file (the global deletion is Task 8).
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 Run: `VOYAGE_API_KEY= cargo test -p mn-cli`
 Expected: PASS (note: the 2 `auth_integration` loopback failures are pre-existing sandbox noise — ignore exactly those).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/mn-cli
@@ -1093,7 +1093,7 @@ git commit -m "feat(mn-cli): rerank placement flags (auto/local/server/off) + lo
 - Modify: wherever `ParsedSearchArgs` is defined/parsed (same file; grep `parse_advanced_search_args`)
 - Modify: the MCP-side cloud `SearchRequest` struct (grep `struct SearchRequest` in `mn-mcp`)
 
-- [ ] **Step 1: Write failing unit tests** (append near the existing `rerank_postprocess` tests):
+- [x] **Step 1: Write failing unit tests** (append near the existing `rerank_postprocess` tests):
 
 ```rust
 #[test]
@@ -1139,12 +1139,12 @@ fn advanced_search_parses_rerank_instructions_and_caps_length() {
 
 (Adapt the second test's call/return shapes to the real `parse_advanced_search_args` signature — keep the two behavioral assertions.)
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `VOYAGE_API_KEY= cargo test -p mn-mcp rerank`
 Expected: FAIL — first test fails on the sigmoid (relevance_multiplier ≈ 0.711), second on the missing field.
 
-- [ ] **Step 3: Implement.**
+- [x] **Step 3: Implement.**
 
 1. `ParsedSearchArgs`: add `pub rerank_instructions: Option<String>`. In `parse_advanced_search_args`, parse + validate with `mn_core::rerank::validate_instruction`, returning the parser's InvalidInput error with the message. `parse_basic_search_args` sets it to `None`.
 2. `rerank_postprocess` / `recompute_confidence`: replace `normalize_rerank(f64::from(s.score))` with `f64::from(s.score).clamp(0.0, 1.0)`; delete the `use mn_core::scoring::normalize_rerank;` import; update both doc comments ("sigmoid-normalized reranker logit" → "Voyage relevance score, already 0–1").
@@ -1166,12 +1166,12 @@ let effective = if parsed.rerank { placement } else { mn_core::config::RerankPla
 7. Server placement: pass the cloud's `search_metadata.rerank` through untouched (the envelope passthrough already does this — verify nothing strips unknown metadata).
 8. Delete `ResolvedReranker`, `resolve_reranker_selection`, `RerankConfig` (the local struct), `load_configured_reranker`, and the `LOADED_RERANKER` `OnceCell` (markers stay). Remove the now-dead `reranker`, `reranker_catalog`, `contextualized`(if unused), `LoadedReranker` imports from line 29.
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 Run: `VOYAGE_API_KEY= cargo test -p mn-mcp`
 Expected: PASS, including `contract_sync` (Task 5 already aligned the manifest).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/mn-mcp
