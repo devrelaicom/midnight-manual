@@ -1191,7 +1191,7 @@ fn rerank_postprocess(
 ) -> Vec<serde_json::Value> {
     let policy = ScoringPolicy::default();
     // Dedupe by index in case the model ever returns the same source index
-    // twice (defensive — fastembed shouldn't, but a future swap could).
+    // twice (defensive — Voyage shouldn't, but a future swap could).
     let mut seen = std::collections::HashSet::new();
     let mut indexed: Vec<(f64, serde_json::Value)> = scores
         .iter()

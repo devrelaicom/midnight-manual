@@ -10,21 +10,21 @@ pub enum EmbeddingError {
         "could not resolve model cache directory; set MIDNIGHT_MANUAL_MODEL_CACHE_DIR or HOME"
     )]
     NoCacheDir,
-    /// fastembed failed to initialize the model (download error, ONNX runtime
-    /// failure, missing files, etc.).
+    /// A model failed to initialize (download error, runtime failure, missing
+    /// files, etc.).
     #[error("failed to initialize model `{model}`: {message}")]
     Init {
         /// The model identifier we were trying to instantiate.
         model: String,
-        /// The underlying fastembed error message.
+        /// The underlying error message.
         message: String,
     },
-    /// fastembed returned an error during inference (batch encode or rerank).
+    /// A model returned an error during inference (batch encode or rerank).
     #[error("inference failed for model `{model}`: {message}")]
     Inference {
         /// The model that failed.
         model: String,
-        /// The underlying fastembed error message.
+        /// The underlying error message.
         message: String,
     },
     /// Output dimension didn't match what we expected.

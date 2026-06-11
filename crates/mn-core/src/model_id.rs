@@ -7,7 +7,7 @@
 //! [`crate::error::ErrorCode::EmbeddingModelMismatch`]).
 //!
 //! Wire grammar: `name`, then literal `@`, then a positive integer revision.
-//! Examples: `"bge-base-en-v1.5@1"`, `"bge-reranker-base@2"`. Empty names and
+//! Examples: `"voyage-context-3@1"`, `"voyage-code-3@2"`. Empty names and
 //! non-positive or non-numeric revisions are rejected.
 
 use std::fmt;
@@ -127,7 +127,7 @@ mod tests {
 
     #[test]
     fn round_trips() {
-        let id = EmbeddingModelId::new("bge-reranker-base", 42).unwrap();
+        let id = EmbeddingModelId::new("voyage-code-3", 42).unwrap();
         let s = id.to_string();
         let back: EmbeddingModelId = s.parse().unwrap();
         assert_eq!(id, back);

@@ -57,8 +57,6 @@ pub struct ModelsConfig {
     /// Code-specialised embedding model name (dual embeddings, D1).
     #[serde(default = "default_code_embedding")]
     pub code_embedding: String,
-    /// Reranker catalog id (see mn-embedding `reranker_catalog`).
-    pub reranker: String,
     /// Override for the on-disk model cache directory. When `None`, the
     /// discoverer resolves to `$XDG_DATA_HOME/midnight-manual/models/`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -78,10 +76,6 @@ pub struct ModelsConfig {
     /// well above the old 30s ceiling. Resolved with flag > env > config precedence.
     #[serde(default = "default_voyage_timeout_secs")]
     pub voyage_timeout_secs: u64,
-    /// Directory holding a custom reranker (model.onnx + tokenizer files) when
-    /// `reranker == "custom"`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reranker_path: Option<PathBuf>,
 }
 
 const fn default_voyage_dim() -> u32 {
@@ -105,13 +99,11 @@ impl Default for ModelsConfig {
         Self {
             embedding: "voyage-context-3".into(),
             code_embedding: default_code_embedding(),
-            reranker: "bge-reranker-base".into(),
             cache_dir: None,
             voyage_api_key: None,
             voyage_output_dimension: default_voyage_dim(),
             voyage_output_dtype: default_voyage_dtype(),
             voyage_timeout_secs: default_voyage_timeout_secs(),
-            reranker_path: None,
         }
     }
 }
@@ -248,20 +240,6 @@ pub fn resolve_voyage_timeout_secs(
         })
         .or_else(|| (cfg.voyage_timeout_secs > 0).then_some(cfg.voyage_timeout_secs))
         .unwrap_or_else(default_voyage_timeout_secs)
-}
-
-/// Resolve the reranker id with precedence flag > `MIDNIGHT_MANUAL_RERANKER` env > config.
-///
-/// An empty flag or env value falls through to the next source, ending at the
-/// configured reranker id (defaulting to `bge-reranker-base` when unset).
-pub fn resolve_reranker(flag: Option<&str>, cfg: &ModelsConfig, env: &impl ConfigEnv) -> String {
-    flag.map(str::to_owned)
-        .filter(|s| !s.is_empty())
-        .or_else(|| {
-            env.var("MIDNIGHT_MANUAL_RERANKER")
-                .filter(|s| !s.is_empty())
-        })
-        .unwrap_or_else(|| cfg.reranker.clone())
 }
 
 /// `[rerank]` — client-side rerank placement and model selection (spec §4).
@@ -462,30 +440,26 @@ mod tests {
         let m = ModelsConfig::default();
         assert_eq!(m.embedding, "voyage-context-3");
         assert_eq!(m.code_embedding, "voyage-code-3");
-        assert_eq!(m.reranker, "bge-reranker-base");
         assert_eq!(m.voyage_output_dimension, 1024);
         assert_eq!(m.voyage_output_dtype, "float");
         assert_eq!(m.voyage_timeout_secs, 120);
         assert!(m.voyage_api_key.is_none());
-        assert!(m.reranker_path.is_none());
     }
 
     #[test]
     fn models_config_roundtrips_through_toml() {
         let toml_src = r#"
 embedding = "voyage-code-3"
-reranker = "jina-reranker-v1-turbo-en"
 voyage_output_dimension = 1024
 voyage_output_dtype = "float"
 "#;
         let m: ModelsConfig = toml::from_str(toml_src).unwrap();
-        assert_eq!(m.reranker, "jina-reranker-v1-turbo-en");
+        assert_eq!(m.embedding, "voyage-code-3");
         assert_eq!(m.code_embedding, "voyage-code-3"); // default filled in
         assert_eq!(m.voyage_output_dimension, 1024);
         assert_eq!(m.voyage_output_dtype, "float"); // default filled in
         assert_eq!(m.voyage_timeout_secs, 120); // default filled in
         assert!(m.voyage_api_key.is_none()); // Option default
-        assert!(m.reranker_path.is_none()); // Option default
         assert!(m.cache_dir.is_none()); // Option default
     }
 
@@ -545,26 +519,6 @@ voyage_output_dtype = "float"
         assert_eq!(resolve_voyage_timeout_secs(Some(0), &cfg, &empty), 90);
         let env_zero = FakeEnv::default().set("VOYAGE_TIMEOUT_SECS", "0");
         assert_eq!(resolve_voyage_timeout_secs(None, &zero_cfg, &env_zero), 120);
-    }
-
-    #[test]
-    fn resolve_reranker_prefers_flag_then_env_then_config() {
-        let cfg = ModelsConfig {
-            reranker: "from-config-reranker".into(),
-            ..Default::default()
-        };
-        let env = FakeEnv::default().set("MIDNIGHT_MANUAL_RERANKER", "from-env-reranker");
-
-        assert_eq!(resolve_reranker(Some("from-flag-reranker"), &cfg, &env), "from-flag-reranker");
-        assert_eq!(resolve_reranker(None, &cfg, &env), "from-env-reranker");
-
-        let empty = FakeEnv::default();
-        assert_eq!(resolve_reranker(None, &cfg, &empty), "from-config-reranker");
-
-        // An empty flag/env value falls through to the next source.
-        assert_eq!(resolve_reranker(Some(""), &cfg, &env), "from-env-reranker");
-        let env_empty = FakeEnv::default().set("MIDNIGHT_MANUAL_RERANKER", "");
-        assert_eq!(resolve_reranker(Some(""), &cfg, &env_empty), "from-config-reranker");
     }
 
     #[test]

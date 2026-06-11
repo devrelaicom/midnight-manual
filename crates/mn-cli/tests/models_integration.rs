@@ -1,8 +1,7 @@
 //! Integration tests for `mnm models active` driven against a `wiremock`
 //! mock of `GET /v1/models/active`. `mnm models pull` is not tested here —
-//! pulling the ONNX bundle in CI would be slow and flaky, and the underlying
-//! load path (`mn_embedding::reranker::global`) is exercised by
-//! `mn-embedding`'s own tests.
+//! it only primes the local cache directory now (both the embedder and the
+//! reranker are remote `VoyageAI`, so there is nothing to download).
 
 use mn_cli::commands::models::fetch_active;
 use serde_json::json;

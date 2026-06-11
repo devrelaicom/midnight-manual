@@ -475,11 +475,13 @@ async fn run_search_dispatch(params: &ToolCallParams, state: &ServerState) -> To
             };
         }
     };
-    // Best-effort reranker name for telemetry. Use the well-known constant —
-    // the constant is what `status` also reports, so it's the most
-    // accurate single-process value we have.
+    // Best-effort reranker name for telemetry. Reranking is VoyageAI now, so
+    // report the default Voyage rerank model from the shared `mn_core::rerank`
+    // vocabulary (the same value `status` reports).
     let reranker_name: Option<String> = if parsed.rerank {
-        Some(mn_embedding::RERANKER_MODEL_NAME.to_string())
+        mn_core::rerank::RerankParam::Rerank25
+            .model_name()
+            .map(str::to_owned)
     } else {
         None
     };

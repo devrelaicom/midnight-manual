@@ -125,7 +125,7 @@ pub struct ServerConfig {
     pub voyage_base_url: Option<String>,
     /// `VOYAGE_API_KEY` — VoyageAI API key for server-side embedding. When
     /// `None`, `POST /v1/embeddings` returns 503; there is no local embedder
-    /// fallback (the fastembed corpus embedder was retired when the corpus
+    /// fallback (the old local corpus embedder was retired when the corpus
     /// moved to VoyageAI).
     pub voyage_api_key: Option<String>,
     /// `MIDNIGHT_MANUAL_VOYAGE_MODEL` — VoyageAI embedding model name for the

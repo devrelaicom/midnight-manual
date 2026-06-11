@@ -451,7 +451,7 @@ mod tests {
                 rerank_on: true,
                 outcome: Outcome::Ok,
                 corpus_model: Some("voyage-code-3@1".into()),
-                reranker_used: Some("bge-reranker-base".into()),
+                reranker_used: Some("rerank-2.5".into()),
                 top_confidence: Some("high".into()),
                 top_attribution: Some("foundation".into()),
                 top_source: Some("Compact Docs".into()),
