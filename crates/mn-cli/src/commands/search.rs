@@ -358,7 +358,7 @@ pub async fn run_with_paths(
         server_url,
         bearer: bearer.as_deref(),
         request: &request,
-        rerank_model_name: rerank_model.model_name(),
+        rerank_model,
         rerank_instructions: args.rerank_instructions.as_deref(),
         voyage_key: voyage_key.as_deref(),
         voyage_base_url: voyage_base_url.as_deref(),
@@ -372,6 +372,13 @@ pub async fn run_with_paths(
     } else {
         Outcome::Error
     };
+    // One `Rerank` event per search (spec §6). On success the placement-specific
+    // facts come from the `RerankOutcome`; on failure the rerank never completed,
+    // so it is reported as not applied (the three-mechanism opt-out wraps `emit`).
+    let rerank_payload = rerank_event(placement, rerank_model, result.as_ref().ok());
+    telemetry
+        .emit(Event::new(Component::Cli, cli_version, rerank_payload))
+        .await;
     telemetry
         .emit(Event::new(
             Component::Cli,
@@ -383,7 +390,43 @@ pub async fn run_with_paths(
             },
         ))
         .await;
-    result
+    result.map(|_| ())
+}
+
+/// The rerank model name for the `Rerank` event: the resolved model on the
+/// `Local` / `Server` placements, `None` on `Off` (no rerank attempted).
+fn rerank_event_model(
+    placement: mn_core::config::RerankPlacement,
+    rerank_model: mn_core::rerank::RerankParam,
+) -> Option<String> {
+    use mn_core::config::RerankPlacement;
+    match placement {
+        RerankPlacement::Local | RerankPlacement::Server => {
+            rerank_model.model_name().map(str::to_owned)
+        }
+        RerankPlacement::Off => None,
+    }
+}
+
+/// Build the FR-109 `Rerank` event payload (spec §6) for one search. The
+/// placement / model come from the resolved request; `applied` / `reason` /
+/// `billed_tokens` come from the [`RerankOutcome`] on success, or are reported
+/// as "not applied" when the search failed before the rerank completed. The
+/// placement wire string comes from the shared
+/// [`mn_core::config::RerankPlacement::wire`] (one source of truth across the
+/// CLI + MCP clients).
+fn rerank_event(
+    placement: mn_core::config::RerankPlacement,
+    rerank_model: mn_core::rerank::RerankParam,
+    outcome: Option<&RerankOutcome>,
+) -> EventPayload {
+    EventPayload::Rerank {
+        placement: placement.wire().to_owned(),
+        model: rerank_event_model(placement, rerank_model),
+        applied: outcome.is_some_and(|o| o.applied),
+        reason: outcome.and_then(|o| o.reason.clone()),
+        billed_tokens: outcome.and_then(|o| o.billed_tokens),
+    }
 }
 
 /// Resolve the rerank placement + model and validate the instruction, failing
@@ -762,6 +805,23 @@ fn build_search_request(parts: SearchRequestParts) -> SearchRequest {
     }
 }
 
+/// What the rerank stage did, for the FR-109 `Rerank` telemetry event
+/// (spec §6). Returned by [`dispatch_search`] so `run_with_paths` can emit one
+/// event per search next to the `CliCommand` event.
+#[derive(Debug, Default)]
+struct RerankOutcome {
+    /// Whether a rerank was actually applied to the result set (local pass ran,
+    /// or the server reported `search_metadata.rerank.applied`).
+    applied: bool,
+    /// Degrade reason when not applied (server path only; mirrors
+    /// `search_metadata.rerank.reason`).
+    reason: Option<String>,
+    /// Billed-equivalent tokens for a local rerank (`total_tokens` through
+    /// [`mn_core::rerank::RerankParam::billed_tokens`]); `None` on the server /
+    /// off paths (the server tracks its own metrics).
+    billed_tokens: Option<u64>,
+}
+
 /// Everything [`dispatch_search`] needs, already resolved off the `ConfigEnv`
 /// (whose trait carries no `Sync` guarantee) into owned data so the async future
 /// stays `Send`. Grouped into a struct to keep the function under the
@@ -777,9 +837,10 @@ struct DispatchSearch<'a> {
     bearer: Option<&'a str>,
     /// The fully-formed search request.
     request: &'a SearchRequest,
-    /// Voyage rerank model name for the `Local` path (always `Some` for a model
-    /// variant; `None` would mean off, which never routes here).
-    rerank_model_name: Option<&'static str>,
+    /// Resolved Voyage rerank model for the `Local` path. Its `model_name()` is
+    /// always `Some` for a model variant (off never routes here); its
+    /// `billed_tokens()` rate feeds the `Rerank` telemetry event.
+    rerank_model: mn_core::rerank::RerankParam,
     /// Agent-supplied rerank instruction for the `Local` path; `None` derives
     /// the same default the server uses.
     rerank_instructions: Option<&'a str>,
@@ -792,21 +853,32 @@ struct DispatchSearch<'a> {
 }
 
 /// Pick the search path based on `d.placement`: `Local` hands off to
-/// [`rerank_via_http`] (client-side Voyage rerank); `Server` / `Off` use the
-/// plain [`search_via_http`] (the server already reranked, or nobody did). All
-/// env reads happen before this `async fn` (see [`DispatchSearch`]) so its
-/// future is `Send`.
+/// [`rerank_via_http`] (client-side Voyage rerank); `Server` / `Off` fetch +
+/// render directly (the server already reranked, or nobody did). All env reads
+/// happen before this `async fn` (see [`DispatchSearch`]) so its future is
+/// `Send`.
+///
+/// Returns the [`RerankOutcome`] for the FR-109 `Rerank` telemetry event: on
+/// the `Server` / `Off` path it is read from the response's
+/// `search_metadata.rerank` (`applied` / `reason`); on the `Local` path it
+/// carries the actual rerank `applied` flag and billed tokens.
 ///
 /// # Errors
 ///
 /// Propagates the HTTP / decode / rerank errors from the chosen path.
-async fn dispatch_search(d: DispatchSearch<'_>) -> Result<()> {
+async fn dispatch_search(d: DispatchSearch<'_>) -> Result<RerankOutcome> {
     use mn_core::config::RerankPlacement;
     if !matches!(d.placement, RerankPlacement::Local) {
-        return search_via_http(d.server_url, d.bearer, d.request, d.json).await;
+        // Server / Off: fetch + render directly (mirroring `search_via_http`)
+        // so we can read the server's `search_metadata.rerank` outcome.
+        let resp = fetch_search(d.server_url, d.bearer, d.request).await?;
+        let outcome = server_rerank_outcome(d.placement, resp.search_metadata.as_ref());
+        let texts: Vec<String> = d.request.queries.iter().map(|q| q.text.clone()).collect();
+        println!("{}", render(&texts, &resp, d.json));
+        return Ok(outcome);
     }
     // Local placement is guarded for a key + model in `run_with_paths`.
-    let model = d.rerank_model_name.unwrap_or("rerank-2.5");
+    let model = d.rerank_model.model_name().unwrap_or("rerank-2.5");
     let key = d
         .voyage_key
         .ok_or_else(|| anyhow!("local rerank reached dispatch without a Voyage key"))?;
@@ -817,11 +889,53 @@ async fn dispatch_search(d: DispatchSearch<'_>) -> Result<()> {
         key,
         d.voyage_base_url,
         model,
+        d.rerank_model,
         d.rerank_instructions,
         d.limit,
         d.json,
     )
     .await
+}
+
+/// Build the [`RerankOutcome`] for a non-local placement (spec §6).
+///
+/// On the `Server` placement the cloud performed the rerank, so `applied` /
+/// `reason` are read from the response's `search_metadata.rerank` object; the
+/// server always reports it, and a missing/legacy/malformed field is treated as
+/// "not applied" with no reason. On the `Off` placement the client opted out and
+/// knows the rerank was not applied without trusting the server echo, so it
+/// reports `applied=false` / `reason=None` — matching the MCP client so the two
+/// emit the same `reason` for the same logical situation.
+///
+/// The server `reason` is routed through [`mn_core::rerank::known_reason`] so
+/// only the documented closed set can reach the `Rerank` event — arbitrary
+/// server text is dropped, preserving the telemetry privacy invariant.
+/// `billed_tokens` is always `None` here — the server tracks its own metrics.
+fn server_rerank_outcome(
+    placement: mn_core::config::RerankPlacement,
+    search_metadata: Option<&serde_json::Value>,
+) -> RerankOutcome {
+    use mn_core::config::RerankPlacement;
+    if !matches!(placement, RerankPlacement::Server) {
+        // Off (the only other non-local placement reaching here): no rerank was
+        // requested anywhere; don't trust the server echo.
+        return RerankOutcome::default();
+    }
+    let rerank = search_metadata.and_then(|m| m.get("rerank"));
+    let applied = rerank
+        .and_then(|r| r.get("applied"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let reason = rerank
+        .and_then(|r| r.get("reason"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(mn_core::rerank::known_reason)
+        .map(str::to_owned);
+    RerankOutcome {
+        applied,
+        reason,
+        billed_tokens: None,
+    }
 }
 
 /// POST `/v1/search` with the supplied request and render the response.
@@ -899,6 +1013,11 @@ pub async fn fetch_search(
 /// results: an agent-supplied `instruction` wins; otherwise the same derived
 /// default the server uses (from `code_mode` exclusive / version filter).
 ///
+/// Returns the [`RerankOutcome`] for the FR-109 `Rerank` event: `applied` is
+/// `true` once the Voyage call succeeds (`false` for an empty result set, where
+/// nothing is reranked), and `billed_tokens` is Voyage's reported `total_tokens`
+/// through `rerank_model`'s [`mn_core::rerank::RerankParam::billed_tokens`] rate.
+///
 /// # Errors
 ///
 /// Returns `anyhow::Error` on the HTTP fetch failure or a Voyage rerank failure.
@@ -910,17 +1029,18 @@ async fn rerank_via_http(
     voyage_key: &str,
     voyage_base_url: Option<&str>,
     model: &'static str,
+    rerank_model: mn_core::rerank::RerankParam,
     instruction: Option<&str>,
     limit: u32,
     json: bool,
-) -> Result<()> {
+) -> Result<RerankOutcome> {
     let resp = fetch_search(server_url, bearer, request).await?;
     let texts: Vec<String> = request.queries.iter().map(|q| q.text.clone()).collect();
 
     // Empty result set: nothing to rerank — render straight through.
     if resp.results.is_empty() {
         println!("{}", render(&texts, &resp, json));
-        return Ok(());
+        return Ok(RerankOutcome::default());
     }
 
     let mut reranker = mn_embedding::voyage::VoyageReranker::new(voyage_key, model);
@@ -955,13 +1075,19 @@ async fn rerank_via_http(
         .rerank(composed, docs, None)
         .await
         .context("voyage rerank")?;
+    // Apply the model's billing rate to Voyage's reported tokens (D5).
+    let billed_tokens = rerank_model.billed_tokens(out.total_tokens);
     let reordered = apply_rerank(resp.results, &out.results, limit);
     let out = SearchResponse {
         results: reordered,
         search_metadata: resp.search_metadata,
     };
     println!("{}", render(&texts, &out, json));
-    Ok(())
+    Ok(RerankOutcome {
+        applied: true,
+        reason: None,
+        billed_tokens: Some(billed_tokens),
+    })
 }
 
 /// Re-order `results` by Voyage relevance score (0–1, descending) and truncate
@@ -1903,5 +2029,149 @@ mod tests {
         let r = build_search_request(p);
         assert_eq!(r.rerank.as_deref(), Some("rerank-2.5-lite"));
         assert_eq!(r.rerank_instructions.as_deref(), Some("Prefer prose."));
+    }
+
+    #[test]
+    fn server_rerank_outcome_parses_server_metadata_shapes() {
+        use mn_core::config::RerankPlacement;
+        let meta = |v: serde_json::Value| server_rerank_outcome(RerankPlacement::Server, Some(&v));
+
+        // Well-formed applied=true with a known reason omitted.
+        let o = meta(serde_json::json!({ "rerank": { "applied": true } }));
+        assert!(o.applied);
+        assert_eq!(o.reason, None);
+        assert_eq!(o.billed_tokens, None, "server tracks its own token metrics");
+
+        // Well-formed degrade: applied=false + a documented reason.
+        let o = meta(serde_json::json!({
+            "rerank": { "applied": false, "reason": "token_budget_exhausted" }
+        }));
+        assert!(!o.applied);
+        assert_eq!(o.reason.as_deref(), Some("token_budget_exhausted"));
+
+        // Missing `rerank` key: degrade silently to not-applied / no-reason.
+        let o = meta(serde_json::json!({ "other": 1 }));
+        assert!(!o.applied);
+        assert_eq!(o.reason, None);
+
+        // Missing `applied`: treated as not-applied.
+        let o = meta(serde_json::json!({ "rerank": { "reason": "disabled" } }));
+        assert!(!o.applied);
+        assert_eq!(o.reason.as_deref(), Some("disabled"));
+
+        // Non-bool `applied`: not coerced — treated as not-applied.
+        let o = meta(serde_json::json!({ "rerank": { "applied": "yes" } }));
+        assert!(!o.applied);
+
+        // Unknown / arbitrary reason text is dropped by the privacy allow-list
+        // (only the closed `mn_core::rerank::RERANK_REASONS` set survives).
+        let o = meta(serde_json::json!({
+            "rerank": { "applied": false, "reason": "rate limited: token=eyJabc" }
+        }));
+        assert_eq!(o.reason, None, "free-form server reason must not reach the event");
+
+        // No metadata at all on the server path: not-applied / no-reason.
+        let o = server_rerank_outcome(RerankPlacement::Server, None);
+        assert!(!o.applied);
+        assert_eq!(o.reason, None);
+    }
+
+    #[test]
+    fn server_rerank_outcome_off_ignores_metadata() {
+        use mn_core::config::RerankPlacement;
+        // Off opted out client-side; it must NOT trust the server echo, so even
+        // a present `applied:true` / reason is ignored (matches the MCP client,
+        // keeping `reason` comparable across clients for the same situation).
+        let meta = serde_json::json!({
+            "rerank": { "applied": true, "reason": "not_requested" }
+        });
+        let o = server_rerank_outcome(RerankPlacement::Off, Some(&meta));
+        assert!(!o.applied);
+        assert_eq!(o.reason, None);
+        assert_eq!(o.billed_tokens, None);
+    }
+
+    #[test]
+    fn rerank_event_payload_matrix() {
+        use mn_core::config::RerankPlacement;
+        use mn_core::rerank::RerankParam;
+
+        // Off: no model, not applied, no reason/tokens — regardless of outcome.
+        let p = rerank_event(RerankPlacement::Off, RerankParam::None, None);
+        match p {
+            EventPayload::Rerank {
+                placement,
+                model,
+                applied,
+                reason,
+                billed_tokens,
+            } => {
+                assert_eq!(placement, "off");
+                assert_eq!(model, None);
+                assert!(!applied);
+                assert_eq!(reason, None);
+                assert_eq!(billed_tokens, None);
+            }
+            _ => panic!("expected Rerank payload"),
+        }
+
+        // Local applied: model named, applied=true, billed tokens carried.
+        let outcome = RerankOutcome {
+            applied: true,
+            reason: None,
+            billed_tokens: Some(321),
+        };
+        let p = rerank_event(RerankPlacement::Local, RerankParam::Rerank25, Some(&outcome));
+        match p {
+            EventPayload::Rerank {
+                placement,
+                model,
+                applied,
+                billed_tokens,
+                ..
+            } => {
+                assert_eq!(placement, "local");
+                assert_eq!(model.as_deref(), Some("rerank-2.5"));
+                assert!(applied);
+                assert_eq!(billed_tokens, Some(321));
+            }
+            _ => panic!("expected Rerank payload"),
+        }
+
+        // Server degrade: model named, applied=false with a documented reason.
+        let outcome = RerankOutcome {
+            applied: false,
+            reason: Some("provider_error".to_owned()),
+            billed_tokens: None,
+        };
+        let p = rerank_event(RerankPlacement::Server, RerankParam::Rerank25Lite, Some(&outcome));
+        match p {
+            EventPayload::Rerank {
+                placement,
+                model,
+                applied,
+                reason,
+                ..
+            } => {
+                assert_eq!(placement, "server");
+                assert_eq!(model.as_deref(), Some("rerank-2.5-lite"));
+                assert!(!applied);
+                assert_eq!(reason.as_deref(), Some("provider_error"));
+            }
+            _ => panic!("expected Rerank payload"),
+        }
+
+        // Search failed before rerank (outcome=None): reported as not applied.
+        let p = rerank_event(RerankPlacement::Server, RerankParam::Rerank25, None);
+        match p {
+            EventPayload::Rerank {
+                applied, reason, billed_tokens, ..
+            } => {
+                assert!(!applied);
+                assert_eq!(reason, None);
+                assert_eq!(billed_tokens, None);
+            }
+            _ => panic!("expected Rerank payload"),
+        }
     }
 }

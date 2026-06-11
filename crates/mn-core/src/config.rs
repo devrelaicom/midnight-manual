@@ -263,6 +263,21 @@ pub enum RerankPlacement {
     Off,
 }
 
+impl RerankPlacement {
+    /// Stable telemetry wire string (`"local"` | `"server"` | `"off"`), matching
+    /// the `EventPayload::Rerank.placement` field. This is the single source of
+    /// truth shared by the CLI and MCP clients so the placement label stays
+    /// byte-aligned across both (and with the server-side telemetry validator).
+    #[must_use]
+    pub const fn wire(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Server => "server",
+            Self::Off => "off",
+        }
+    }
+}
+
 /// Resolve rerank placement with precedence flag > `MIDNIGHT_MANUAL_RERANK` env > config.
 ///
 /// The config fallback is `[rerank].location`, ending at auto. Auto (and any
@@ -565,6 +580,16 @@ model = "rerank-2.5-lite"
             resolve_rerank_placement(Some("bogus"), &empty, &no_env, true),
             RerankPlacement::Local
         );
+    }
+
+    #[test]
+    fn rerank_placement_wire_strings() {
+        // These wire strings are the single source of truth shared by the CLI
+        // and MCP telemetry paths; they must match the telemetry validator's
+        // expectations byte-for-byte.
+        assert_eq!(RerankPlacement::Local.wire(), "local");
+        assert_eq!(RerankPlacement::Server.wire(), "server");
+        assert_eq!(RerankPlacement::Off.wire(), "off");
     }
 
     #[test]

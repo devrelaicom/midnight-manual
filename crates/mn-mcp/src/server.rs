@@ -226,6 +226,9 @@ async fn handle_request(req: crate::protocol::Request, state: &ServerState) -> V
 struct ToolResponse {
     result: ToolCallResult,
     telemetry: Option<crate::render::SearchTelemetry>,
+    /// Rerank facts for the FR-109 `Rerank` event (search tools only; `None`
+    /// for every other tool and on early-return error paths).
+    rerank: Option<tools::RerankFacts>,
     outcome: Outcome,
 }
 
@@ -304,20 +307,40 @@ async fn dispatch_tool(id: RequestId, params: ToolCallParams, state: &ServerStat
         _ => false,
     };
 
-    let (response, telemetry, outcome) = match dispatch_tool_inner(id.clone(), params, state).await
-    {
-        Ok(tr) => (
-            Response::success(id, serde_json::to_value(tr.result).expect("serialize result")),
-            tr.telemetry,
-            tr.outcome,
-        ),
-        Err(resp) => (resp, None, Outcome::Error),
-    };
+    let (response, telemetry, rerank, outcome) =
+        match dispatch_tool_inner(id.clone(), params, state).await {
+            Ok(tr) => (
+                Response::success(id, serde_json::to_value(tr.result).expect("serialize result")),
+                tr.telemetry,
+                tr.rerank,
+                tr.outcome,
+            ),
+            Err(resp) => (resp, None, None, Outcome::Error),
+        };
 
     let latency_ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
     state.tools_served.fetch_add(1, Ordering::Relaxed);
     if let Some(name) = name_for_event {
         let t = telemetry.unwrap_or_default();
+        // One `Rerank` event per search (spec §6), alongside the McpToolCall.
+        // Only the search tools carry rerank facts; the three-mechanism opt-out
+        // wraps `emit`, so no extra gating is needed here.
+        if let Some(r) = rerank {
+            state
+                .telemetry
+                .emit(Event::new(
+                    Component::Mcp,
+                    crate::VERSION,
+                    EventPayload::Rerank {
+                        placement: r.placement.to_owned(),
+                        model: r.model,
+                        applied: r.applied,
+                        reason: r.reason,
+                        billed_tokens: r.billed_tokens,
+                    },
+                ))
+                .await;
+        }
         state
             .telemetry
             .emit(Event::new(
@@ -383,11 +406,13 @@ async fn dispatch_tool_inner(
     let ok = |result: ToolCallResult, telemetry| ToolResponse {
         result,
         telemetry,
+        rerank: None,
         outcome: Outcome::Ok,
     };
     let err = |result: ToolCallResult, outcome| ToolResponse {
         result,
         telemetry: None,
+        rerank: None,
         outcome,
     };
 
@@ -471,6 +496,7 @@ async fn run_search_dispatch(params: &ToolCallParams, state: &ServerState) -> To
                 result: ToolFailure::simple(ErrorKind::InvalidInput, msg.clone(), msg)
                     .into_result(),
                 telemetry: None,
+                rerank: None,
                 outcome: Outcome::InvalidInput,
             };
         }
@@ -487,17 +513,18 @@ async fn run_search_dispatch(params: &ToolCallParams, state: &ServerState) -> To
     };
 
     match tools::run_search(&parsed, &state.cfg, &state.cloud).await {
-        Ok(envelope) => {
+        Ok(success) => {
             let opts = SearchRenderOpts {
                 reranker_used: reranker_name,
                 advanced,
                 skill_installed: mn_skills::installed_anywhere(&mn_skills::StdSkillEnv),
             };
-            let outcome = render::project_search(envelope, &opts);
+            let outcome = render::project_search(success.envelope, &opts);
             let telemetry = outcome.telemetry.clone();
             ToolResponse {
                 result: outcome.into_result(),
                 telemetry,
+                rerank: Some(success.rerank),
                 outcome: Outcome::Ok,
             }
         }
@@ -523,6 +550,7 @@ async fn run_search_dispatch(params: &ToolCallParams, state: &ServerState) -> To
             }
             .into_result(),
             telemetry: None,
+            rerank: None,
             outcome: Outcome::Error,
         },
         Err(tools::SearchError::Cloud(msg)) => ToolResponse {
@@ -533,6 +561,7 @@ async fn run_search_dispatch(params: &ToolCallParams, state: &ServerState) -> To
             )
             .into_result(),
             telemetry: None,
+            rerank: None,
             outcome: Outcome::Error,
         },
     }
@@ -554,6 +583,7 @@ async fn run_passthrough_tool(params: &ToolCallParams, state: &ServerState) -> T
             Ok(v) => ToolResponse {
                 result: render::project_chunks(v).into_result(),
                 telemetry: None,
+                rerank: None,
                 outcome: Outcome::Ok,
             },
             Err(e) => {
@@ -561,6 +591,7 @@ async fn run_passthrough_tool(params: &ToolCallParams, state: &ServerState) -> T
                 ToolResponse {
                     result: passthrough_failure(e).into_result(),
                     telemetry: None,
+                    rerank: None,
                     outcome,
                 }
             }
@@ -570,6 +601,7 @@ async fn run_passthrough_tool(params: &ToolCallParams, state: &ServerState) -> T
                 Ok(v) => ToolResponse {
                     result: render::project_chunk_list(v, "after").into_result(),
                     telemetry: None,
+                    rerank: None,
                     outcome: Outcome::Ok,
                 },
                 Err(e) => {
@@ -577,6 +609,7 @@ async fn run_passthrough_tool(params: &ToolCallParams, state: &ServerState) -> T
                     ToolResponse {
                         result: passthrough_failure(e).into_result(),
                         telemetry: None,
+                        rerank: None,
                         outcome,
                     }
                 }
@@ -587,6 +620,7 @@ async fn run_passthrough_tool(params: &ToolCallParams, state: &ServerState) -> T
                 Ok(v) => ToolResponse {
                     result: render::project_chunk_list(v, "before").into_result(),
                     telemetry: None,
+                    rerank: None,
                     outcome: Outcome::Ok,
                 },
                 Err(e) => {
@@ -594,6 +628,7 @@ async fn run_passthrough_tool(params: &ToolCallParams, state: &ServerState) -> T
                     ToolResponse {
                         result: passthrough_failure(e).into_result(),
                         telemetry: None,
+                        rerank: None,
                         outcome,
                     }
                 }
@@ -603,6 +638,7 @@ async fn run_passthrough_tool(params: &ToolCallParams, state: &ServerState) -> T
             Ok(v) => ToolResponse {
                 result: render::project_neighbors(v).into_result(),
                 telemetry: None,
+                rerank: None,
                 outcome: Outcome::Ok,
             },
             Err(e) => {
@@ -610,6 +646,7 @@ async fn run_passthrough_tool(params: &ToolCallParams, state: &ServerState) -> T
                 ToolResponse {
                     result: passthrough_failure(e).into_result(),
                     telemetry: None,
+                    rerank: None,
                     outcome,
                 }
             }
@@ -619,6 +656,7 @@ async fn run_passthrough_tool(params: &ToolCallParams, state: &ServerState) -> T
                 Ok(v) => ToolResponse {
                     result: render::project_parents(v).into_result(),
                     telemetry: None,
+                    rerank: None,
                     outcome: Outcome::Ok,
                 },
                 Err(e) => {
@@ -626,6 +664,7 @@ async fn run_passthrough_tool(params: &ToolCallParams, state: &ServerState) -> T
                     ToolResponse {
                         result: passthrough_failure(e).into_result(),
                         telemetry: None,
+                        rerank: None,
                         outcome,
                     }
                 }
@@ -636,6 +675,7 @@ async fn run_passthrough_tool(params: &ToolCallParams, state: &ServerState) -> T
                 Ok(v) => ToolResponse {
                     result: render::project_document(v).into_result(),
                     telemetry: None,
+                    rerank: None,
                     outcome: Outcome::Ok,
                 },
                 Err(e) => {
@@ -643,6 +683,7 @@ async fn run_passthrough_tool(params: &ToolCallParams, state: &ServerState) -> T
                     ToolResponse {
                         result: passthrough_failure(e).into_result(),
                         telemetry: None,
+                        rerank: None,
                         outcome,
                     }
                 }
@@ -652,6 +693,7 @@ async fn run_passthrough_tool(params: &ToolCallParams, state: &ServerState) -> T
             Ok(v) => ToolResponse {
                 result: render::project_document_window(v).into_result(),
                 telemetry: None,
+                rerank: None,
                 outcome: Outcome::Ok,
             },
             Err(e) => {
@@ -659,6 +701,7 @@ async fn run_passthrough_tool(params: &ToolCallParams, state: &ServerState) -> T
                 ToolResponse {
                     result: passthrough_failure(e).into_result(),
                     telemetry: None,
+                    rerank: None,
                     outcome,
                 }
             }
@@ -671,6 +714,7 @@ async fn run_passthrough_tool(params: &ToolCallParams, state: &ServerState) -> T
             )
             .into_result(),
             telemetry: None,
+            rerank: None,
             outcome: Outcome::Error,
         },
     }

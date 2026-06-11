@@ -1190,7 +1190,7 @@ git commit -m "feat(mn-mcp): rerank placement + rerank_instructions; fix Voyage 
 - Modify: `crates/mn-core/src/config.rs` (remove `ModelsConfig.reranker`/`reranker_path`, `resolve_reranker`, their tests)
 - Modify: `crates/mn-core/src/scoring.rs` (remove `normalize_rerank` + its test assertions; update the module doc at lines 6–9 and the `RelevanceSource::Rerank` doc at line 22–23 to say "Voyage relevance score (server inline or client BYOK)")
 
-- [ ] **Step 1: Shrink `reranker.rs`** to exactly:
+- [x] **Step 1: Shrink `reranker.rs`** to exactly:
 
 ```rust
 //! Rerank result type shared by the Voyage reranker client and its callers.
@@ -1210,26 +1210,26 @@ pub struct RerankResult {
 
 Delete `reranker_catalog.rs`. Fix `lib.rs` (`pub mod` list + the `LoadedReranker`/`RerankResult` re-exports — keep `pub use reranker::RerankResult;`, drop `LoadedReranker`). Remove fastembed-specific variants from `error.rs` if any become unused.
 
-- [ ] **Step 2: Drop the dependency.** Verify nothing else uses it:
+- [x] **Step 2: Drop the dependency.** Verify nothing else uses it:
 
 Run: `grep -rn "fastembed" crates/*/src/ | grep -v "^Binary"`
 Expected: zero hits after Step 1 (before this task: reranker.rs, reranker_catalog.rs, lib.rs, error.rs, cache.rs — cache.rs hits should be doc-comment-only; reword them, the cache dir is still used for token-count tokenizers). Then remove `fastembed` from `crates/mn-embedding/Cargo.toml` and the `[workspace.dependencies]` entry in root `Cargo.toml` (lines ~157–158; KEEP `tokenizers` — `tokens.rs` uses it directly, and fix the comment that says it's transitive-via-fastembed). Check whether the explicit `hf-hub` pin (mn-embedding/Cargo.toml lines 26–30) was only there to mirror fastembed's features — if nothing else imports `hf_hub`, remove it too. Update `crates/mn-embedding/Cargo.toml`'s `description` (line 3).
 
-- [ ] **Step 3: `models.rs`** — remove the reranker download block (the `mn_embedding::reranker::global(...)` call and any "pulling reranker" output). `mnm models pull` now only ensures tokenizer/cache assets. Update its doc comment and any test asserting reranker-pull output.
+- [x] **Step 3: `models.rs`** — remove the reranker download block (the `mn_embedding::reranker::global(...)` call and any "pulling reranker" output). `mnm models pull` now only ensures tokenizer/cache assets. Update its doc comment and any test asserting reranker-pull output.
 
-- [ ] **Step 4: `mn-core` legacy config** — remove `ModelsConfig.reranker`, `ModelsConfig.reranker_path`, their defaults (lines ~105/111), `resolve_reranker` (line 254), and the tests touching them (lines ~372–395, 458–474). Grep the workspace for stragglers:
+- [x] **Step 4: `mn-core` legacy config** — remove `ModelsConfig.reranker`, `ModelsConfig.reranker_path`, their defaults (lines ~105/111), `resolve_reranker` (line 254), and the tests touching them (lines ~372–395, 458–474). Grep the workspace for stragglers:
 
 Run: `grep -rn "resolve_reranker\|reranker_path\|MIDNIGHT_MANUAL_RERANKER\b\|bge-reranker" crates/ --include="*.rs"`
 Expected: zero hits (Tasks 6–7 removed the call sites).
 
-- [ ] **Step 5: `scoring.rs`** — delete `normalize_rerank` (lines 104–110), the three `normalize_rerank` assertions in `normalizers_are_bounded_and_monotonic` (rename it `normalize_rrf_is_bounded_and_monotonic`), and rewrite the module doc's normalization sentence (lines 6–9) to mention only `normalize_rrf`.
+- [x] **Step 5: `scoring.rs`** — delete `normalize_rerank` (lines 104–110), the three `normalize_rerank` assertions in `normalizers_are_bounded_and_monotonic` (rename it `normalize_rrf_is_bounded_and_monotonic`), and rewrite the module doc's normalization sentence (lines 6–9) to mention only `normalize_rrf`.
 
-- [ ] **Step 6: Full workspace check**
+- [x] **Step 6: Full workspace check**
 
 Run: `cargo fmt && cargo clippy --workspace --all-targets --all-features -- -D warnings && VOYAGE_API_KEY= cargo test --workspace`
 Expected: clean (modulo the 2 known `auth_integration` sandbox failures). `cargo tree -i fastembed 2>&1` should report the package is not in the graph.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add -A

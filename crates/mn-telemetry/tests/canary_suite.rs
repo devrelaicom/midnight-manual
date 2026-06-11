@@ -213,6 +213,30 @@ fn mcp_tool_call_get_chunks_fields_do_not_leak_canary() {
 }
 
 #[test]
+fn rerank_event_fields_do_not_leak_canary() {
+    // The `Rerank` event's only string-shaped fields are `placement` (closed
+    // wire enum), `model` (Voyage model name), and `reason` (routed through the
+    // closed `mn_core::rerank::known_reason` allow-list before it reaches the
+    // event). None can carry free-form text, so a canary cannot flow in.
+    let _ = CANARY_STRINGS[0].value;
+    let event = Event::new(
+        Component::Cli,
+        "0.1.0",
+        EventPayload::Rerank {
+            placement: "server".into(),
+            model: Some("rerank-2.5".into()),
+            applied: false,
+            reason: Some("provider_error".into()),
+            billed_tokens: Some(1234),
+        },
+    );
+    let v = serde_json::to_value(&event).expect("serialize");
+    assert_eq!(v["payload"]["event_type"], "rerank");
+    let wire = serde_json::to_string(&event).expect("serialize");
+    canary::assert_no_canary_in(&wire);
+}
+
+#[test]
 fn current_log_output_does_not_contain_canaries() {
     // The aspirational form of FR-112 will drive every endpoint and tool
     // here with canary-laden inputs; in Phase 8a we have no telemetry call

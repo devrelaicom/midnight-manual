@@ -31,11 +31,12 @@ use crate::app::AppState;
 use crate::error;
 use crate::middleware::request_id::RequestId;
 
-/// Closed allow-list of `event_type` strings, matching migration `0005`'s
-/// CHECK constraint AND `mn_telemetry::EventPayload::event_type()`. The
-/// server-side validator MUST be a strict subset of these — any future
-/// event needs a coordinated bump on the client schema, the server
-/// allow-list, and the migration.
+/// Closed allow-list of `event_type` strings, matching the CHECK constraint
+/// (migration `0005`, extended by `0012` to add `rerank`) AND
+/// `mn_telemetry::EventPayload::event_type()`. The server-side validator MUST
+/// stay in lockstep with both — any future event needs a coordinated bump on
+/// the client schema, this allow-list, and a new migration extending the
+/// constraint.
 const ALLOWED_EVENT_TYPES: &[&str] = &[
     "mcp_tool_call",
     "cli_command",
@@ -43,6 +44,7 @@ const ALLOWED_EVENT_TYPES: &[&str] = &[
     "pull_models",
     "mcp_startup",
     "mcp_shutdown",
+    "rerank",
 ];
 
 /// Closed allow-list of `component` strings (mirrors migration `0005`'s
@@ -175,4 +177,114 @@ async fn insert_one(pool: &PgPool, event_type: &str, ev: &InboundEvent) -> Resul
     .execute(pool)
     .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mn_telemetry::events::{Component, Event, EventPayload};
+
+    /// Decode a serialized `Event` into the validator's `InboundEvent` shape.
+    fn inbound(event: &Event) -> InboundEvent {
+        let v = serde_json::to_value(event).expect("serialize event");
+        serde_json::from_value(v).expect("decode into InboundEvent")
+    }
+
+    #[test]
+    fn validate_accepts_rerank_event() {
+        // Regression guard: the `rerank` event_type must pass the allow-list,
+        // otherwise every emitted rerank decision is dropped as
+        // `unknown_event_type` (the bug 0012 + this allow-list bump fix).
+        let event = Event::new(
+            Component::Mcp,
+            "0.1.0",
+            EventPayload::Rerank {
+                placement: "server".to_owned(),
+                model: Some("rerank-2.5".to_owned()),
+                applied: true,
+                reason: None,
+                billed_tokens: None,
+            },
+        );
+        assert_eq!(validate(&inbound(&event)).as_deref(), Ok("rerank"));
+    }
+
+    #[test]
+    fn validate_rejects_unknown_event_type() {
+        let mut ev = inbound(&Event::new(
+            Component::Cli,
+            "0.1.0",
+            EventPayload::McpShutdown { uptime_s: 0, tools_served: 0 },
+        ));
+        ev.payload.insert(
+            "event_type".to_owned(),
+            serde_json::Value::String("not_a_real_event".to_owned()),
+        );
+        assert_eq!(validate(&ev), Err("unknown_event_type"));
+    }
+
+    #[test]
+    fn allow_list_covers_every_event_payload_variant() {
+        // The server allow-list MUST accept every event the clients can emit;
+        // a variant the enum produces but the allow-list omits is silently
+        // dropped at ingest. Build one of every variant and assert each passes.
+        let variants = [
+            EventPayload::McpToolCall {
+                tool_name: mn_telemetry::events::McpToolName::Search,
+                latency_ms: 0,
+                result_count: 0,
+                model_state: mn_telemetry::events::ModelState::Ready,
+                rerank_on: false,
+                outcome: mn_telemetry::events::Outcome::Ok,
+                corpus_model: None,
+                reranker_used: None,
+                top_confidence: None,
+                top_attribution: None,
+                top_source: None,
+                filtered_by_confidence: None,
+                deduplicated_count: None,
+            },
+            EventPayload::Rerank {
+                placement: "off".to_owned(),
+                model: None,
+                applied: false,
+                reason: None,
+                billed_tokens: None,
+            },
+            EventPayload::CliCommand {
+                command: mn_telemetry::events::CliCommandName::Search,
+                duration_ms: 0,
+                outcome: mn_telemetry::events::Outcome::Ok,
+            },
+            EventPayload::IngestComplete {
+                documents_added: 0,
+                documents_updated: 0,
+                documents_skipped: 0,
+                duration_ms: 0,
+                outcome: mn_telemetry::events::Outcome::Ok,
+                batch_count: None,
+                failed_batch_index: None,
+            },
+            EventPayload::PullModels {
+                embedder_downloaded: false,
+                reranker_downloaded: false,
+                duration_ms: 0,
+                outcome: mn_telemetry::events::Outcome::Ok,
+            },
+            EventPayload::McpStartup {
+                startup_ms: 0,
+                model_state: mn_telemetry::events::ModelState::Missing,
+            },
+            EventPayload::McpShutdown { uptime_s: 0, tools_served: 0 },
+        ];
+        for payload in variants {
+            let event = Event::new(Component::Cli, "0.1.0", payload);
+            let expected = event.payload.event_type();
+            assert_eq!(
+                validate(&inbound(&event)).as_deref(),
+                Ok(expected),
+                "ALLOWED_EVENT_TYPES is missing `{expected}`"
+            );
+        }
+    }
 }

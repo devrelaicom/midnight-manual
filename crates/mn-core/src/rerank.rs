@@ -53,6 +53,33 @@ impl RerankParam {
     }
 }
 
+/// The closed set of `search_metadata.rerank.reason` values the server emits.
+///
+/// Emitted when a rerank is not applied (see `mn-server` `routes::search`).
+/// Clients copy this field into the FR-109 `Rerank` telemetry event, so it must
+/// stay a known-value allow-list — never free-form server text — to preserve
+/// the telemetry module's privacy-by-construction invariant.
+pub const RERANK_REASONS: &[&str] = &[
+    "not_requested",
+    "token_budget_exhausted",
+    "provider_error",
+    "disabled",
+];
+
+/// Map a raw `search_metadata.rerank.reason` string from a server response to a
+/// known reason wire value, returning `None` for anything outside the closed
+/// [`RERANK_REASONS`] set.
+///
+/// This is the privacy gate on the telemetry path: a client reads the reason
+/// off the (untrusted) server response and would otherwise copy arbitrary text
+/// into a `Rerank` event. Routing it through this allow-list means only the
+/// documented closed set can ever reach the wire — an unrecognized value is
+/// dropped rather than echoed.
+#[must_use]
+pub fn known_reason(raw: &str) -> Option<&'static str> {
+    RERANK_REASONS.iter().copied().find(|&r| r == raw)
+}
+
 /// Validate an agent-supplied instruction against [`MAX_INSTRUCTION_CHARS`].
 ///
 /// # Errors
@@ -173,6 +200,19 @@ mod tests {
         // Both -> both sentences concatenated (non-contradictory by construction).
         let both = default_instruction(true, Some(("compact", "0.31"))).unwrap();
         assert!(both.contains("code examples") && both.contains("0.31"));
+    }
+
+    #[test]
+    fn known_reason_passes_closed_set_and_drops_others() {
+        // Every documented server reason maps to itself (interned to 'static).
+        for r in RERANK_REASONS {
+            assert_eq!(known_reason(r), Some(*r));
+        }
+        // Anything outside the closed set is dropped — never echoed into an Event.
+        assert_eq!(known_reason(""), None);
+        assert_eq!(known_reason("applied"), None);
+        assert_eq!(known_reason("Not_Requested"), None); // case-sensitive
+        assert_eq!(known_reason("rate limited: token=eyJhbGci"), None);
     }
 
     #[test]
