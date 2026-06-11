@@ -47,6 +47,14 @@ pub struct AppState {
     /// `VOYAGE_API_KEY` is unset — the endpoint then 503s rather than failing
     /// boot, so a deployment that only proxies client-side vectors still serves.
     pub voyage: Option<std::sync::Arc<mn_embedding::voyage::VoyageEmbedder>>,
+    /// Server-side contextualized (general) Voyage embedder for
+    /// `POST /v1/embeddings` with `type=general`. `None` when
+    /// `VOYAGE_API_KEY` is unset (endpoint 503s).
+    pub voyage_ctx:
+        Option<std::sync::Arc<mn_embedding::contextualized::ContextualizedVoyageEmbedder>>,
+    /// The corpus's code-embedding model, resolved at boot from config.
+    /// `None` when unresolved — code_mode searches then 503.
+    pub code_model: crate::code_model::Shared,
     /// In-process embedding-token accounting (tiered hourly/daily ceilings).
     /// Always present — token accounting has no disable switch.
     pub token_limiter: std::sync::Arc<crate::tokenlimit::TokenUsageLimiter>,
@@ -175,7 +183,18 @@ pub fn build(pool: PgPool, cfg: ServerConfig) -> Result<Router, AuthStateError> 
     let corpus_model = std::sync::Arc::new(std::sync::RwLock::new(None));
     let token_limiter = crate::tokenlimit::TokenUsageLimiter::from_config(&cfg);
     let voyage = voyage_from_config(&cfg);
-    build_with_limiter(pool, cfg, limiter, corpus_model, token_limiter, voyage)
+    let voyage_ctx = voyage_ctx_from_config(&cfg);
+    let code_model = std::sync::Arc::new(std::sync::RwLock::new(None));
+    build_with_limiter(
+        pool,
+        cfg,
+        limiter,
+        corpus_model,
+        token_limiter,
+        voyage,
+        voyage_ctx,
+        code_model,
+    )
 }
 
 /// Construct the server-side Voyage embedder from config, or `None` when
@@ -193,21 +212,50 @@ fn voyage_from_config(
     })
 }
 
-/// Build the app with the corpus model auto-resolved from the DB. Convenience
-/// for integration tests (and any caller that wants boot-time resolution
-/// without threading the handle manually). Resolution failure yields an
-/// unresolved (`None`) corpus model — search then 503s, matching prod's
-/// "no model" path.
+/// Construct the server-side contextualized (general) Voyage embedder from
+/// config, or `None` when `VOYAGE_API_KEY` is unset.
+fn voyage_ctx_from_config(
+    cfg: &ServerConfig,
+) -> Option<std::sync::Arc<mn_embedding::contextualized::ContextualizedVoyageEmbedder>> {
+    cfg.voyage_api_key.as_ref().map(|k| {
+        std::sync::Arc::new(mn_embedding::contextualized::ContextualizedVoyageEmbedder::new(
+            k,
+            &cfg.voyage_context_model,
+            cfg.voyage_output_dimension,
+            &cfg.voyage_output_dtype,
+        ))
+    })
+}
+
+/// Build the app with the corpus model (and the config-pinned code model)
+/// auto-resolved from the DB. Convenience for integration tests (and any
+/// caller that wants boot-time resolution without threading the handles
+/// manually). Resolution failure yields an unresolved (`None`) model —
+/// search then 503s, matching prod's "no model" path.
 ///
 /// # Errors
 /// Returns [`AuthStateError`] if the auth env values are present but malformed.
 pub async fn build_resolved(pool: PgPool, cfg: ServerConfig) -> Result<Router, AuthStateError> {
     let cm = crate::corpus_model::resolve(&pool).await.ok();
     let corpus_model = std::sync::Arc::new(std::sync::RwLock::new(cm));
+    let km = crate::code_model::resolve(&pool, &cfg.code_model_wire)
+        .await
+        .ok();
+    let code_model = std::sync::Arc::new(std::sync::RwLock::new(km));
     let limiter = crate::ratelimit::RateLimiter::from_config(&cfg);
     let token_limiter = crate::tokenlimit::TokenUsageLimiter::from_config(&cfg);
     let voyage = voyage_from_config(&cfg);
-    build_with_limiter(pool, cfg, limiter, corpus_model, token_limiter, voyage)
+    let voyage_ctx = voyage_ctx_from_config(&cfg);
+    build_with_limiter(
+        pool,
+        cfg,
+        limiter,
+        corpus_model,
+        token_limiter,
+        voyage,
+        voyage_ctx,
+        code_model,
+    )
 }
 
 /// Build the app with an explicit rate limiter and corpus-model handle, so
@@ -219,6 +267,9 @@ pub async fn build_resolved(pool: PgPool, cfg: ServerConfig) -> Result<Router, A
 /// # Errors
 ///
 /// Returns [`AuthStateError`] if the auth env values are present but malformed.
+// Boot wiring threads each shared handle explicitly (so `main` and tests can
+// share/seed them); a params struct would only add ceremony.
+#[allow(clippy::too_many_arguments)]
 pub fn build_with_limiter(
     pool: PgPool,
     cfg: ServerConfig,
@@ -226,6 +277,8 @@ pub fn build_with_limiter(
     corpus_model: crate::corpus_model::Shared,
     token_limiter: Arc<crate::tokenlimit::TokenUsageLimiter>,
     voyage: Option<Arc<mn_embedding::voyage::VoyageEmbedder>>,
+    voyage_ctx: Option<Arc<mn_embedding::contextualized::ContextualizedVoyageEmbedder>>,
+    code_model: crate::code_model::Shared,
 ) -> Result<Router, AuthStateError> {
     let auth = AuthState::from_config(&cfg)?.map(Arc::new);
     let scoring_policy = Arc::new(cfg.scoring_policy.clone());
@@ -242,6 +295,8 @@ pub fn build_with_limiter(
         scoring_policy,
         corpus_model,
         voyage,
+        voyage_ctx,
+        code_model,
         token_limiter,
         cache_dir,
         facets_cache: crate::routes::facets::new_cache(),

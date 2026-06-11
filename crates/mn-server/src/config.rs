@@ -119,9 +119,18 @@ pub struct ServerConfig {
     /// fallback (the fastembed corpus embedder was retired when the corpus
     /// moved to VoyageAI).
     pub voyage_api_key: Option<String>,
-    /// `MIDNIGHT_MANUAL_VOYAGE_MODEL` — VoyageAI embedding model name.
-    /// Defaults to `"voyage-code-3"`.
+    /// `MIDNIGHT_MANUAL_VOYAGE_MODEL` — VoyageAI embedding model name for the
+    /// flat `/v1/embeddings` API (the `type=code` embedder). Defaults to
+    /// `"voyage-code-3"`.
     pub voyage_model: String,
+    /// `MIDNIGHT_MANUAL_VOYAGE_CONTEXT_MODEL` — VoyageAI contextualized
+    /// embedding model name (the `type=general` embedder, served via
+    /// `/v1/contextualizedembeddings`). Defaults to `"voyage-context-3"`.
+    pub voyage_context_model: String,
+    /// `MIDNIGHT_MANUAL_CODE_MODEL` — registry wire id (`name@revision`) of
+    /// the corpus's code-embedding model, resolved at boot against the
+    /// `embedding_model` registry. Defaults to `"voyage-code-3@1"`.
+    pub code_model_wire: String,
     /// `MIDNIGHT_MANUAL_VOYAGE_DIM` — output dimension for VoyageAI embeddings.
     /// Defaults to 1024.
     pub voyage_output_dimension: u32,
@@ -194,6 +203,8 @@ impl Default for ServerConfig {
             scoring_policy: ScoringPolicy::default(),
             voyage_api_key: None,
             voyage_model: "voyage-code-3".into(),
+            voyage_context_model: "voyage-context-3".into(),
+            code_model_wire: "voyage-code-3@1".into(),
             voyage_output_dimension: 1024,
             voyage_output_dtype: "float".into(),
             token_limit_anon_hourly: 2_000,
@@ -302,6 +313,14 @@ impl ServerConfig {
             .ok()
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "voyage-code-3".into());
+        let voyage_context_model = env::var("MIDNIGHT_MANUAL_VOYAGE_CONTEXT_MODEL")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "voyage-context-3".into());
+        let code_model_wire = env::var("MIDNIGHT_MANUAL_CODE_MODEL")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "voyage-code-3@1".into());
         let voyage_output_dimension: u32 = env::var("MIDNIGHT_MANUAL_VOYAGE_DIM")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -362,6 +381,8 @@ impl ServerConfig {
             scoring_policy,
             voyage_api_key,
             voyage_model,
+            voyage_context_model,
+            code_model_wire,
             voyage_output_dimension,
             voyage_output_dtype,
             token_limit_anon_hourly,
@@ -458,6 +479,13 @@ mod tests {
         assert_eq!(c.voyage_output_dimension, 1024);
         assert_eq!(c.voyage_output_dtype, "float");
         assert!(c.voyage_api_key.is_none());
+    }
+
+    #[test]
+    fn dual_embedding_model_defaults() {
+        let c = ServerConfig::default();
+        assert_eq!(c.voyage_context_model, "voyage-context-3");
+        assert_eq!(c.code_model_wire, "voyage-code-3@1");
     }
 
     #[test]

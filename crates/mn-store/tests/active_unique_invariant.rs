@@ -22,16 +22,18 @@ async fn cannot_have_two_active_versions_for_same_source() {
         .await
         .unwrap();
 
-    let (sv1, _) = source_version::create_building(&h.pool, source_id, model_id, "0.1.0", "h1")
-        .await
-        .unwrap();
+    let (sv1, _) =
+        source_version::create_building(&h.pool, source_id, model_id, None, "0.1.0", "h1")
+            .await
+            .unwrap();
     source_version::finalize(&h.pool, sv1).await.unwrap();
 
     // Try to force a second active row directly bypassing finalize() — the
     // partial unique index MUST reject it.
-    let (sv2, _) = source_version::create_building(&h.pool, source_id, model_id, "0.1.0", "h2")
-        .await
-        .unwrap();
+    let (sv2, _) =
+        source_version::create_building(&h.pool, source_id, model_id, None, "0.1.0", "h2")
+            .await
+            .unwrap();
 
     let err =
         sqlx::query("UPDATE source_version SET is_active = true, status = 'active' WHERE id = $1")

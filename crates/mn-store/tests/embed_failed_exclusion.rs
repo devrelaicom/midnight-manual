@@ -24,9 +24,10 @@ async fn embed_failed_excluded_from_read_path_but_admin_visible() {
         source::insert(&h.pool, &slug, "Embed Failed Test", SourceKind::DocsSite, None, 5)
             .await
             .unwrap();
-    let (sv_id, _) = source_version::create_building(&h.pool, source_id, model_id, "0.1.0", "h")
-        .await
-        .unwrap();
+    let (sv_id, _) =
+        source_version::create_building(&h.pool, source_id, model_id, None, "0.1.0", "h")
+            .await
+            .unwrap();
     let root = node::insert(&h.pool, sv_id, None, NodeKind::Root, "root", 0)
         .await
         .unwrap();
@@ -76,6 +77,7 @@ async fn embed_failed_excluded_from_read_path_but_admin_visible() {
             content_hash: "ch1",
             embedding: None,
             embedding_model_id: model_id,
+            code_embedding: None,
             heading_path: &[],
             symbol_path: &[],
             start_byte: 0,
@@ -99,6 +101,7 @@ async fn embed_failed_excluded_from_read_path_but_admin_visible() {
             content_hash: "ch2",
             embedding: None,
             embedding_model_id: model_id,
+            code_embedding: None,
             heading_path: &[],
             symbol_path: &[],
             start_byte: 12,

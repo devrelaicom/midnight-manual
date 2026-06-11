@@ -30,9 +30,10 @@ async fn chunk_with_mismatched_model_id_is_rejected() {
         .unwrap();
 
     // source_version uses model_a
-    let (sv_id, _) = source_version::create_building(&h.pool, source_id, model_a, "0.1.0", "h")
-        .await
-        .unwrap();
+    let (sv_id, _) =
+        source_version::create_building(&h.pool, source_id, model_a, None, "0.1.0", "h")
+            .await
+            .unwrap();
 
     let root = node::insert(&h.pool, sv_id, None, NodeKind::Root, "root", 0)
         .await
@@ -82,6 +83,7 @@ async fn chunk_with_mismatched_model_id_is_rejected() {
             content_hash: "ch",
             embedding: None,
             embedding_model_id: model_b, // wrong!
+            code_embedding: None,
             heading_path: &[],
             symbol_path: &[],
             start_byte: 0,
@@ -113,6 +115,7 @@ async fn chunk_with_mismatched_model_id_is_rejected() {
             content_hash: "ch",
             embedding: None,
             embedding_model_id: model_a, // correct
+            code_embedding: None,
             heading_path: &[],
             symbol_path: &[],
             start_byte: 0,
@@ -142,9 +145,10 @@ async fn chunk_symbol_path_roundtrips_structured() {
         source::insert(&h.pool, &slug, "Symbol Path Test", SourceKind::Standalone, None, 5)
             .await
             .unwrap();
-    let (sv_id, _) = source_version::create_building(&h.pool, source_id, model_id, "0.1.0", "h")
-        .await
-        .unwrap();
+    let (sv_id, _) =
+        source_version::create_building(&h.pool, source_id, model_id, None, "0.1.0", "h")
+            .await
+            .unwrap();
     let root = node::insert(&h.pool, sv_id, None, NodeKind::Root, "root", 0)
         .await
         .unwrap();
@@ -183,10 +187,12 @@ async fn chunk_symbol_path_roundtrips_structured() {
         SymbolSegment {
             kind: "impl".into(),
             name: "Foo".into(),
+            path: Vec::new(),
         },
         SymbolSegment {
             kind: "fn".into(),
             name: "bar".into(),
+            path: vec!["Foo".into()],
         },
     ];
 
@@ -202,6 +208,7 @@ async fn chunk_symbol_path_roundtrips_structured() {
             content_hash: "ch-sym",
             embedding: None,
             embedding_model_id: model_id,
+            code_embedding: None,
             heading_path: &[],
             symbol_path: &segs,
             start_byte: 0,

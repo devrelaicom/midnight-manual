@@ -20,8 +20,12 @@
 //! chunks normally arrive `ready`. A chunk uploaded without an embedding lands
 //! in `embed_failed` and is excluded from search (there is no server-side
 //! embedder worker to backfill it; re-ingest the source to fix it). Carried
-//! chunks inherit their prior `status` and `embedding`, preserving the prior
-//! version's vectors.
+//! chunks inherit their prior `status`, `embedding`, and `code_embedding`,
+//! preserving the prior version's vectors.
+//!
+//! Dual embeddings (D1): a run started with `code_embedding_model` accepts an
+//! optional per-chunk `code_embedding` (voyage-code-3) alongside the general
+//! vector; a run started without one rejects any `code_embedding` with 400.
 //!
 //! [`source_version`]: mn_store::entities::source_version
 
@@ -64,6 +68,10 @@ pub struct StartIngestRunRequest {
     /// Embedding model wire id (`name@revision`). MUST match the corpus's
     /// active model; otherwise the request 409s with `embedding_model_mismatch`.
     pub embedding_model: String,
+    /// Code-embedding model wire id for this run's code vectors. Omit/null ⇔
+    /// code embeddings disabled for this version (D9 opt-out).
+    #[serde(default)]
+    pub code_embedding_model: Option<String>,
     /// Optional notes captured at run start.
     #[serde(default)]
     pub note: Option<String>,
@@ -152,6 +160,11 @@ pub struct ChunkUpload {
     /// re-ingested (there is no server-side embedder worker to backfill it).
     #[serde(default)]
     pub embedding: Option<Vec<f32>>,
+    /// Optional voyage-code-3 vector; present only for code-kind chunks of
+    /// code-embedding-enabled runs (the run's source_version must carry a
+    /// `code_embedding_model_id`, otherwise the batch 400s).
+    #[serde(default)]
+    pub code_embedding: Option<Vec<f32>>,
 }
 
 /// Body of `PUT .../documents`.
@@ -268,12 +281,21 @@ async fn start_ingest_run(
         }
     };
 
+    // Resolve the optional code-embedding model the same way (D1/D9): absent ⇔
+    // code embeddings disabled for this version.
+    let code_model_id =
+        match resolve_code_model_id(&state, req.code_embedding_model.as_deref(), rid).await {
+            Ok(id) => id,
+            Err(resp) => return *resp,
+        };
+
     // SV's content_hash is filled at finalize from the aggregate of its
     // documents; on create we stamp a placeholder.
     match source_version::create_building(
         &state.pool,
         src.id,
         model.id,
+        code_model_id,
         &req.ingest_cli_version,
         "pending",
     )
@@ -288,6 +310,57 @@ async fn start_ingest_run(
         Err(e) => {
             tracing::warn!(request_id = rid, op = "start_ingest_run", error = %e, "create sv failed");
             error::service_unavailable("could not allocate source_version", rid)
+        }
+    }
+}
+
+/// Resolve the optional `code_embedding_model` wire id from a start-run
+/// request to its registered model id (D1/D9).
+///
+/// `Ok(None)` when no code model was requested (code embeddings disabled for
+/// this version); `Err` carries a ready-to-return error response (boxed: the
+/// `Response` is large relative to the `Option<Uuid>` success arm).
+async fn resolve_code_model_id(
+    state: &AppState,
+    raw: Option<&str>,
+    rid: &str,
+) -> Result<Option<Uuid>, Box<Response>> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let code_wire: EmbeddingModelId = match EmbeddingModelId::from_str(raw) {
+        Ok(id) => id,
+        Err(e) => {
+            return Err(Box::new(error::into_response(
+                CoreError::builder(ErrorCode::InvalidRequest)
+                    .message(format!("code_embedding_model parse failed: {e}"))
+                    .remediation("supply name@revision (e.g. voyage-code-3@1)")
+                    .build(),
+                rid,
+            )));
+        }
+    };
+    let Ok(code_revision) = i32::try_from(code_wire.revision) else {
+        return Err(Box::new(error::into_response(
+            CoreError::builder(ErrorCode::InvalidRequest)
+                .message("code_embedding_model revision overflows i32")
+                .remediation("supply a revision between 1 and 2147483647")
+                .build(),
+            rid,
+        )));
+    };
+    match embedding_model::get_by_name_revision(&state.pool, &code_wire.name, code_revision).await {
+        Ok(m) => Ok(Some(m.id)),
+        Err(StoreError::NotFound) => Err(Box::new(error::into_response(
+            CoreError::builder(ErrorCode::EmbeddingModelMismatch)
+                .message(format!("code_embedding_model `{raw}` is not registered"))
+                .remediation("run `mnm models list` to see the corpus's registered models")
+                .build(),
+            rid,
+        ))),
+        Err(e) => {
+            tracing::warn!(request_id = rid, op = "start_ingest_run", error = %e, "code model lookup failed");
+            Err(Box::new(error::service_unavailable("code embedding model lookup failed", rid)))
         }
     }
 }
@@ -412,6 +485,30 @@ async fn upload_documents(
             &expected,
             expected_dim,
         ) {
+            return error::into_response(e, rid);
+        }
+    }
+
+    // Same contract for code vectors (D1): they require the run to have been
+    // started with a `code_embedding_model`, and must match that model's dim.
+    let has_code_embeddings = req
+        .documents
+        .iter()
+        .any(|d| d.chunks.iter().any(|c| c.code_embedding.is_some()));
+    if has_code_embeddings {
+        let code_dim = match sv.code_embedding_model_id {
+            None => None,
+            Some(code_model_id) => {
+                match embedding_model::get_by_id(&state.pool, code_model_id).await {
+                    Ok(m) => Some(usize::try_from(m.dim).unwrap_or(0)),
+                    Err(e) => {
+                        tracing::warn!(request_id = rid, op = "upload_documents", error = %e, "code model lookup failed");
+                        return error::service_unavailable("code model lookup failed", rid);
+                    }
+                }
+            }
+        };
+        if let Err(e) = check_code_embedded_batch(&req.documents, code_dim) {
             return error::into_response(e, rid);
         }
     }
@@ -743,6 +840,59 @@ fn check_embedded_batch(
     Ok(())
 }
 
+/// Validate a batch that carries `code_embedding` vectors (D1 dual
+/// embeddings): the run must have been started with a `code_embedding_model`
+/// (`code_model_dim` is its resolved dimension, `None` when the run's
+/// source_version has no `code_embedding_model_id`), and every supplied code
+/// vector must match that dimension. Batches with no code vectors pass.
+///
+/// Pure and DB-free, mirroring [`check_embedded_batch`], so every error path
+/// is unit-testable without Postgres.
+///
+/// # Errors
+///
+/// Returns a built [`CoreError`] (`InvalidRequest`, → 400) describing the
+/// first violation found.
+fn check_code_embedded_batch(
+    documents: &[DocumentUpload],
+    code_model_dim: Option<usize>,
+) -> Result<(), CoreError> {
+    let has_code_embeddings = documents
+        .iter()
+        .any(|d| d.chunks.iter().any(|c| c.code_embedding.is_some()));
+    if !has_code_embeddings {
+        return Ok(());
+    }
+    let Some(expected_dim) = code_model_dim else {
+        return Err(CoreError::builder(ErrorCode::InvalidRequest)
+            .message("upload supplies code_embedding but the run has no code_embedding_model")
+            .remediation(
+                "pass code_embedding_model on start-run, or drop code_embedding from chunks",
+            )
+            .build());
+    };
+    for d in documents {
+        for c in &d.chunks {
+            if let Some(v) = &c.code_embedding {
+                if v.len() != expected_dim {
+                    return Err(CoreError::builder(ErrorCode::InvalidRequest)
+                        .message(format!(
+                            "chunk {}#{} code_embedding dim {} != {expected_dim}",
+                            d.path,
+                            c.chunk_index,
+                            v.len(),
+                        ))
+                        .remediation(format!(
+                            "re-embed with the run's code model ({expected_dim}-dim)"
+                        ))
+                        .build());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn insert_new_document(
     pool: &sqlx::PgPool,
     sv_id: Uuid,
@@ -815,6 +965,7 @@ async fn insert_new_document(
                 content_hash: &chunk_upload.content_hash,
                 embedding,
                 embedding_model_id,
+                code_embedding: chunk_upload.code_embedding.clone(),
                 heading_path: &chunk_upload.heading_path,
                 symbol_path: &chunk_upload.symbol_path,
                 start_byte: chunk_upload.start_byte,
@@ -882,6 +1033,7 @@ async fn carry_forward_one(
                 content_hash: &prior.content_hash,
                 embedding: prior.embedding.clone(),
                 embedding_model_id,
+                code_embedding: prior.code_embedding.clone(),
                 heading_path: &prior.heading_path,
                 symbol_path: &prior.symbol_path,
                 start_byte: prior.start_byte,
@@ -953,6 +1105,7 @@ mod tests {
             end_byte: 0,
             token_count: 0,
             embedding: dim.map(|d| vec![0.0_f32; d]),
+            code_embedding: None,
         }
     }
 
@@ -1026,5 +1179,99 @@ mod tests {
         let err = check_embedded_batch(&docs, Some(EXPECTED_MODEL), EXPECTED_MODEL, EXPECTED_DIM)
             .unwrap_err();
         assert_eq!(err.code, ErrorCode::InvalidRequest);
+    }
+
+    // ── Dual-embedding uploads (D1/D9) ──
+
+    #[test]
+    fn start_run_request_parses_with_code_embedding_model() {
+        let body = serde_json::json!({
+            "ingest_cli_version": "0.1.0",
+            "embedding_model": "voyage-context-3@1",
+            "code_embedding_model": "voyage-code-3@1",
+        });
+        let req: StartIngestRunRequest = serde_json::from_value(body).unwrap();
+        assert_eq!(req.code_embedding_model.as_deref(), Some("voyage-code-3@1"));
+    }
+
+    #[test]
+    fn start_run_request_defaults_code_embedding_model_to_none() {
+        // Omitting the field ⇔ code embeddings disabled for this run (D9).
+        let body = serde_json::json!({
+            "ingest_cli_version": "0.1.0",
+            "embedding_model": "voyage-context-3@1",
+        });
+        let req: StartIngestRunRequest = serde_json::from_value(body).unwrap();
+        assert!(req.code_embedding_model.is_none());
+    }
+
+    #[test]
+    fn upload_request_deserializes_code_embedding() {
+        let body = serde_json::json!({
+            "documents": [{
+                "path": "a.rs", "kind": "code", "content_hash": "h", "provenance": {},
+                "chunks": [{
+                    "chunk_index": 0,
+                    "total_chunks": 1,
+                    "content": "fn x() {}",
+                    "content_hash": "c",
+                    "embedding": [0.1_f32, 0.2],
+                    "code_embedding": [0.3_f32, 0.4, 0.5]
+                }]
+            }]
+        });
+        let req: UploadDocumentsRequest = serde_json::from_value(body).unwrap();
+        let code = req.documents[0].chunks[0].code_embedding.as_ref().unwrap();
+        assert_eq!(code.len(), 3);
+    }
+
+    #[test]
+    fn upload_request_defaults_code_embedding_to_none() {
+        let body = serde_json::json!({
+            "documents": [{
+                "path": "a.md", "kind": "markdown", "content_hash": "h", "provenance": {},
+                "chunks": [{ "chunk_index": 0, "total_chunks": 1, "content": "x", "content_hash": "c" }]
+            }]
+        });
+        let req: UploadDocumentsRequest = serde_json::from_value(body).unwrap();
+        assert!(req.documents[0].chunks[0].code_embedding.is_none());
+    }
+
+    /// Like [`chunk_with_dim`] but populating `code_embedding` instead of the
+    /// general `embedding`.
+    fn chunk_with_code_dim(idx: i32, dim: Option<usize>) -> ChunkUpload {
+        ChunkUpload {
+            code_embedding: dim.map(|d| vec![0.0_f32; d]),
+            ..chunk_with_dim(idx, None)
+        }
+    }
+
+    #[test]
+    fn check_code_batch_without_code_embeddings_is_ok_even_without_code_model() {
+        // A run with no code model accepts batches that carry no code vectors.
+        let docs = vec![doc_with(vec![chunk_with_dim(0, Some(EXPECTED_DIM))])];
+        assert!(check_code_embedded_batch(&docs, None).is_ok());
+    }
+
+    #[test]
+    fn check_code_embedding_on_code_model_less_run_is_invalid_request() {
+        let docs = vec![doc_with(vec![chunk_with_code_dim(0, Some(EXPECTED_DIM))])];
+        let err = check_code_embedded_batch(&docs, None).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidRequest);
+        assert!(!err.remediation.is_empty());
+    }
+
+    #[test]
+    fn check_code_embedding_with_matching_dim_is_ok() {
+        let docs = vec![doc_with(vec![chunk_with_code_dim(0, Some(EXPECTED_DIM))])];
+        assert!(check_code_embedded_batch(&docs, Some(EXPECTED_DIM)).is_ok());
+    }
+
+    #[test]
+    fn check_code_embedding_with_wrong_dim_is_invalid_request() {
+        let docs = vec![doc_with(vec![chunk_with_code_dim(0, Some(768))])];
+        let err = check_code_embedded_batch(&docs, Some(EXPECTED_DIM)).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidRequest);
+        assert!(!err.remediation.is_empty());
     }
 }

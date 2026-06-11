@@ -29,10 +29,16 @@ async fn seed_source(pool: &PgPool, prefix: &str, retention_count: i32) -> (Uuid
 async fn seed_n_finalized(pool: &PgPool, source_id: Uuid, model_id: Uuid, n: usize) -> Vec<Uuid> {
     let mut ids = Vec::with_capacity(n);
     for i in 0..n {
-        let (id, _rev) =
-            source_version::create_building(pool, source_id, model_id, "0.1.0", &format!("h{i}"))
-                .await
-                .unwrap();
+        let (id, _rev) = source_version::create_building(
+            pool,
+            source_id,
+            model_id,
+            None,
+            "0.1.0",
+            &format!("h{i}"),
+        )
+        .await
+        .unwrap();
         source_version::finalize(pool, id).await.unwrap();
         ids.push(id);
     }
@@ -215,7 +221,7 @@ async fn sweep_aged_inactive_leaves_aborted_versions_alone() {
     // One finalized active version + one aborted run that never finalized.
     let _active = seed_n_finalized(&h.pool, source_id, model_id, 1).await;
     let (aborted_id, _) =
-        source_version::create_building(&h.pool, source_id, model_id, "0.1.0", "h-aborted")
+        source_version::create_building(&h.pool, source_id, model_id, None, "0.1.0", "h-aborted")
             .await
             .unwrap();
     source_version::abort(&h.pool, aborted_id).await.unwrap();
@@ -266,7 +272,7 @@ async fn seed_aborted_run(
     aged_seconds_ago: i64,
 ) -> Uuid {
     let (id, _rev) =
-        source_version::create_building(pool, source_id, model_id, "0.1.0", content_hash)
+        source_version::create_building(pool, source_id, model_id, None, "0.1.0", content_hash)
             .await
             .unwrap();
     source_version::abort(pool, id).await.unwrap();

@@ -172,9 +172,17 @@ async fn rate_limit_enabled_reports_bucket_and_peek_does_not_spend() {
     assert!(limiter.is_some(), "limiter must be enabled");
     let corpus_model = Arc::new(RwLock::new(None));
     let token_limiter = TokenUsageLimiter::from_config(&cfg);
-    let app =
-        app::build_with_limiter(h.pool.clone(), cfg, limiter, corpus_model, token_limiter, None)
-            .expect("build app");
+    let app = app::build_with_limiter(
+        h.pool.clone(),
+        cfg,
+        limiter,
+        corpus_model,
+        token_limiter,
+        None,
+        None,
+        Arc::new(RwLock::new(None)),
+    )
+    .expect("build app");
 
     let (status, v) = call(app.clone(), "GET", "/v1/me", None, None).await;
     assert_eq!(status, StatusCode::OK, "{v}");
@@ -232,6 +240,13 @@ async fn embeddings_charge_is_visible_in_me_token_budget() {
     let voyage = Some(Arc::new(
         VoyageEmbedder::new("k", "voyage-code-3", 1024, "float").with_base_url(&mock.uri()),
     ));
+    // `type=code` snapshots the resolved code model for the wire id; a
+    // synthetic entry suffices (the flat embedder above does the work).
+    let code_model = Arc::new(RwLock::new(Some(mn_server::code_model::CodeModel {
+        wire: "voyage-code-3@1".to_owned(),
+        id: Uuid::new_v4(),
+        dim: 1024,
+    })));
     let app = app::build_with_limiter(
         h.pool.clone(),
         ServerConfig::default(),
@@ -239,6 +254,8 @@ async fn embeddings_charge_is_visible_in_me_token_budget() {
         corpus_model,
         token_limiter,
         voyage,
+        None,
+        code_model,
     )
     .expect("build app");
 
@@ -249,7 +266,7 @@ async fn embeddings_charge_is_visible_in_me_token_budget() {
         "POST",
         "/v1/embeddings",
         None,
-        Some(json!({ "input": ["hi"], "input_type": "query" })),
+        Some(json!({ "input": ["hi"], "input_type": "query", "type": "code" })),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{v}");

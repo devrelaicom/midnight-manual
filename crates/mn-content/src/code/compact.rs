@@ -234,7 +234,11 @@ fn item_segment(node: &SyntaxNode) -> Option<SymbolSegment> {
             return None;
         }
     };
-    Some(SymbolSegment { kind: kind.to_string(), name })
+    Some(SymbolSegment {
+        kind: kind.to_string(),
+        name,
+        path: Vec::new(),
+    })
 }
 
 fn token_text(t: Option<SyntaxToken>) -> String {

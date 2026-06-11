@@ -2,9 +2,10 @@
 //!
 //! Two surfaces are covered:
 //!
-//! 1. **Server-proxy embedding** (`EmbedSource::Server`): `mn_embedding::client::embed`
-//!    posts to `/v1/embeddings` when no BYOK key is present, decodes the
-//!    response, and returns the correct vectors.
+//! 1. **Server-proxy embedding** (`GeneralEmbedSource::Server`):
+//!    `mn_embedding::client::embed_general` posts to `/v1/embeddings` when no
+//!    BYOK key is present, decodes the response, and returns the correct
+//!    vectors.
 //!
 //! 2. **Wire-id propagation** (`run_with_paths` end-to-end in server-proxy
 //!    mode): the `client_embedding_model` field in the `/v1/search` body must
@@ -14,14 +15,14 @@
 //!
 //! We deliberately avoid the BYOK path here — that would require a real (or
 //! mock) Voyage API key and a live network call; the unit tests in
-//! `mn-embedding` cover the BYOK branch of `embed()` itself.
+//! `mn-embedding` cover the BYOK branch of the embed client itself.
 
 #![allow(missing_docs)]
 
 use std::sync::{Arc, Mutex};
 
 use mn_cli::commands::search::{run_with_paths, Args, DEFAULT_EMBEDDING_MODEL};
-use mn_embedding::client::{embed, EmbedSource};
+use mn_embedding::client::{embed_general, GeneralEmbedSource};
 use mn_embedding::voyage::InputType;
 use mn_telemetry::TelemetryClient;
 use serde_json::json;
@@ -43,6 +44,7 @@ fn make_args(query: &str) -> Args {
         rerank: false,
         reranker: None,
         mode: "hybrid".to_owned(),
+        code_mode: None,
         kind: vec![],
         language: vec![],
         exclude_language: vec![],
@@ -115,10 +117,10 @@ async fn server_mode_embed_returns_mocked_vectors() {
         .mount(&server)
         .await;
 
-    let result = embed(
+    let result = embed_general(
         vec!["how do I compile a Compact contract?".to_owned()],
         InputType::Query,
-        EmbedSource::Server {
+        GeneralEmbedSource::Server {
             base_url: &server.uri(),
             bearer: None,
             no_global_limit: false,
@@ -217,6 +219,25 @@ async fn run_with_paths_server_mode_carries_corpus_wire_id() {
 
     // Filters must be present (default shape).
     assert!(body["filters"].is_object(), "filters field must be present");
+
+    // Dual embeddings: hybrid mode without --code-mode also embeds the query
+    // with the code model, so a code_vector rides along on each pair...
+    assert!(
+        body["queries"][0]["code_vector"].is_array(),
+        "hybrid default must carry a code_vector; got: {body}"
+    );
+    // ...labelled with the code wire id. The active-model mock carries no
+    // `code` half, so this is the `<config code model>@1` fallback.
+    assert_eq!(
+        body["client_code_embedding_model"], "voyage-code-3@1",
+        "code wire id must fall back to the config code model; got: {}",
+        body["client_code_embedding_model"]
+    );
+    // No --code-mode flag → the key is omitted (server default applies).
+    assert!(
+        !body.as_object().unwrap().contains_key("code_mode"),
+        "code_mode key must be absent when the flag is not given: {body}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -262,33 +283,14 @@ async fn explicit_embedding_model_override_skips_active_fetch() {
     let auth_dir = tempdir().unwrap();
     let auth_path = auth_dir.path().join("auth.toml");
 
-    // Build args with an explicit override (not "auto").
-    let args = Args {
-        query: Some("query text".to_owned()),
-        extra_queries: vec![],
-        queries_stdin: false,
-        limit: 3,
-        embedding_model: "voyage-code-3@2".to_owned(),
-        rerank: false,
-        reranker: None,
-        mode: "hybrid".to_owned(),
-        kind: vec![],
-        language: vec![],
-        exclude_language: vec![],
-        tag: vec![],
-        exclude_tag: vec![],
-        symbol: vec![],
-        source: vec![],
-        content_type: vec![],
-        attribution: vec![],
-        no_deprecated: false,
-        verified: false,
-        ingested_after: None,
-        ingested_before: None,
-        min_tokens: None,
-        max_tokens: None,
-        filter_json: None,
-    };
+    // Build args with an explicit override (not "auto") AND code search off.
+    // With dual embeddings the code wire id is resolved from /v1/models/active,
+    // so only the `--code-mode off` + explicit-override combination needs no
+    // active-model round-trip at all.
+    let mut args = make_args("query text");
+    args.limit = 3;
+    args.embedding_model = "voyage-code-3@2".to_owned();
+    args.code_mode = Some("off".to_owned());
 
     run_with_paths(
         args,
@@ -309,6 +311,15 @@ async fn explicit_embedding_model_override_skips_active_fetch() {
         body["client_embedding_model"], "voyage-code-3@2",
         "explicit override must be used verbatim; got: {}",
         body["client_embedding_model"]
+    );
+    // --code-mode off rides along verbatim, and no code wire id is sent.
+    assert_eq!(body["code_mode"], "off", "got: {body}");
+    assert!(
+        !body
+            .as_object()
+            .unwrap()
+            .contains_key("client_code_embedding_model"),
+        "no code embedding was made, so the code wire id must be absent: {body}"
     );
 }
 

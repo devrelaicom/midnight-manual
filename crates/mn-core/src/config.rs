@@ -49,8 +49,11 @@ impl Default for ServerConfig {
 /// `[models]` — ML model selection and Voyage API settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelsConfig {
-    /// Corpus embedding model name (e.g. "voyage-code-3").
+    /// General corpus embedding model name (e.g. "voyage-context-3").
     pub embedding: String,
+    /// Code-specialised embedding model name (dual embeddings, D1).
+    #[serde(default = "default_code_embedding")]
+    pub code_embedding: String,
     /// Reranker catalog id (see mn-embedding `reranker_catalog`).
     pub reranker: String,
     /// Override for the on-disk model cache directory. When `None`, the
@@ -90,10 +93,15 @@ fn default_voyage_dtype() -> String {
     "float".to_owned()
 }
 
+fn default_code_embedding() -> String {
+    "voyage-code-3".to_owned()
+}
+
 impl Default for ModelsConfig {
     fn default() -> Self {
         Self {
-            embedding: "voyage-code-3".into(),
+            embedding: "voyage-context-3".into(),
+            code_embedding: default_code_embedding(),
             reranker: "bge-reranker-base".into(),
             cache_dir: None,
             voyage_api_key: None,
@@ -357,9 +365,10 @@ mod tests {
     }
 
     #[test]
-    fn models_config_defaults_to_voyage_code_3() {
+    fn models_config_defaults_to_dual_voyage_models() {
         let m = ModelsConfig::default();
-        assert_eq!(m.embedding, "voyage-code-3");
+        assert_eq!(m.embedding, "voyage-context-3");
+        assert_eq!(m.code_embedding, "voyage-code-3");
         assert_eq!(m.reranker, "bge-reranker-base");
         assert_eq!(m.voyage_output_dimension, 1024);
         assert_eq!(m.voyage_output_dtype, "float");
@@ -378,6 +387,7 @@ voyage_output_dtype = "float"
 "#;
         let m: ModelsConfig = toml::from_str(toml_src).unwrap();
         assert_eq!(m.reranker, "jina-reranker-v1-turbo-en");
+        assert_eq!(m.code_embedding, "voyage-code-3"); // default filled in
         assert_eq!(m.voyage_output_dimension, 1024);
         assert_eq!(m.voyage_output_dtype, "float"); // default filled in
         assert_eq!(m.voyage_timeout_secs, 120); // default filled in

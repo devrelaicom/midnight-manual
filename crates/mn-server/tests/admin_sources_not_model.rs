@@ -134,9 +134,10 @@ async fn seed_source_on_model(pool: &sqlx::PgPool, slug: &str, model_id: Uuid) {
     let source_id = source::insert(pool, slug, slug, SourceKind::DocsSite, None, 5)
         .await
         .expect("insert source");
-    let (sv_id, _) = source_version::create_building(pool, source_id, model_id, "0.1.0", "hash")
-        .await
-        .expect("create source_version");
+    let (sv_id, _) =
+        source_version::create_building(pool, source_id, model_id, None, "0.1.0", "hash")
+            .await
+            .expect("create source_version");
     source_version::finalize(pool, sv_id)
         .await
         .expect("finalize source_version");

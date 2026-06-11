@@ -54,6 +54,7 @@ mod common;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
+use mn_embedding::contextualized::ContextualizedVoyageEmbedder;
 use mn_embedding::voyage::VoyageEmbedder;
 use mn_server::{app, config::ServerConfig};
 use mn_telemetry::canary::{self, find_first_match, CanaryCategory, CANARY_PREFIX, CANARY_STRINGS};
@@ -110,15 +111,31 @@ async fn spawn_server(pool: sqlx::PgPool, cfg: ServerConfig, voyage_mock_uri: &s
     let limiter = mn_server::ratelimit::RateLimiter::from_config(&cfg);
     let token_limiter = mn_server::tokenlimit::TokenUsageLimiter::from_config(&cfg);
 
-    // Point the server-side VoyageEmbedder at the local wiremock, so
-    // POST /v1/embeddings is served in-process without network egress.
+    // Point the server-side embedders at the local wiremock, so
+    // POST /v1/embeddings is served in-process without network egress. The
+    // canary requests carry no `type` and therefore route to the GENERAL
+    // (contextualized) embedder; the flat embedder is wired too so `type=code`
+    // requests would exercise the same harness.
     let voyage = Some(Arc::new(
         VoyageEmbedder::new("test-key", "voyage-code-3", 1024, "float")
             .with_base_url(voyage_mock_uri),
     ));
+    let voyage_ctx = Some(Arc::new(
+        ContextualizedVoyageEmbedder::new("test-key", "voyage-context-3", 1024, "float")
+            .with_base_url(voyage_mock_uri),
+    ));
 
-    let app = app::build_with_limiter(pool, cfg, limiter, corpus_model, token_limiter, voyage)
-        .expect("build app");
+    let app = app::build_with_limiter(
+        pool,
+        cfg,
+        limiter,
+        corpus_model,
+        token_limiter,
+        voyage,
+        voyage_ctx,
+        Arc::new(RwLock::new(None)),
+    )
+    .expect("build app");
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -132,7 +149,10 @@ async fn spawn_server(pool: sqlx::PgPool, cfg: ServerConfig, voyage_mock_uri: &s
     format!("http://{addr}")
 }
 
-/// Mount a dynamic `POST /v1/embeddings` mock returning `input.len()` vectors.
+/// Mount dynamic Voyage mocks: flat `POST /v1/embeddings` returning
+/// `input.len()` vectors, and `POST /v1/contextualizedembeddings` mirroring the
+/// request's group shape (the route's default `type=general` path hits the
+/// latter).
 async fn voyage_mock() -> MockServer {
     let mock = MockServer::start().await;
     Mock::given(method("POST"))
@@ -152,6 +172,43 @@ async fn voyage_mock() -> MockServer {
         })
         .mount(&mock)
         .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/contextualizedembeddings"))
+        .respond_with(|req: &Request| {
+            let body: serde_json::Value =
+                serde_json::from_slice(&req.body).unwrap_or(serde_json::Value::Null);
+            let groups: Vec<usize> = body["inputs"]
+                .as_array()
+                .map(|gs| {
+                    gs.iter()
+                        .map(|g| g.as_array().map_or(0, Vec::len))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let total: usize = groups.iter().sum();
+            let data: Vec<serde_json::Value> = groups
+                .iter()
+                .enumerate()
+                .map(|(gi, &n)| {
+                    serde_json::json!({
+                        "index": gi,
+                        "data": (0..n)
+                            .map(|k| serde_json::json!({
+                                "embedding": vec![0.0_f32; 1024],
+                                "index": k,
+                            }))
+                            .collect::<Vec<_>>(),
+                    })
+                })
+                .collect();
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": data,
+                "model": "voyage-context-3",
+                "usage": { "total_tokens": total }
+            }))
+        })
+        .mount(&mock)
+        .await;
     mock
 }
 
@@ -166,6 +223,11 @@ async fn voyage_mock_500() -> MockServer {
     let mock = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/embeddings"))
+        .respond_with(ResponseTemplate::new(500).set_body_string("upstream unavailable"))
+        .mount(&mock)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/contextualizedembeddings"))
         .respond_with(ResponseTemplate::new(500).set_body_string("upstream unavailable"))
         .mount(&mock)
         .await;

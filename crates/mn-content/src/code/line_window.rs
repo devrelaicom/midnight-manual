@@ -1,9 +1,12 @@
-//! Line-window fallback — used for unknown languages, parser-error recovery,
-//! and Compact (until compactp). No syntax awareness; overlapping windows.
+//! Line-window fallback for Plaintext, unknown languages, and parser-error recovery.
+//!
+//! Emits token-budgeted, NON-overlapping windows (D3): each window grows line
+//! by line until adding the next line would push it past 90% of `max_tokens`,
+//! then the next window starts on the next line.
 
-use crate::chunk::{Chunk, ChunkError, Chunker, ChunkerConfig};
+use crate::chunk::{coalesce_target, Chunk, ChunkError, Chunker, ChunkerConfig};
 
-/// Splits source into fixed line-count windows with overlap.
+/// Splits source into token-budgeted, non-overlapping line windows.
 pub struct LineWindowChunker;
 
 impl Chunker for LineWindowChunker {
@@ -11,6 +14,7 @@ impl Chunker for LineWindowChunker {
         if body.trim().is_empty() {
             return Ok(Vec::new());
         }
+        let target = coalesce_target(cfg);
         // Precompute byte offset of the start of each line.
         let mut line_starts = vec![0usize];
         for (i, b) in body.bytes().enumerate() {
@@ -19,24 +23,29 @@ impl Chunker for LineWindowChunker {
             }
         }
         let total_lines = line_starts.len();
-        let window = usize::try_from(cfg.fallback_lines.max(1)).unwrap_or(usize::MAX);
-        let overlap_raw = cfg
-            .fallback_overlap_lines
-            .min(cfg.fallback_lines.saturating_sub(1));
-        let overlap = usize::try_from(overlap_raw).unwrap_or(usize::MAX);
-        let step = window.saturating_sub(overlap).max(1);
+        let line_end = |i: usize| -> usize {
+            if i + 1 < total_lines {
+                line_starts[i + 1]
+            } else {
+                body.len()
+            }
+        };
 
         let mut chunks = Vec::new();
         let mut start_line = 0usize;
         let mut idx = 0u32;
         while start_line < total_lines {
-            let end_line = (start_line + window).min(total_lines);
+            // Grow: at least one line, then keep adding while within budget.
+            let mut end_line = start_line + 1;
+            while end_line < total_lines {
+                let slice = &body[line_starts[start_line]..line_end(end_line)];
+                if crate::tokens::count(slice) > target {
+                    break;
+                }
+                end_line += 1;
+            }
             let start_byte = line_starts[start_line];
-            let end_byte = if end_line < total_lines {
-                line_starts[end_line]
-            } else {
-                body.len()
-            };
+            let end_byte = line_end(end_line - 1);
             let content = body[start_byte..end_byte].to_string();
             if !content.trim().is_empty() {
                 chunks.push(Chunk {
@@ -51,10 +60,7 @@ impl Chunker for LineWindowChunker {
                 });
                 idx += 1;
             }
-            if end_line >= total_lines {
-                break;
-            }
-            start_line += step;
+            start_line = end_line;
         }
         Ok(chunks)
     }
@@ -63,26 +69,32 @@ impl Chunker for LineWindowChunker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chunk::{Chunker, ChunkerConfig};
+    use crate::chunk::{coalesce_target, Chunker, ChunkerConfig};
 
     #[test]
-    fn splits_into_overlapping_line_windows() {
-        let body: String = (0..200).fold(String::new(), |mut s, i| {
+    fn windows_are_token_budgeted_and_disjoint() {
+        let body: String = (0..400).fold(String::new(), |mut s, i| {
             use std::fmt::Write as _;
-            let _ = writeln!(s, "line {i}");
+            let _ = writeln!(s, "line {i} with a few more words for tokens");
             s
         });
         let cfg = ChunkerConfig {
-            fallback_lines: 60,
-            fallback_overlap_lines: 20,
+            max_tokens: 128,
             ..ChunkerConfig::default()
         };
         let chunks = LineWindowChunker.chunk(&body, &cfg).unwrap();
-        assert!(chunks.len() >= 3, "200 lines / (60-20 step) ≈ 5 windows");
-        assert!(chunks.iter().all(|c| c.fallback_used));
-        assert!(chunks.iter().all(|c| c.symbol_path.is_empty()));
-        // overlap: window 2 starts before window 1 ends (by line)
-        assert!(chunks[1].start_byte < chunks[0].end_byte);
+        assert!(chunks.len() >= 2, "long input must produce multiple windows");
+        let target = coalesce_target(&cfg);
+        for c in &chunks {
+            assert!(c.fallback_used);
+            // Within budget OR a single line that alone exceeds it.
+            let single_line = c.content.trim_end().lines().count() == 1;
+            assert!(c.token_count <= target || single_line);
+        }
+        // Disjoint and contiguous in document order.
+        for w in chunks.windows(2) {
+            assert!(w[1].start_byte >= w[0].end_byte, "windows must not overlap");
+        }
     }
 
     #[test]

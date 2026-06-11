@@ -27,14 +27,15 @@ playbook for using it like a researcher.
 Thirteen tools, four groups:
 
 **Search**
-- `search` — quick lookups: `{query, mode?, limit?}` and nothing else. One
-  query string, always reranked, no filters. Use when one plain question will
-  do.
+- `search` — quick lookups: `{query, mode?, code_mode?, limit?}` and nothing
+  else. One query string, always reranked, no filters. Use when one plain
+  question will do.
 - `advanced_search` — the full-control surface and this skill's main subject:
-  `{queries: [1–10 strings], mode?, limit?, rerank? (default true), filters?}`.
-  Multi-query fusion (HyDE, expansion, step-back; RRF k=60), per-facet
-  filters, and the rerank toggle all live here. One query = a one-element
-  array.
+  `{queries: [1–10 strings], mode?, code_mode?, limit?, rerank? (default
+  true), filters?}`. Multi-query fusion (HyDE, expansion, step-back; RRF
+  k=60), per-facet filters, and the rerank toggle all live here. One query =
+  a one-element array. Both search tools take `code_mode` (`on` | `off` |
+  `exclusive`, see *code_mode* below).
 
 **Chunk reads**
 - `get_chunks` — fetch chunk bodies by id: `{ids: [1–20 uuids]}`. Feed it
@@ -108,6 +109,36 @@ entirely. Fan out deliberately, not reflexively.
 - `vector` — semantic only. Use for purely conceptual questions with no literal
   anchor.
 - `hybrid` (default) — fuses both. Use when unsure.
+
+## code_mode
+
+The corpus carries dual embeddings: every chunk has a general vector
+(voyage-context-3), and code chunks additionally carry a code vector
+(voyage-code-3). `code_mode` controls whether the code-vector ranked list joins
+the RRF fusion:
+
+- `on` (default for `hybrid`/`vector`) — fuse a code-vector ranked list
+  alongside the general results.
+- `off` — general retrieval only.
+- `exclusive` — the code-vector list replaces the general vector list.
+
+| mode | code_mode default | ranked lists fused by RRF (k=60) |
+|---|---|---|
+| hybrid | `on` | general vector + code vector + FTS |
+| hybrid + `off` | — | general vector + FTS (today's behavior) |
+| hybrid + `exclusive` | — | code vector + FTS |
+| vector | `on` | general vector + code vector |
+| vector + `off` | — | general vector |
+| vector + `exclusive` | — | code vector |
+| fts | `off` (forced) | FTS only; `code_mode` `on`/`exclusive` → **400** with explicit error message |
+
+Code-heavy queries (function names, API signatures, error strings from code)
+benefit from `code_mode=exclusive`; conceptual queries should keep the default.
+Chunks without code embeddings can never appear in the code-vector list, so
+`exclusive` also narrows retrieval toward code chunks. When code search ran,
+`search_metadata.per_query` reports `code_vector_candidates` /
+`code_vector_latency_ms` and the top-level metadata carries the effective
+`code_mode`.
 
 ## Match the user's version & freshness
 

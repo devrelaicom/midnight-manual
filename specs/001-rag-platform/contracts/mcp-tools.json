@@ -45,10 +45,19 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Search the Midnight Network documentation and code corpus (docs, SDK references, Compact language material, code examples). Returns ranked excerpts with confidence scores and source attribution. Use it whenever you need facts about Midnight, Compact, or the Midnight SDK. For multi-query strategies, facet filters, or rerank control, use advanced_search.",
+      "description": "Search the Midnight Network documentation and code corpus (docs, SDK references, Compact language material, code examples). Returns ranked excerpts with confidence scores and source attribution. Use it whenever you need facts about Midnight, Compact, or the Midnight SDK. Code-heavy queries (function names, API signatures, error strings from code) benefit from code_mode=exclusive; conceptual queries should keep the default. For multi-query strategies, facet filters, or rerank control, use advanced_search.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
+          "code_mode": {
+            "description": "Code-vector fusion (dual embeddings): on (default for hybrid/vector) fuses a voyage-code-3 ranked list alongside the general results; off = general retrieval only; exclusive = code vectors replace the general vector list (best for API-shaped / code-identifier queries). Incompatible with mode=fts.",
+            "enum": [
+              "on",
+              "off",
+              "exclusive"
+            ],
+            "type": "string"
+          },
           "limit": {
             "default": 10,
             "description": "Max results returned.",
@@ -81,6 +90,10 @@
       "outputSchema": {
         "additionalProperties": true,
         "properties": {
+          "corpus_code_embedding_model": {
+            "description": "Present when the code-vector half ran (code_mode != off).",
+            "type": "string"
+          },
           "corpus_embedding_model": {
             "type": "string"
           },
@@ -165,6 +178,15 @@
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
+          "code_mode": {
+            "description": "Code-vector fusion (dual embeddings): on (default for hybrid/vector) fuses a voyage-code-3 ranked list alongside the general results; off = general retrieval only; exclusive = code vectors replace the general vector list (best for API-shaped / code-identifier queries). Incompatible with mode=fts.",
+            "enum": [
+              "on",
+              "off",
+              "exclusive"
+            ],
+            "type": "string"
+          },
           "filters": {
             "additionalProperties": false,
             "description": "Per-facet filters. AND across keys, OR within any_of, exclude none_of. See the `facets` tool for corpus-derived values.",
@@ -606,6 +628,10 @@
       "outputSchema": {
         "additionalProperties": true,
         "properties": {
+          "corpus_code_embedding_model": {
+            "description": "Present when the code-vector half ran (code_mode != off).",
+            "type": "string"
+          },
           "corpus_embedding_model": {
             "type": "string"
           },

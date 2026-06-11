@@ -63,7 +63,7 @@ async fn seed(pool: &sqlx::PgPool) {
     let source_id = source::insert(pool, &slug, "MQ", SourceKind::DocsSite, None, 5)
         .await
         .unwrap();
-    let (sv_id, _) = source_version::create_building(pool, source_id, model_id, "0.1.0", "h")
+    let (sv_id, _) = source_version::create_building(pool, source_id, model_id, None, "0.1.0", "h")
         .await
         .unwrap();
     let root = node::insert(pool, sv_id, None, NodeKind::Root, "root", 0)
@@ -109,6 +109,7 @@ async fn seed(pool: &sqlx::PgPool) {
             content_hash: "ha",
             embedding: Some(unit_vector(0.10)),
             embedding_model_id: model_id,
+            code_embedding: None,
             heading_path: &[],
             symbol_path: &[],
             start_byte: 0,
@@ -126,6 +127,7 @@ async fn search(app: axum::Router, ip: &str, queries: Value) -> (StatusCode, Hea
     let body = json!({
         "queries": queries,
         "client_embedding_model": "voyage-code-3@1",
+        "code_mode": "off",
         "limit": 5,
     });
     let resp = app
@@ -166,6 +168,8 @@ async fn over_cap_returns_400_and_refunds_the_base_token() {
         resolved_cm(&h.pool).await,
         token_limiter,
         None,
+        None,
+        std::sync::Arc::new(std::sync::RwLock::new(None)),
     )
     .expect("build");
     let ip = unique_ip();
@@ -199,6 +203,8 @@ async fn duplicate_queries_do_not_inflate_cost() {
         resolved_cm(&h.pool).await,
         token_limiter,
         None,
+        None,
+        std::sync::Arc::new(std::sync::RwLock::new(None)),
     )
     .expect("build");
     let ip = unique_ip();
@@ -224,6 +230,8 @@ async fn distinct_queries_charge_n_tokens() {
         resolved_cm(&h.pool).await,
         token_limiter,
         None,
+        None,
+        std::sync::Arc::new(std::sync::RwLock::new(None)),
     )
     .expect("build");
     let ip = unique_ip();
@@ -254,6 +262,8 @@ async fn insufficient_budget_returns_429() {
         resolved_cm(&h.pool).await,
         token_limiter,
         None,
+        None,
+        std::sync::Arc::new(std::sync::RwLock::new(None)),
     )
     .expect("build");
     let ip = unique_ip();

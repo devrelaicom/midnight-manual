@@ -42,6 +42,8 @@ pub fn search_output_schema() -> Value {
         "type": "object",
         "properties": {
             "corpus_embedding_model": { "type": "string" },
+            "corpus_code_embedding_model": { "type": "string",
+                "description": "Present when the code-vector half ran (code_mode != off)." },
             "results": { "type": "array", "items": chunk_fragment() },
             "search_metadata": { "type": "object", "additionalProperties": true },
             "suggested_next_actions": suggested_next_actions_fragment()

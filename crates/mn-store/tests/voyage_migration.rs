@@ -32,9 +32,10 @@ async fn migration_registers_voyage_and_sets_1024_dim() {
     .await
     .expect("query idx_chunk_embedding existence");
     assert!(idx_exists, "HNSW index idx_chunk_embedding must exist post-migration");
-    // get_active resolves to voyage-code-3 (most-recently-created model, no active sv yet)
+    // get_active resolves to voyage-context-3 (most-recently-created model —
+    // registered by migration 0011 — no active sv yet).
     let active = mn_store::entities::embedding_model::get_active(&h.pool)
         .await
         .unwrap();
-    assert_eq!(active.name, "voyage-code-3");
+    assert_eq!(active.name, "voyage-context-3");
 }

@@ -25,7 +25,9 @@ use std::sync::Arc;
 
 use mn_core::scoring::normalize_rerank;
 use mn_core::scoring_policy::ScoringPolicy;
-use mn_embedding::{client as embed_client, reranker, reranker_catalog, voyage, LoadedReranker};
+use mn_embedding::{
+    client as embed_client, contextualized, reranker, reranker_catalog, voyage, LoadedReranker,
+};
 use serde_json::json;
 use tokio::sync::OnceCell;
 use uuid::Uuid;
@@ -51,7 +53,7 @@ pub fn list() -> ToolsListResult {
             ToolDescription {
                 name: "search",
                 description:
-                    "Search the Midnight Network documentation and code corpus (docs, SDK references, Compact language material, code examples). Returns ranked excerpts with confidence scores and source attribution. Use it whenever you need facts about Midnight, Compact, or the Midnight SDK. For multi-query strategies, facet filters, or rerank control, use advanced_search.",
+                    "Search the Midnight Network documentation and code corpus (docs, SDK references, Compact language material, code examples). Returns ranked excerpts with confidence scores and source attribution. Use it whenever you need facts about Midnight, Compact, or the Midnight SDK. Code-heavy queries (function names, API signatures, error strings from code) benefit from code_mode=exclusive; conceptual queries should keep the default. For multi-query strategies, facet filters, or rerank control, use advanced_search.",
                 input_schema: search_input_schema(),
                 output_schema: Some(crate::schemas::search_output_schema()),
                 annotations: ToolAnnotations::read_only(),
@@ -253,12 +255,20 @@ fn search_input_schema() -> serde_json::Value {
                 "description": "What you want to find, as natural language or code terms." },
             "mode": { "type": "string", "enum": ["hybrid", "vector", "fts"], "default": "hybrid",
                 "description": "hybrid (default) fuses keyword + semantic; fts is keyword-only (lowest latency); vector is semantic-only." },
+            "code_mode": code_mode_schema(),
             "limit": { "type": "integer", "minimum": 1, "maximum": 50, "default": 10,
                 "description": "Max results returned." }
         },
         "required": ["query"],
         "additionalProperties": false
     })
+}
+
+/// The shared `code_mode` property schema (dual embeddings), referenced by
+/// both `search` and `advanced_search`.
+fn code_mode_schema() -> serde_json::Value {
+    json!({ "type": "string", "enum": ["on", "off", "exclusive"],
+        "description": "Code-vector fusion (dual embeddings): on (default for hybrid/vector) fuses a voyage-code-3 ranked list alongside the general results; off = general retrieval only; exclusive = code vectors replace the general vector list (best for API-shaped / code-identifier queries). Incompatible with mode=fts." })
 }
 
 /// Input schema for `advanced_search`: multi-query fusion, facet filters,
@@ -272,6 +282,7 @@ fn advanced_search_input_schema() -> serde_json::Value {
                 "description": "1-10 query variants fused with RRF (HyDE, expansion, step-back). One query = one-element array. Rate-limit cost is one token per distinct query." },
             "mode": { "type": "string", "enum": ["hybrid", "vector", "fts"], "default": "hybrid",
                 "description": "hybrid (default) fuses keyword + semantic; fts is keyword-only; vector is semantic-only." },
+            "code_mode": code_mode_schema(),
             "limit": { "type": "integer", "minimum": 1, "maximum": 50, "default": 10,
                 "description": "Max results returned." },
             "rerank": { "type": "boolean", "default": true,
@@ -585,32 +596,22 @@ pub async fn run_search(
     // mode=fts (needs_vector is false server-side). hybrid/vector embed locally
     // (BYOK Voyage or the cloud's /v1/embeddings proxy) and label the request
     // with the corpus's active {name}@{revision}.
-    let (pairs, client_embedding_model): (Vec<QueryPair>, String) = if parsed.mode == "fts" {
-        let pairs = parsed
-            .queries
-            .iter()
-            .map(|text| QueryPair {
-                text: text.clone(),
-                vector: Vec::new(),
-            })
-            .collect();
-        (pairs, String::new())
-    } else {
-        let vectors =
-            embed_queries(&parsed.queries, &core_cfg.models, voyage_key.as_deref(), cfg, cloud)
-                .await?;
-        let pairs = parsed
-            .queries
-            .iter()
-            .zip(vectors.into_iter())
-            .map(|(text, vector)| QueryPair { text: text.clone(), vector })
-            .collect();
-        let model = cloud
-            .fetch_active_model()
-            .await
-            .map_err(|e| SearchError::Cloud(e.to_string()))?;
-        (pairs, model)
-    };
+    let (pairs, client_embedding_model, code_wire): (Vec<QueryPair>, String, Option<String>) =
+        if parsed.mode == "fts" {
+            let pairs = parsed
+                .queries
+                .iter()
+                .map(|text| QueryPair {
+                    text: text.clone(),
+                    vector: Vec::new(),
+                    code_vector: Vec::new(),
+                })
+                .collect();
+            (pairs, String::new(), None)
+        } else {
+            build_embedded_pairs(parsed, &core_cfg.models, voyage_key.as_deref(), cfg, cloud)
+                .await?
+        };
 
     // Send to cloud. If rerank is on, ask for a fixed top-K so the reranker
     // has a useful candidate pool independent of the caller's limit.
@@ -631,6 +632,10 @@ pub async fn run_search(
         // cloud's confidence ordering.
         sort_by: if parsed.rerank { Some("score") } else { None },
         mode: Some(parsed.mode),
+        // Forward only an explicit caller choice; `None` lets the cloud apply
+        // its mode-derived default (on for hybrid/vector, off for fts).
+        code_mode: parsed.code_mode,
+        client_code_embedding_model: code_wire.clone(),
     };
     let cloud_resp = match cloud.search(&req).await {
         Ok(v) => v,
@@ -686,19 +691,126 @@ pub async fn run_search(
             "corpus_embedding_model".to_owned(),
             serde_json::Value::String(client_embedding_model),
         );
+        // Report the code model only when code search actually ran.
+        if let Some(code) = code_wire {
+            obj.insert("corpus_code_embedding_model".to_owned(), serde_json::Value::String(code));
+        }
     }
     Ok(envelope)
 }
 
-/// Embed `queries` via VoyageAI, returning one vector per query in order.
-/// Uses BYOK (the caller's `voyage_key`, direct to Voyage) when a key is
-/// present, else the cloud server's `/v1/embeddings` proxy. There is no local
+/// Embed the parsed queries for hybrid/vector modes and assemble the
+/// `QueryPair`s. Dual embeddings (§11.2): the general (voyage-context-3) half
+/// is skipped when `code_mode=exclusive` and the code (voyage-code-3) half
+/// when `code_mode=off` — mirroring the cloud's effective-mode rules without
+/// sniffing queries. Returns `(pairs, general_wire_id, code_wire_id)`, where
+/// the code wire id is `Some` exactly when code search ran.
+///
+/// # Errors
+///
+/// Returns [`SearchError::Cloud`] on any embedding or active-model failure.
+async fn build_embedded_pairs(
+    parsed: &ParsedSearchArgs,
+    models: &mn_core::config::ModelsConfig,
+    voyage_key: Option<&str>,
+    cfg: &ServerConfig,
+    cloud: &Arc<CloudClient>,
+) -> Result<(Vec<QueryPair>, String, Option<String>), SearchError> {
+    let embed_code_q = parsed.code_mode != Some("off");
+    let embed_general_q = parsed.code_mode != Some("exclusive");
+    let n = parsed.queries.len();
+    let general_vectors = if embed_general_q {
+        embed_general_queries(&parsed.queries, models, voyage_key, cfg, cloud).await?
+    } else {
+        vec![Vec::new(); n]
+    };
+    let code_vectors = if embed_code_q {
+        embed_code_queries(&parsed.queries, models, voyage_key, cfg, cloud).await?
+    } else {
+        vec![Vec::new(); n]
+    };
+    let active = cloud
+        .fetch_active_model()
+        .await
+        .map_err(|e| SearchError::Cloud(e.to_string()))?;
+    // The code wire id pins code_vectors to a model. Prefer the
+    // corpus-reported id; fall back to the config-pinned model at revision 1
+    // when the server didn't report one (the cloud then rejects the request
+    // with a precise mismatch if it disagrees).
+    let code_wire = embed_code_q.then(|| {
+        active
+            .code
+            .clone()
+            .unwrap_or_else(|| format!("{}@1", models.code_embedding))
+    });
+    let pairs = parsed
+        .queries
+        .iter()
+        .zip(general_vectors)
+        .zip(code_vectors)
+        .map(|((text, vector), code_vector)| QueryPair {
+            text: text.clone(),
+            vector,
+            code_vector,
+        })
+        .collect();
+    Ok((pairs, active.general, code_wire))
+}
+
+/// Embed `queries` with the GENERAL model (voyage-context-3), returning one
+/// vector per query in order. Uses BYOK (the caller's `voyage_key`, direct to
+/// Voyage's contextualized endpoint) when a key is present, else the cloud
+/// server's `/v1/embeddings` proxy with `type=general`. There is no local
 /// embedder; the only local model is the reranker.
 ///
 /// # Errors
 ///
 /// Returns [`SearchError::Cloud`] on any embedding failure.
-async fn embed_queries(
+async fn embed_general_queries(
+    queries: &[String],
+    models: &mn_core::config::ModelsConfig,
+    voyage_key: Option<&str>,
+    cfg: &ServerConfig,
+    cloud: &Arc<CloudClient>,
+) -> Result<Vec<Vec<f32>>, SearchError> {
+    let embedded = if let Some(key) = voyage_key {
+        let e = contextualized::ContextualizedVoyageEmbedder::new(
+            key,
+            &models.embedding,
+            models.voyage_output_dimension,
+            &models.voyage_output_dtype,
+        );
+        embed_client::embed_general(
+            queries.to_vec(),
+            voyage::InputType::Query,
+            embed_client::GeneralEmbedSource::Byok(&e),
+        )
+        .await
+    } else {
+        embed_client::embed_general(
+            queries.to_vec(),
+            voyage::InputType::Query,
+            embed_client::GeneralEmbedSource::Server {
+                base_url: &cfg.cloud_url,
+                bearer: cloud.bearer(),
+                // Search never opts out of the global cap (read path, not ingest).
+                no_global_limit: false,
+            },
+        )
+        .await
+    }
+    .map_err(|e| SearchError::Cloud(format!("embed general failed: {e}")))?;
+    Ok(embedded.vectors)
+}
+
+/// Embed `queries` with the CODE model (voyage-code-3, flat endpoint),
+/// returning one vector per query in order. BYOK hits Voyage's flat endpoint
+/// directly; otherwise the cloud's `/v1/embeddings` proxy with `type=code`.
+///
+/// # Errors
+///
+/// Returns [`SearchError::Cloud`] on any embedding failure.
+async fn embed_code_queries(
     queries: &[String],
     models: &mn_core::config::ModelsConfig,
     voyage_key: Option<&str>,
@@ -708,18 +820,18 @@ async fn embed_queries(
     let embedded = if let Some(key) = voyage_key {
         let v = voyage::VoyageEmbedder::new(
             key,
-            &models.embedding,
+            &models.code_embedding,
             models.voyage_output_dimension,
             &models.voyage_output_dtype,
         );
-        embed_client::embed(
+        embed_client::embed_code(
             queries.to_vec(),
             voyage::InputType::Query,
             embed_client::EmbedSource::Byok(&v),
         )
         .await
     } else {
-        embed_client::embed(
+        embed_client::embed_code(
             queries.to_vec(),
             voyage::InputType::Query,
             embed_client::EmbedSource::Server {
@@ -731,7 +843,7 @@ async fn embed_queries(
         )
         .await
     }
-    .map_err(|e| SearchError::Cloud(format!("embed failed: {e}")))?;
+    .map_err(|e| SearchError::Cloud(format!("embed code failed: {e}")))?;
     Ok(embedded.vectors)
 }
 
@@ -750,6 +862,10 @@ pub struct ParsedSearchArgs {
     pub filters: Option<serde_json::Value>,
     /// Retrieval mode (`hybrid` | `vector` | `fts`).
     pub mode: &'static str,
+    /// Code-vector fusion mode (`on` | `off` | `exclusive`). `None` = caller
+    /// didn't choose; the cloud applies its mode-derived default (on for
+    /// hybrid/vector, off for fts).
+    pub code_mode: Option<&'static str>,
 }
 
 /// Parse arguments for the basic `search` tool: `{query, mode?, limit?}`.
@@ -785,12 +901,14 @@ pub fn parse_basic_search_args(v: &serde_json::Value) -> Result<ParsedSearchArgs
         None => return Err("`query` (string) is required".to_owned()),
     };
 
+    let mode = parse_mode_arg(obj)?;
     Ok(ParsedSearchArgs {
         queries: vec![query],
         limit: parse_limit_arg(obj)?,
         rerank: true,
         filters: None,
-        mode: parse_mode_arg(obj)?,
+        mode,
+        code_mode: parse_code_mode_arg(obj, mode)?,
     })
 }
 
@@ -853,12 +971,14 @@ pub fn parse_advanced_search_args(v: &serde_json::Value) -> Result<ParsedSearchA
             .map_err(|e| format!("invalid filter `{}`: {}", e.facet, e.message))?;
     }
 
+    let mode = parse_mode_arg(obj)?;
     Ok(ParsedSearchArgs {
         queries,
         limit: parse_limit_arg(obj)?,
         rerank,
         filters,
-        mode: parse_mode_arg(obj)?,
+        mode,
+        code_mode: parse_code_mode_arg(obj, mode)?,
     })
 }
 
@@ -894,6 +1014,35 @@ fn parse_mode_arg(
         },
         Some(_) => Err("`mode` must be a string".to_owned()),
     }
+}
+
+/// Parse the shared optional `code_mode` argument, failing fast on the fts
+/// incompatibility (mirrors the cloud's 400, D5/D6: fts forces code_mode off)
+/// before any embedding or wire call.
+fn parse_code_mode_arg(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    mode: &'static str,
+) -> Result<Option<&'static str>, String> {
+    let code_mode = match obj.get("code_mode") {
+        None => None,
+        Some(serde_json::Value::String(s)) => match s.as_str() {
+            "on" => Some("on"),
+            "off" => Some("off"),
+            "exclusive" => Some("exclusive"),
+            other => {
+                return Err(format!("unknown code_mode `{other}` (expected on|off|exclusive)"));
+            }
+        },
+        Some(_) => return Err("`code_mode` must be a string".to_owned()),
+    };
+    if mode == "fts" && matches!(code_mode, Some("on" | "exclusive")) {
+        return Err(
+            "code_mode on/exclusive is incompatible with mode=fts (drop code_mode, or use \
+             mode=hybrid/vector)"
+                .to_owned(),
+        );
+    }
+    Ok(code_mode)
 }
 
 /// The owned reranker selection resolved from config + env, held by
@@ -1590,6 +1739,82 @@ mod tests {
             assert_eq!(schema["properties"]["limit"]["maximum"], MAX_LIMIT);
             assert_eq!(schema["properties"]["limit"]["default"], DEFAULT_LIMIT);
         }
+    }
+
+    #[test]
+    fn both_search_input_schemas_have_code_mode_enum() {
+        for s in [search_input_schema(), advanced_search_input_schema()] {
+            let cm = &s["properties"]["code_mode"];
+            assert_eq!(cm["type"], "string");
+            assert_eq!(cm["enum"], json!(["on", "off", "exclusive"]));
+            assert!(
+                cm["description"].as_str().unwrap_or("").contains("fts"),
+                "code_mode description must document the fts incompatibility"
+            );
+        }
+    }
+
+    #[test]
+    fn search_description_mentions_code_mode_guidance() {
+        let m = list();
+        let t = m
+            .tools
+            .iter()
+            .find(|t| t.name == "search")
+            .expect("search tool");
+        assert!(
+            t.description.contains("code_mode=exclusive"),
+            "search description should steer code-shaped queries at code_mode=exclusive"
+        );
+    }
+
+    #[test]
+    fn both_parsers_accept_code_mode_values() {
+        for v in ["on", "off", "exclusive"] {
+            let b = parse_basic_search_args(&json!({ "query": "x", "code_mode": v })).unwrap();
+            assert_eq!(b.code_mode, Some(v));
+            let a =
+                parse_advanced_search_args(&json!({ "queries": ["x"], "code_mode": v })).unwrap();
+            assert_eq!(a.code_mode, Some(v));
+        }
+        // Absent means "let the server apply its mode-derived default".
+        let b = parse_basic_search_args(&json!({ "query": "x" })).unwrap();
+        assert_eq!(b.code_mode, None);
+        let a = parse_advanced_search_args(&json!({ "queries": ["x"] })).unwrap();
+        assert_eq!(a.code_mode, None);
+    }
+
+    #[test]
+    fn both_parsers_reject_bad_code_mode() {
+        assert!(parse_basic_search_args(&json!({ "query": "x", "code_mode": "auto" })).is_err());
+        assert!(parse_basic_search_args(&json!({ "query": "x", "code_mode": 1 })).is_err());
+        assert!(
+            parse_advanced_search_args(&json!({ "queries": ["x"], "code_mode": "auto" })).is_err()
+        );
+        assert!(parse_advanced_search_args(&json!({ "queries": ["x"], "code_mode": 1 })).is_err());
+    }
+
+    #[test]
+    fn both_parsers_reject_fts_with_code_mode_on_or_exclusive() {
+        // Mirrors the server's 400: fts forces code_mode off (D5).
+        for v in ["on", "exclusive"] {
+            assert!(
+                parse_basic_search_args(&json!({ "query": "x", "mode": "fts", "code_mode": v }))
+                    .is_err(),
+                "basic: fts + code_mode={v} must be rejected client-side"
+            );
+            assert!(
+                parse_advanced_search_args(
+                    &json!({ "queries": ["x"], "mode": "fts", "code_mode": v })
+                )
+                .is_err(),
+                "advanced: fts + code_mode={v} must be rejected client-side"
+            );
+        }
+        assert!(parse_basic_search_args(
+            &json!({ "query": "x", "mode": "fts", "code_mode": "off" })
+        )
+        .is_ok());
     }
 
     #[test]

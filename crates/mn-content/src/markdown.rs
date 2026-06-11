@@ -1,18 +1,21 @@
-//! Markdown chunker — heading-based splits with a token-budgeted window fallback.
+//! Markdown chunker — heading splits + greedy coalescing + non-overlapping
+//! window splits.
 //!
-//! Heading-based strategy (FR-007): every H1-H6 heading begins a new chunk.
+//! Heading-based strategy (FR-007): every H1-H6 heading begins a new segment.
 //! Chunks carry a `heading_path` of their ancestor headings so the caller can
-//! reconstruct the document outline. Chunks longer than `max_tokens` are split
-//! further via the fallback windowing.
+//! reconstruct the document outline.
 //!
-//! Fallback strategy (EC-07): documents with no headings fall through to a
-//! token-counted line-growth window with overlap. Defaults driven by
-//! `ChunkerConfig::default()` (400 tokens max, 20-line overlap).
+//! Coalescing pass (D2): adjacent segments pack greedily up to
+//! [`crate::chunk::coalesce_target`] (90% of `max_tokens`), never absorbing a
+//! segment shallower than the run anchor. Segments still larger than
+//! `max_tokens` are split via a token-budgeted line window.
+//!
+//! Every emitted chunk's byte range is disjoint from every other chunk's (D3):
+//! no window overlap, no context expansion — surrounding context is supplied at
+//! embedding time by contextualized embeddings, not by inflating chunk ranges.
 //!
 //! Tokenization uses the real BPE tokenizer via `crate::tokens::count` so
 //! chunk-size gating matches what the embedder actually sees.
-
-use std::ops::Range;
 
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag};
 
@@ -80,7 +83,7 @@ impl Chunker for MarkdownChunker {
             segments.push(current);
         }
 
-        // ── Coalescing pass: merge undersized adjacent sections up to min_tokens ──
+        // ── Coalescing pass: greedily pack adjacent sections to the 90% target ──
         let segments = coalesce_segments(body, &segments, cfg);
 
         // ── Second pass: split over-large segments via token-budgeted line windows ──
@@ -91,16 +94,13 @@ impl Chunker for MarkdownChunker {
                 continue;
             }
             if crate::tokens::count(text) <= cfg.max_tokens {
-                // Expand the core section with a surrounding sentence window.
-                let (ws, we) = expand_window(body, seg.start, seg.end, cfg);
-                let content = &body[ws..we];
                 chunks.push(Chunk {
-                    content: content.to_owned(),
+                    content: text.to_owned(),
                     heading_path: seg.heading_path.clone(),
                     symbol_path: Vec::new(),
-                    start_byte: ws,
-                    end_byte: we,
-                    token_count: crate::tokens::count(content),
+                    start_byte: seg.start,
+                    end_byte: seg.end,
+                    token_count: crate::tokens::count(text),
                     chunk_index: 0, // filled in below
                     fallback_used: false,
                 });
@@ -144,22 +144,22 @@ const fn heading_depth(level: HeadingLevel) -> u8 {
     }
 }
 
-/// Level-aware coalescing pass (FR-007 small-section merge).
+/// Level-aware greedy coalescing pass (FR-007 small-section merge, D2).
 ///
-/// Walks the first-pass `segments` and merges adjacent undersized sections into
-/// runs that approach `cfg.min_tokens` without exceeding `cfg.max_tokens`. A run
+/// Walks the first-pass `segments` and greedily packs adjacent sections into
+/// runs up to [`crate::chunk::coalesce_target`] (90% of `max_tokens`). A run
 /// absorbs its descendants and same-level siblings but never a *shallower*
 /// section (that would pull the run up out of its subtree). A section that is
-/// already larger than `max_tokens` on its own passes through alone and is
-/// windowed later by [`token_window_split`]. The merged run keeps the FIRST
-/// segment's `heading_path` (shallowest ancestor context) and `depth`.
+/// already larger than the target on its own passes through alone (and is
+/// windowed later by [`token_window_split`] if it also exceeds `max_tokens`).
+/// The merged run keeps the FIRST segment's `heading_path` (shallowest
+/// ancestor context) and `depth`.
 fn coalesce_segments(
     body: &str,
     segments: &[HeadingSegment],
     cfg: &ChunkerConfig,
 ) -> Vec<HeadingSegment> {
-    let min = cfg.min_tokens;
-    let max = cfg.max_tokens;
+    let target = crate::chunk::coalesce_target(cfg);
     let mut out: Vec<HeadingSegment> = Vec::new();
     let mut i = 0usize;
     while i < segments.len() {
@@ -170,19 +170,15 @@ fn coalesce_segments(
         let mut j = i + 1;
         while j < segments.len() {
             let next = &segments[j];
-            // Size cap: never grow past max. A single >max segment passes
-            // through alone (windowed later).
-            if crate::tokens::count(&body[start..next.end]) > max {
-                break;
-            }
             // Structural: never absorb a segment SHALLOWER than the run anchor
             // (don't pull the run up into an aunt/ancestor section).
             if next.depth < start_depth {
                 break;
             }
-            // Size floor: once the run alone is big enough, stop at this
-            // section boundary.
-            if crate::tokens::count(&body[start..end]) >= min {
+            // Greedy fill (D2): stop when absorbing the next section would push
+            // the run past the 90% target. A single >target segment passes
+            // through alone (windowed later).
+            if crate::tokens::count(&body[start..next.end]) > target {
                 break;
             }
             end = next.end;
@@ -199,19 +195,20 @@ fn coalesce_segments(
     out
 }
 
-/// Split `text` into overlapping token-budgeted windows, growing line by line.
+/// Split `text` into disjoint token-budgeted windows, growing line by line.
 ///
 /// `base_offset` is the byte offset of `text[0]` within the original document,
 /// used to compute absolute `start_byte`/`end_byte` on each emitted `Chunk`.
 ///
 /// The algorithm:
 /// 1. Collect all lines from `text`.
-/// 2. Grow a window by appending lines until adding the next line would push the
-///    token count over `cfg.max_tokens`.
-/// 3. Emit the window as a `Chunk`.
-/// 4. Step back by `cfg.fallback_overlap_lines` lines to create overlap, then
-///    continue from that position.
-/// 5. A single line that exceeds the budget on its own is emitted whole (no
+/// 2. Grow a window by appending lines until adding the next line would push
+///    the token count over [`crate::chunk::coalesce_target`] (90% of
+///    `max_tokens`, so split windows aim at the same fill target as
+///    coalescing).
+/// 3. Emit the window as a `Chunk`, then continue from the next line —
+///    windows never overlap (D3).
+/// 4. A single line that exceeds the budget on its own is emitted whole (no
 ///    infinite loop).
 fn token_window_split(
     text: &str,
@@ -241,7 +238,7 @@ fn token_window_split(
         }
     };
 
-    let overlap_lines = usize::try_from(cfg.fallback_overlap_lines).unwrap_or(usize::MAX);
+    let target = crate::chunk::coalesce_target(cfg);
     let mut out: Vec<Chunk> = Vec::new();
     let mut window_start_line = 0usize;
 
@@ -252,7 +249,7 @@ fn token_window_split(
         let mut end_line = window_start_line + 1; // at least one line
         while end_line < n_lines {
             let slice = &text[line_starts[window_start_line]..line_end(end_line)];
-            if crate::tokens::count(slice) > cfg.max_tokens {
+            if crate::tokens::count(slice) > target {
                 // Adding line `end_line` would overflow — stop before it.
                 break;
             }
@@ -280,219 +277,11 @@ fn token_window_split(
             });
         }
 
-        // Step the start forward, then back by overlap, ensuring forward progress.
-        let lines_in_window = last_line - window_start_line + 1;
-        let step = lines_in_window.saturating_sub(overlap_lines).max(1);
-        window_start_line += step;
+        // Continue from the line after this window — no overlap (D3).
+        window_start_line = last_line + 1;
     }
 
     out
-}
-
-/// Split `region` into sentence-granular byte ranges (offsets relative to the
-/// start of `region`, usable directly as `&region[range]`).
-///
-/// Prose splits on `.`/`!`/`?` followed by whitespace or end-of-input, and at
-/// blank-line (paragraph) breaks. Fenced code blocks (```` ``` ````/`~~~`) and
-/// runs of table lines (`|…`) are emitted whole — never split. Whitespace-only
-/// spans are dropped; returned ranges are in document order.
-fn segment_sentences(region: &str) -> Vec<Range<usize>> {
-    let bytes = region.as_bytes();
-    let n = region.len();
-    let mut units: Vec<Range<usize>> = Vec::new();
-    let mut unit_start = 0usize;
-    let mut i = 0usize;
-
-    while i < n {
-        let line_start = i;
-        let line_end = region[i..].find('\n').map_or(n, |o| i + o);
-        let next_line = if line_end < n { line_end + 1 } else { n };
-        let trimmed = region[line_start..line_end].trim_start();
-
-        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
-            push_trimmed(region, &mut units, unit_start, line_start);
-            let fence = if trimmed.starts_with("```") {
-                "```"
-            } else {
-                "~~~"
-            };
-            let mut j = next_line;
-            let block_end = loop {
-                if j >= n {
-                    break n;
-                }
-                let jl_end = region[j..].find('\n').map_or(n, |o| j + o);
-                if region[j..jl_end].trim_start().starts_with(fence) {
-                    break jl_end;
-                }
-                j = if jl_end < n { jl_end + 1 } else { n };
-            };
-            units.push(line_start..block_end);
-            i = if block_end < n { block_end + 1 } else { n };
-            unit_start = i;
-            continue;
-        }
-
-        if trimmed.starts_with('|') {
-            push_trimmed(region, &mut units, unit_start, line_start);
-            let mut end = line_end;
-            let mut k = next_line;
-            while k < n {
-                let kl_end = region[k..].find('\n').map_or(n, |o| k + o);
-                if region[k..kl_end].trim_start().starts_with('|') {
-                    end = kl_end;
-                    k = if kl_end < n { kl_end + 1 } else { n };
-                } else {
-                    break;
-                }
-            }
-            units.push(line_start..end);
-            i = if end < n { end + 1 } else { n };
-            unit_start = i;
-            continue;
-        }
-
-        if trimmed.is_empty() {
-            push_trimmed(region, &mut units, unit_start, line_start);
-            i = next_line;
-            unit_start = i;
-            continue;
-        }
-
-        // Prose line: split on sentence terminators (ASCII bytes, so multibyte
-        // UTF-8 is never matched mid-codepoint).
-        let mut p = line_start;
-        while p < line_end {
-            let b = bytes[p];
-            if (b == b'.' || b == b'!' || b == b'?')
-                && (p + 1 >= line_end || bytes[p + 1].is_ascii_whitespace())
-            {
-                push_trimmed(region, &mut units, unit_start, p + 1);
-                unit_start = p + 1;
-            }
-            p += 1;
-        }
-        i = next_line;
-    }
-    push_trimmed(region, &mut units, unit_start, n);
-    units
-}
-
-/// Push `[start, end)` with surrounding whitespace trimmed off; skip if empty.
-fn push_trimmed(region: &str, units: &mut Vec<Range<usize>>, start: usize, end: usize) {
-    if start >= end || end > region.len() {
-        return;
-    }
-    let slice = &region[start..end];
-    let s = start + (slice.len() - slice.trim_start().len());
-    let e = end - (slice.len() - slice.trim_end().len());
-    if s < e {
-        units.push(s..e);
-    }
-}
-
-/// `round(pct * max)` as a token count.
-// Budgets are coarse token counts: sub-token precision is irrelevant
-// (`cast_precision_loss` on `u32 -> f32`) and the value is clamped non-negative
-// before the narrowing cast (`cast_possible_truncation` / `cast_sign_loss` on
-// `f32 -> u32`), so all three pedantic cast lints are allowed.
-#[allow(
-    clippy::cast_precision_loss,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss
-)]
-fn pct_tokens(pct: f32, max: u32) -> u32 {
-    (pct * max as f32).round().max(0.0) as u32
-}
-
-/// Grow one side of the window by whole sentence units (ordered nearest-core
-/// first) until `limit` tokens or the side is exhausted, never letting the
-/// window exceed `cap`. Updates `ws`/`we`/`idx` in place.
-// The 8 params reflect the in-place mutation design (window bounds + per-side
-// cursor passed `&mut`); collapsing them into a struct would obscure the call
-// sites more than it helps.
-#[allow(clippy::too_many_arguments)]
-fn grow_side(
-    body: &str,
-    units: &[Range<usize>],
-    idx: &mut usize,
-    before: bool,
-    ws: &mut usize,
-    we: &mut usize,
-    limit: u32,
-    cap: u32,
-) {
-    loop {
-        if crate::tokens::count(&body[*ws..*we]) >= limit {
-            break;
-        }
-        let Some(r) = units.get(*idx) else { break };
-        let (nws, nwe) = if before { (r.start, *we) } else { (*ws, r.end) };
-        if crate::tokens::count(&body[nws..nwe]) > cap {
-            break; // atomic unit would breach the cap → stop this side
-        }
-        *ws = nws;
-        *we = nwe;
-        *idx += 1;
-    }
-}
-
-/// Expand the core byte range `[core_start, core_end)` with surrounding sentence
-/// context per the rolling-window policy. Returns the (possibly unchanged)
-/// expanded byte range. Smaller side first to the switch point, then the larger
-/// side to the target; budgets in BPE tokens.
-fn expand_window(
-    body: &str,
-    core_start: usize,
-    core_end: usize,
-    cfg: &ChunkerConfig,
-) -> (usize, usize) {
-    let max = cfg.max_tokens;
-    let switch = pct_tokens(cfg.window_switch_pct, max);
-    let target = pct_tokens(cfg.window_target_pct, max);
-    let cap = pct_tokens(cfg.window_cap_pct, max);
-    debug_assert!(switch <= target && target <= cap);
-
-    if crate::tokens::count(&body[core_start..core_end]) >= target {
-        return (core_start, core_end);
-    }
-
-    // `before` nearest-core first = reverse document order; `after` already is.
-    let before: Vec<Range<usize>> = segment_sentences(&body[..core_start])
-        .into_iter()
-        .rev()
-        .collect();
-    let after: Vec<Range<usize>> = segment_sentences(&body[core_end..])
-        .into_iter()
-        .map(|r| (core_end + r.start)..(core_end + r.end))
-        .collect();
-
-    let before_avail = crate::tokens::count(&body[..core_start]);
-    let after_avail = crate::tokens::count(&body[core_end..]);
-    let smaller_is_before = before_avail <= after_avail;
-
-    let mut ws = core_start;
-    let mut we = core_end;
-    let mut bi = 0usize;
-    let mut ai = 0usize;
-
-    let core_tokens = crate::tokens::count(&body[core_start..core_end]);
-    // Phase 1: smaller side to the switch point (skipped when core ≥ switch).
-    if core_tokens < switch {
-        if smaller_is_before {
-            grow_side(body, &before, &mut bi, true, &mut ws, &mut we, switch, cap);
-        } else {
-            grow_side(body, &after, &mut ai, false, &mut ws, &mut we, switch, cap);
-        }
-    }
-    // Phase 2: the larger side to the target.
-    if smaller_is_before {
-        grow_side(body, &after, &mut ai, false, &mut ws, &mut we, target, cap);
-    } else {
-        grow_side(body, &before, &mut bi, true, &mut ws, &mut we, target, cap);
-    }
-
-    (ws, we)
 }
 
 #[cfg(test)]
@@ -506,29 +295,55 @@ mod tests {
         ChunkerConfig::default()
     }
 
-    /// Coalescing-disabled config: `min_tokens == 1` means every non-empty
-    /// section already meets the soft floor, so the coalescing pass is a no-op
-    /// and the chunker emits one chunk per heading. Used by tests that assert
-    /// per-heading semantics (`heading_path`, chunk counts).
-    fn no_coalesce_cfg() -> ChunkerConfig {
+    /// Coalescing-suppressing config for per-heading assertions: a tiny budget
+    /// whose 90% target is smaller than any two adjacent test sections combined,
+    /// so each heading stays its own chunk (and sections stay under `max_tokens`
+    /// so no window split kicks in either).
+    fn per_section_cfg() -> ChunkerConfig {
         ChunkerConfig {
-            min_tokens: 1,
+            max_tokens: 28,
             ..ChunkerConfig::default()
         }
     }
 
     fn small_cfg() -> ChunkerConfig {
         // 50-token budget — small enough that a few hundred-word body splits.
-        // min_tokens=10 keeps min <= max; the single-segment docs these tests
-        // use are unaffected by coalescing either way.
         ChunkerConfig {
             max_tokens: 50,
-            min_tokens: 10,
             ..ChunkerConfig::default()
         }
     }
 
     // ── tests ────────────────────────────────────────────────────────────────
+
+    /// THE no-overlap invariant (D3): every emitted chunk's byte range is
+    /// disjoint from every other chunk's, in document order.
+    #[test]
+    fn markdown_chunks_never_overlap() {
+        use std::fmt::Write as _;
+
+        let line = "the quick brown fox jumps over the lazy dog near the river bank.\n";
+        let mut md = String::from("# Top\n\nintro paragraph.\n\n");
+        for h in ["A", "B", "C", "D", "E", "F"] {
+            write!(md, "## Section {h}\n\n{}", line.repeat(8)).unwrap();
+        }
+        let cfg = ChunkerConfig {
+            max_tokens: 64,
+            ..ChunkerConfig::default()
+        };
+        let chunks = MarkdownChunker.chunk(&md, &cfg).unwrap();
+        assert!(chunks.len() >= 2);
+        for w in chunks.windows(2) {
+            assert!(
+                w[1].start_byte >= w[0].end_byte,
+                "overlap: [{}, {}) then [{}, {})",
+                w[0].start_byte,
+                w[0].end_byte,
+                w[1].start_byte,
+                w[1].end_byte
+            );
+        }
+    }
 
     #[test]
     fn empty_input_produces_no_chunks() {
@@ -551,11 +366,15 @@ mod tests {
 
     #[test]
     fn nested_headings_record_path() {
-        // Under default `min_tokens` these tiny sections would coalesce into a
-        // single chunk; `no_coalesce_cfg()` keeps the per-heading semantics this
-        // test asserts (one chunk per heading + ancestor heading_path).
-        let md = "# Top\n\nintro\n\n## Sub A\n\ncontent A\n\n## Sub B\n\ncontent B\n";
-        let chunks = MarkdownChunker.chunk(md, &no_coalesce_cfg()).unwrap();
+        // Under the default budget these sections would greedily coalesce into
+        // a single chunk; `per_section_cfg()` keeps the per-heading semantics
+        // this test asserts (one chunk per heading + ancestor heading_path):
+        // each ~15-token section fits the 28-token budget alone, but two
+        // adjacent sections exceed the 25-token coalesce target.
+        let md = "# Top\n\nthis section body has roughly fifteen tokens of filler text here\n\n\
+                  ## Sub A\n\nthis section body has roughly fifteen tokens of filler text here\n\n\
+                  ## Sub B\n\nthis section body has roughly fifteen tokens of filler text here\n";
+        let chunks = MarkdownChunker.chunk(md, &per_section_cfg()).unwrap();
         assert_eq!(chunks.len(), 3);
         // First chunk is from `# Top` heading; its path is empty (it IS Top).
         assert_eq!(chunks[1].heading_path, vec!["Top".to_string()]);
@@ -593,23 +412,6 @@ mod tests {
     }
 
     #[test]
-    fn windows_overlap() {
-        // Long body of many lines to guarantee multiple windows.
-        let line = "the quick brown fox jumps over the lazy dog near the river bank\n";
-        let body: String = line.repeat(30);
-        let md = format!("# X\n\n{body}");
-        let chunks = MarkdownChunker.chunk(&md, &small_cfg()).unwrap();
-        assert!(chunks.len() >= 2, "expected multiple windows, got {}", chunks.len());
-        // Adjacent windows must overlap: chunks[1].start_byte < chunks[0].end_byte.
-        assert!(
-            chunks[1].start_byte < chunks[0].end_byte,
-            "chunks[1].start_byte={} should be < chunks[0].end_byte={} (overlap required)",
-            chunks[1].start_byte,
-            chunks[0].end_byte,
-        );
-    }
-
-    #[test]
     fn headingless_document_produces_chunks() {
         let md = "Just a plain paragraph with no headings.\n\nAnother one.";
         let chunks = MarkdownChunker.chunk(md, &default_cfg()).unwrap();
@@ -619,11 +421,14 @@ mod tests {
 
     #[test]
     fn chunk_indices_are_sequential() {
-        // `no_coalesce_cfg()` so the three tiny `# A/# B/# C` sections stay as
-        // three distinct chunks and the sequential-index contract is exercised
-        // across more than one chunk.
-        let md = "# A\n\ntext\n\n# B\n\ntext\n\n# C\n\ntext\n";
-        let chunks = MarkdownChunker.chunk(md, &no_coalesce_cfg()).unwrap();
+        // `per_section_cfg()` so the three `# A/# B/# C` sections stay as
+        // three distinct chunks (each fits the 28-token budget alone; two
+        // adjacent ones exceed the 25-token coalesce target) and the
+        // sequential-index contract is exercised across more than one chunk.
+        let md = "# A\n\nthis section body has roughly fifteen tokens of filler text here\n\n\
+                  # B\n\nthis section body has roughly fifteen tokens of filler text here\n\n\
+                  # C\n\nthis section body has roughly fifteen tokens of filler text here\n";
+        let chunks = MarkdownChunker.chunk(md, &per_section_cfg()).unwrap();
         assert!(chunks.len() >= 2, "expected multiple chunks, got {}", chunks.len());
         for (i, c) in chunks.iter().enumerate() {
             assert_eq!(c.chunk_index, u32::try_from(i).unwrap());
@@ -718,43 +523,19 @@ mod tests {
         }
     }
 
-    /// A merged run's `heading_path` is the FIRST segment's ancestor path. The
-    /// `## A` + `### a1` run anchors at `## A`, so its path is `["Top"]` (the H1
-    /// ancestor) — NOT `["Top", "A"]` (which would be the deeper child's path).
-    ///
-    /// A `min_tokens == 12` config is used so the `# Top` intro sentence (a dozen
-    /// words) clears the floor alone and does NOT absorb `## A`; that makes `## A`
-    /// the anchor of its own coalesced run, while the tiny `## A` and `### a1`
-    /// sections still merge with each other.
+    /// A merged run's `heading_path` is the FIRST segment's ancestor path.
+    /// Under greedy packing the `# Top` intro absorbs `## A` + `### a1` (depth
+    /// ≥ anchor, all tiny), so the single merged chunk keeps the anchor's path
+    /// (`[]`, the preamble anchored at `# Top`) — NOT a deeper child's path.
     #[test]
     fn merged_chunk_uses_first_segments_path() {
-        let cfg = ChunkerConfig {
-            min_tokens: 12,
-            ..ChunkerConfig::default()
-        };
-        let md =
-            "# Top\n\nThis intro paragraph is comfortably above the soft floor on its own.\n\n\
-                  ## A\n\nshort\n\n### a1\n\nalso short\n";
-        let chunks = MarkdownChunker.chunk(md, &cfg).unwrap();
-
-        // The rolling window can pad several chunks with neighbouring text, so
-        // `## A` may appear in more than one chunk's `content`. Locate the run
-        // anchored at `## A` by the property under test — its ancestor path is
-        // the H1 `Top`, NOT the preamble path `[]` carried by the `# Top` run.
-        let a_chunk = chunks
-            .iter()
-            .find(|c| c.heading_path == ["Top"] && c.content.contains("## A"))
-            .expect("a chunk anchored at `## A` with ancestor path [\"Top\"]");
-        assert!(
-            a_chunk.content.contains("### a1"),
-            "## A should merge with ### a1: {:?}",
-            a_chunk.content
-        );
-        assert_eq!(
-            a_chunk.heading_path,
-            vec!["Top".to_string()],
-            "merged run must keep the FIRST segment's ancestor path, not the deepest"
-        );
+        let md = "# Top\n\nintro.\n\n## A\n\nshort\n\n### a1\n\nalso short\n";
+        let chunks = MarkdownChunker
+            .chunk(md, &ChunkerConfig::default())
+            .unwrap();
+        assert_eq!(chunks.len(), 1, "tiny sections all pack into the anchor run");
+        assert!(chunks[0].content.contains("### a1"));
+        assert!(chunks[0].heading_path.is_empty(), "run keeps the FIRST segment's path");
     }
 
     /// Structural invariants on every emitted chunk: non-empty byte range
@@ -768,143 +549,5 @@ mod tests {
             assert!(c.end_byte <= md.len(), "end_byte past body len: {c:?}");
             assert_eq!(c.chunk_index, u32::try_from(i).unwrap());
         }
-    }
-
-    // ── rolling-window expansion tests ─────────────────────────────────────────
-
-    fn window_cfg() -> ChunkerConfig {
-        ChunkerConfig {
-            max_tokens: 60,
-            min_tokens: 1,
-            ..ChunkerConfig::default()
-        }
-    }
-
-    #[test]
-    fn windowed_chunk_spans_neighbours_but_stays_bounded() {
-        // Ten headed sections, coalescing OFF (min_tokens=1) so each section is
-        // its own core, and the doc is far larger than the cap. This genuinely
-        // exercises `expand_window`: WITHOUT windowing each chunk holds only its
-        // own section (no cross-section co-occurrence), so the first assertion
-        // would fail. WITH windowing a core pulls in adjacent sections — but the
-        // cap keeps the window local, so no chunk spans the whole document.
-        let markers = [
-            "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india",
-            "juliet",
-        ];
-        let mut md = String::new();
-        for &m in &markers {
-            md.push_str("## Section ");
-            md.push_str(m);
-            md.push_str("\n\nThis section ");
-            md.push_str(m);
-            md.push_str(" discusses the ");
-            md.push_str(m);
-            md.push_str(" topic in a few words for testing.\n\n");
-        }
-        let cfg = ChunkerConfig {
-            max_tokens: 60,
-            min_tokens: 1,
-            ..ChunkerConfig::default()
-        };
-        let chunks = MarkdownChunker.chunk(&md, &cfg).unwrap();
-
-        // Windowing produced at least one chunk spanning `echo` + an immediate
-        // neighbour — impossible without the rolling window under min_tokens=1.
-        assert!(
-            chunks.iter().any(|c| c.content.contains("echo")
-                && (c.content.contains("delta") || c.content.contains("foxtrot"))),
-            "expected a windowed chunk spanning echo + a neighbour: {:#?}",
-            chunks.iter().map(|c| c.content.trim()).collect::<Vec<_>>()
-        );
-        // ...but the cap keeps the window local: no chunk spans the whole doc.
-        assert!(
-            chunks
-                .iter()
-                .all(|c| !(c.content.contains("alpha") && c.content.contains("juliet"))),
-            "window must be bounded by the cap, not the entire document"
-        );
-        for c in &chunks {
-            assert!(c.token_count <= cfg.max_tokens, "chunk over cap: {}", c.token_count);
-        }
-    }
-
-    #[test]
-    fn expand_grows_both_sides_when_centered() {
-        let s = "alpha beta gamma delta. ".repeat(40);
-        let body = s.as_str();
-        let core_start = body.len() / 2;
-        let core_end = (core_start + 20).min(body.len());
-        let (ws, we) = expand_window(body, core_start, core_end, &window_cfg());
-        assert!(ws < core_start, "should pull `before` context");
-        assert!(we > core_end, "should pull `after` context");
-        assert!(crate::tokens::count(&body[ws..we]) <= 60, "must not exceed the cap");
-    }
-
-    #[test]
-    fn expand_is_noop_when_core_already_at_target() {
-        let body = "one two three four five. ".repeat(40);
-        let big_end = body.len();
-        let (ws, we) = expand_window(&body, 0, big_end, &window_cfg());
-        assert_eq!((ws, we), (0, big_end));
-    }
-
-    #[test]
-    fn expand_at_document_start_only_grows_forward() {
-        let body = "aa bb cc dd ee ff. ".repeat(40);
-        let core_end = 18.min(body.len());
-        let (ws, we) = expand_window(&body, 0, core_end, &window_cfg());
-        assert_eq!(ws, 0, "no `before` text available at doc start");
-        assert!(we > core_end, "must still grow forward");
-    }
-
-    #[test]
-    fn segments_prose_into_sentences() {
-        let r = "First one. Second two! Third three?";
-        let units: Vec<&str> = segment_sentences(r).iter().map(|x| &r[x.clone()]).collect();
-        assert_eq!(units, vec!["First one.", "Second two!", "Third three?"]);
-    }
-
-    #[test]
-    fn fenced_code_block_is_one_atomic_unit() {
-        let r = "Intro line.\n\n```rust\nfn a() {}\nfn b() {}\n```\n\nOutro line.";
-        let units: Vec<&str> = segment_sentences(r).iter().map(|x| &r[x.clone()]).collect();
-        assert!(units
-            .iter()
-            .any(|u| u.starts_with("```rust") && u.contains("fn b() {}")));
-        assert!(units.contains(&"Intro line."));
-        assert!(units.contains(&"Outro line."));
-    }
-
-    #[test]
-    fn table_rows_group_into_one_unit() {
-        let r = "Before.\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\nAfter.";
-        let units: Vec<&str> = segment_sentences(r).iter().map(|x| &r[x.clone()]).collect();
-        assert!(units
-            .iter()
-            .any(|u| u.starts_with("| a | b |") && u.contains("| 1 | 2 |")));
-    }
-
-    #[test]
-    fn empty_region_yields_no_units() {
-        assert!(segment_sentences("   \n\n  ").is_empty());
-    }
-
-    #[test]
-    fn unterminated_fence_consumes_to_eof() {
-        // A fence with no closing ``` must be emitted whole to EOF, with no
-        // tail loss — pins the EOF-consumption branch.
-        let r = "Before.\n\n```rust\nfn a() {}\nfn b() {}";
-        let units: Vec<&str> = segment_sentences(r).iter().map(|x| &r[x.clone()]).collect();
-        assert_eq!(units, vec!["Before.", "```rust\nfn a() {}\nfn b() {}"]);
-    }
-
-    #[test]
-    fn multibyte_terminators_do_not_split_or_panic() {
-        // Full-width 。 is multibyte and must NOT split (only ASCII .!? do);
-        // pins UTF-8 boundary safety against a mid-codepoint slice panic.
-        let r = "これは。テスト。Done.";
-        let units: Vec<&str> = segment_sentences(r).iter().map(|x| &r[x.clone()]).collect();
-        assert_eq!(units, vec!["これは。テスト。Done."]);
     }
 }

@@ -1,9 +1,11 @@
-//! Tests for `client::embed` — both the BYOK (Voyage-direct) and the server
-//! (`/v1/embeddings`) resolution modes, against a mocked HTTP endpoint.
+//! Tests for `client::embed_code` — both the BYOK (Voyage-direct) and the
+//! server (`/v1/embeddings`, `type=code`) resolution modes, against a mocked
+//! HTTP endpoint. These pin the shared flat-embed plumbing: retry/backoff
+//! classification and the server-proxy wire shape.
 
 #![allow(missing_docs)]
 
-use mn_embedding::client::{embed, EmbedSource};
+use mn_embedding::client::{embed_code, EmbedSource};
 use mn_embedding::voyage::{InputType, VoyageEmbedder};
 use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -21,7 +23,7 @@ async fn byok_uses_voyage_directly() {
         .mount(&voyage)
         .await;
     let v = VoyageEmbedder::new("k", "voyage-code-3", 1024, "float").with_base_url(&voyage.uri());
-    let out = embed(vec!["q".into()], InputType::Query, EmbedSource::Byok(&v))
+    let out = embed_code(vec!["q".into()], InputType::Query, EmbedSource::Byok(&v))
         .await
         .unwrap();
     assert_eq!(out.vectors.len(), 1);
@@ -51,7 +53,7 @@ async fn byok_retries_transient_503_then_succeeds() {
         .mount(&voyage)
         .await;
     let v = VoyageEmbedder::new("k", "voyage-code-3", 1024, "float").with_base_url(&voyage.uri());
-    let out = embed(vec!["q".into()], InputType::Query, EmbedSource::Byok(&v))
+    let out = embed_code(vec!["q".into()], InputType::Query, EmbedSource::Byok(&v))
         .await
         .expect("a transient 503 must be retried, not surfaced");
     assert_eq!(out.vectors.len(), 1);
@@ -70,7 +72,7 @@ async fn byok_does_not_retry_400() {
         .mount(&voyage)
         .await;
     let v = VoyageEmbedder::new("k", "voyage-code-3", 1024, "float").with_base_url(&voyage.uri());
-    let err = embed(vec!["q".into()], InputType::Query, EmbedSource::Byok(&v))
+    let err = embed_code(vec!["q".into()], InputType::Query, EmbedSource::Byok(&v))
         .await
         .unwrap_err();
     assert!(matches!(err, mn_embedding::voyage::VoyageError::Status { status: 400, .. }));
@@ -94,7 +96,7 @@ async fn server_mode_calls_v1_embeddings() {
         })))
         .mount(&srv)
         .await;
-    let out = embed(
+    let out = embed_code(
         vec!["q".into()],
         InputType::Query,
         EmbedSource::Server {
@@ -129,7 +131,7 @@ async fn server_mode_sends_no_global_limit_true_on_the_wire() {
         })))
         .mount(&srv)
         .await;
-    let out = embed(
+    let out = embed_code(
         vec!["q".into()],
         InputType::Query,
         EmbedSource::Server {

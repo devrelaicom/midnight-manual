@@ -19,13 +19,38 @@ fn make_search_req() -> SearchRequest {
         queries: vec![QueryPair {
             text: "hello".into(),
             vector: vec![0.0_f32; 768],
+            code_vector: Vec::new(),
         }],
         client_embedding_model: "bge-base-en-v1.5@1".into(),
         limit: 10,
         filters: None,
         sort_by: None,
         mode: None,
+        code_mode: None,
+        client_code_embedding_model: None,
     }
+}
+
+#[test]
+fn search_request_omits_absent_code_fields_from_the_wire() {
+    // Pre-dual-embeddings requests must serialize byte-identically: no
+    // `code_mode`, no `client_code_embedding_model`, no per-pair `code_vector`.
+    let v = serde_json::to_value(make_search_req()).unwrap();
+    assert!(v.get("code_mode").is_none());
+    assert!(v.get("client_code_embedding_model").is_none());
+    assert!(v["queries"][0].get("code_vector").is_none());
+}
+
+#[test]
+fn search_request_serializes_code_fields_when_present() {
+    let mut req = make_search_req();
+    req.code_mode = Some("exclusive");
+    req.client_code_embedding_model = Some("voyage-code-3@1".into());
+    req.queries[0].code_vector = vec![0.5_f32; 4];
+    let v = serde_json::to_value(req).unwrap();
+    assert_eq!(v["code_mode"], "exclusive");
+    assert_eq!(v["client_code_embedding_model"], "voyage-code-3@1");
+    assert_eq!(v["queries"][0]["code_vector"].as_array().unwrap().len(), 4);
 }
 
 #[tokio::test]

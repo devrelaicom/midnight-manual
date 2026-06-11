@@ -4,8 +4,8 @@
 //! Covers:
 //! (a) `CloudClient::fetch_active_model` correctly calls `GET /v1/models/active`
 //!     and returns a `{name}@{revision}` wire id.
-//! (b) `mn_embedding::client::embed` with `EmbedSource::Server` calls
-//!     `POST /v1/embeddings` on the cloud URL (the server-proxy path).
+//! (b) `mn_embedding::client::embed_general` with `GeneralEmbedSource::Server`
+//!     calls `POST /v1/embeddings` on the cloud URL (the server-proxy path).
 //! (c) `run_search` in server-embed mode sends the corpus wire id as
 //!     `client_embedding_model` in the search request, and the query vectors
 //!     originate from `/v1/embeddings`.
@@ -22,7 +22,7 @@
 
 use std::sync::Arc;
 
-use mn_embedding::client::{embed, EmbedSource};
+use mn_embedding::client::{embed_general, GeneralEmbedSource};
 use mn_embedding::voyage::InputType;
 use mn_mcp::cloud_client::{CloudClient, CloudError};
 use mn_mcp::server::ServerConfig;
@@ -30,6 +30,39 @@ use mn_mcp::tools::run_search;
 use serde_json::json;
 use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
+
+/// True when `VOYAGE_API_KEY` is set (BYOK active): tests that depend on the
+/// server-proxy `/v1/embeddings` path skip themselves.
+fn byok_active() -> bool {
+    std::env::var("VOYAGE_API_KEY")
+        .map(|s| !s.is_empty())
+        .unwrap_or(false)
+}
+
+/// Fetch the most recent `/v1/search` request body recorded by the mock server.
+async fn last_search_body(server: &MockServer) -> serde_json::Value {
+    let reqs = server
+        .received_requests()
+        .await
+        .expect("request recording enabled");
+    let req = reqs
+        .iter()
+        .rev()
+        .find(|r| r.url.path() == "/v1/search")
+        .expect("a /v1/search request was made");
+    serde_json::from_slice(&req.body).expect("search body is JSON")
+}
+
+/// Count `/v1/embeddings` requests recorded by the mock server.
+async fn embeddings_request_count(server: &MockServer) -> usize {
+    let reqs = server
+        .received_requests()
+        .await
+        .expect("request recording enabled");
+    reqs.iter()
+        .filter(|r| r.url.path() == "/v1/embeddings")
+        .count()
+}
 
 // ---------------------------------------------------------------------------
 // CloudClient::fetch_active_model — unit tests (pure wiremock, no env deps)
@@ -50,11 +83,12 @@ async fn fetch_active_model_returns_name_at_revision() {
         .await;
 
     let client = CloudClient::new(&server.uri(), None).unwrap();
-    let wire_id = client
+    let active = client
         .fetch_active_model()
         .await
         .expect("fetch active model");
-    assert_eq!(wire_id, "voyage-code-3@1");
+    assert_eq!(active.general, "voyage-code-3@1");
+    assert_eq!(active.code, None, "no `code` field in the response means no code model");
 }
 
 #[tokio::test]
@@ -72,8 +106,52 @@ async fn fetch_active_model_formats_revision_as_integer() {
         .await;
 
     let client = CloudClient::new(&server.uri(), None).unwrap();
-    let wire_id = client.fetch_active_model().await.expect("fetch");
-    assert_eq!(wire_id, "voyage-code-3@42");
+    let active = client.fetch_active_model().await.expect("fetch");
+    assert_eq!(active.general, "voyage-code-3@42");
+}
+
+#[tokio::test]
+async fn fetch_active_model_parses_code_wire_id() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models/active"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "name": "voyage-context-3",
+            "revision": 1,
+            "dim": 1024,
+            "provider": "voyageai",
+            "code": { "name": "voyage-code-3", "revision": 7, "dim": 1024, "provider": "voyageai" },
+        })))
+        .mount(&server)
+        .await;
+
+    let client = CloudClient::new(&server.uri(), None).unwrap();
+    let active = client.fetch_active_model().await.expect("fetch");
+    assert_eq!(active.general, "voyage-context-3@1");
+    assert_eq!(active.code.as_deref(), Some("voyage-code-3@7"));
+}
+
+#[tokio::test]
+async fn fetch_active_model_treats_malformed_code_as_absent() {
+    // A `code` object missing name/revision degrades to "code unavailable",
+    // not a decode error — the general half is unaffected.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models/active"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "name": "voyage-context-3",
+            "revision": 1,
+            "dim": 1024,
+            "provider": "voyageai",
+            "code": { "name": "voyage-code-3" },
+        })))
+        .mount(&server)
+        .await;
+
+    let client = CloudClient::new(&server.uri(), None).unwrap();
+    let active = client.fetch_active_model().await.expect("fetch");
+    assert_eq!(active.general, "voyage-context-3@1");
+    assert_eq!(active.code, None);
 }
 
 #[tokio::test]
@@ -125,29 +203,32 @@ async fn fetch_active_model_returns_decode_error_for_missing_revision() {
 }
 
 // ---------------------------------------------------------------------------
-// mn_embedding::client::embed — server-proxy path (EmbedSource::Server)
+// mn_embedding::client::embed_general — server-proxy path
+// (GeneralEmbedSource::Server)
 // ---------------------------------------------------------------------------
 //
 // These tests drive the embed client directly against a wiremock `/v1/embeddings`
-// endpoint, verifying (b): the server-proxy path hits the right URL.
+// endpoint, verifying (b): the server-proxy path `run_search` uses for general
+// query embedding hits the right URL with `type=general`.
 
 #[tokio::test]
-async fn embed_server_mode_posts_to_v1_embeddings() {
+async fn embed_general_server_mode_posts_to_v1_embeddings() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/embeddings"))
+        .and(body_partial_json(json!({ "type": "general" })))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "model": "voyage-code-3@1",
+            "model": "voyage-context-3@1",
             "embeddings": [[0.1_f32, 0.2, 0.3, 0.4]],
             "usage": { "total_tokens": 3 },
         })))
         .mount(&server)
         .await;
 
-    let embedded = embed(
+    let embedded = embed_general(
         vec!["how to deploy a Midnight dapp".to_owned()],
         InputType::Query,
-        EmbedSource::Server {
+        GeneralEmbedSource::Server {
             base_url: &server.uri(),
             bearer: None,
             no_global_limit: false,
@@ -162,13 +243,13 @@ async fn embed_server_mode_posts_to_v1_embeddings() {
 }
 
 #[tokio::test]
-async fn embed_server_mode_returns_vectors_in_order() {
+async fn embed_general_server_mode_returns_vectors_in_order() {
     let server = MockServer::start().await;
     // Two distinct vectors — verify order is preserved.
     Mock::given(method("POST"))
         .and(path("/v1/embeddings"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "model": "voyage-code-3@1",
+            "model": "voyage-context-3@1",
             "embeddings": [
                 [1.0_f32, 0.0, 0.0, 0.0],
                 [0.0_f32, 1.0, 0.0, 0.0],
@@ -178,10 +259,10 @@ async fn embed_server_mode_returns_vectors_in_order() {
         .mount(&server)
         .await;
 
-    let embedded = embed(
+    let embedded = embed_general(
         vec!["first query".to_owned(), "second query".to_owned()],
         InputType::Query,
-        EmbedSource::Server {
+        GeneralEmbedSource::Server {
             base_url: &server.uri(),
             bearer: None,
             no_global_limit: false,
@@ -202,7 +283,7 @@ async fn embed_server_mode_returns_vectors_in_order() {
 }
 
 #[tokio::test]
-async fn embed_server_mode_forwards_bearer_token() {
+async fn embed_general_server_mode_forwards_bearer_token() {
     use wiremock::matchers::header;
 
     let server = MockServer::start().await;
@@ -210,17 +291,17 @@ async fn embed_server_mode_forwards_bearer_token() {
         .and(path("/v1/embeddings"))
         .and(header("authorization", "Bearer test-token-xyz"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "model": "voyage-code-3@1",
+            "model": "voyage-context-3@1",
             "embeddings": [[0.5_f32, 0.5]],
             "usage": { "total_tokens": 2 },
         })))
         .mount(&server)
         .await;
 
-    let embedded = embed(
+    let embedded = embed_general(
         vec!["query with bearer".to_owned()],
         InputType::Query,
-        EmbedSource::Server {
+        GeneralEmbedSource::Server {
             base_url: &server.uri(),
             bearer: Some("test-token-xyz"),
             no_global_limit: false,
@@ -260,14 +341,25 @@ fn make_server_cfg(cloud_url: &str) -> ServerConfig {
 }
 
 /// Single-query, no-rerank `ParsedSearchArgs` (the shape these wiremock tests
-/// always drive `run_search` with).
+/// always drive `run_search` with). `rerank: false` keeps the reranker model
+/// out of the test path (the public parsers force `rerank` on for basic
+/// search, so these tests construct the struct directly).
 fn single_query_args(query: &str) -> mn_mcp::tools::ParsedSearchArgs {
+    single_query_args_with(query, None)
+}
+
+/// [`single_query_args`] with an explicit `code_mode` override.
+fn single_query_args_with(
+    query: &str,
+    code_mode: Option<&'static str>,
+) -> mn_mcp::tools::ParsedSearchArgs {
     mn_mcp::tools::ParsedSearchArgs {
         queries: vec![query.to_owned()],
         limit: 10,
         rerank: false,
         filters: None,
         mode: "hybrid",
+        code_mode,
     }
 }
 
@@ -454,4 +546,204 @@ async fn run_search_propagates_active_model_fetch_failure() {
         matches!(err, mn_mcp::tools::SearchError::Cloud(_)),
         "expected Cloud error when /v1/models/active fails, got {err:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// run_search — code_mode (dual embeddings, §11.2)
+//
+// These tests inspect the recorded /v1/search request body directly (via
+// `last_search_body`), so absence of fields is assertable. They mount two
+// `type`-discriminated /v1/embeddings mocks returning distinct vectors so the
+// general and code halves of each QueryPair are distinguishable. All of them
+// depend on the server-proxy embedding path and skip under BYOK.
+// ---------------------------------------------------------------------------
+
+/// Mount `/v1/models/active` (optionally with a `code` model), the two
+/// `type`-discriminated `/v1/embeddings` mocks (general → [1,0,0,0],
+/// code → [0,1,0,0]), and a permissive `/v1/search`.
+async fn mount_dual_embedding_stack(server: &MockServer, code_revision: Option<i64>) {
+    let mut active = json!({
+        "name": "voyage-context-3",
+        "revision": 1,
+        "dim": 4,
+        "provider": "voyageai",
+    });
+    if let Some(rev) = code_revision {
+        active["code"] = json!({
+            "name": "voyage-code-3",
+            "revision": rev,
+            "dim": 4,
+            "provider": "voyageai",
+        });
+    }
+    Mock::given(method("GET"))
+        .and(path("/v1/models/active"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(active))
+        .mount(server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .and(body_partial_json(json!({ "type": "general" })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "model": "voyage-context-3@1",
+            "embeddings": [[1.0_f32, 0.0, 0.0, 0.0]],
+            "usage": { "total_tokens": 4 },
+        })))
+        .mount(server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .and(body_partial_json(json!({ "type": "code" })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "model": "voyage-code-3@1",
+            "embeddings": [[0.0_f32, 1.0, 0.0, 0.0]],
+            "usage": { "total_tokens": 4 },
+        })))
+        .mount(server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [{
+                "chunk_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "content": "dual-embedding result",
+                "chunk_index": 0,
+                "total_chunks": 1,
+                "document_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                "source_version_id": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+                "created_at": "2026-06-10T00:00:00Z",
+                "scores": { "vector_similarity": 0.9 },
+            }],
+            "search_metadata": { "per_query": [], "total_candidates": 1 },
+        })))
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn run_search_default_sends_code_vector_and_code_model() {
+    if byok_active() {
+        eprintln!("SKIP: run_search_default_sends_code_vector_and_code_model — BYOK active");
+        return;
+    }
+    let server = MockServer::start().await;
+    mount_dual_embedding_stack(&server, Some(7)).await;
+
+    let cfg = make_server_cfg(&server.uri());
+    let cloud = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
+    let result = run_search(&single_query_args("fn deploy_contract"), &cfg, &cloud)
+        .await
+        .expect("run_search ok");
+
+    let body = last_search_body(&server).await;
+    // Both halves embedded, each from its own type-tagged /v1/embeddings call.
+    assert_eq!(body["queries"][0]["vector"], json!([1.0, 0.0, 0.0, 0.0]));
+    assert_eq!(body["queries"][0]["code_vector"], json!([0.0, 1.0, 0.0, 0.0]));
+    assert_eq!(body["client_embedding_model"], "voyage-context-3@1");
+    // The code wire id comes from /v1/models/active's `code` field.
+    assert_eq!(body["client_code_embedding_model"], "voyage-code-3@7");
+    // Default (absent) code_mode is NOT forwarded — the server derives it.
+    assert!(body.get("code_mode").is_none(), "absent code_mode must not be forwarded");
+    assert_eq!(embeddings_request_count(&server).await, 2, "one general + one code embed");
+
+    assert_eq!(result["corpus_embedding_model"], "voyage-context-3@1");
+    assert_eq!(result["corpus_code_embedding_model"], "voyage-code-3@7");
+}
+
+#[tokio::test]
+async fn run_search_code_mode_off_omits_code_fields() {
+    if byok_active() {
+        eprintln!("SKIP: run_search_code_mode_off_omits_code_fields — BYOK active");
+        return;
+    }
+    let server = MockServer::start().await;
+    mount_dual_embedding_stack(&server, Some(7)).await;
+
+    let cfg = make_server_cfg(&server.uri());
+    let cloud = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
+    let result =
+        run_search(&single_query_args_with("what is a zk proof", Some("off")), &cfg, &cloud)
+            .await
+            .expect("run_search ok");
+
+    let body = last_search_body(&server).await;
+    // Explicit off IS forwarded (the caller overrode the server default).
+    assert_eq!(body["code_mode"], "off");
+    // No code embedding ran, no code fields on the wire.
+    assert!(body.get("client_code_embedding_model").is_none());
+    assert!(
+        body["queries"][0].get("code_vector").is_none(),
+        "empty code_vector must be omitted"
+    );
+    assert_eq!(body["queries"][0]["vector"], json!([1.0, 0.0, 0.0, 0.0]));
+    assert_eq!(embeddings_request_count(&server).await, 1, "general embed only");
+
+    assert_eq!(result["corpus_embedding_model"], "voyage-context-3@1");
+    assert!(
+        result.get("corpus_code_embedding_model").is_none(),
+        "code model must not be reported when code search did not run"
+    );
+}
+
+#[tokio::test]
+async fn run_search_code_mode_exclusive_skips_general_embedding() {
+    if byok_active() {
+        eprintln!("SKIP: run_search_code_mode_exclusive_skips_general_embedding — BYOK active");
+        return;
+    }
+    let server = MockServer::start().await;
+    mount_dual_embedding_stack(&server, Some(7)).await;
+
+    let cfg = make_server_cfg(&server.uri());
+    let cloud = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
+    let result =
+        run_search(&single_query_args_with("VoyageEmbedder::new", Some("exclusive")), &cfg, &cloud)
+            .await
+            .expect("run_search ok");
+
+    let body = last_search_body(&server).await;
+    assert_eq!(body["code_mode"], "exclusive");
+    // Only the code half is embedded; the general vector is sent empty.
+    assert_eq!(body["queries"][0]["vector"], json!([]));
+    assert_eq!(body["queries"][0]["code_vector"], json!([0.0, 1.0, 0.0, 0.0]));
+    assert_eq!(body["client_code_embedding_model"], "voyage-code-3@7");
+    assert_eq!(embeddings_request_count(&server).await, 1, "code embed only");
+
+    assert_eq!(result["corpus_code_embedding_model"], "voyage-code-3@7");
+}
+
+#[tokio::test]
+async fn run_search_falls_back_to_config_code_wire_when_active_has_none() {
+    if byok_active() {
+        eprintln!(
+            "SKIP: run_search_falls_back_to_config_code_wire_when_active_has_none — BYOK active"
+        );
+        return;
+    }
+    let server = MockServer::start().await;
+    // /v1/models/active carries no `code` field.
+    mount_dual_embedding_stack(&server, None).await;
+
+    let cfg = make_server_cfg(&server.uri());
+    let cloud = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
+    run_search(&single_query_args("fn main"), &cfg, &cloud)
+        .await
+        .expect("run_search ok");
+
+    let body = last_search_body(&server).await;
+    // Falls back to the config-pinned code model at revision 1.
+    assert_eq!(body["client_code_embedding_model"], "voyage-code-3@1");
+}
+
+#[test]
+fn fts_with_code_mode_on_is_rejected_at_parse_time() {
+    // The fts/code_mode incompatibility fails in the parsers (before
+    // run_search and any embedding or wire call) — mirrors the cloud's 400.
+    let err = mn_mcp::tools::parse_basic_search_args(&json!({
+        "query": "x", "mode": "fts", "code_mode": "on"
+    }))
+    .unwrap_err();
+    assert!(err.contains("code_mode"), "got: {err}");
 }

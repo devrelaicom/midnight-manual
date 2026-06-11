@@ -15,12 +15,25 @@ pub fn from_path(path: &Path) -> Option<&'static str> {
         "md" | "mdx" => "markdown",
         "rs" => "rust",
         "ts" | "tsx" => "typescript",
-        "js" | "jsx" => "javascript",
+        "js" | "jsx" | "mjs" | "cjs" => "javascript",
         "compact" => "compact",
         "txt" => "plaintext",
         "json" => "json",
         "yaml" | "yml" => "yaml",
         "toml" => "toml",
+        "py" | "pyi" => "python",
+        "go" => "go",
+        "sol" => "solidity",
+        "sh" | "bash" => "bash",
+        "scm" | "ss" | "sld" => "scheme",
+        "java" => "java",
+        "swift" => "swift",
+        "rb" => "ruby",
+        "kt" | "kts" => "kotlin",
+        "cs" => "csharp",
+        "hs" => "haskell",
+        "html" | "htm" => "html",
+        "xml" | "csproj" | "nuspec" | "plist" => "xml",
         _ => return None,
     })
 }
@@ -42,5 +55,40 @@ mod tests {
         assert_eq!(from_path(Path::new("foo")), None);
         assert_eq!(from_path(Path::new("foo.unknown")), None);
         assert_eq!(from_path(Path::new("")), None);
+    }
+
+    #[test]
+    fn code_chunker_languages_are_discoverable() {
+        // Every language the code chunker supports must resolve here, else
+        // glob-included files of that language bypass discovery defaults (D7).
+        let cases = [
+            ("a.py", "python"),
+            ("a.pyi", "python"),
+            ("a.go", "go"),
+            ("a.sol", "solidity"),
+            ("a.sh", "bash"),
+            ("a.bash", "bash"),
+            ("a.scm", "scheme"),
+            ("a.ss", "scheme"),
+            ("a.sld", "scheme"),
+            ("a.java", "java"),
+            ("a.swift", "swift"),
+            ("a.rb", "ruby"),
+            ("a.kt", "kotlin"),
+            ("a.kts", "kotlin"),
+            ("a.cs", "csharp"),
+            ("a.hs", "haskell"),
+            ("a.html", "html"),
+            ("a.htm", "html"),
+            ("a.xml", "xml"),
+            ("a.csproj", "xml"),
+            ("a.nuspec", "xml"),
+            ("a.plist", "xml"),
+            ("a.mjs", "javascript"),
+            ("a.cjs", "javascript"),
+        ];
+        for (path, lang) in cases {
+            assert_eq!(from_path(Path::new(path)), Some(lang), "{path}");
+        }
     }
 }

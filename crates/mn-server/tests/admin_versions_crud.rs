@@ -108,10 +108,16 @@ async fn seed_source_with_versions(
         .unwrap();
     let mut ids = Vec::with_capacity(n);
     for i in 0..n {
-        let (id, _rev) =
-            source_version::create_building(pool, source_id, model_id, "0.1.0", &format!("h{i}"))
-                .await
-                .unwrap();
+        let (id, _rev) = source_version::create_building(
+            pool,
+            source_id,
+            model_id,
+            None,
+            "0.1.0",
+            &format!("h{i}"),
+        )
+        .await
+        .unwrap();
         source_version::finalize(pool, id).await.unwrap();
         ids.push(id);
     }

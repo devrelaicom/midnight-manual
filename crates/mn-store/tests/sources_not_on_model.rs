@@ -31,10 +31,16 @@ async fn lists_sources_whose_active_version_is_not_on_target_ordered_by_provenan
     let source_a_id = source::insert(&h.pool, &slug_a, "Source A", SourceKind::DocsSite, None, 5)
         .await
         .expect("insert source A");
-    let (sv_a_id, _) =
-        source_version::create_building(&h.pool, source_a_id, old_model_id, "0.1.0", "hash-a")
-            .await
-            .expect("create_building source A");
+    let (sv_a_id, _) = source_version::create_building(
+        &h.pool,
+        source_a_id,
+        old_model_id,
+        None,
+        "0.1.0",
+        "hash-a",
+    )
+    .await
+    .expect("create_building source A");
     let root_a = node::insert(&h.pool, sv_a_id, None, NodeKind::Root, "root", 0)
         .await
         .expect("root node A");
@@ -72,10 +78,16 @@ async fn lists_sources_whose_active_version_is_not_on_target_ordered_by_provenan
     let source_b_id = source::insert(&h.pool, &slug_b, "Source B", SourceKind::DocsSite, None, 5)
         .await
         .expect("insert source B");
-    let (sv_b_id, _) =
-        source_version::create_building(&h.pool, source_b_id, old_model_id, "0.1.0", "hash-b")
-            .await
-            .expect("create_building source B");
+    let (sv_b_id, _) = source_version::create_building(
+        &h.pool,
+        source_b_id,
+        old_model_id,
+        None,
+        "0.1.0",
+        "hash-b",
+    )
+    .await
+    .expect("create_building source B");
     let root_b = node::insert(&h.pool, sv_b_id, None, NodeKind::Root, "root", 0)
         .await
         .expect("root node B");
@@ -113,10 +125,16 @@ async fn lists_sources_whose_active_version_is_not_on_target_ordered_by_provenan
     let source_c_id = source::insert(&h.pool, &slug_c, "Source C", SourceKind::DocsSite, None, 5)
         .await
         .expect("insert source C");
-    let (sv_c_id, _) =
-        source_version::create_building(&h.pool, source_c_id, target_model.id, "0.1.0", "hash-c")
-            .await
-            .expect("create_building source C");
+    let (sv_c_id, _) = source_version::create_building(
+        &h.pool,
+        source_c_id,
+        target_model.id,
+        None,
+        "0.1.0",
+        "hash-c",
+    )
+    .await
+    .expect("create_building source C");
     source_version::finalize(&h.pool, sv_c_id)
         .await
         .expect("finalize source C version");

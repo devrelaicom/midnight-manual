@@ -54,7 +54,7 @@ async fn seed_on_model(
     let source_id = source::insert(pool, &slug, "Filter", SourceKind::DocsSite, None, 5)
         .await
         .unwrap();
-    let (sv_id, _) = source_version::create_building(pool, source_id, model_id, "0.1.0", "h")
+    let (sv_id, _) = source_version::create_building(pool, source_id, model_id, None, "0.1.0", "h")
         .await
         .unwrap();
     let root = node::insert(pool, sv_id, None, NodeKind::Root, "root", 0)
@@ -101,6 +101,7 @@ async fn seed_on_model(
             content_hash: "hc",
             embedding: Some(vector.to_vec()),
             embedding_model_id: model_id,
+            code_embedding: None,
             heading_path: &[],
             symbol_path: &[],
             start_byte: 0,
@@ -155,14 +156,23 @@ async fn off_model_chunks_excluded_from_results() {
     let cfg = ServerConfig::default();
     let limiter = mn_server::ratelimit::RateLimiter::from_config(&cfg);
     let token_limiter = mn_server::tokenlimit::TokenUsageLimiter::from_config(&cfg);
-    let app =
-        app::build_with_limiter(h.pool.clone(), cfg, limiter, corpus_model, token_limiter, None)
-            .expect("build app");
+    let app = app::build_with_limiter(
+        h.pool.clone(),
+        cfg,
+        limiter,
+        corpus_model,
+        token_limiter,
+        None,
+        None,
+        Arc::new(RwLock::new(None)),
+    )
+    .expect("build app");
 
     let body = serde_json::json!({
         "query": token,
         "vector": vector,
         "client_embedding_model": "voyage-code-3@1",
+        "code_mode": "off",
         "limit": 100,
     });
     let resp = app
