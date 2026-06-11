@@ -360,6 +360,7 @@ fn single_query_args_with(
         filters: None,
         mode: "hybrid",
         code_mode,
+        rerank_instructions: None,
     }
 }
 
