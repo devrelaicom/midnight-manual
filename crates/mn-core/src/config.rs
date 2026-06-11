@@ -23,6 +23,9 @@ pub struct Config {
     /// `[models]` section.
     #[serde(default)]
     pub models: ModelsConfig,
+    /// `[rerank]` section.
+    #[serde(default)]
+    pub rerank: RerankConfig,
     /// `[telemetry]` section.
     #[serde(default)]
     pub telemetry: TelemetryConfig,
@@ -261,6 +264,96 @@ pub fn resolve_reranker(flag: Option<&str>, cfg: &ModelsConfig, env: &impl Confi
         .unwrap_or_else(|| cfg.reranker.clone())
 }
 
+/// `[rerank]` — client-side rerank placement and model selection (spec §4).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct RerankConfig {
+    /// Where reranking runs: `"auto"` (default) | `"local"` | `"server"` | `"off"`.
+    pub location: Option<String>,
+    /// `VoyageAI` rerank model: `"rerank-2.5"` (default) | `"rerank-2.5-lite"`.
+    pub model: Option<String>,
+}
+
+/// Where a client runs reranking after placement resolution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RerankPlacement {
+    /// Call `VoyageAI` directly with the user's own key; tell the server `none`.
+    Local,
+    /// Ask the server to rerank inline in `/v1/search`.
+    Server,
+    /// No reranking anywhere; tell the server `none`.
+    Off,
+}
+
+/// Resolve rerank placement with precedence flag > `MIDNIGHT_MANUAL_RERANK` env > config.
+///
+/// The config fallback is `[rerank].location`, ending at auto. Auto (and any
+/// unrecognized value) resolves by key detection: a Voyage key present means
+/// local BYOK, absent means server (D6). Mirrors the embedding-path defaulting.
+///
+/// An empty flag or env value is treated as absent and falls through to the
+/// next source, matching the other config resolvers.
+#[must_use]
+pub fn resolve_rerank_placement(
+    flag: Option<&str>,
+    cfg: &RerankConfig,
+    env: &impl ConfigEnv,
+    has_voyage_key: bool,
+) -> RerankPlacement {
+    let explicit = |s: &str| match s {
+        "local" => Some(RerankPlacement::Local),
+        "server" => Some(RerankPlacement::Server),
+        "off" => Some(RerankPlacement::Off),
+        _ => None, // "auto" or unknown: fall through
+    };
+    flag.filter(|s| !s.is_empty())
+        .and_then(explicit)
+        .or_else(|| {
+            env.var("MIDNIGHT_MANUAL_RERANK")
+                .filter(|s| !s.is_empty())
+                .as_deref()
+                .and_then(explicit)
+        })
+        .or_else(|| cfg.location.as_deref().and_then(explicit))
+        .unwrap_or(if has_voyage_key {
+            RerankPlacement::Local
+        } else {
+            RerankPlacement::Server
+        })
+}
+
+/// Resolve the rerank model with precedence flag > `MIDNIGHT_MANUAL_RERANK_MODEL` env > config.
+///
+/// The config fallback is `[rerank].model`, ending at `rerank-2.5`. Returns a
+/// model variant only — never [`crate::rerank::RerankParam::None`] (placement
+/// handles "off").
+///
+/// An empty flag or env value is treated as absent and falls through to the
+/// next source, matching the other config resolvers.
+#[must_use]
+pub fn resolve_rerank_model(
+    flag: Option<&str>,
+    cfg: &RerankConfig,
+    env: &impl ConfigEnv,
+) -> crate::rerank::RerankParam {
+    use crate::rerank::RerankParam;
+    let parse = |s: &str| match s {
+        "rerank-2.5" => Some(RerankParam::Rerank25),
+        "rerank-2.5-lite" => Some(RerankParam::Rerank25Lite),
+        _ => None,
+    };
+    flag.filter(|s| !s.is_empty())
+        .and_then(parse)
+        .or_else(|| {
+            env.var("MIDNIGHT_MANUAL_RERANK_MODEL")
+                .filter(|s| !s.is_empty())
+                .as_deref()
+                .and_then(parse)
+        })
+        .or_else(|| cfg.model.as_deref().and_then(parse))
+        .unwrap_or(RerankParam::Rerank25)
+}
+
 /// All the ways config discovery can fail.
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -472,5 +565,77 @@ voyage_output_dtype = "float"
         assert_eq!(resolve_reranker(Some(""), &cfg, &env), "from-env-reranker");
         let env_empty = FakeEnv::default().set("MIDNIGHT_MANUAL_RERANKER", "");
         assert_eq!(resolve_reranker(Some(""), &cfg, &env_empty), "from-config-reranker");
+    }
+
+    #[test]
+    fn rerank_config_parses_from_toml() {
+        let toml = r#"
+[rerank]
+location = "server"
+model = "rerank-2.5-lite"
+"#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.rerank.location.as_deref(), Some("server"));
+        assert_eq!(cfg.rerank.model.as_deref(), Some("rerank-2.5-lite"));
+        // Absent section -> defaults (both None).
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(cfg.rerank.location.is_none() && cfg.rerank.model.is_none());
+    }
+
+    #[test]
+    fn resolve_rerank_placement_precedence_and_auto() {
+        let cfg = RerankConfig {
+            location: Some("off".into()),
+            model: None,
+        };
+        let env = FakeEnv::default().set("MIDNIGHT_MANUAL_RERANK", "server");
+        // flag > env > config.
+        assert_eq!(
+            resolve_rerank_placement(Some("local"), &cfg, &env, false),
+            RerankPlacement::Local
+        );
+        assert_eq!(resolve_rerank_placement(None, &cfg, &env, true), RerankPlacement::Server);
+        let no_env = FakeEnv::default();
+        assert_eq!(resolve_rerank_placement(None, &cfg, &no_env, true), RerankPlacement::Off);
+        // Auto everywhere -> key detection: key => local, no key => server.
+        let empty = RerankConfig::default();
+        assert_eq!(resolve_rerank_placement(None, &empty, &no_env, true), RerankPlacement::Local);
+        assert_eq!(resolve_rerank_placement(None, &empty, &no_env, false), RerankPlacement::Server);
+        // Explicit "auto" at any level falls through to key detection.
+        assert_eq!(
+            resolve_rerank_placement(Some("auto"), &empty, &no_env, false),
+            RerankPlacement::Server
+        );
+        // Unknown value falls through to the next level (lenient, like other resolvers).
+        assert_eq!(
+            resolve_rerank_placement(Some("bogus"), &empty, &no_env, true),
+            RerankPlacement::Local
+        );
+    }
+
+    #[test]
+    fn resolve_rerank_model_precedence_and_default() {
+        use crate::rerank::RerankParam;
+        let cfg = RerankConfig {
+            location: None,
+            model: Some("rerank-2.5-lite".into()),
+        };
+        let env = FakeEnv::default().set("MIDNIGHT_MANUAL_RERANK_MODEL", "rerank-2.5");
+        assert_eq!(
+            resolve_rerank_model(Some("rerank-2.5-lite"), &cfg, &env),
+            RerankParam::Rerank25Lite
+        );
+        assert_eq!(resolve_rerank_model(None, &cfg, &env), RerankParam::Rerank25);
+        let no_env = FakeEnv::default();
+        assert_eq!(resolve_rerank_model(None, &cfg, &no_env), RerankParam::Rerank25Lite);
+        // Nothing anywhere -> rerank-2.5; unknown strings fall through.
+        assert_eq!(
+            resolve_rerank_model(None, &RerankConfig::default(), &no_env),
+            RerankParam::Rerank25
+        );
+        assert_eq!(
+            resolve_rerank_model(Some("bogus"), &RerankConfig::default(), &no_env),
+            RerankParam::Rerank25
+        );
     }
 }
