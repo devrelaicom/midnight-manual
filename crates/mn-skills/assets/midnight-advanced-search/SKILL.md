@@ -60,8 +60,9 @@ Thirteen tools, four groups:
   created_after?, created_before?, kind?, retired?}` →
   `{sources, total, next_cursor}`. Use it for `source_slug` values and to see
   what material exists.
-- `facets` — call with no args for the filter-dimension overview (open-set
-  dimensions show value samples plus exact totals); call with
+- `facets` — call with no args for the filter-dimension overview (`language`,
+  `source_slug`, `tags`, and `package` show value samples plus exact totals;
+  `heading_path` and `symbol` advertise their type only); call with
   `{facet, cursor?, limit?}` to page the full value list of `source_slug` /
   `language` / `tags` / `package`. **Call this before building `filters`.**
 - `status` — cloud reachability, auth identity + permission level, both limit
@@ -200,7 +201,7 @@ technique D (differential search) for the filtered version of this.
   latency; each `advanced_search` result's `scores.matched_queries` lists which
   of your queries pulled it in. Use them to see which formulation is working
   and drop the rest. In `fts` mode only the full-text half runs, so vector
-  candidate counts are absent.
+  candidate counts read zero.
 
 ## Going deeper
 

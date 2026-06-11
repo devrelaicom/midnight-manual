@@ -75,7 +75,9 @@ All 17 facets. "Neg?" = supports `none_of`.
 Sharp edges:
 
 - `symbol.kind` is NOT a closed enum — do not hard-code a list; discover real
-  kinds from results or `facets`. Either side of `{kind?, name?}` is optional.
+  kinds from the `symbol_path` of results you've already retrieved (the
+  `facets` tool does not enumerate symbol kinds). Either side of
+  `{kind?, name?}` is optional.
 - `version_satisfies` is a semver requirement (e.g. `">=0.23"`, `"^1.2"`)
   evaluated against the target/dependency's declared constraint. The two
   semver-bearing facets (`language_target`, `sdk_dependency`) cannot be negated.
@@ -108,7 +110,7 @@ with its type and negatability:
   "filters": [
     { "key": "kind",        "type": "enum",       "negatable": true,  "values": ["markdown","code","plaintext"] },
     { "key": "language",    "type": "open_set",   "negatable": true,  "values": ["compact","rust","typescript"], "truncated": false, "total": 3 },
-    { "key": "tags",        "type": "open_set",   "negatable": true,  "values": ["quickstart","privacy", /* ≤10 samples */], "truncated": true, "total": 142 },
+    { "key": "tags",        "type": "open_set",   "negatable": true,  "values": ["quickstart","privacy" /* …≤10 samples */], "truncated": true, "total": 142 },
     { "key": "ingested_at", "type": "range_temporal", "negatable": false }
     // … one entry per facet
   ]
@@ -116,14 +118,17 @@ with its type and negatability:
 ```
 
 - Closed-enum facets carry their full value list.
-- Open-set facets show **up to 10 sample values** plus an exact `total`;
+- The enumerated open-set facets (`language`, `source_slug`, `tags`,
+  `package`) show **up to 10 sample values** plus an exact `total`;
   `truncated: true` means more exist. Treat the samples as **examples, not the
-  closed universe** — a value not shown may still exist.
-- To see *every* value of an open-set dimension, drill down with
+  closed universe** — a value not shown may still exist. The extreme-
+  cardinality facets (`heading_path`, `symbol`) advertise their type only —
+  no values, no total.
+- To see *every* value of an enumerated open-set dimension, drill down with
   `{facet, cursor?, limit?}` where `facet` ∈ `source_slug` | `language` |
   `tags` | `package` (`limit` 1–200, default 50). Each page returns
   `{facet, values, total, next_cursor}`; pass `next_cursor` back as `cursor`
-  until it is absent.
+  until it is `null`.
 
 Worked example — paging every tag value (total 142):
 
@@ -156,8 +161,9 @@ Violations:
 - Unknown facet key (lists valid keys).
 - Invalid closed-set value (lists valid values).
 - Wrong shape for the facet type.
-- `none_of` on a non-negatable facet (`language_target`, `sdk_dependency`,
-  `verified`, `deprecated`, ranges).
+- `none_of` on a non-negatable facet (`language_target`, `sdk_dependency`;
+  for bools and ranges `none_of` isn't a representable shape, so those reject
+  as shape errors).
 - Contradictory range (`min > max`, `after > before`) or a malformed date.
 - Malformed `version_satisfies` semver.
 
@@ -173,7 +179,9 @@ A *valid* filter that matches nothing returns an empty result set, not an error.
 ## CLI mapping (`mnm`)
 
 For shell users, `mnm search` exposes the same advanced surface as flags, and
-`mnm facets` prints the discovery output:
+`mnm facets` prints the discovery output. One asymmetry: CLI reranking is
+**opt-in** via `--rerank` (off by default), the opposite of both MCP search
+tools:
 
 ```
 --mode <hybrid|vector|fts>
