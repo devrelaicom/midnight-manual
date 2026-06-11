@@ -170,7 +170,7 @@ pub fn list() -> ToolsListResult {
             ToolDescription {
                 name: "status",
                 description:
-                    "Diagnose the retrieval setup: cloud reachability, authentication and rate-limit state, VoyageAI key validity, and reranker readiness. Call when searches fail, return errors, or before starting a long session.",
+                    "Diagnose the retrieval setup: cloud reachability, authentication and rate-limit state, VoyageAI key validity, and rerank configuration. Call when searches fail, return errors, or before starting a long session.",
                 input_schema: json!({
                     "type": "object",
                     "properties": {},
@@ -286,7 +286,12 @@ fn advanced_search_input_schema() -> serde_json::Value {
             "limit": { "type": "integer", "minimum": 1, "maximum": 50, "default": 10,
                 "description": "Max results returned." },
             "rerank": { "type": "boolean", "default": true,
-                "description": "Apply cross-encoder reranking against the first query. Disable for lowest latency." },
+                "description": "Apply VoyageAI reranking against the first query (server-side, or locally with your own VOYAGE_API_KEY). Disable for lowest latency." },
+            "rerank_instructions": {
+                "type": "string",
+                "maxLength": 400,
+                "description": "Optional rerank instruction (max 400 chars). Guides relevance: emphasize aspects, filter document kinds, or disambiguate terms. Replaces the derived default instruction. Keep it terse — instruction tokens are multiplied by the candidate-pool size. See the midnight-advanced-search skill for guidance."
+            },
             "filters": filters_schema()
         },
         "required": ["queries"],
