@@ -243,6 +243,9 @@ pub struct PackageRef {
     pub kind: String,
     /// Package name.
     pub name: String,
+    /// Manifest-declared version of the package itself, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
     /// Manifest path relative to the source root, if known.
     pub manifest_path: Option<String>,
 }

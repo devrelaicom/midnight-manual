@@ -211,6 +211,7 @@ pub fn detect_module_package(body: &str) -> Option<PackageRef> {
     Some(PackageRef {
         kind: "compact".to_string(),
         name: first,
+        version: None,
         manifest_path: None,
     })
 }

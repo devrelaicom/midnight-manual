@@ -1467,6 +1467,7 @@ fn detect_package_ref(
     mn_content::package::detect(&abs, source_root).map(|p| mn_core::types::PackageRef {
         kind: p.kind,
         name: p.name,
+        version: p.version,
         manifest_path: Some(p.manifest_path.display().to_string()),
     })
 }

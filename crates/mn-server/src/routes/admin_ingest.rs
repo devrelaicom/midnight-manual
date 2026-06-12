@@ -912,8 +912,15 @@ async fn insert_new_document(
             _ => mn_core::types::PackageKind::Other,
         };
         Some(
-            package::upsert(pool, sv_id, kind, &pkg.name, None, pkg.manifest_path.as_deref())
-                .await?,
+            package::upsert(
+                pool,
+                sv_id,
+                kind,
+                &pkg.name,
+                pkg.version.as_deref(),
+                pkg.manifest_path.as_deref(),
+            )
+            .await?,
         )
     } else {
         None
