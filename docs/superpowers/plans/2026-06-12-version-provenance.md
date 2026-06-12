@@ -554,7 +554,7 @@ git commit -m "feat(mn-core): version interval parsing + match classification (0
 **Files:**
 - Modify: `crates/mn-core/src/scoring_policy.rs:87-96` (struct), `:130-134` (default), `:166-183` (validate list), tests `:283-292`
 
-- [ ] **Step 1: Write the failing test** (append to the tests module in `scoring_policy.rs`)
+- [x] **Step 1: Write the failing test** (append to the tests module in `scoring_policy.rs`)
 
 ```rust
 #[test]
@@ -579,12 +579,12 @@ fn rejects_legacy_unsatisfied_key() {
 }
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `cargo test -p mn-core scoring_policy 2>&1 | tail -5`
 Expected: FAIL — no field `floor` on `VersionMatchMultipliers`.
 
-- [ ] **Step 3: Implement.** Replace `VersionMatchMultipliers` (scoring_policy.rs:89-96):
+- [x] **Step 3: Implement.** Replace `VersionMatchMultipliers` (scoring_policy.rs:89-96):
 
 ```rust
 /// `[version_match]` — multipliers when query-side version filters are checked
@@ -607,9 +607,9 @@ pub struct VersionMatchMultipliers {
 
 Update `Default` (`:130-134`) to `satisfies: 1.15, neutral: 1.00, floor: 0.30, patch_step: 0.05, minor_step: 0.15`. In `validate_finite` (`:166-183`) replace the `version_match.unsatisfied` entry with three entries (`floor`, `patch_step`, `minor_step`) and bump the array size `[(&str, f64); 16]` → `18`. Update the old test `rejects_negative_neutral_or_unsatisfied` to mutate `floor` instead of `unsatisfied` (rename it `rejects_negative_neutral_or_floor`). `cargo build -p mn-core` will flag every other `unsatisfied` use — fix them as Task 3 directs (scoring.rs) or temporarily `todo!()`-free by completing Task 3 before pushing.
 
-- [ ] **Step 4: Run** — `cargo test -p mn-core scoring_policy` → PASS (scoring.rs may not compile yet; that is Task 3 — if so, do Tasks 2+3 as one commit).
+- [x] **Step 4: Run** — `cargo test -p mn-core scoring_policy` → PASS (scoring.rs may not compile yet; that is Task 3 — if so, do Tasks 2+3 as one commit).
 
-- [ ] **Step 5: Commit** (possibly squashed with Task 3)
+- [x] **Step 5: Commit** (possibly squashed with Task 3)
 
 ```bash
 git add crates/mn-core/src/scoring_policy.rs
@@ -623,7 +623,7 @@ git commit -m "feat(mn-core): version_match policy knobs floor/patch_step/minor_
 **Files:**
 - Modify: `crates/mn-core/src/scoring.rs` (remove `VersionQuery` + `version_match_multiplier`; new input struct; `ConfidenceFactors` fields; `score()` signature; tests)
 
-- [ ] **Step 1: Write the failing tests** (replace `version_match_boosts_penalizes_and_neutral` and add):
+- [x] **Step 1: Write the failing tests** (replace `version_match_boosts_penalizes_and_neutral` and add):
 
 ```rust
 #[test]
@@ -665,9 +665,9 @@ fn multiplier_for_class_scales_with_distance(/* spec §3.3 */) {
 }
 ```
 
-- [ ] **Step 2: Run to verify failure** — `cargo test -p mn-core scoring 2>&1 | tail -5` → compile errors (expected).
+- [x] **Step 2: Run to verify failure** — `cargo test -p mn-core scoring 2>&1 | tail -5` → compile errors (expected).
 
-- [ ] **Step 3: Implement.**
+- [x] **Step 3: Implement.**
 
 1. Delete `VersionQuery` (scoring.rs:25-33) and `version_match_multiplier` (scoring.rs:161-195). Keep `LanguageTargetQueryFactor` (`:36-43`) — it remains the echo type.
 2. Add after `LanguageTargetQueryFactor`:
@@ -739,9 +739,9 @@ and the factors fill becomes:
 
 6. Fix remaining mn-core tests: `trust_clamps_when_boost_exceeds_one` and `factors_serialize_with_spec_keys` construct a `VersionScoreInput { multiplier: 1.15, class: "satisfies", distance: None, query: Some(...) }` instead of `VersionQuery`. `factors_serialize_with_spec_keys` keeps asserting `v["language_target_query"]["version_constraint_satisfies"] == "0.31"`.
 
-- [ ] **Step 4: Run** — `cargo test -p mn-core` → PASS. (`cargo build -p mn-server` will now fail at search.rs:779/813 — that's Task 5.)
+- [x] **Step 4: Run** — `cargo test -p mn-core` → PASS. (`cargo build -p mn-server` will now fail at search.rs:779/813 — that's Task 5.)
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/mn-core/src
