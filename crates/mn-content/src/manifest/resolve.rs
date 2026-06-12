@@ -30,6 +30,8 @@ pub struct ResolvedLeaf {
     /// Provenance override merged from ancestor `provenance:` nodes.
     /// Frontmatter wins over this at ingest time; this only fills gaps.
     pub provenance_override: Provenance,
+    /// Inherited extraction opt-out (default false).
+    pub no_extract: bool,
 }
 
 /// Resolve a manifest into its leaves.
@@ -41,7 +43,7 @@ pub struct ResolvedLeaf {
 pub fn resolve(manifest: &Manifest, base: &Path) -> Vec<ResolvedLeaf> {
     let mut out = Vec::new();
     let empty = serde_json::Map::new();
-    walk(base, &manifest.root, None, &empty, &mut out);
+    walk(base, &manifest.root, None, &empty, false, &mut out);
     out.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
     out
 }
@@ -51,6 +53,7 @@ fn walk(
     node: &super::ManifestNode,
     parent_url: Option<&str>,
     parent_prov: &serde_json::Map<String, serde_json::Value>,
+    parent_no_extract: bool,
     out: &mut Vec<ResolvedLeaf>,
 ) {
     let merged_prov = merge_prov(parent_prov, node.provenance.as_ref());
@@ -61,6 +64,10 @@ fn walk(
         (Some(s), _) => Some(s.as_str()),
         (None, p) => p,
     };
+
+    // A node's explicit `no_extract` overrides the inherited value; otherwise
+    // the ancestor's effective value flows down.
+    let inherited_no_extract = node.no_extract.unwrap_or(parent_no_extract);
 
     if let Some(file) = &node.file {
         // If this node has its own published_url, use it directly (no composition).
@@ -85,6 +92,7 @@ fn walk(
             published_url: final_url,
             source_url: None,
             provenance_override: prov_override,
+            no_extract: inherited_no_extract,
         });
     }
 
@@ -113,12 +121,13 @@ fn walk(
                 published_url: url,
                 source_url: None,
                 provenance_override: prov_override,
+                no_extract: inherited_no_extract,
             });
         }
     }
 
     for child in &node.children {
-        walk(base, child, inherited_url, &merged_prov, out);
+        walk(base, child, inherited_url, &merged_prov, inherited_no_extract, out);
     }
 }
 
@@ -439,5 +448,34 @@ root:
             leaves[0].published_url.as_deref(),
             Some("https://override.example.com/special/")
         );
+    }
+
+    #[test]
+    fn no_extract_inherits_and_leaf_overrides() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        std::fs::create_dir_all(base.join("docs")).unwrap();
+        std::fs::write(base.join("docs/a.compact"), "// a").unwrap();
+        std::fs::write(base.join("docs/b.compact"), "// b").unwrap();
+        let yaml = r"
+manifest_version: 1
+root:
+  path: docs
+  no_extract: true
+  children:
+    - file: docs/a.compact
+    - file: docs/b.compact
+      no_extract: false
+";
+        let m = Manifest::parse(yaml).unwrap();
+        let leaves = resolve(&m, base);
+        let by_path: std::collections::HashMap<PathBuf, bool> = leaves
+            .iter()
+            .map(|l| (l.rel_path.clone(), l.no_extract))
+            .collect();
+        // a inherits true from the root node
+        assert!(by_path[&PathBuf::from("docs/a.compact")]);
+        // b overrides to false
+        assert!(!by_path[&PathBuf::from("docs/b.compact")]);
     }
 }

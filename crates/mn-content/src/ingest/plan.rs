@@ -185,6 +185,8 @@ pub struct WalkContext<'a> {
     pub split: &'a FrontmatterSplit,
     /// Resolver-derived inheritance from the manifest.
     pub resolved: &'a crate::manifest::resolve::ResolvedLeaf,
+    /// Machine-extracted version provenance (computed by the caller; spec §1).
+    pub extracted: Provenance,
     /// Filesystem modification timestamp at walk time (`None` if the OS
     /// could not supply `mtime`).
     pub source_modified_at: Option<time::OffsetDateTime>,
@@ -314,6 +316,7 @@ impl PlanBuilder {
             frontmatter: walked.split.frontmatter.clone(),
             provenance: merge_provenance(
                 &walked.split.provenance,
+                &walked.extracted,
                 &walked.resolved.provenance_override,
             ),
             char_count: walked.content.chars().count(),
@@ -329,42 +332,48 @@ impl PlanBuilder {
     }
 }
 
-/// Frontmatter wins per-field; ancestor `resolved` fills only the gaps.
-fn merge_provenance(frontmatter: &Provenance, ancestor: &Provenance) -> Provenance {
+/// Most-specific wins: frontmatter > extracted > manifest ancestor (spec §1.2).
+fn merge_provenance(
+    frontmatter: &Provenance,
+    extracted: &Provenance,
+    ancestor: &Provenance,
+) -> Provenance {
+    overlay(frontmatter, &overlay(extracted, ancestor))
+}
+
+/// `top` wins per-field over `base`; non-empty lists replace wholesale.
+fn overlay(top: &Provenance, base: &Provenance) -> Provenance {
     let default = Provenance::default();
-    let mut out = ancestor.clone();
-    if frontmatter.attribution != default.attribution {
-        out.attribution = frontmatter.attribution;
+    let mut out = base.clone();
+    if top.attribution != default.attribution {
+        out.attribution = top.attribution;
     }
-    if frontmatter.verified != default.verified {
-        out.verified = frontmatter.verified;
+    if top.verified != default.verified {
+        out.verified = top.verified;
     }
-    if frontmatter.verified_by != default.verified_by {
-        out.verified_by.clone_from(&frontmatter.verified_by);
+    if top.verified_by != default.verified_by {
+        out.verified_by.clone_from(&top.verified_by);
     }
-    if frontmatter.verified_at != default.verified_at {
-        out.verified_at = frontmatter.verified_at;
+    if top.verified_at != default.verified_at {
+        out.verified_at = top.verified_at;
     }
-    if frontmatter.verification_notes != default.verification_notes {
-        out.verification_notes
-            .clone_from(&frontmatter.verification_notes);
+    if top.verification_notes != default.verification_notes {
+        out.verification_notes.clone_from(&top.verification_notes);
     }
-    if !frontmatter.language_targets.is_empty() {
-        out.language_targets
-            .clone_from(&frontmatter.language_targets);
+    if !top.language_targets.is_empty() {
+        out.language_targets.clone_from(&top.language_targets);
     }
-    if !frontmatter.sdk_dependencies.is_empty() {
-        out.sdk_dependencies
-            .clone_from(&frontmatter.sdk_dependencies);
+    if !top.sdk_dependencies.is_empty() {
+        out.sdk_dependencies.clone_from(&top.sdk_dependencies);
     }
-    if frontmatter.deprecation != default.deprecation {
-        out.deprecation.clone_from(&frontmatter.deprecation);
+    if top.deprecation != default.deprecation {
+        out.deprecation.clone_from(&top.deprecation);
     }
-    if !frontmatter.tags.is_empty() {
-        out.tags.clone_from(&frontmatter.tags);
+    if !top.tags.is_empty() {
+        out.tags.clone_from(&top.tags);
     }
-    if frontmatter.content_type != default.content_type {
-        out.content_type = frontmatter.content_type;
+    if top.content_type != default.content_type {
+        out.content_type = top.content_type;
     }
     out
 }
@@ -442,6 +451,7 @@ mod tests {
             published_url: None,
             source_url: None,
             provenance_override: Provenance::default(),
+            no_extract: false,
         };
         let ctx = WalkContext {
             path: PathBuf::from(path),
@@ -449,6 +459,7 @@ mod tests {
             content,
             split: &split,
             resolved: &leaf,
+            extracted: Provenance::default(),
             source_modified_at: None,
             package: None,
         };
@@ -637,6 +648,7 @@ mod tests {
             published_url: None,
             source_url: None,
             provenance_override: Provenance::default(),
+            no_extract: false,
         };
         let ctx = WalkContext {
             path: PathBuf::from("x.md"),
@@ -644,6 +656,7 @@ mod tests {
             content: "# B",
             split: &split,
             resolved: &leaf,
+            extracted: Provenance::default(),
             source_modified_at: None,
             package: None,
         };
@@ -742,6 +755,7 @@ mod tests {
             published_url: Some("https://docs.example.com/a/".to_owned()),
             source_url: Some("https://github.com/x/y/blob/main/a.md".to_owned()),
             provenance_override: Provenance::default(),
+            no_extract: false,
         };
         let mut b = empty_builder();
         let split = split_frontmatter("# A\n\nbody");
@@ -751,6 +765,7 @@ mod tests {
             content: "# A\n\nbody",
             split: &split,
             resolved: &leaf,
+            extracted: Provenance::default(),
             source_modified_at: None,
             package: None,
         };
@@ -799,6 +814,7 @@ mod tests {
             published_url: None,
             source_url: None,
             provenance_override: Provenance::default(),
+            no_extract: false,
         };
         let ctx = WalkContext {
             path: PathBuf::from("src/lib.rs"),
@@ -806,6 +822,7 @@ mod tests {
             content: code,
             split: &split,
             resolved: &leaf,
+            extracted: Provenance::default(),
             source_modified_at: None,
             package: None,
         };
@@ -824,6 +841,41 @@ mod tests {
             chunks.iter().all(|c| c.heading_path.is_empty()),
             "code chunks should have empty heading_path"
         );
+    }
+
+    #[test]
+    fn merge_precedence_frontmatter_extracted_manifest() {
+        use mn_core::provenance::{LanguageTarget, Provenance};
+        let fm = Provenance {
+            language_targets: vec![LanguageTarget {
+                name: "compact".into(),
+                version_constraint: Some(">=0.30".into()),
+            }],
+            ..Provenance::default()
+        };
+        let extracted = Provenance {
+            language_targets: vec![LanguageTarget {
+                name: "compact".into(),
+                version_constraint: Some(">=0.23".into()),
+            }],
+            sdk_dependencies: vec![mn_core::provenance::SdkDependency {
+                kind: "npm".into(),
+                name: "@midnight-ntwrk/midnight-js".into(),
+                version_constraint: Some("^1.4.0".into()),
+            }],
+            ..Provenance::default()
+        };
+        let manifest = Provenance::attributed_to(mn_core::provenance::Attribution::Foundation);
+        let merged = merge_provenance(&fm, &extracted, &manifest);
+        // frontmatter beats extracted
+        assert_eq!(merged.language_targets[0].version_constraint.as_deref(), Some(">=0.30"));
+        // extracted fills what frontmatter lacks
+        assert_eq!(merged.sdk_dependencies.len(), 1);
+        // manifest fills what both lack
+        assert_eq!(merged.attribution, mn_core::provenance::Attribution::Foundation);
+        // no frontmatter → extracted wins the lists
+        let merged2 = merge_provenance(&Provenance::default(), &extracted, &manifest);
+        assert_eq!(merged2.language_targets[0].version_constraint.as_deref(), Some(">=0.23"));
     }
 }
 
@@ -897,6 +949,7 @@ mod proptests {
                     published_url: None,
                     source_url: None,
                     provenance_override: Provenance::default(),
+                    no_extract: false,
                 };
                 let ctx = WalkContext {
                     path: PathBuf::from(&p),
@@ -904,6 +957,7 @@ mod proptests {
                     content: &body,
                     split: &split,
                     resolved: &leaf,
+                    extracted: Provenance::default(),
                     source_modified_at: None,
                     package: None,
                 };

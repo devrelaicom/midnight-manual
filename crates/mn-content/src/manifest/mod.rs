@@ -57,6 +57,10 @@ pub struct ManifestNode {
     /// Optional provenance override merged with frontmatter at ingest time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provenance: Option<serde_json::Value>,
+    /// Disable pipeline version extraction for this subtree (spec §1.3).
+    /// Inheritable; a child's explicit value overrides the ancestor's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_extract: Option<bool>,
     /// Per-node glob include filter (applies when `path:` is set; ignored otherwise).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub include: Vec<String>,

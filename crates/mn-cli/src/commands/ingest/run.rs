@@ -404,6 +404,8 @@ async fn run_inner(
             content: &doc.content,
             split: &doc.split,
             resolved: &doc.resolved,
+            // Task 10 fills machine-extracted provenance; empty for now.
+            extracted: Provenance::default(),
             source_modified_at: doc.source_modified_at,
             package: detect_package_ref(&source_root, &doc.rel_path, &doc.content),
         };
