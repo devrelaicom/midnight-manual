@@ -20,6 +20,7 @@ pub mod rerank;
 pub mod scoring;
 pub mod scoring_policy;
 pub mod types;
+pub mod version_match;
 
 /// Crate version stamped at build time.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

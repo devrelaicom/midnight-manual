@@ -22,16 +22,6 @@ pub enum RelevanceSource {
     Rerank,
 }
 
-/// Query-side language-target constraint, as supplied in `filters.language_target`.
-#[derive(Debug, Clone, Copy)]
-pub struct VersionQuery<'a> {
-    /// Language name to match against the chunk's `language_targets`.
-    pub name: &'a str,
-    /// Concrete version the caller wants satisfied (e.g. `"0.31"`). `None`
-    /// means "no version preference" and yields a neutral multiplier.
-    pub version_constraint_satisfies: Option<&'a str>,
-}
-
 /// The query-side language target echoed into [`ConfidenceFactors`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LanguageTargetQueryFactor {
@@ -40,6 +30,20 @@ pub struct LanguageTargetQueryFactor {
     /// Concrete version the query asked to be satisfied.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version_constraint_satisfies: Option<String>,
+}
+
+/// Precomputed version-match input for [`ScoringPolicy::score`] (spec §3.5).
+/// Computed by the search route from the mode + per-facet classification.
+#[derive(Debug, Clone)]
+pub struct VersionScoreInput {
+    /// The multiplier to apply to trust.
+    pub multiplier: f64,
+    /// `"satisfies" | "near_miss" | "silent" | "unknown"`.
+    pub class: &'static str,
+    /// Component distance for near misses.
+    pub distance: Option<u32>,
+    /// Echo of the query-side element that drove the outcome.
+    pub query: Option<LanguageTargetQueryFactor>,
 }
 
 /// Per-factor breakdown of a result's trust + confidence, rich enough to write
@@ -74,6 +78,12 @@ pub struct ConfidenceFactors {
     pub language_targets_chunk: Vec<LanguageTarget>,
     /// The version-match multiplier applied.
     pub version_match_multiplier: f64,
+    /// Match class, present only when the request carried a version filter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version_match_class: Option<&'static str>,
+    /// Near-miss component distance, when applicable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version_distance: Option<u32>,
     /// Which relevance term fed the blend.
     pub relevance_source: RelevanceSource,
     /// The normalized relevance term used in the blend.
@@ -152,45 +162,20 @@ impl ScoringPolicy {
         (-age / self.freshness.half_life_days).exp()
     }
 
-    /// The version-match multiplier plus the factors needed to explain it.
-    ///
-    /// Neutral when the query carries no version constraint or the chunk
-    /// declares no matching-language target; `satisfies` when at least one
-    /// matching target satisfies the requested version; `unsatisfied` when
-    /// matching targets exist but none satisfy it.
+    /// Map a [`crate::version_match::MatchClass`] to its trust multiplier
+    /// using the `[version_match]` policy knobs (spec §3.3): linear steps with
+    /// a floor. `Breaking` maps to `floor` for completeness — callers drop
+    /// Breaking candidates before scoring.
     #[must_use]
-    pub fn version_match_multiplier(
-        &self,
-        query: Option<&VersionQuery<'_>>,
-        chunk_targets: &[LanguageTarget],
-    ) -> f64 {
-        let Some(q) = query else {
-            return self.version_match.neutral;
-        };
-        let Some(wanted) = q.version_constraint_satisfies else {
-            return self.version_match.neutral;
-        };
-        let Some(candidate) = parse_version(wanted) else {
-            return self.version_match.neutral;
-        };
-        let matching: Vec<&LanguageTarget> = chunk_targets
-            .iter()
-            .filter(|t| t.name.eq_ignore_ascii_case(q.name))
-            .collect();
-        if matching.is_empty() {
-            return self.version_match.neutral;
-        }
-        // A matching target with no version constraint applies to every version,
-        // so it satisfies any concrete request.
-        let any_satisfied = matching.iter().any(|t| {
-            t.version_constraint.as_ref().is_none_or(|req| {
-                semver::VersionReq::parse(req).is_ok_and(|r| r.matches(&candidate))
-            })
-        });
-        if any_satisfied {
-            self.version_match.satisfies
-        } else {
-            self.version_match.unsatisfied
+    pub fn version_multiplier(&self, class: &crate::version_match::MatchClass) -> f64 {
+        use crate::version_match::MatchClass as C;
+        let m = &self.version_match;
+        match class {
+            C::Satisfies => m.satisfies,
+            C::Unknown => m.neutral,
+            C::Breaking => m.floor,
+            C::NearMissPatch(d) => m.patch_step.mul_add(-f64::from(*d), 1.0).max(m.floor),
+            C::NearMissMinor(d) => m.minor_step.mul_add(-f64::from(*d), 1.0).max(m.floor),
         }
     }
 
@@ -213,7 +198,7 @@ impl ScoringPolicy {
     pub fn score(
         &self,
         provenance: &Provenance,
-        query: Option<&VersionQuery<'_>>,
+        version: Option<&VersionScoreInput>,
         age_days: i64,
         relevance: f64,
         relevance_source: RelevanceSource,
@@ -227,8 +212,7 @@ impl ScoringPolicy {
         } else {
             1.0
         };
-        let version_match_multiplier =
-            self.version_match_multiplier(query, &provenance.language_targets);
+        let version_match_multiplier = version.map_or(self.version_match.neutral, |v| v.multiplier);
 
         let raw_trust = attribution_multiplier
             * verification_multiplier
@@ -249,12 +233,11 @@ impl ScoringPolicy {
             freshness_multiplier,
             deprecation: provenance.deprecation.is_deprecated,
             deprecation_multiplier,
-            language_target_query: query.map(|q| LanguageTargetQueryFactor {
-                name: q.name.to_owned(),
-                version_constraint_satisfies: q.version_constraint_satisfies.map(str::to_owned),
-            }),
+            language_target_query: version.and_then(|v| v.query.clone()),
             language_targets_chunk: provenance.language_targets.clone(),
             version_match_multiplier,
+            version_match_class: version.map(|v| v.class),
+            version_distance: version.and_then(|v| v.distance),
             relevance_source,
             relevance_multiplier,
         };
@@ -389,39 +372,41 @@ mod tests {
     }
 
     #[test]
-    fn version_match_boosts_penalizes_and_neutral(/* #6 */) {
+    fn score_applies_precomputed_version_input(/* spec §3.5 */) {
         let p = policy();
-        let mut prov = prov_with(Attribution::Foundation);
-        prov.language_targets = vec![LanguageTarget {
-            name: "compact".into(),
-            version_constraint: Some(">=0.23".into()),
-        }];
-
-        let satisfies = VersionQuery {
-            name: "compact",
-            version_constraint_satisfies: Some("0.31"),
+        let prov = prov_with(Attribution::Foundation);
+        let vin = VersionScoreInput {
+            multiplier: 0.85,
+            class: "near_miss",
+            distance: Some(1),
+            query: Some(LanguageTargetQueryFactor {
+                name: "compact".into(),
+                version_constraint_satisfies: Some("0.31".into()),
+            }),
         };
-        let m_sat = p.version_match_multiplier(Some(&satisfies), &prov.language_targets);
-        assert!((m_sat - p.version_match.satisfies).abs() < 1e-12);
+        let r = p.score(&prov, Some(&vin), 0, 0.5, RelevanceSource::Rrf);
+        assert!((r.factors.version_match_multiplier - 0.85).abs() < 1e-12);
+        assert_eq!(r.factors.version_match_class, Some("near_miss"));
+        assert_eq!(r.factors.version_distance, Some(1));
+        // absent input → neutral, fields omitted
+        let r2 = p.score(&prov, None, 0, 0.5, RelevanceSource::Rrf);
+        assert!((r2.factors.version_match_multiplier - 1.0).abs() < 1e-12);
+        assert_eq!(r2.factors.version_match_class, None);
+        let v = serde_json::to_value(&r2.factors).unwrap();
+        assert!(v.get("version_match_class").is_none());
+        assert!(v.get("version_distance").is_none());
+    }
 
-        let misses = VersionQuery {
-            name: "compact",
-            version_constraint_satisfies: Some("0.10"),
-        };
-        let m_miss = p.version_match_multiplier(Some(&misses), &prov.language_targets);
-        assert!((m_miss - p.version_match.unsatisfied).abs() < 1e-12);
-
-        // No language_targets on the chunk → neutral.
-        let m_neutral = p.version_match_multiplier(Some(&satisfies), &[]);
-        assert!((m_neutral - p.version_match.neutral).abs() < 1e-12);
-
-        // No query constraint → neutral.
-        let no_constraint = VersionQuery {
-            name: "compact",
-            version_constraint_satisfies: None,
-        };
-        let m_no = p.version_match_multiplier(Some(&no_constraint), &prov.language_targets);
-        assert!((m_no - p.version_match.neutral).abs() < 1e-12);
+    #[test]
+    fn multiplier_for_class_scales_with_distance(/* spec §3.3 */) {
+        use crate::version_match::MatchClass;
+        let p = policy();
+        assert!((p.version_multiplier(&MatchClass::Satisfies) - 1.15).abs() < 1e-12);
+        assert!((p.version_multiplier(&MatchClass::Unknown) - 1.00).abs() < 1e-12);
+        assert!((p.version_multiplier(&MatchClass::NearMissPatch(2)) - 0.90).abs() < 1e-12);
+        assert!((p.version_multiplier(&MatchClass::NearMissMinor(3)) - 0.55).abs() < 1e-12);
+        // floor clamps
+        assert!((p.version_multiplier(&MatchClass::NearMissMinor(20)) - 0.30).abs() < 1e-12);
     }
 
     #[test]
@@ -436,11 +421,16 @@ mod tests {
             name: "compact".into(),
             version_constraint: Some(">=0.23".into()),
         }];
-        let q = VersionQuery {
-            name: "compact",
-            version_constraint_satisfies: Some("0.31"),
+        let vin = VersionScoreInput {
+            multiplier: 1.15,
+            class: "satisfies",
+            distance: None,
+            query: Some(LanguageTargetQueryFactor {
+                name: "compact".into(),
+                version_constraint_satisfies: Some("0.31".into()),
+            }),
         };
-        let r = p.score(&prov, Some(&q), 0, 1.0, RelevanceSource::Rrf);
+        let r = p.score(&prov, Some(&vin), 0, 1.0, RelevanceSource::Rrf);
         assert!((r.trust_score - 1.0).abs() < 1e-12, "trust should clamp to 1.0");
         assert!((0.0..=1.0).contains(&r.confidence));
     }
@@ -481,11 +471,16 @@ mod tests {
             name: "compact".into(),
             version_constraint: Some(">=0.23".into()),
         }];
-        let q = VersionQuery {
-            name: "compact",
-            version_constraint_satisfies: Some("0.31"),
+        let vin = VersionScoreInput {
+            multiplier: 1.15,
+            class: "satisfies",
+            distance: None,
+            query: Some(LanguageTargetQueryFactor {
+                name: "compact".into(),
+                version_constraint_satisfies: Some("0.31".into()),
+            }),
         };
-        let r = p.score(&prov, Some(&q), 14, 0.873, RelevanceSource::Rerank);
+        let r = p.score(&prov, Some(&vin), 14, 0.873, RelevanceSource::Rerank);
         let v = serde_json::to_value(&r.factors).unwrap();
         assert_eq!(v["attribution"], "foundation");
         assert_eq!(v["verified"], true);

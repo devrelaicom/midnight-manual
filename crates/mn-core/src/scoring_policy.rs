@@ -82,17 +82,21 @@ pub struct DeprecationParams {
     pub penalty_multiplier: f64,
 }
 
-/// `[version_match]` — multipliers when query-side `language_target` constraint
-/// is checked against the chunk's `provenance.language_targets`.
+/// `[version_match]` — multipliers when query-side version filters are checked
+/// against the chunk's declared version constraints (spec §3.4).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VersionMatchMultipliers {
     /// Chunk's target satisfies the query constraint.
     pub satisfies: f64,
-    /// No constraint provided / target absent. Neutral.
+    /// No constraint provided / target absent / unknowable. Neutral.
     pub neutral: f64,
-    /// Chunk's target does not satisfy the query constraint.
-    pub unsatisfied: f64,
+    /// Lower clamp on the permissive near-miss penalty (replaces `unsatisfied`).
+    pub floor: f64,
+    /// Penalty subtracted per patch-level distance step (permissive mode).
+    pub patch_step: f64,
+    /// Penalty subtracted per minor-level distance step (permissive mode).
+    pub minor_step: f64,
 }
 
 /// `[blend]` — exponents in the geometric-mean blend `trust^w_t * relevance^w_r`.
@@ -130,7 +134,9 @@ impl Default for ScoringPolicy {
             version_match: VersionMatchMultipliers {
                 satisfies: 1.15,
                 neutral: 1.00,
-                unsatisfied: 0.70,
+                floor: 0.30,
+                patch_step: 0.05,
+                minor_step: 0.15,
             },
             blend: BlendWeights {
                 trust_weight: 0.55,
@@ -163,7 +169,7 @@ impl ScoringPolicy {
     }
 
     fn validate_finite(&self) -> Result<(), ScoringPolicyError> {
-        let weights: [(&str, f64); 16] = [
+        let weights: [(&str, f64); 18] = [
             ("attribution.foundation", self.attribution.foundation),
             ("attribution.partner", self.attribution.partner),
             ("attribution.third_party", self.attribution.third_party),
@@ -177,7 +183,9 @@ impl ScoringPolicy {
             ("deprecation.penalty_multiplier", self.deprecation.penalty_multiplier),
             ("version_match.satisfies", self.version_match.satisfies),
             ("version_match.neutral", self.version_match.neutral),
-            ("version_match.unsatisfied", self.version_match.unsatisfied),
+            ("version_match.floor", self.version_match.floor),
+            ("version_match.patch_step", self.version_match.patch_step),
+            ("version_match.minor_step", self.version_match.minor_step),
             ("blend.trust_weight", self.blend.trust_weight),
             ("blend.relevance_weight", self.blend.relevance_weight),
         ];
@@ -280,15 +288,42 @@ mod tests {
     }
 
     #[test]
-    fn rejects_negative_neutral_or_unsatisfied() {
+    fn rejects_negative_neutral_or_floor() {
         for mutate in [
             |p: &mut ScoringPolicy| p.version_match.neutral = -0.1,
-            |p: &mut ScoringPolicy| p.version_match.unsatisfied = -0.1,
+            |p: &mut ScoringPolicy| p.version_match.floor = -0.1,
         ] {
             let mut p = ScoringPolicy::default();
             mutate(&mut p);
             assert!(p.validate_finite().is_err());
         }
+    }
+
+    #[test]
+    fn version_match_knobs_v2() {
+        let p = ScoringPolicy::default();
+        assert!((p.version_match.satisfies - 1.15).abs() < 1e-12);
+        assert!((p.version_match.neutral - 1.00).abs() < 1e-12);
+        assert!((p.version_match.floor - 0.30).abs() < 1e-12);
+        assert!((p.version_match.patch_step - 0.05).abs() < 1e-12);
+        assert!((p.version_match.minor_step - 0.15).abs() < 1e-12);
+    }
+
+    #[test]
+    fn rejects_legacy_unsatisfied_key() {
+        // Hard cutover: a stale policy TOML still carrying `unsatisfied` must fail
+        // loudly at startup. Inject the stale key INTO the existing
+        // `[version_match]` table so the failure is raised by
+        // `deny_unknown_fields` (the real guard) rather than an incidental
+        // duplicate-table-header error.
+        let body = toml::to_string(&ScoringPolicy::default())
+            .unwrap()
+            .replace("[version_match]", "[version_match]\nunsatisfied = 0.7");
+        let err = ScoringPolicy::parse(&body).unwrap_err();
+        assert!(
+            matches!(err, ScoringPolicyError::Parse(_)),
+            "stale `unsatisfied` key must fail loudly: {err:?}"
+        );
     }
 
     #[test]

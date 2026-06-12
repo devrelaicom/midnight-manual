@@ -1025,21 +1025,42 @@ async fn run_filtered(
     token: &str,
     filters: serde_json::Value,
 ) -> serde_json::Value {
+    run_filtered_mode(pool, token, filters, None).await
+}
+
+/// Like [`run_filtered`] but pins `version_match: "strict"`, so the version
+/// facets hard-filter (SQL name gate + drop non-satisfying) — the FR-033
+/// contract that the permissive default deliberately relaxes to a soft ranking
+/// signal.
+async fn run_filtered_strict(
+    pool: &sqlx::PgPool,
+    token: &str,
+    filters: serde_json::Value,
+) -> serde_json::Value {
+    run_filtered_mode(pool, token, filters, Some("strict")).await
+}
+
+async fn run_filtered_mode(
+    pool: &sqlx::PgPool,
+    token: &str,
+    filters: serde_json::Value,
+    version_match: Option<&str>,
+) -> serde_json::Value {
     let app = app::build_resolved(pool.clone(), cfg())
         .await
         .expect("build app");
-    post_search(
-        app,
-        serde_json::json!({
-            "query": token,
-            "vector": unit_vector(0.271),
-            "client_embedding_model": "voyage-code-3@1",
-            "code_mode": "off",
-            "limit": 100,
-            "filters": filters,
-        }),
-    )
-    .await
+    let mut body = serde_json::json!({
+        "query": token,
+        "vector": unit_vector(0.271),
+        "client_embedding_model": "voyage-code-3@1",
+        "code_mode": "off",
+        "limit": 100,
+        "filters": filters,
+    });
+    if let Some(vm) = version_match {
+        body["version_match"] = serde_json::Value::from(vm);
+    }
+    post_search(app, body).await
 }
 
 #[tokio::test]
@@ -1148,16 +1169,19 @@ async fn and_across_keys_excludes_on_any_miss() {
 #[tokio::test]
 async fn semver_filters_language_target_and_sdk_dependency() {
     // Acceptance #11 / FR-033: version_satisfies is evaluated server-side for
-    // language_target and sdk_dependency.
+    // language_target and sdk_dependency. This asserts the HARD-FILTER contract
+    // (name gate + drop non-satisfying), which is `version_match: "strict"`
+    // since the permissive default deliberately relaxes the name-mismatch case
+    // to a neutral ranking signal rather than an exclusion.
     let h = common::boot().await;
     let (chunk, _slug, _pkg, token) = seed_filter_fixture(&h.pool).await;
 
     // language_target: chunk targets compact >=0.23.
-    assert!(contains_chunk(&run_filtered(&h.pool, &token, serde_json::json!({ "language_target": { "any_of": [{ "name": "compact", "version_satisfies": "0.31" }] } })).await, chunk));
-    assert!(!contains_chunk(&run_filtered(&h.pool, &token, serde_json::json!({ "language_target": { "any_of": [{ "name": "compact", "version_satisfies": "0.10" }] } })).await, chunk));
-    // name mismatch excludes.
+    assert!(contains_chunk(&run_filtered_strict(&h.pool, &token, serde_json::json!({ "language_target": { "any_of": [{ "name": "compact", "version_satisfies": "0.31" }] } })).await, chunk));
+    assert!(!contains_chunk(&run_filtered_strict(&h.pool, &token, serde_json::json!({ "language_target": { "any_of": [{ "name": "compact", "version_satisfies": "0.10" }] } })).await, chunk));
+    // name mismatch excludes (strict name gate).
     assert!(!contains_chunk(
-        &run_filtered(
+        &run_filtered_strict(
             &h.pool,
             &token,
             serde_json::json!({ "language_target": { "any_of": [{ "name": "rust" }] } })
@@ -1167,8 +1191,8 @@ async fn semver_filters_language_target_and_sdk_dependency() {
     ));
 
     // sdk_dependency: chunk declares npm @midnight-ntwrk/midnight-js >=1.0.0.
-    assert!(contains_chunk(&run_filtered(&h.pool, &token, serde_json::json!({ "sdk_dependency": { "any_of": [{ "kind": "npm", "name": "@midnight-ntwrk/midnight-js", "version_satisfies": "1.4.0" }] } })).await, chunk));
-    assert!(!contains_chunk(&run_filtered(&h.pool, &token, serde_json::json!({ "sdk_dependency": { "any_of": [{ "kind": "npm", "name": "@midnight-ntwrk/midnight-js", "version_satisfies": "0.9.0" }] } })).await, chunk));
+    assert!(contains_chunk(&run_filtered_strict(&h.pool, &token, serde_json::json!({ "sdk_dependency": { "any_of": [{ "kind": "npm", "name": "@midnight-ntwrk/midnight-js", "version_satisfies": "1.4.0" }] } })).await, chunk));
+    assert!(!contains_chunk(&run_filtered_strict(&h.pool, &token, serde_json::json!({ "sdk_dependency": { "any_of": [{ "kind": "npm", "name": "@midnight-ntwrk/midnight-js", "version_satisfies": "0.9.0" }] } })).await, chunk));
 }
 
 #[tokio::test]
@@ -1372,4 +1396,295 @@ async fn wrong_code_vector_dim_400() {
             .contains("code_vector"),
         "error names the bad field: {v}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// FR-033 / spec §3: strict vs permissive version matching.
+//
+// `seed_scored` provides two chunks under a shared, unique FTS token: `high`
+// declares `compact >=0.23` (a version-bearing language_target) and `low`
+// declares no provenance targets at all (a "silent" chunk). That is exactly the
+// declaring-vs-silent pair these tests need; the version-match scenarios below
+// reuse it, and the near-miss scenario seeds its own constraint.
+// ---------------------------------------------------------------------------
+
+/// Locate a result by chunk id and return its `confidence_factors` object.
+fn factors_for(v: &serde_json::Value, id: Uuid) -> Option<&serde_json::Value> {
+    v["results"]
+        .as_array()?
+        .iter()
+        .find(|r| r["chunk_id"].as_str() == Some(id.to_string().as_str()))
+        .map(|r| &r["scores"]["confidence_factors"])
+}
+
+#[tokio::test]
+async fn permissive_is_default_and_soft() {
+    // Scenario 1: with no `version_match` field, the mode defaults to permissive.
+    // A satisfied language_target filter keeps BOTH the declaring chunk (boosted,
+    // class "satisfies") and the silent chunk (neutral, class "silent").
+    let h = common::boot().await;
+    let (high, low, token) = seed_scored(&h.pool).await;
+    let app = app::build_resolved(h.pool.clone(), cfg())
+        .await
+        .expect("build app");
+
+    let v = post_search(
+        app,
+        serde_json::json!({
+            "query": token,
+            "vector": unit_vector(0.314),
+            "client_embedding_model": "voyage-code-3@1",
+            "code_mode": "off",
+            "limit": 50,
+            "filters": { "language_target": { "any_of": [{ "name": "compact", "version_satisfies": "0.31" }] } },
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        v["search_metadata"]["version_match"], "permissive",
+        "absent version_match must echo permissive"
+    );
+
+    let hi = factors_for(&v, high).expect("declaring chunk present under permissive");
+    assert_eq!(hi["version_match_class"], "satisfies");
+    assert!(
+        hi["version_match_multiplier"].as_f64().unwrap() > 1.0,
+        "satisfied target should boost above neutral, got {}",
+        hi["version_match_multiplier"]
+    );
+
+    let lo = factors_for(&v, low).expect("silent chunk still returns under permissive");
+    assert_eq!(lo["version_match_class"], "silent");
+    assert!(
+        (lo["version_match_multiplier"].as_f64().unwrap() - 1.0).abs() < 1e-9,
+        "silent chunk is neutral (1.0), got {}",
+        lo["version_match_multiplier"]
+    );
+}
+
+#[tokio::test]
+async fn permissive_drops_breaking() {
+    // Scenario 2: requesting "0.10" against the chunk's `>=0.23` is a 0.x minor
+    // mismatch — Breaking — so permissive drops the declaring chunk. The silent
+    // chunk (no matching-name target) survives.
+    let h = common::boot().await;
+    let (high, low, token) = seed_scored(&h.pool).await;
+    let app = app::build_resolved(h.pool.clone(), cfg())
+        .await
+        .expect("build app");
+
+    let v = post_search(
+        app,
+        serde_json::json!({
+            "query": token,
+            "vector": unit_vector(0.314),
+            "client_embedding_model": "voyage-code-3@1",
+            "code_mode": "off",
+            "limit": 50,
+            "filters": { "language_target": { "any_of": [{ "name": "compact", "version_satisfies": "0.10" }] } },
+        }),
+    )
+    .await;
+
+    assert!(!contains_chunk(&v, high), "permissive must drop the breaking-mismatch chunk");
+    assert!(contains_chunk(&v, low), "the silent chunk must still return");
+}
+
+#[tokio::test]
+async fn permissive_near_miss_penalized() {
+    // Scenario 3: a chunk constrained to `>=1.4.0, <1.5.0` (covers 1.4.x) versus a
+    // request for "1.5.0" is one minor past the nearest member — NearMissMinor(1).
+    // Permissive keeps it, penalized by minor_step (0.15) × distance (1) = 0.85.
+    let h = common::boot().await;
+    let (chunk, token) = seed_near_miss(&h.pool).await;
+    let app = app::build_resolved(h.pool.clone(), cfg())
+        .await
+        .expect("build app");
+
+    let v = post_search(
+        app,
+        serde_json::json!({
+            "query": token,
+            "vector": unit_vector(0.629),
+            "client_embedding_model": "voyage-code-3@1",
+            "code_mode": "off",
+            "limit": 50,
+            "filters": { "language_target": { "any_of": [{ "name": "compact", "version_satisfies": "1.5.0" }] } },
+        }),
+    )
+    .await;
+
+    let f = factors_for(&v, chunk).expect("near-miss chunk present under permissive");
+    assert_eq!(f["version_match_class"], "near_miss");
+    assert_eq!(f["version_distance"].as_u64().unwrap(), 1);
+    assert!(
+        (f["version_match_multiplier"].as_f64().unwrap() - 0.85).abs() < 1e-9,
+        "minor near-miss at distance 1 = 0.85, got {}",
+        f["version_match_multiplier"]
+    );
+}
+
+#[tokio::test]
+async fn strict_mode_preserves_hard_filtering() {
+    // Scenario 4: strict mode restores the SQL name gate + drop-unless-Satisfies.
+    // A satisfied request returns ONLY the declaring chunk (the silent chunk is
+    // excluded by the name gate); a breaking request returns nothing.
+    let h = common::boot().await;
+    let (high, low, token) = seed_scored(&h.pool).await;
+
+    let satisfied = {
+        let app = app::build_resolved(h.pool.clone(), cfg())
+            .await
+            .expect("build app");
+        post_search(
+            app,
+            serde_json::json!({
+                "query": token,
+                "vector": unit_vector(0.314),
+                "client_embedding_model": "voyage-code-3@1",
+                "code_mode": "off",
+                "limit": 50,
+                "version_match": "strict",
+                "filters": { "language_target": { "any_of": [{ "name": "compact", "version_satisfies": "0.31" }] } },
+            }),
+        )
+        .await
+    };
+    assert_eq!(satisfied["search_metadata"]["version_match"], "strict");
+    assert!(contains_chunk(&satisfied, high), "satisfying chunk returns under strict");
+    assert!(!contains_chunk(&satisfied, low), "strict name gate excludes the silent chunk");
+
+    let breaking = {
+        let app = app::build_resolved(h.pool.clone(), cfg())
+            .await
+            .expect("build app");
+        post_search(
+            app,
+            serde_json::json!({
+                "query": token,
+                "vector": unit_vector(0.314),
+                "client_embedding_model": "voyage-code-3@1",
+                "code_mode": "off",
+                "limit": 50,
+                "version_match": "strict",
+                "filters": { "language_target": { "any_of": [{ "name": "compact", "version_satisfies": "0.10" }] } },
+            }),
+        )
+        .await
+    };
+    // The name gate keeps the declaring chunk in the pool, but strict drops it as
+    // non-Satisfies; the silent chunk was never in the pool. Zero results.
+    assert!(
+        !contains_chunk(&breaking, high) && !contains_chunk(&breaking, low),
+        "strict + breaking request yields no version-bearing matches"
+    );
+}
+
+#[tokio::test]
+async fn range_request_accepted() {
+    // Scenario 5: a range `version_satisfies` validates and matches the declaring
+    // chunk via interval intersection (`>=0.23` ∩ `>=0.23` is non-empty).
+    let h = common::boot().await;
+    let (high, _low, token) = seed_scored(&h.pool).await;
+    let app = app::build_resolved(h.pool.clone(), cfg())
+        .await
+        .expect("build app");
+
+    let v = post_search(
+        app,
+        serde_json::json!({
+            "query": token,
+            "vector": unit_vector(0.314),
+            "client_embedding_model": "voyage-code-3@1",
+            "code_mode": "off",
+            "limit": 50,
+            "filters": { "language_target": { "any_of": [{ "name": "compact", "version_satisfies": ">=0.23" }] } },
+        }),
+    )
+    .await;
+
+    let f = factors_for(&v, high).expect("range request matches the declaring chunk");
+    assert_eq!(f["version_match_class"], "satisfies");
+}
+
+#[tokio::test]
+async fn invalid_version_match_value_422s() {
+    // Scenario 6: an unknown `version_match` enum value is rejected by serde
+    // inside the `Json<SearchRequest>` extractor, so axum answers 422
+    // (JsonDataError) with its default plain-text body — exactly as every other
+    // bare-enum field on this route (mode/code_mode/rerank) does for an invalid
+    // variant. The app's 400 `invalid_request` JSON envelope is reserved for
+    // semantic `validate()` failures (wrong vector dim, empty queries, …), which
+    // run only after a successful deserialization, so it does not apply here.
+    let h = common::boot().await;
+    let _ = seed(&h.pool).await;
+    let app = app::build_resolved(h.pool.clone(), cfg())
+        .await
+        .expect("build app");
+
+    let (status, _body) = post_search_raw(
+        app,
+        serde_json::json!({
+            "query": "anything",
+            "vector": unit_vector(0.11),
+            "client_embedding_model": "voyage-code-3@1",
+            "code_mode": "off",
+            "version_match": "fuzzy",
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+/// Seed one verified Foundation chunk whose `compact` language target is
+/// constrained to `>=1.4.0, <1.5.0` (covers 1.4.x only) under a unique FTS
+/// token. Returns `(chunk_id, token)`. Used by the near-miss penalty test.
+async fn seed_near_miss(pool: &sqlx::PgPool) -> (Uuid, String) {
+    let model_id = embedding_model::upsert(pool, "voyage-code-3", 1, 1024, "voyageai")
+        .await
+        .unwrap();
+    let slug = format!("near-miss-test-{}", Uuid::new_v4());
+    let source_id = source::insert(pool, &slug, "NearMiss", SourceKind::DocsSite, None, 5)
+        .await
+        .unwrap();
+    let (sv_id, _) = source_version::create_building(pool, source_id, model_id, None, "0.1.0", "h")
+        .await
+        .unwrap();
+    let root = node::insert(pool, sv_id, None, NodeKind::Root, "root", 0)
+        .await
+        .unwrap();
+
+    let token = format!("nearmisstok{}", Uuid::new_v4().simple());
+    let content = format!("{token} near miss scoring content");
+    let vector = unit_vector(0.629);
+
+    let provenance = Provenance {
+        attribution: Attribution::Foundation,
+        verified: true,
+        verified_by: Some("midnight-foundation".into()),
+        language_targets: vec![LanguageTarget {
+            name: "compact".into(),
+            version_constraint: Some(">=1.4.0, <1.5.0".into()),
+        }],
+        ..Provenance::default()
+    };
+
+    let chunk = seed_scored_chunk(
+        pool,
+        sv_id,
+        root,
+        model_id,
+        "near.md",
+        &provenance,
+        Some(OffsetDateTime::now_utc() - Duration::days(14)),
+        &content,
+        &vector,
+        0,
+    )
+    .await;
+
+    source_version::finalize(pool, sv_id).await.unwrap();
+    (chunk, token)
 }

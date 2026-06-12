@@ -15,7 +15,7 @@ use axum::routing::post;
 use axum::{Json, Router};
 use mn_core::error::{Error as CoreError, ErrorCode};
 use mn_core::provenance::Provenance;
-use mn_core::scoring::{self, ConfidenceFactors, RelevanceSource, ScoreResult, VersionQuery};
+use mn_core::scoring::{self, ConfidenceFactors, RelevanceSource, ScoreResult};
 use mn_retrieval::filters::SearchFilters;
 use pgvector::Vector;
 use serde::{Deserialize, Serialize};
@@ -97,6 +97,11 @@ pub struct SearchRequest {
     /// derived default wholesale, D4). Ignored when rerank is `"none"`.
     #[serde(default)]
     pub rerank_instructions: Option<String>,
+    /// Version-matching mode for the semver-bearing facets (spec §3): strict
+    /// hard-filters; permissive (default) biases, dropping only breaking
+    /// mismatches among version-declaring content.
+    #[serde(default)]
+    pub version_match: mn_retrieval::filters::VersionMatchMode,
 }
 
 /// Whether the code-vector ranked list joins the RRF pool (D5/D6).
@@ -266,6 +271,8 @@ pub struct SearchMetadata {
     pub sort_by: SortBy,
     /// The effective code_mode applied (request value or mode-derived default).
     pub code_mode: CodeMode,
+    /// The version-matching mode applied (echoes the request; default permissive).
+    pub version_match: mn_retrieval::filters::VersionMatchMode,
     /// Outcome of the inline rerank stage (spec §1), reported on every response.
     pub rerank: RerankMetadata,
 }
@@ -648,8 +655,14 @@ async fn search(
         // for the general list).
         let (vector_hits, vector_latency_ms): (Vec<(Uuid, f64)>, f64) = if run_general_vector {
             let t0 = std::time::Instant::now();
-            let hits = match vector_search(&state.pool, &q.vector, &req.filters, corpus_model_id)
-                .await
+            let hits = match vector_search(
+                &state.pool,
+                &q.vector,
+                &req.filters,
+                req.version_match,
+                corpus_model_id,
+            )
+            .await
             {
                 Ok(hits) => hits,
                 Err(e) => {
@@ -668,7 +681,14 @@ async fn search(
         let (code_hits, code_vector_latency_ms): (Vec<(Uuid, f64)>, f64) = if run_code_vector {
             let t = std::time::Instant::now();
             let id = code_model_id.expect("validated above");
-            let hits = match code_vector_search(&state.pool, &q.code_vector, &req.filters, id).await
+            let hits = match code_vector_search(
+                &state.pool,
+                &q.code_vector,
+                &req.filters,
+                req.version_match,
+                id,
+            )
+            .await
             {
                 Ok(hits) => hits,
                 Err(e) => {
@@ -686,7 +706,15 @@ async fn search(
 
         let (fts_hits, fts_latency_ms): (Vec<Uuid>, f64) = if run_fts {
             let t1 = std::time::Instant::now();
-            let hits = match fts_search(&state.pool, &q.text, &req.filters, corpus_model_id).await {
+            let hits = match fts_search(
+                &state.pool,
+                &q.text,
+                &req.filters,
+                req.version_match,
+                corpus_model_id,
+            )
+            .await
+            {
                 Ok(hits) => hits,
                 Err(e) => {
                     tracing::warn!(request_id = rid, error = %e, query_index = i, "fts search failed");
@@ -772,19 +800,7 @@ async fn search(
         }
     };
 
-    // Query-side version constraint for the scoring boost (borrows from
-    // req.filters), built once from the first `language_target` element. The
-    // full multi-element semver match is applied separately by
-    // `semver_post_match`; this preserves the prior single-target boost.
-    let version_query = req
-        .filters
-        .language_target
-        .any_of
-        .first()
-        .map(|lt| VersionQuery {
-            name: &lt.name,
-            version_constraint_satisfies: lt.version_satisfies.as_deref(),
-        });
+    let mode = req.version_match;
     let now = OffsetDateTime::now_utc();
 
     // Score each candidate in fused order. Rows missing (deleted since the
@@ -794,12 +810,15 @@ async fn search(
         let Some(row) = rows.get(&chunk_id) else {
             continue;
         };
-        // Apply the semver-bearing filter dimensions (language_target /
-        // sdk_dependency, #11/FR-033) that SQL can't express. The scalar
-        // dimensions were already enforced during candidate retrieval.
-        if !req.filters.semver_post_match(&row.provenance) {
-            continue;
-        }
+        // Version-bearing facets (FR-033, spec §3): classify, then drop per
+        // mode — strict drops everything not Satisfies; permissive drops only
+        // Breaking. Scalar facets were already enforced in SQL.
+        let outcomes = req.filters.version_outcomes(&row.provenance);
+        let version_input =
+            match version_decision(&req.filters, outcomes, mode, &state.scoring_policy) {
+                VersionDecision::Drop => continue,
+                VersionDecision::Score(v) => v,
+            };
         // BTreeSet iterates ascending, so matched_queries is sorted.
         let matched_queries: Vec<usize> = matched
             .get(&chunk_id)
@@ -812,7 +831,7 @@ async fn search(
         let age_days = age_in_days(now, row.source_modified_at, row.ingested_at);
         let score = state.scoring_policy.score(
             &row.provenance,
-            version_query.as_ref(),
+            version_input.as_ref(),
             age_days,
             relevance,
             RelevanceSource::Rrf,
@@ -924,6 +943,7 @@ async fn search(
             filtered_by_confidence,
             sort_by: req.sort_by,
             code_mode,
+            version_match: req.version_match,
             rerank: rerank_meta.meta,
         },
     })
@@ -1010,11 +1030,17 @@ async fn rerank_stage(
         None
     } else {
         let code_exclusive = matches!(req.code_mode, Some(CodeMode::Exclusive));
-        let version = req.filters.language_target.any_of.first().and_then(|lt| {
-            lt.version_satisfies
-                .as_deref()
-                .map(|v| (lt.name.as_str(), v))
-        });
+        let version = req
+            .filters
+            .language_target
+            .any_of
+            .iter()
+            .find(|lt| lt.version_satisfies.is_some())
+            .and_then(|lt| {
+                lt.version_satisfies
+                    .as_deref()
+                    .map(|v| (lt.name.as_str(), v))
+            });
         mn_core::rerank::default_instruction(code_exclusive, version)
     };
     let instruction = agent_instruction.or(derived.as_deref());
@@ -1368,6 +1394,7 @@ async fn vector_search(
     pool: &sqlx::PgPool,
     vector: &[f32],
     filters: &SearchFilters,
+    mode: mn_retrieval::filters::VersionMatchMode,
     corpus_model_id: Uuid,
 ) -> Result<Vec<(Uuid, f64)>, sqlx::Error> {
     // pgvector cosine distance: 0 = identical, 2 = opposite. Top 100 per query.
@@ -1375,7 +1402,7 @@ async fn vector_search(
         QueryBuilder::new("SELECT chunk.id, 1 - (chunk.embedding <=> ");
     qb.push_bind(Vector::from(vector.to_vec()));
     qb.push(") AS similarity FROM chunk JOIN source_version sv ON sv.id = chunk.source_version_id");
-    push_filter_joins(&mut qb, filters);
+    push_filter_joins(&mut qb, filters, mode);
     qb.push(
         " WHERE chunk.embedding IS NOT NULL AND chunk.status = 'ready' AND sv.is_active = true",
     );
@@ -1384,7 +1411,7 @@ async fn vector_search(
     // into candidates — their vectors aren't comparable to the query's.
     qb.push(" AND sv.embedding_model_id = ");
     qb.push_bind(corpus_model_id);
-    push_filter_predicates(&mut qb, filters);
+    push_filter_predicates(&mut qb, filters, mode);
     qb.push(" ORDER BY chunk.embedding <=> ");
     qb.push_bind(Vector::from(vector.to_vec()));
     qb.push(" LIMIT 100");
@@ -1411,19 +1438,20 @@ async fn code_vector_search(
     pool: &sqlx::PgPool,
     vector: &[f32],
     filters: &SearchFilters,
+    mode: mn_retrieval::filters::VersionMatchMode,
     code_model_id: Uuid,
 ) -> Result<Vec<(Uuid, f64)>, sqlx::Error> {
     let mut qb: QueryBuilder<Postgres> =
         QueryBuilder::new("SELECT chunk.id, 1 - (chunk.code_embedding <=> ");
     qb.push_bind(Vector::from(vector.to_vec()));
     qb.push(") AS similarity FROM chunk JOIN source_version sv ON sv.id = chunk.source_version_id");
-    push_filter_joins(&mut qb, filters);
+    push_filter_joins(&mut qb, filters, mode);
     qb.push(
         " WHERE chunk.code_embedding IS NOT NULL AND chunk.status = 'ready' AND sv.is_active = true",
     );
     qb.push(" AND sv.code_embedding_model_id = ");
     qb.push_bind(code_model_id);
-    push_filter_predicates(&mut qb, filters);
+    push_filter_predicates(&mut qb, filters, mode);
     qb.push(" ORDER BY chunk.code_embedding <=> ");
     qb.push_bind(Vector::from(vector.to_vec()));
     qb.push(" LIMIT 100");
@@ -1453,12 +1481,13 @@ async fn fts_search(
     pool: &sqlx::PgPool,
     text: &str,
     filters: &SearchFilters,
+    mode: mn_retrieval::filters::VersionMatchMode,
     corpus_model_id: Uuid,
 ) -> Result<Vec<Uuid>, sqlx::Error> {
     let mut qb: QueryBuilder<Postgres> = QueryBuilder::new(
         "SELECT chunk.id FROM chunk JOIN source_version sv ON sv.id = chunk.source_version_id",
     );
-    push_filter_joins(&mut qb, filters);
+    push_filter_joins(&mut qb, filters, mode);
     qb.push(" WHERE chunk.tsvector @@ websearch_to_tsquery('english', ");
     qb.push_bind(text.to_owned());
     qb.push(") AND chunk.status = 'ready' AND sv.is_active = true");
@@ -1466,7 +1495,7 @@ async fn fts_search(
     // an off-model active source_version must not contribute FTS candidates.
     qb.push(" AND sv.embedding_model_id = ");
     qb.push_bind(corpus_model_id);
-    push_filter_predicates(&mut qb, filters);
+    push_filter_predicates(&mut qb, filters, mode);
     qb.push(" ORDER BY ts_rank(chunk.tsvector, websearch_to_tsquery('english', ");
     qb.push_bind(text.to_owned());
     qb.push(")) DESC LIMIT 100");
@@ -1486,7 +1515,8 @@ async fn fts_search(
 // Not `const`: `SetMatch::is_empty` is deliberately a non-const method in
 // `mn-retrieval`, so this can't be a `const fn` (unlike the old all-`Vec`
 // `SearchFilters`, whose `Vec::is_empty` was const).
-fn needs_document_join(f: &SearchFilters) -> bool {
+fn needs_document_join(f: &SearchFilters, mode: mn_retrieval::filters::VersionMatchMode) -> bool {
+    use mn_retrieval::filters::VersionMatchMode;
     !f.attribution.is_empty()
         || f.verified.is_some()
         || f.deprecated.is_some()
@@ -1495,16 +1525,22 @@ fn needs_document_join(f: &SearchFilters) -> bool {
         || !f.language.is_empty()
         || !f.tags.is_empty()
         || !f.package.is_empty()
-        || !f.language_target.is_empty()
-        || !f.sdk_dependency.is_empty()
+        // language_target / sdk_dependency only gate in SQL under strict mode;
+        // permissive fetches provenance post-RRF, so they must not force the join.
+        || (mode == VersionMatchMode::Strict
+            && (!f.language_target.is_empty() || !f.sdk_dependency.is_empty()))
         || f.source_modified_at.is_some()
 }
 
 /// Append the JOINs required by the active SQL filter facets. Both candidate
 /// queries call this immediately after the `source_version` join so the alias
 /// set (`chunk`, `sv`, `d`, `s`, `p`) is consistent.
-fn push_filter_joins(qb: &mut QueryBuilder<'_, Postgres>, f: &SearchFilters) {
-    if needs_document_join(f) {
+fn push_filter_joins(
+    qb: &mut QueryBuilder<'_, Postgres>,
+    f: &SearchFilters,
+    mode: mn_retrieval::filters::VersionMatchMode,
+) {
+    if needs_document_join(f, mode) {
         qb.push(" JOIN document d ON d.id = chunk.document_id");
     }
     if !f.source_slug.is_empty() || !f.source_kind.is_empty() {
@@ -1521,13 +1557,18 @@ fn push_filter_joins(qb: &mut QueryBuilder<'_, Postgres>, f: &SearchFilters) {
 /// express: the column-backed string sets (`kind`, `language`, `source_slug`,
 /// `source_kind`), the provenance-backed enums (`attribution`, `content_type`),
 /// the bools (`verified`, `deprecated`), the array/JSONB sets (`tags`,
-/// `heading_path`, `symbol`), `package` tuples, the `language_target`/
-/// `sdk_dependency` *name* membership, and the temporal/numeric ranges
-/// (`ingested_at`, `source_modified_at`, `token_count`). The semver refinements
-/// on `language_target`/`sdk_dependency` (version constraints) can't be
-/// expressed in SQL and are applied post-fetch by
-/// [`SearchFilters::semver_post_match`].
-fn push_filter_predicates(qb: &mut QueryBuilder<'_, Postgres>, f: &SearchFilters) {
+/// `heading_path`, `symbol`), `package` tuples, and the temporal/numeric ranges
+/// (`ingested_at`, `source_modified_at`, `token_count`). The
+/// `language_target`/`sdk_dependency` *name* membership is gated to `mode ==
+/// Strict`: in permissive mode those facets are a pure ranking signal
+/// (classified post-RRF, spec §3.3), not a SQL hard filter. The semver
+/// refinements (version constraints) can't be expressed in SQL and are applied
+/// post-fetch by [`SearchFilters::version_outcomes`].
+fn push_filter_predicates(
+    qb: &mut QueryBuilder<'_, Postgres>,
+    f: &SearchFilters,
+    mode: mn_retrieval::filters::VersionMatchMode,
+) {
     // -- enum / open-set string facets backed by a column --
     push_text_set(qb, "d.kind", &f.kind);
     push_text_set(qb, "d.language", &f.language);
@@ -1577,9 +1618,12 @@ fn push_filter_predicates(qb: &mut QueryBuilder<'_, Postgres>, f: &SearchFilters
     // -- package: (kind,name) tuples (OR within any_of) --
     push_package(qb, &f.package);
 
-    // -- language_target / sdk_dependency: name membership in SQL --
-    push_language_target_names(qb, &f.language_target);
-    push_sdk_dependency_names(qb, &f.sdk_dependency);
+    // -- language_target / sdk_dependency: name membership in SQL (strict only;
+    //    permissive is a pure ranking signal, spec §3.3) --
+    if mode == mn_retrieval::filters::VersionMatchMode::Strict {
+        push_language_target_names(qb, &f.language_target);
+        push_sdk_dependency_names(qb, &f.sdk_dependency);
+    }
 
     // -- ranges --
     if let Some(r) = &f.ingested_at {
@@ -1759,6 +1803,114 @@ fn date_to_dt(d: time::Date) -> time::OffsetDateTime {
         .assume_utc()
 }
 
+/// What the version facets decided for one candidate.
+enum VersionDecision {
+    /// Candidate is removed (strict non-satisfies, or permissive Breaking).
+    Drop,
+    /// Candidate is scored with this input (`None` = no version filter).
+    Score(Option<mn_core::scoring::VersionScoreInput>),
+}
+
+/// Combine per-facet outcomes into a drop/score decision (spec §3.2/§3.3).
+/// Combined multiplier = min across constrained facets (worst offender).
+fn version_decision(
+    filters: &SearchFilters,
+    outcomes: mn_retrieval::filters::VersionOutcomes,
+    mode: mn_retrieval::filters::VersionMatchMode,
+    policy: &mn_core::scoring_policy::ScoringPolicy,
+) -> VersionDecision {
+    use mn_core::scoring::{LanguageTargetQueryFactor, VersionScoreInput};
+    use mn_core::version_match::MatchClass;
+    use mn_retrieval::filters::{FacetVersionOutcome, VersionMatchMode};
+
+    let constrained: Vec<FacetVersionOutcome> = [outcomes.language_target, outcomes.sdk_dependency]
+        .into_iter()
+        .flatten()
+        .collect();
+    if constrained.is_empty() {
+        return VersionDecision::Score(None);
+    }
+    match mode {
+        VersionMatchMode::Strict => {
+            // Anything not Satisfies (incl. Silent/Unknown) drops — unchanged
+            // hard-filter semantics.
+            let all_satisfy = constrained.iter().all(|o| {
+                matches!(
+                    o,
+                    FacetVersionOutcome::Classified {
+                        class: MatchClass::Satisfies,
+                        ..
+                    }
+                )
+            });
+            if !all_satisfy {
+                return VersionDecision::Drop;
+            }
+        }
+        VersionMatchMode::Permissive => {
+            if constrained.iter().any(|o| {
+                matches!(
+                    o,
+                    FacetVersionOutcome::Classified {
+                        class: MatchClass::Breaking,
+                        ..
+                    }
+                )
+            }) {
+                return VersionDecision::Drop;
+            }
+        }
+    }
+    // Per-facet multiplier; Silent → neutral. Track the worst (min) facet.
+    let facet_eval = |o: &FacetVersionOutcome| -> (f64, &'static str, Option<u32>) {
+        match o {
+            FacetVersionOutcome::Silent => (policy.version_match.neutral, "silent", None),
+            FacetVersionOutcome::Classified { class, .. } => {
+                let m = policy.version_multiplier(class);
+                let (label, dist) = match class {
+                    MatchClass::Satisfies => ("satisfies", None),
+                    MatchClass::NearMissPatch(d) | MatchClass::NearMissMinor(d) => {
+                        ("near_miss", Some(*d))
+                    }
+                    MatchClass::Unknown => ("unknown", None),
+                    MatchClass::Breaking => ("near_miss", None), // dropped above; unreachable
+                };
+                (m, label, dist)
+            }
+        }
+    };
+    let (multiplier, class, distance) = constrained
+        .iter()
+        .map(facet_eval)
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .expect("constrained is non-empty");
+    // Echo the language element that won (when the language facet is constrained).
+    let query = match outcomes.language_target {
+        Some(FacetVersionOutcome::Classified { element, .. }) => filters
+            .language_target
+            .any_of
+            .get(element)
+            .map(|lt| LanguageTargetQueryFactor {
+                name: lt.name.clone(),
+                version_constraint_satisfies: lt.version_satisfies.clone(),
+            }),
+        _ => filters
+            .language_target
+            .any_of
+            .first()
+            .map(|lt| LanguageTargetQueryFactor {
+                name: lt.name.clone(),
+                version_constraint_satisfies: lt.version_satisfies.clone(),
+            }),
+    };
+    VersionDecision::Score(Some(VersionScoreInput {
+        multiplier,
+        class,
+        distance,
+        query,
+    }))
+}
+
 #[cfg(test)]
 mod code_mode_tests {
     use super::{effective_code_mode, CodeMode, SearchMode};
@@ -1810,6 +1962,7 @@ mod tests {
             code_vector: None,
             rerank: None,
             rerank_instructions: None,
+            version_match: mn_retrieval::filters::VersionMatchMode::default(),
         }
     }
 
@@ -1936,12 +2089,15 @@ mod tests {
     }
 
     fn built_sql(filters: &SearchFilters) -> String {
+        // Strict mode so the helper still exercises the language_target /
+        // sdk_dependency name-gate path (permissive suppresses it in SQL).
+        let mode = mn_retrieval::filters::VersionMatchMode::Strict;
         let mut qb: sqlx::QueryBuilder<sqlx::Postgres> = sqlx::QueryBuilder::new(
             "SELECT chunk.id FROM chunk JOIN source_version sv ON sv.id = chunk.source_version_id",
         );
-        super::push_filter_joins(&mut qb, filters);
+        super::push_filter_joins(&mut qb, filters, mode);
         qb.push(" WHERE true");
-        super::push_filter_predicates(&mut qb, filters);
+        super::push_filter_predicates(&mut qb, filters, mode);
         qb.sql().to_owned()
     }
 
@@ -2014,6 +2170,8 @@ mod tests {
                     language_target_query: None,
                     language_targets_chunk: vec![],
                     version_match_multiplier: 1.0,
+                    version_match_class: None,
+                    version_distance: None,
                     relevance_source: RelevanceSource::Rrf,
                     relevance_multiplier: 0.0,
                 },
