@@ -5,10 +5,9 @@
 //! structured elements, a bare bool, or a range. Combination is AND across
 //! facets, OR within `any_of`, exclude `none_of`. The semver-bearing facets
 //! (`language_target`, `sdk_dependency`) carry a `version_satisfies` field
-//! evaluated in [`SearchFilters::semver_post_match`], not SQL.
+//! classified per-candidate in [`SearchFilters::version_outcomes`], not SQL.
 
 use mn_core::provenance::Provenance;
-use mn_core::scoring::parse_version;
 use serde::{Deserialize, Serialize};
 use time::Date;
 
@@ -121,6 +120,18 @@ pub struct NumericRange {
     /// Inclusive upper bound; `None` leaves the range open above.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max: Option<i64>,
+}
+
+/// Version-matching mode for the semver-bearing facets (spec §3). Default
+/// permissive: filters bias rather than restrict; only breaking mismatches drop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VersionMatchMode {
+    /// Hard semantics: SQL name gate + drop everything not Satisfies.
+    Strict,
+    /// Soft preference: no name gate; Breaking drops, near-misses are penalized.
+    #[default]
+    Permissive,
 }
 
 /// Top-level filter object. Every field defaults to empty/absent so a missing
@@ -271,45 +282,114 @@ impl SearchFilters {
         Ok(())
     }
 
-    /// Evaluate the semver refinements Postgres can't express against a chunk's
-    /// provenance. `language_target` / `sdk_dependency` use OR-within-`any_of`
-    /// semantics: the chunk passes if it matches at least one element (name +
-    /// version). Facets with empty `any_of` impose no constraint.
+    /// Classify a candidate's provenance against the version-bearing facets.
+    /// Callers must have run [`SearchFilters::validate`] (unparseable
+    /// `version_satisfies` values are treated as absent here).
     #[must_use]
-    pub fn semver_post_match(&self, provenance: &Provenance) -> bool {
-        if !self.language_target.any_of.is_empty() {
-            let ok = self.language_target.any_of.iter().any(|want| {
-                provenance.language_targets.iter().any(|have| {
-                    have.name.eq_ignore_ascii_case(&want.name)
-                        && version_satisfies(
-                            want.version_satisfies.as_deref(),
-                            have.version_constraint.as_deref(),
-                        )
-                })
-            });
-            if !ok {
-                return false;
+    pub fn version_outcomes(&self, provenance: &Provenance) -> VersionOutcomes {
+        let language_target =
+            if self.language_target.any_of.is_empty() {
+                None
+            } else {
+                best_facet_outcome(self.language_target.any_of.iter().enumerate().map(
+                    |(i, want)| {
+                        let constraints: Vec<Option<&str>> = provenance
+                            .language_targets
+                            .iter()
+                            .filter(|have| have.name.eq_ignore_ascii_case(&want.name))
+                            .map(|have| have.version_constraint.as_deref())
+                            .collect();
+                        (i, want.version_satisfies.as_deref(), constraints)
+                    },
+                ))
+            };
+        let sdk_dependency =
+            if self.sdk_dependency.any_of.is_empty() {
+                None
+            } else {
+                best_facet_outcome(self.sdk_dependency.any_of.iter().enumerate().map(
+                    |(i, want)| {
+                        let constraints: Vec<Option<&str>> = provenance
+                            .sdk_dependencies
+                            .iter()
+                            .filter(|have| {
+                                have.kind.eq_ignore_ascii_case(&want.kind) && have.name == want.name
+                            })
+                            .map(|have| have.version_constraint.as_deref())
+                            .collect();
+                        (i, want.version_satisfies.as_deref(), constraints)
+                    },
+                ))
+            };
+        VersionOutcomes {
+            language_target,
+            sdk_dependency,
+        }
+    }
+}
+
+/// Per-facet classification outcome for one candidate (spec §3.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FacetVersionOutcome {
+    /// The chunk declares no matching-name target for any requested element.
+    Silent,
+    /// Best classification across (element, matching target) pairs.
+    Classified {
+        /// The winning class.
+        class: mn_core::version_match::MatchClass,
+        /// Index into the facet's `any_of` of the winning element.
+        element: usize,
+    },
+}
+
+/// Outcomes for both semver-bearing facets; `None` = facet unconstrained.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VersionOutcomes {
+    /// `language_target` facet outcome.
+    pub language_target: Option<FacetVersionOutcome>,
+    /// `sdk_dependency` facet outcome.
+    pub sdk_dependency: Option<FacetVersionOutcome>,
+}
+
+/// Best classification across a facet's elements (spec §3.3). Each item is
+/// `(element idx, requested version, matching targets' constraints)`. Elements
+/// with no matching-name target contribute nothing; the facet is [`Silent`]
+/// only when no element matched any target's name.
+///
+/// [`Silent`]: FacetVersionOutcome::Silent
+fn best_facet_outcome<'t>(
+    elements: impl Iterator<Item = (usize, Option<&'t str>, Vec<Option<&'t str>>)>,
+) -> Option<FacetVersionOutcome> {
+    use mn_core::version_match::{class_rank, classify, parse_request, MatchClass};
+
+    let mut found_any_name = false;
+    let mut best: Option<(usize, MatchClass)> = None;
+    for (idx, requested, constraints) in elements {
+        if constraints.is_empty() {
+            continue;
+        }
+        found_any_name = true;
+        let parsed = requested.and_then(parse_request);
+        for c in constraints {
+            let class = match (&parsed, requested) {
+                (Some(p), _) => classify(p, c),
+                // name-only element (no version requested) → Satisfies
+                (None, None) => MatchClass::Satisfies,
+                // unparseable requested (validate() should prevent)
+                (None, Some(_)) => MatchClass::Unknown,
+            };
+            if best
+                .as_ref()
+                .is_none_or(|(_, b)| class_rank(&class) < class_rank(b))
+            {
+                best = Some((idx, class));
             }
         }
-        if !self.sdk_dependency.any_of.is_empty() {
-            // Exact `name` match (vs the case-insensitive language-target name
-            // above): package identifiers are canonical and case-significant
-            // (npm scoped names, crates.io), unlike free-form language labels.
-            let ok = self.sdk_dependency.any_of.iter().any(|want| {
-                provenance.sdk_dependencies.iter().any(|have| {
-                    have.kind.eq_ignore_ascii_case(&want.kind)
-                        && have.name == want.name
-                        && version_satisfies(
-                            want.version_satisfies.as_deref(),
-                            have.version_constraint.as_deref(),
-                        )
-                })
-            });
-            if !ok {
-                return false;
-            }
-        }
-        true
+    }
+    match best {
+        Some((element, class)) => Some(FacetVersionOutcome::Classified { class, element }),
+        None if found_any_name => None, // unreachable; kept for totality
+        None => Some(FacetVersionOutcome::Silent),
     }
 }
 
@@ -358,8 +438,14 @@ fn check_kind_enum<'a>(
 
 fn check_semver(key: &str, constraint: Option<&str>) -> Result<(), FilterError> {
     if let Some(c) = constraint {
-        if parse_version(c).is_none() {
-            return Err(FilterError::new(key, format!("`{c}` is not a valid version")));
+        if mn_core::version_match::parse_request(c).is_none() {
+            return Err(FilterError::new(
+                key,
+                format!(
+                    "`{c}` is not a valid version or range — pass the user's concrete \
+                     version (e.g. `0.31`) or a semver range (e.g. `>=0.23`)"
+                ),
+            ));
         }
     }
     Ok(())
@@ -387,19 +473,6 @@ fn check_temporal_range(key: &str, r: Option<&TemporalRange>) -> Result<(), Filt
     Ok(())
 }
 
-/// Does a requested version satisfy a chunk's declared constraint? `None`
-/// request always passes; an unparseable request is treated as no constraint
-/// (callers are expected to `validate()` first); an unconstrained chunk passes
-/// any request; a chunk constraint that fails to parse never satisfies.
-fn version_satisfies(requested: Option<&str>, chunk_constraint: Option<&str>) -> bool {
-    let Some(req) = requested else { return true };
-    let Some(candidate) = parse_version(req) else {
-        return true;
-    };
-    chunk_constraint
-        .is_none_or(|c| semver::VersionReq::parse(c).is_ok_and(|r| r.matches(&candidate)))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -407,6 +480,7 @@ mod tests {
 
     #[test]
     fn semver_post_match_filters_by_version() {
+        use mn_core::version_match::MatchClass;
         let prov = Provenance {
             language_targets: vec![LanguageTarget {
                 name: "compact".into(),
@@ -424,7 +498,13 @@ mod tests {
             },
             ..Default::default()
         };
-        assert!(satisfies.semver_post_match(&prov));
+        assert!(matches!(
+            satisfies.version_outcomes(&prov).language_target,
+            Some(FacetVersionOutcome::Classified {
+                class: MatchClass::Satisfies,
+                ..
+            })
+        ));
         let misses = SearchFilters {
             language_target: SetMatch {
                 any_of: vec![LanguageTargetMatch {
@@ -435,12 +515,20 @@ mod tests {
             },
             ..Default::default()
         };
-        assert!(!misses.semver_post_match(&prov));
+        assert!(matches!(
+            misses.version_outcomes(&prov).language_target,
+            Some(FacetVersionOutcome::Classified {
+                class: MatchClass::Breaking,
+                ..
+            })
+        ));
     }
 
     #[test]
     fn empty_filter_post_matches_anything() {
-        assert!(SearchFilters::default().semver_post_match(&Provenance::default()));
+        let out = SearchFilters::default().version_outcomes(&Provenance::default());
+        assert!(out.language_target.is_none());
+        assert!(out.sdk_dependency.is_none());
     }
 
     #[test]
@@ -556,6 +644,19 @@ mod tests {
             ..Default::default()
         };
         assert!(f.validate().is_err());
+        // Ranges are accepted now (not just concrete versions): a well-formed
+        // range alongside the garbage case above must still validate.
+        let ranged = SearchFilters {
+            language_target: SetMatch {
+                any_of: vec![LanguageTargetMatch {
+                    name: "compact".into(),
+                    version_satisfies: Some(">=0.23".into()),
+                }],
+                none_of: vec![],
+            },
+            ..Default::default()
+        };
+        assert!(ranged.validate().is_ok());
     }
 
     #[test]
@@ -615,5 +716,96 @@ mod tests {
         };
         let err = f.validate().unwrap_err();
         assert_eq!(err.facet, "package");
+    }
+
+    #[test]
+    fn accepts_range_version_satisfies() {
+        for val in [">=0.23", "^1.2", "~1.4.2", "0.31"] {
+            let f = SearchFilters {
+                language_target: SetMatch {
+                    any_of: vec![LanguageTargetMatch {
+                        name: "compact".into(),
+                        version_satisfies: Some(val.into()),
+                    }],
+                    none_of: vec![],
+                },
+                ..Default::default()
+            };
+            assert!(f.validate().is_ok(), "{val} should validate");
+        }
+        // empty interval still rejected
+        let f = SearchFilters {
+            language_target: SetMatch {
+                any_of: vec![LanguageTargetMatch {
+                    name: "compact".into(),
+                    version_satisfies: Some(">=2.0, <1.0".into()),
+                }],
+                none_of: vec![],
+            },
+            ..Default::default()
+        };
+        assert!(f.validate().is_err());
+    }
+
+    #[test]
+    fn version_outcomes_classify_per_facet() {
+        use mn_core::version_match::MatchClass;
+        let prov = Provenance {
+            language_targets: vec![mn_core::provenance::LanguageTarget {
+                name: "compact".into(),
+                version_constraint: Some(">=0.23".into()),
+            }],
+            ..Provenance::default()
+        };
+        let mk = |ver: &str| SearchFilters {
+            language_target: SetMatch {
+                any_of: vec![LanguageTargetMatch {
+                    name: "compact".into(),
+                    version_satisfies: Some(ver.into()),
+                }],
+                none_of: vec![],
+            },
+            ..Default::default()
+        };
+        // satisfies
+        let out = mk("0.31").version_outcomes(&prov);
+        assert!(matches!(
+            out.language_target,
+            Some(FacetVersionOutcome::Classified {
+                class: MatchClass::Satisfies,
+                element: 0
+            })
+        ));
+        assert!(out.sdk_dependency.is_none()); // unconstrained facet
+                                               // breaking (0.x minor mismatch)
+        let out = mk("0.10").version_outcomes(&prov);
+        assert!(matches!(
+            out.language_target,
+            Some(FacetVersionOutcome::Classified {
+                class: MatchClass::Breaking,
+                ..
+            })
+        ));
+        // silent: no matching-name target
+        let out = mk("0.31").version_outcomes(&Provenance::default());
+        assert!(matches!(out.language_target, Some(FacetVersionOutcome::Silent)));
+        // name-only element (no version) against a declaring chunk → Satisfies
+        let f = SearchFilters {
+            language_target: SetMatch {
+                any_of: vec![LanguageTargetMatch {
+                    name: "compact".into(),
+                    version_satisfies: None,
+                }],
+                none_of: vec![],
+            },
+            ..Default::default()
+        };
+        assert!(matches!(
+            f.version_outcomes(&prov).language_target,
+            Some(FacetVersionOutcome::Classified {
+                class: MatchClass::Satisfies,
+                ..
+            })
+        ));
     }
 }
