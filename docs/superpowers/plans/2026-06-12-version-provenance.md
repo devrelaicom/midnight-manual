@@ -25,7 +25,7 @@
 - Create: `crates/mn-core/src/version_match.rs`
 - Modify: `crates/mn-core/src/lib.rs` (add `pub mod version_match;` next to the existing `pub mod scoring;`)
 
-- [ ] **Step 1: Write the failing tests** (inside the new file; module skeleton + tests first)
+- [x] **Step 1: Write the failing tests** (inside the new file; module skeleton + tests first)
 
 Create `crates/mn-core/src/version_match.rs` with this skeleton and tests (implementation bodies `todo!()` for now):
 
@@ -265,12 +265,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `cargo test -p mn-core version_match 2>&1 | tail -5`
 Expected: panics on `todo!()` (or compile errors until lib.rs is updated — add `pub mod version_match;` first).
 
-- [ ] **Step 3: Implement** (replace the `todo!()` bodies)
+- [x] **Step 3: Implement** (replace the `todo!()` bodies)
 
 ```rust
 pub fn parse_request(raw: &str) -> Option<RequestedVersion> {
@@ -535,12 +535,12 @@ fn comparator_interval(c: &Comparator) -> Option<VersionInterval> {
 
 Note on `^0.J` partials: `^0.2` desugars to `[0.2.0, 0.3.0)` — the `min.unwrap_or(0) > 0` arm. Trust the proptest oracle to catch any caret/tilde partial-form slips and adjust arms until it is green.
 
-- [ ] **Step 4: Run to verify pass**
+- [x] **Step 4: Run to verify pass**
 
 Run: `cargo test -p mn-core version_match`
 Expected: all tests PASS including the proptest oracle. If the oracle finds a counterexample, fix the comparator arm it names — the oracle is right.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/mn-core/src/version_match.rs crates/mn-core/src/lib.rs
