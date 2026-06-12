@@ -1025,21 +1025,42 @@ async fn run_filtered(
     token: &str,
     filters: serde_json::Value,
 ) -> serde_json::Value {
+    run_filtered_mode(pool, token, filters, None).await
+}
+
+/// Like [`run_filtered`] but pins `version_match: "strict"`, so the version
+/// facets hard-filter (SQL name gate + drop non-satisfying) — the FR-033
+/// contract that the permissive default deliberately relaxes to a soft ranking
+/// signal.
+async fn run_filtered_strict(
+    pool: &sqlx::PgPool,
+    token: &str,
+    filters: serde_json::Value,
+) -> serde_json::Value {
+    run_filtered_mode(pool, token, filters, Some("strict")).await
+}
+
+async fn run_filtered_mode(
+    pool: &sqlx::PgPool,
+    token: &str,
+    filters: serde_json::Value,
+    version_match: Option<&str>,
+) -> serde_json::Value {
     let app = app::build_resolved(pool.clone(), cfg())
         .await
         .expect("build app");
-    post_search(
-        app,
-        serde_json::json!({
-            "query": token,
-            "vector": unit_vector(0.271),
-            "client_embedding_model": "voyage-code-3@1",
-            "code_mode": "off",
-            "limit": 100,
-            "filters": filters,
-        }),
-    )
-    .await
+    let mut body = serde_json::json!({
+        "query": token,
+        "vector": unit_vector(0.271),
+        "client_embedding_model": "voyage-code-3@1",
+        "code_mode": "off",
+        "limit": 100,
+        "filters": filters,
+    });
+    if let Some(vm) = version_match {
+        body["version_match"] = serde_json::Value::from(vm);
+    }
+    post_search(app, body).await
 }
 
 #[tokio::test]
@@ -1148,16 +1169,19 @@ async fn and_across_keys_excludes_on_any_miss() {
 #[tokio::test]
 async fn semver_filters_language_target_and_sdk_dependency() {
     // Acceptance #11 / FR-033: version_satisfies is evaluated server-side for
-    // language_target and sdk_dependency.
+    // language_target and sdk_dependency. This asserts the HARD-FILTER contract
+    // (name gate + drop non-satisfying), which is `version_match: "strict"`
+    // since the permissive default deliberately relaxes the name-mismatch case
+    // to a neutral ranking signal rather than an exclusion.
     let h = common::boot().await;
     let (chunk, _slug, _pkg, token) = seed_filter_fixture(&h.pool).await;
 
     // language_target: chunk targets compact >=0.23.
-    assert!(contains_chunk(&run_filtered(&h.pool, &token, serde_json::json!({ "language_target": { "any_of": [{ "name": "compact", "version_satisfies": "0.31" }] } })).await, chunk));
-    assert!(!contains_chunk(&run_filtered(&h.pool, &token, serde_json::json!({ "language_target": { "any_of": [{ "name": "compact", "version_satisfies": "0.10" }] } })).await, chunk));
-    // name mismatch excludes.
+    assert!(contains_chunk(&run_filtered_strict(&h.pool, &token, serde_json::json!({ "language_target": { "any_of": [{ "name": "compact", "version_satisfies": "0.31" }] } })).await, chunk));
+    assert!(!contains_chunk(&run_filtered_strict(&h.pool, &token, serde_json::json!({ "language_target": { "any_of": [{ "name": "compact", "version_satisfies": "0.10" }] } })).await, chunk));
+    // name mismatch excludes (strict name gate).
     assert!(!contains_chunk(
-        &run_filtered(
+        &run_filtered_strict(
             &h.pool,
             &token,
             serde_json::json!({ "language_target": { "any_of": [{ "name": "rust" }] } })
@@ -1167,8 +1191,8 @@ async fn semver_filters_language_target_and_sdk_dependency() {
     ));
 
     // sdk_dependency: chunk declares npm @midnight-ntwrk/midnight-js >=1.0.0.
-    assert!(contains_chunk(&run_filtered(&h.pool, &token, serde_json::json!({ "sdk_dependency": { "any_of": [{ "kind": "npm", "name": "@midnight-ntwrk/midnight-js", "version_satisfies": "1.4.0" }] } })).await, chunk));
-    assert!(!contains_chunk(&run_filtered(&h.pool, &token, serde_json::json!({ "sdk_dependency": { "any_of": [{ "kind": "npm", "name": "@midnight-ntwrk/midnight-js", "version_satisfies": "0.9.0" }] } })).await, chunk));
+    assert!(contains_chunk(&run_filtered_strict(&h.pool, &token, serde_json::json!({ "sdk_dependency": { "any_of": [{ "kind": "npm", "name": "@midnight-ntwrk/midnight-js", "version_satisfies": "1.4.0" }] } })).await, chunk));
+    assert!(!contains_chunk(&run_filtered_strict(&h.pool, &token, serde_json::json!({ "sdk_dependency": { "any_of": [{ "kind": "npm", "name": "@midnight-ntwrk/midnight-js", "version_satisfies": "0.9.0" }] } })).await, chunk));
 }
 
 #[tokio::test]
@@ -1585,15 +1609,21 @@ async fn range_request_accepted() {
 }
 
 #[tokio::test]
-async fn invalid_version_match_value_400s() {
-    // Scenario 6: an unknown `version_match` enum value is rejected at parse time.
+async fn invalid_version_match_value_422s() {
+    // Scenario 6: an unknown `version_match` enum value is rejected by serde
+    // inside the `Json<SearchRequest>` extractor, so axum answers 422
+    // (JsonDataError) with its default plain-text body — exactly as every other
+    // bare-enum field on this route (mode/code_mode/rerank) does for an invalid
+    // variant. The app's 400 `invalid_request` JSON envelope is reserved for
+    // semantic `validate()` failures (wrong vector dim, empty queries, …), which
+    // run only after a successful deserialization, so it does not apply here.
     let h = common::boot().await;
     let _ = seed(&h.pool).await;
     let app = app::build_resolved(h.pool.clone(), cfg())
         .await
         .expect("build app");
 
-    let (status, v) = post_search_raw(
+    let (status, _body) = post_search_raw(
         app,
         serde_json::json!({
             "query": "anything",
@@ -1605,8 +1635,7 @@ async fn invalid_version_match_value_400s() {
     )
     .await;
 
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(v["error"]["code"], "invalid_request");
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
 }
 
 /// Seed one verified Foundation chunk whose `compact` language target is
