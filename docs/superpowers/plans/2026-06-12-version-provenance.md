@@ -1320,7 +1320,7 @@ git commit -m "feat(mn-server): two-level facet drill for language_target/sdk_de
 **Files:**
 - Modify: `crates/mn-core/src/types.rs:241-248` (PackageRef), `crates/mn-content/src/package.rs` (DetectedPackage + detect), `crates/mn-content/src/code/compact.rs:211-215` (struct literal), `crates/mn-cli/src/commands/ingest/run.rs:1458-1472` (mapping), `crates/mn-server/src/routes/admin_ingest.rs:915` (upsert call)
 
-- [ ] **Step 1: Failing test** (append to `crates/mn-content/src/package.rs` tests):
+- [x] **Step 1: Failing test** (append to `crates/mn-content/src/package.rs` tests):
 
 ```rust
 #[test]
@@ -1346,9 +1346,9 @@ fn version_extracted_from_manifests() {
 }
 ```
 
-- [ ] **Step 2: Run to verify failure** — `cargo test -p mn-content package 2>&1 | tail -3` → no field `version`.
+- [x] **Step 2: Run to verify failure** — `cargo test -p mn-content package 2>&1 | tail -3` → no field `version`.
 
-- [ ] **Step 3: Implement.**
+- [x] **Step 3: Implement.**
 
 1. `DetectedPackage` gains `pub version: Option<String>` (doc: `/// [package].version / .version from the manifest, when declared.`). In `detect`, read it alongside the name: cargo arm `v.get("package").and_then(|p| p.get("version")).and_then(toml::Value::as_str).map(str::to_owned)`; npm arm `v.get("version").and_then(serde_json::Value::as_str).map(str::to_owned)`.
 2. `PackageRef` (types.rs:241-248) gains:
@@ -1366,9 +1366,9 @@ fn version_extracted_from_manifests() {
             package::upsert(pool, sv_id, kind, &pkg.name, pkg.version.as_deref(), pkg.manifest_path.as_deref())
 ```
 
-- [ ] **Step 4: Run** — `cargo test -p mn-content && cargo build --workspace` → PASS/builds.
+- [x] **Step 4: Run** — `cargo test -p mn-content && cargo build --workspace` → PASS/builds.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/mn-core/src/types.rs crates/mn-content/src crates/mn-cli/src crates/mn-server/src
