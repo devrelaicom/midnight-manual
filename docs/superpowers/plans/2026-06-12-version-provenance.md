@@ -1723,7 +1723,7 @@ git commit -m "feat(mn-content): three-layer provenance merge + no_extract manif
 - Modify: `crates/mn-cli/src/commands/ingest/run.rs` (walk loop :400-413, summary output, new helper near `detect_package_ref` :1458)
 - Test: `crates/mn-cli/src/commands/ingest/run.rs` tests module (next to the existing `detect_package_ref` tests :2078)
 
-- [ ] **Step 1: Failing test** (append to run.rs tests):
+- [x] **Step 1: Failing test** (append to run.rs tests):
 
 ```rust
 #[test]
@@ -1757,9 +1757,9 @@ fn extracted_provenance_for_code_files() {
 
 (Adjust the `DocumentKind` path to wherever the enum actually lives — `grep -rn "enum DocumentKind" crates/` first; it is the same type `WalkContext.kind` uses.)
 
-- [ ] **Step 2: Run to verify failure** — `cargo test -p mn-cli extracted_provenance 2>&1 | tail -3`.
+- [x] **Step 2: Run to verify failure** — `cargo test -p mn-cli extracted_provenance 2>&1 | tail -3`.
 
-- [ ] **Step 3: Implement.** Helper next to `detect_package_ref`:
+- [x] **Step 3: Implement.** Helper next to `detect_package_ref`:
 
 ```rust
 /// Machine-extract version provenance for one walked file (spec §1.1): code
@@ -1819,9 +1819,9 @@ Report counts: after `builder.finalize()`, compute and add to the `phase_done("c
 
 …emitted as `"docs_with_language_targets"` / `"docs_with_sdk_dependencies"` keys.
 
-- [ ] **Step 4: Run** — `cargo test -p mn-cli && cargo clippy -p mn-cli --all-targets -- -D warnings` → PASS.
+- [x] **Step 4: Run** — `cargo test -p mn-cli && cargo clippy -p mn-cli --all-targets -- -D warnings` → PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/mn-cli crates/mn-content
