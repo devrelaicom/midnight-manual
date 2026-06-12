@@ -34,6 +34,12 @@ See `CONSTITUTION.md` for non-negotiable principles. See `specs/001-rag-platform
 
 ## Recent Changes
 
+- 2026-06-11 — VoyageAI reranking: inline server rerank in `/v1/search`
+  (`rerank` = rerank-2.5 default | rerank-2.5-lite at half-rate billing | none;
+  degrade-and-flag on budget/provider failure; `MIDNIGHT_MANUAL_SERVER_RERANK`
+  kill switch), client placement auto-resolution (`VOYAGE_API_KEY` ⇒ local
+  BYOK), instruction-following (`rerank_instructions`, 400-char cap, derived
+  defaults), and full removal of the fastembed/ONNX reranker catalog.
 - 2026-06-10 — Contextualized dual embeddings: general corpus model moves to `voyage-context-3` (contextualized chunk embeddings); code chunks gain a second `voyage-code-3` vector (migration 0011, opt-out via start-run without `code_embedding_model`); search/CLI/MCP gain `code_mode` (on/off/exclusive) fused via RRF. Full corpus re-ingest required after deploy.
 - 2026-05-13 — `/sdd:plan` Phase 1: data-model, contracts (openapi.yaml + mcp-tools.json), quickstart generated. CLAUDE.md populated with v1 stack.
 - 2026-05-13 — Feature branch `001-rag-platform` created; v1 spec (117 FRs, 110 edge cases, 66 success criteria, 28 decisions) bridged from `discovery/SPEC.md` into the sdd workflow.

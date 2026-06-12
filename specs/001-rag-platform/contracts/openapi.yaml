@@ -1105,6 +1105,19 @@ components:
         min_confidence: { type: number, default: 0.0, minimum: 0.0, maximum: 1.0 }
         filters: { $ref: '#/components/schemas/SearchFilters' }
         include_scores: { type: boolean, default: true }
+        rerank:
+          type: string
+          enum: [rerank-2.5, rerank-2.5-lite, none]
+          default: rerank-2.5
+          description: >-
+            Server-side rerank model, or "none" to skip. Tokens are charged to the
+            caller's token budget (rerank-2.5-lite at half rate, rounded up).
+        rerank_instructions:
+          type: string
+          maxLength: 400
+          description: >-
+            Optional natural-language rerank instruction appended to the query;
+            replaces the derived default. Ignored when rerank is "none".
 
     SearchFilters:
       type: object
@@ -1426,6 +1439,15 @@ components:
                   vector_latency_ms: { type: integer }
             fts_zero_matches: { type: boolean }
             limit_capped: { type: boolean }
+            rerank:
+              type: object
+              required: [applied]
+              properties:
+                applied: { type: boolean }
+                model: { type: string, enum: [rerank-2.5, rerank-2.5-lite] }
+                reason:
+                  type: string
+                  enum: [not_requested, token_budget_exhausted, provider_error, disabled]
 
     ChunkResult:
       type: object
@@ -1465,6 +1487,7 @@ components:
             trust_score: { type: number, minimum: 0, maximum: 1 }
             confidence: { type: number, minimum: 0, maximum: 1 }
             confidence_factors: { $ref: '#/components/schemas/ConfidenceFactors' }
+            rerank_score: { type: number }
 
     ConfidenceFactors:
       type: object

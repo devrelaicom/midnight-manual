@@ -11,7 +11,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/built_with-Rust_1.91-CE412B" alt="Rust 1.91">
   <img src="https://img.shields.io/badge/interface-MCP_+_CLI_+_HTTP-4C6FFF" alt="MCP + CLI + HTTP">
-  <img src="https://img.shields.io/badge/models-remote_embed_%2B_local_rerank-2DBfA5" alt="models: remote embed, local rerank">
+  <img src="https://img.shields.io/badge/models-remote_embed_%2B_rerank-2DBfA5" alt="models: remote embed + rerank">
   <img src="https://img.shields.io/badge/telemetry-opt--out_%E2%80%A2_canary--enforced-6E56CF" alt="privacy">
   <img src="https://img.shields.io/badge/status-pre--production-E5A000" alt="pre-production">
 </p>
@@ -19,7 +19,7 @@
 `midnight-manual` is one Cargo workspace that ships three things that work together:
 
 - **`mnm` — a local MCP server.** Drop it into Claude Code, Codex, Cursor, or any MCP client and your assistant gains hybrid semantic search over the Midnight corpus, with reranking, source-aware confidence scoring, and document navigation.
-- **`mnm` — a developer & admin CLI.** Search the corpus from your terminal, inspect chunks and documents, manage local models, and (for maintainers) run the whole ingestion pipeline.
+- **`mnm` — a developer & admin CLI.** Search the corpus from your terminal, inspect chunks and documents, check the active embedding model, and (for maintainers) run the whole ingestion pipeline.
 - **`midnight-manual-server` — the cloud corpus.** An `axum` service backed by PostgreSQL + pgvector that hosts the indexed corpus and the search API. A hosted instance lives at **`https://midnight-manual.midnightntwrk.expert`** and is the compiled-in default — most users never run the server themselves.
 
 > [!WARNING]
@@ -51,7 +51,7 @@
 
 ## Quick start
 
-You need a [Rust toolchain](https://rustup.rs) (1.91+) — nothing else. The corpus is hosted, query embedding runs through VoyageAI (proxied by the hosted server), and the only model fetched to your machine is the local reranker, on demand. There is **no database, no API key, and no account** required to search.
+You need a [Rust toolchain](https://rustup.rs) (1.91+) — nothing else. The corpus is hosted, and both embedding and reranking run through VoyageAI (proxied by the hosted server) — **no model is fetched to your machine**. There is **no database, no API key, and no account** required to search.
 
 ### 1. Build the CLI from source
 
@@ -65,10 +65,10 @@ This produces two identical binaries, `midnight-manual` and its short alias `mnm
 
 ```bash
 install -m 0755 target/release/mnm ~/.local/bin/mnm   # or anywhere on $PATH
-mnm doctor                                            # verify reachability + model state
+mnm doctor                                            # verify reachability + rerank config
 ```
 
-`mnm doctor` checks that the cloud corpus is reachable, reports whether the local models are present, and flags anything misconfigured.
+`mnm doctor` checks that the cloud corpus is reachable, reports your reranking configuration, and flags anything misconfigured.
 
 ### 2. Search straight away
 
@@ -76,7 +76,7 @@ mnm doctor                                            # verify reachability + mo
 mnm search "how do I write a Compact contract with a sealed ledger?"
 ```
 
-`mnm search` returns ranked, source-attributed results straight away — each with a **confidence score** and a one-line provenance breakdown. Embedding runs through VoyageAI (proxied by the hosted server, so no key is needed), with no local model to download for a basic search. Add `--rerank` and the first reranked query fetches the `bge-reranker-base` cross-encoder once (~hundreds of MB) into your local cache.
+`mnm search` returns ranked, source-attributed results straight away — each with a **confidence score** and a one-line provenance breakdown. Both embedding and reranking run through VoyageAI (proxied by the hosted server, so no key is needed) — there is no local model to download. Reranking is **on by default** (VoyageAI `rerank-2.5`); pass `--rerank off` for lowest latency, or `--rerank local` to rerank with your own `VOYAGE_API_KEY`.
 
 ### 3. Install the MCP server into your AI client
 
@@ -142,7 +142,7 @@ Restart your client and ask it something Midnight-specific. It will reach for th
 
 ## The MCP server
 
-`mnm mcp serve` is a hand-rolled MCP server (JSON-RPC 2.0 framed over stdio) with **lazy model loading** — it starts in well under half a second and only loads the reranker the first time a reranking query needs it (the embedder is remote VoyageAI), so adding it to your client costs you nothing at idle.
+`mnm mcp serve` is a hand-rolled MCP server (JSON-RPC 2.0 framed over stdio) — it starts in well under half a second with no local models to load (both embedding and reranking are remote VoyageAI calls), so adding it to your client costs you nothing at idle.
 
 It exposes **13 tools**, grouped by what they do:
 
@@ -151,7 +151,7 @@ It exposes **13 tools**, grouped by what they do:
 | Tool | What it does |
 | --- | --- |
 | **`search`** | The simple surface: hybrid full-text + vector retrieval from a single `query` (switch `mode` to `fts` or `vector` to pin one half). `limit` defaults to 10, capped at 50. Every hit carries a confidence score and per-factor trust breakdown. |
-| **`advanced_search`** | Full-control retrieval: fuses 1–10 `queries` via RRF (HyDE / expansion / step-back), restricts by per-facet `filters` (source, attribution tier, language, package, symbol, freshness, …), switches `mode`, and toggles cross-encoder `rerank` (on by default). Call `facets` first to discover valid filter values. |
+| **`advanced_search`** | Full-control retrieval: fuses 1–10 `queries` via RRF (HyDE / expansion / step-back), restricts by per-facet `filters` (source, attribution tier, language, package, symbol, freshness, …), switches `mode`, toggles VoyageAI `rerank` (on by default), and accepts `rerank_instructions` (≤400 chars). Call `facets` first to discover valid filter values. |
 
 ### Read a hit in context
 
@@ -172,13 +172,13 @@ A search result is a chunk. These tools let your assistant pull exactly as much 
 | --- | --- |
 | **`list_sources`** | Enumerate corpus sources (paginated) — slug, display name, kind, active revision. The slugs feed `advanced_search` filters. |
 | **`facets`** | Discover the filter dimensions `advanced_search` accepts and the values present in the corpus — call it bare for the overview, or drill into one facet's full value list. |
-| **`status`** | Diagnose the retrieval setup: cloud reachability, auth state, both limit families (request rate + token budget), VoyageAI key validity, and reranker readiness. Call it when searches misbehave. |
+| **`status`** | Diagnose the retrieval setup: cloud reachability, auth state, both limit families (request rate + token budget), VoyageAI key validity, and rerank configuration. Call it when searches misbehave. |
 | **`install_search_skill`** | Install the Advanced Search Skill (`SKILL.md`) into your detected AI harness(es); reports the paths written and the per-harness reload step. |
 
 ### Why it's good
 
 - **Hybrid retrieval, not just vectors.** Lexical (PostgreSQL full-text) and semantic (pgvector) results are fused with [Reciprocal Rank Fusion](#deep-dives) so exact-term matches and conceptual matches both surface.
-- **Cross-encoder reranking.** `advanced_search` re-scores the candidate set with a local cross-encoder (`bge-reranker-base` by default — [swappable](#models)) for precision on hard queries. It's on by default; flip `rerank: false` for lowest latency.
+- **VoyageAI reranking.** `advanced_search` re-scores the candidate set with VoyageAI's reranker (`rerank-2.5` by default — see [Models](#models)) for precision on hard queries. It's on by default; flip `rerank: false` for lowest latency.
 - **Confidence you can reason about.** Each result blends a **trust score** (source attribution, verification, freshness, deprecation, version-match) with relevance — and returns the factor breakdown so your assistant can say *why* a passage is trustworthy without another round-trip.
 - **Structured errors that self-correct.** Failures come back as machine-readable envelopes with remediation guidance and `suggested_next_actions` (a stale chunk id, say, suggests a fresh `search`); if the corpus's embedding model has rolled forward, `search` returns an `embedding_model_mismatch` envelope naming both models and the fix — no cryptic failures.
 
@@ -302,7 +302,7 @@ Overrides are time-boxed (they expire on their `--ttl`) and the server refreshes
 
 ## The CLI
 
-`midnight-manual` / `mnm` is a noun-first command tree: pick a noun, then a verb. Reranking runs **locally on your machine**; query embedding goes through VoyageAI (bring-your-own-key, or proxied by the hosted server), and the search request itself reaches the hosted corpus. Add `--json` to any command for scripting.
+`midnight-manual` / `mnm` is a noun-first command tree: pick a noun, then a verb. Both embedding and reranking go through VoyageAI (bring-your-own-key, or proxied by the hosted server), and the search request itself reaches the hosted corpus. Add `--json` to any command for scripting.
 
 ```text
 mnm search   "<query>"                 ad-hoc hybrid search
@@ -310,7 +310,7 @@ mnm sources  list | show               browse corpus sources
 mnm versions list | show | promote …   inspect source versions
 mnm chunks   show | next | prev | neighbors  walk the chunk graph by id
 mnm documents show | chunks            read documents, windowed
-mnm models   pull | active             local reranker / active embed model
+mnm models   pull | active             model-cache dir / active embed model
 mnm config   show | edit | defaults    resolved configuration
 mnm telemetry disable | enable | status opt out (or back in)
 mnm auth     github | status           GitHub OAuth for rate-limit uplift
@@ -334,8 +334,8 @@ mnm chunks next <chunk-id> --count 10
 mnm documents show <doc-id>
 mnm documents chunks <doc-id> --from 0 --limit 20
 
-# Manage the local reranker (the embedder is remote VoyageAI)
-mnm models pull          # fetch the reranker
+# Inspect models (both embedding and reranking are remote VoyageAI)
+mnm models pull          # ensure the model-cache dir exists (nothing to download)
 mnm models active        # the corpus's active embedding model
 ```
 
@@ -361,11 +361,11 @@ mnm models active        # the corpus's active embedding model
 | Role | Model | Where it runs | Notes |
 | --- | --- | --- | --- |
 | Embedder | **`voyage-code-3`** | VoyageAI (remote) | 1024-dimensional embeddings. Your client embeds queries via VoyageAI — bring-your-own-key, or proxied through the server's `/v1/embeddings`. |
-| Reranker | **`bge-reranker-base`** | on your machine | Cross-encoder, used only when `rerank` is requested. |
+| Reranker | **`rerank-2.5`** (or `rerank-2.5-lite`) | VoyageAI (remote) | Used when `rerank` is requested (on by default). `rerank-2.5-lite` is lower latency and billed at half tokens server-side. |
 
-- **Reranker powered by [`fastembed`](https://github.com/Anush008/fastembed-rs)** over the ONNX runtime — no Python, no GPU required. The embedder is remote (VoyageAI), so there is nothing to download for it.
-- **Lazy & cached.** The reranker downloads on first use into `$XDG_DATA_HOME/midnight-manual/models/` (override with `models.cache_dir`). Subsequent runs load from disk; the MCP server only loads it when a reranking query needs it.
-- **Pull & inspect.** `mnm models pull` fetches the reranker ahead of time; `mnm models active` shows which embedding model the corpus is on.
+- **Nothing to download.** Both the embedder and the reranker are remote VoyageAI calls — no Python, no ONNX, no model files on disk, no GPU. The `models.cache_dir` setting only governs the (now-empty) cache directory.
+- **Two rerank placements.** With a `VOYAGE_API_KEY` your client reranks directly against your own Voyage account (BYOK); without one, the server reranks inline in `/v1/search` under its own key, charged to your token budget. `--rerank auto` (the default) picks local when a key is present, else server; `--rerank off` skips it. On any rerank failure the server degrades to RRF order rather than failing the search.
+- **Inspect.** `mnm models pull` just ensures the model-cache directory exists (nothing is fetched); `mnm models active` shows which embedding model the corpus is on.
 - **Version-aware.** The corpus advertises its active embedding model as `name@revision` (e.g. `voyage-code-3@1`). If the corpus rolls forward, clients are told to re-embed against the new model rather than silently returning mis-scored results.
 
 ---
@@ -619,7 +619,7 @@ The indexed corpus is built from **public Midnight repositories** — the docs s
 
 ### Where query text goes — two embedding paths
 
-Query embedding uses VoyageAI's **`voyage-code-3`** model (1024-dimensional). Reranking, when you ask for it, runs locally. Which path your query text takes depends on whether you supply your own Voyage key:
+Query embedding uses VoyageAI's **`voyage-code-3`** model (1024-dimensional). Reranking, when you ask for it (on by default), also goes through VoyageAI. Which path your query text takes depends on whether you supply your own Voyage key:
 
 | Path | When it applies | What text reaches Voyage |
 | --- | --- | --- |
@@ -629,6 +629,13 @@ Query embedding uses VoyageAI's **`voyage-code-3`** model (1024-dimensional). Re
 Either way the query text reaches Voyage; the only question is *whose* Voyage account processes it. There is no path that embeds entirely on your machine — the embedder is remote by design.
 
 The server records only **token counts** and an anonymised **subject key** (a hashed IP, or your SSO user id) for budget accounting — it **never** logs or persists the submitted query text. That invariant is enforced by a CI canary alongside the telemetry one.
+
+When server-side reranking is enabled (the default), the search query — plus any
+`rerank_instructions` — and the text of candidate result chunks are sent to
+VoyageAI's rerank API, the same third-party exposure class as the embeddings
+proxy. Send `rerank: "none"` (CLI: `--rerank off`) to keep a search's
+candidates out of the rerank call, or rerank locally with your own
+`VOYAGE_API_KEY`.
 
 ### BYOK setup
 
@@ -646,22 +653,17 @@ voyage_api_key = "…"                    # config file (lowest precedence)
 
 Precedence is the usual **flag › env › config**.
 
-### Reranking stays on your machine — with one exception
+### Reranking — placement and models
 
-By default the reranker is the local `bge-reranker-base` cross-encoder; it and every other local option run entirely on your machine, so candidate text never leaves. The **Voyage reranker options are the exception** — they send the query *and* the candidate passages to Voyage, the same way the embedder does. Choose a reranker with `--reranker`, `MIDNIGHT_MANUAL_RERANKER`, or `models.reranker`:
+Reranking is a VoyageAI call: there is no on-device option, so when it runs (on by default) the query, any `rerank_instructions`, and the candidate passages reach Voyage — the same third-party exposure class as embedding. Where the call originates depends on your placement:
 
-| Reranker id | Runs | Notes |
+| `--rerank` | When `auto` picks it | What happens |
 | --- | --- | --- |
-| **`bge-reranker-base`** | local | **default** — native `fastembed` cross-encoder |
-| `bge-reranker-v2-m3` | local | native `fastembed` |
-| `jina-reranker-v1-turbo-en` | local | native `fastembed` |
-| `ms-marco-minilm-l2` / `-l6` / `-l12` | local | auto-fetched ONNX |
-| `mxbai-rerank-base-v1` | local | auto-fetched ONNX |
-| `mxbai-rerank-base-v2` | local | auto-fetched ONNX (experimental) |
-| `custom` | local | your own model dir (`--reranker-path` / `models.reranker_path`) with `model.onnx` + tokenizer files |
-| `voyage-rerank-2.5` / `-2.5-lite` / `-2` | **Voyage API** | **sends query + candidate text to Voyage** (needs a Voyage key) |
+| **`server`** | no Voyage key set | The hosted server reranks inline in `/v1/search` under **its** Voyage key, charged to your token budget. |
+| **`local`** | a Voyage key is set | Your client calls Voyage's `/v1/rerank` directly under **your own** account (BYOK). |
+| **`off`** | — | No rerank anywhere; results stay in RRF order. |
 
-> `jina-reranker-v2-base-multilingual` is **intentionally excluded** — its licence is `cc-by-nc-4.0` (non-commercial).
+`--rerank auto` is the default. Pick the model with `--rerank-model rerank-2.5` (default) or `rerank-2.5-lite` (lower latency, billed at half tokens server-side), and steer relevance with `--rerank-instructions "<text>"` (≤400 chars). The same knobs live in config under `[rerank]` (`location`, `model`) and in the `MIDNIGHT_MANUAL_RERANK` / `MIDNIGHT_MANUAL_RERANK_MODEL` env vars.
 
 ---
 
@@ -679,10 +681,12 @@ url = "https://midnight-manual.midnightntwrk.expert"
 
 [models]
 embedding = "voyage-code-3"          # remote VoyageAI embedder
-reranker  = "bge-reranker-base"       # local fastembed cross-encoder
-# cache_dir = "/custom/model/cache"   # optional (reranker cache)
-# voyage_api_key = "…"                # optional — BYOK embedding (else server-proxied)
+# voyage_api_key = "…"                # optional — BYOK embedding + reranking (else server-proxied)
 # voyage_timeout_secs = 120           # optional — per-request Voyage embed timeout
+
+[rerank]
+location = "auto"                     # auto (default) | local | server | off
+model    = "rerank-2.5"               # rerank-2.5 (default) | rerank-2.5-lite
 
 [telemetry]
 enabled = true
@@ -707,9 +711,10 @@ mnm config edit       # open it in $EDITOR
 | `MIDNIGHT_MANUAL_CONFIG` | Config file path. |
 | `MIDNIGHT_MANUAL_DISABLE_TELEMETRY` | Opt out of telemetry. |
 | `MIDNIGHT_MANUAL_SHOW_ADMIN_CMDS` | Reveal admin subcommands. |
-| `VOYAGE_API_KEY` | Your Voyage key for BYOK embedding (and Voyage rerankers). Unset → query embedding is proxied by the hosted server. |
+| `VOYAGE_API_KEY` | Your Voyage key for BYOK embedding and reranking. Unset → embedding and reranking are proxied by the hosted server. |
 | `VOYAGE_TIMEOUT_SECS` | Per-request timeout (seconds) for Voyage embedding calls (default 120). Flag form: `--voyage-timeout-secs`. |
-| `MIDNIGHT_MANUAL_RERANKER` | Reranker catalog id (same as `--reranker`). |
+| `MIDNIGHT_MANUAL_RERANK` | Rerank placement: `auto` \| `local` \| `server` \| `off` (same as `--rerank`). |
+| `MIDNIGHT_MANUAL_RERANK_MODEL` | Voyage rerank model: `rerank-2.5` \| `rerank-2.5-lite` (same as `--rerank-model`). |
 | `RUST_LOG` | Log verbosity. |
 | `MIDNIGHT_MANUAL_USER_STORE` / `MIDNIGHT_MANUAL_JWT_SECRET` | Server-side: user store + JWT secret. |
 
@@ -731,7 +736,7 @@ The result carries the **per-factor breakdown**, so your assistant can explain *
 
 ### Hybrid retrieval & RRF
 
-Lexical and semantic candidate lists are merged with **Reciprocal Rank Fusion** (`k = 60`, the canonical constant), normalized into `[0, 1)`. Exact-term hits and conceptual hits both get a fair shot at the top, and the optional cross-encoder reranker (`bge-reranker-base`) sharpens the final ordering when you ask for it.
+Lexical and semantic candidate lists are merged with **Reciprocal Rank Fusion** (`k = 60`, the canonical constant), normalized into `[0, 1)`. Exact-term hits and conceptual hits both get a fair shot at the top, and the VoyageAI reranker (`rerank-2.5`) sharpens the final ordering when it runs (on by default).
 
 ### Multi-query / HyDE
 

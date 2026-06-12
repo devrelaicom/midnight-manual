@@ -1017,6 +1017,7 @@ async fn dispatch_search_mismatch_produces_iserror_envelope() {
         filters: None,
         mode: "fts",
         code_mode: None,
+        rerank_instructions: None,
     };
     let err = run_search(&parsed, &cfg, &cloud).await.unwrap_err();
 

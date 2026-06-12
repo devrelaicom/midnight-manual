@@ -219,7 +219,7 @@ async fn sweep_rolls_up_search_dimensions_into_telemetry_search_daily() {
         "tool_name": "search",
         "corpus_model": "voyage-code-3@1",
         "top_attribution": "foundation",
-        "reranker_used": "bge-reranker-base",
+        "reranker_used": "rerank-2.5",
         "top_source": "Compact Docs",
         "top_confidence": "high"
     }))
@@ -232,7 +232,7 @@ async fn sweep_rolls_up_search_dimensions_into_telemetry_search_daily() {
     let count: i64 = sqlx::query_scalar(
         "SELECT count FROM telemetry_search_daily \
          WHERE corpus_model = 'voyage-code-3@1' AND attribution = 'foundation' \
-           AND reranker = 'bge-reranker-base' AND top_source = 'Compact Docs' \
+           AND reranker = 'rerank-2.5' AND top_source = 'Compact Docs' \
            AND confidence_bucket = 'high'",
     )
     .fetch_one(&h.pool)
@@ -262,7 +262,7 @@ async fn sweep_rollup_includes_advanced_search_and_merges_shared_dimensions() {
             "tool_name": tool_name,
             "corpus_model": "voyage-code-3@1",
             "top_attribution": "community",
-            "reranker_used": "bge-reranker-base",
+            "reranker_used": "rerank-2.5",
             "top_source": "Midnight JS",
             "top_confidence": "medium"
         }))
@@ -276,7 +276,7 @@ async fn sweep_rollup_includes_advanced_search_and_merges_shared_dimensions() {
     let count: i64 = sqlx::query_scalar(
         "SELECT count FROM telemetry_search_daily \
          WHERE corpus_model = 'voyage-code-3@1' AND attribution = 'community' \
-           AND reranker = 'bge-reranker-base' AND top_source = 'Midnight JS' \
+           AND reranker = 'rerank-2.5' AND top_source = 'Midnight JS' \
            AND confidence_bucket = 'medium'",
     )
     .fetch_one(&h.pool)

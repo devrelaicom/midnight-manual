@@ -1098,7 +1098,7 @@ mod tests {
     /// (keeps the nudge out of tests that aren't about it).
     fn basic_opts() -> SearchRenderOpts {
         SearchRenderOpts {
-            reranker_used: Some("bge-reranker-base".to_owned()),
+            reranker_used: Some("rerank-2.5".to_owned()),
             advanced: false,
             skill_installed: true,
         }
@@ -1121,7 +1121,7 @@ mod tests {
         assert_eq!(t.corpus_model.as_deref(), Some("voyage-code-3@1"));
         assert_eq!(t.top_attribution.as_deref(), Some("foundation"));
         assert_eq!(t.top_source.as_deref(), Some("Compact Docs"));
-        assert_eq!(t.reranker_used.as_deref(), Some("bge-reranker-base"));
+        assert_eq!(t.reranker_used.as_deref(), Some("rerank-2.5"));
     }
 
     #[test]
@@ -1812,7 +1812,7 @@ mod tests {
                 "daily": { "limit": 2_000_000, "remaining": 1_900_000, "reset_at_secs": 50_000 }
             },
             "voyage": "valid",
-            "reranker": "bge-reranker-base",
+            "reranker": "rerank-2.5",
             "reranker_loaded": false
         })
     }
@@ -1831,7 +1831,7 @@ mod tests {
             o.summary
         );
         assert!(o.summary.contains("Voyage key valid"), "voyage: {}", o.summary);
-        assert!(o.summary.contains("bge-reranker-base not loaded"), "reranker: {}", o.summary);
+        assert!(o.summary.contains("rerank-2.5 not loaded"), "reranker: {}", o.summary);
         // Authenticated + valid key → nothing to suggest.
         assert!(o.suggested_next_actions.is_empty());
     }

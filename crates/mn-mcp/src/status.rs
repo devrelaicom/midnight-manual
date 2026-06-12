@@ -8,6 +8,15 @@ use serde::Serialize;
 
 use crate::cloud_client::CloudClient;
 
+/// The reranker model reported by `status`. Reranking is VoyageAI now (server
+/// inline or client BYOK), so this is the default Voyage rerank model name —
+/// sourced from the shared [`mn_core::rerank::RerankParam`] vocabulary so the
+/// status report and the rerank request never drift.
+const RERANKER_MODEL_NAME: &str = match mn_core::rerank::RerankParam::Rerank25.model_name() {
+    Some(name) => name,
+    None => "rerank-2.5",
+};
+
 /// Cloud reachability.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -57,9 +66,9 @@ pub struct StatusReport {
     pub token_limits: Option<serde_json::Value>,
     /// Voyage key state.
     pub voyage: VoyageState,
-    /// Local reranker model name.
+    /// Reranker model name (VoyageAI — server inline or client BYOK).
     pub reranker: &'static str,
-    /// Whether the local reranker is loaded into memory.
+    /// Whether a local (BYOK) rerank has been exercised in this process.
     pub reranker_loaded: bool,
 }
 
@@ -141,7 +150,7 @@ pub async fn assemble(cloud: &CloudClient, voyage_key: Option<&str>) -> StatusRe
             .and_then(|m| m.get("token_limits").cloned())
             .filter(|v| !v.is_null()),
         voyage,
-        reranker: mn_embedding::RERANKER_MODEL_NAME,
+        reranker: RERANKER_MODEL_NAME,
         reranker_loaded: crate::tools::reranker_loaded(),
     }
 }
@@ -210,7 +219,7 @@ mod tests {
         let tl = r.token_limits.expect("token_limits populated");
         assert_eq!(tl["hourly"]["limit"], 200_000);
         assert_eq!(r.voyage, VoyageState::NotConfigured);
-        assert_eq!(r.reranker, mn_embedding::RERANKER_MODEL_NAME);
+        assert_eq!(r.reranker, super::RERANKER_MODEL_NAME);
     }
 
     #[tokio::test]

@@ -360,6 +360,7 @@ fn single_query_args_with(
         filters: None,
         mode: "hybrid",
         code_mode,
+        rerank_instructions: None,
     }
 }
 
@@ -420,7 +421,8 @@ async fn run_search_uses_corpus_wire_id_as_client_embedding_model() {
 
     let result = run_search(&single_query_args("how to compile a Compact contract"), &cfg, &cloud)
         .await
-        .expect("run_search should succeed with corpus wire id");
+        .expect("run_search should succeed with corpus wire id")
+        .envelope;
 
     // The response must carry the corpus wire id as corpus_embedding_model.
     assert_eq!(
@@ -502,7 +504,8 @@ async fn run_search_server_embed_end_to_end_when_byok_absent() {
 
     let result = run_search(&single_query_args("zero knowledge proof"), &cfg, &cloud)
         .await
-        .expect("run_search must succeed in server-embed mode");
+        .expect("run_search must succeed in server-embed mode")
+        .envelope;
 
     // The corpus wire id must be correct.
     assert_eq!(result["corpus_embedding_model"], "voyage-code-3@1");
@@ -635,7 +638,8 @@ async fn run_search_default_sends_code_vector_and_code_model() {
     let cloud = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
     let result = run_search(&single_query_args("fn deploy_contract"), &cfg, &cloud)
         .await
-        .expect("run_search ok");
+        .expect("run_search ok")
+        .envelope;
 
     let body = last_search_body(&server).await;
     // Both halves embedded, each from its own type-tagged /v1/embeddings call.
@@ -666,7 +670,8 @@ async fn run_search_code_mode_off_omits_code_fields() {
     let result =
         run_search(&single_query_args_with("what is a zk proof", Some("off")), &cfg, &cloud)
             .await
-            .expect("run_search ok");
+            .expect("run_search ok")
+            .envelope;
 
     let body = last_search_body(&server).await;
     // Explicit off IS forwarded (the caller overrode the server default).
@@ -701,7 +706,8 @@ async fn run_search_code_mode_exclusive_skips_general_embedding() {
     let result =
         run_search(&single_query_args_with("VoyageEmbedder::new", Some("exclusive")), &cfg, &cloud)
             .await
-            .expect("run_search ok");
+            .expect("run_search ok")
+            .envelope;
 
     let body = last_search_body(&server).await;
     assert_eq!(body["code_mode"], "exclusive");

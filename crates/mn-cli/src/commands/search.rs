@@ -30,12 +30,17 @@
 //!    server RRFs across them; the response's per-query and per-result
 //!    diagnostics are surfaced in the rendered output.
 //!
-//! 5. Optionally rerank. By default the CLI does NOT rerank — quick queries
-//!    trade the quality boost for lower latency and a smaller install
-//!    footprint. Pass `--rerank` to opt in: the response candidates are
-//!    reranked client-side via the configured reranker catalog id
-//!    (`--reranker` flag > `MIDNIGHT_MANUAL_RERANKER` env > config, default
-//!    `bge-reranker-base`), the same catalog the MCP `search` tool uses.
+//! 5. Rerank according to the resolved placement (`--rerank` flag >
+//!    `MIDNIGHT_MANUAL_RERANK` env > config `[rerank].location`, default
+//!    `auto`). `auto` picks local when a Voyage key is present, else server.
+//!    Local/off always send `rerank: "none"` to the server, so there is
+//!    exactly one rerank pass regardless of placement:
+//!    - **local**: candidates are reranked client-side via `VoyageAI`'s
+//!      `/v1/rerank` with the caller's own key; the cloud pool is over-fetched
+//!      to `RERANK_FETCH`.
+//!    - **server**: the server reranks inline in `/v1/search` with the
+//!      resolved `--rerank-model` and instructions.
+//!    - **off**: no reranking anywhere.
 //!
 //! 6. Render the response — human table by default, single-line NDJSON when
 //!    `--json` is set.
@@ -64,9 +69,9 @@ pub const DEFAULT_EMBEDDING_MODEL: &str = "auto";
 /// server's hard ceiling).
 const MAX_QUERIES: usize = 10;
 
-/// Candidate pool size requested from the cloud when `--rerank` is set (mirrors
-/// the MCP `search` tool's constant of the same name). Reranking needs a pool
-/// wider than the caller's `--limit` so the cross-encoder can *promote* a chunk
+/// Candidate pool size requested from the cloud when reranking locally (mirrors
+/// the MCP `search` tool's constant of the same name). Local reranking needs a
+/// pool wider than the caller's `--limit` so the reranker can *promote* a chunk
 /// the cloud ranked below the cutoff — not merely reorder the caller's top-N.
 /// The reranker truncates back to `--limit` after scoring; the server's
 /// `/v1/search` accepts a `limit` up to 100, so 50 is within range.
@@ -74,8 +79,8 @@ const RERANK_FETCH: u32 = 50;
 
 /// Args for `mnm search`.
 // A clap `Args` struct naturally accumulates one bool per boolean flag
-// (`--queries-stdin`, `--rerank`, `--no-deprecated`, `--verified`); these are
-// independent CLI switches, not a state enum, so the >3-bools lint doesn't apply.
+// (`--queries-stdin`, `--no-deprecated`, `--verified`); these are independent
+// CLI switches, not a state enum, so the >3-bools lint doesn't apply.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, ClapArgs)]
 pub struct Args {
@@ -104,19 +109,21 @@ pub struct Args {
     #[arg(long, default_value = DEFAULT_EMBEDDING_MODEL)]
     pub embedding_model: String,
 
-    /// Rerank the results client-side with a cross-encoder before rendering.
-    /// Off by default (lower latency, no model download); the MCP `search` tool
-    /// reranks by default, this CLI is opt-in.
-    #[arg(long)]
-    pub rerank: bool,
+    /// Where reranking runs: auto (default; local with a Voyage key, else
+    /// server), local (BYOK Voyage), server, or off.
+    #[arg(long, default_value = "auto", value_parser = ["auto", "local", "server", "off"])]
+    pub rerank: String,
 
-    /// Reranker catalog id to use when `--rerank` is set (e.g.
-    /// `bge-reranker-base`, `jina-reranker-v1-turbo-en`, `voyage-rerank-2.5-lite`,
-    /// `custom`). Precedence: this flag > `MIDNIGHT_MANUAL_RERANKER` env >
-    /// config `[models].reranker` (default `bge-reranker-base`). Ignored unless
-    /// `--rerank` is set.
-    #[arg(long)]
-    pub reranker: Option<String>,
+    /// Voyage rerank model. rerank-2.5-lite is faster and billed at half rate
+    /// server-side. Precedence: this flag > MIDNIGHT_MANUAL_RERANK_MODEL env >
+    /// config `[rerank].model`.
+    #[arg(long = "rerank-model", value_parser = ["rerank-2.5", "rerank-2.5-lite"])]
+    pub rerank_model: Option<String>,
+
+    /// Natural-language rerank instruction (max 400 chars). Replaces the
+    /// derived default. Keep terse — instruction tokens multiply by pool size.
+    #[arg(long = "rerank-instructions")]
+    pub rerank_instructions: Option<String>,
 
     /// Query mode: hybrid (default), vector, or fts.
     #[arg(long, default_value = "hybrid", value_parser = ["hybrid", "vector", "fts"])]
@@ -219,17 +226,12 @@ pub async fn run(
     json: bool,
 ) -> Result<()> {
     let server_url = crate::shared::resolve_server_url(server_flag);
-    let cache_env = mn_embedding::cache::StdEnv;
-    let cache_dir = mn_embedding::cache::resolve(&cache_env).context(
-        "could not resolve model cache dir; set MIDNIGHT_MANUAL_MODEL_CACHE_DIR or HOME",
-    )?;
     let cfg_env = mn_core::config::StdEnv;
     let auth_path = mn_core::paths::auth_file_path(&cfg_env);
     run_with_paths(
         args,
         &server_url,
         auth_path.as_deref(),
-        &cache_dir,
         config_path,
         voyage_api_key,
         telemetry,
@@ -241,10 +243,9 @@ pub async fn run(
 
 /// Path-explicit driver. Embeds the query via VoyageAI (BYOK or server-proxy)
 /// with the general and/or code model as the effective mode/`--code-mode`
-/// requires, resolves the corpus wire ids, posts `/v1/search`, and — when
-/// `args.rerank` is set — reranks the candidates client-side via the
-/// configured reranker catalog id before rendering. `cache_dir` is the on-disk fastembed model cache used
-/// by the local reranker variants.
+/// requires, resolves the corpus wire ids, posts `/v1/search`, and — when the
+/// resolved placement is `local` — reranks the candidates client-side via
+/// `VoyageAI`'s `/v1/rerank` (BYOK) before rendering.
 ///
 /// # Errors
 ///
@@ -254,7 +255,6 @@ pub async fn run_with_paths(
     args: Args,
     server_url: &str,
     auth_path: Option<&Path>,
-    cache_dir: &Path,
     config_path: Option<&Path>,
     voyage_api_key: Option<&str>,
     telemetry: &TelemetryClient,
@@ -273,6 +273,11 @@ pub async fn run_with_paths(
     let env = mn_core::config::StdEnv;
     let (cfg, _) = mn_core::config::Config::discover(config_path, &env).unwrap_or_default();
     let voyage_key = mn_core::config::resolve_voyage_api_key(voyage_api_key, &cfg.models, &env);
+
+    // Resolve rerank placement + model and validate the instruction up front, so
+    // a bad placement/key/instruction fails fast — before any embedding / network
+    // work.
+    let (placement, rerank_model) = resolve_rerank(&args, &cfg.rerank, &env, voyage_key.is_some())?;
 
     // Resolve mode + filters from the granular flags (or --filter-json) and
     // fail fast on an invalid filter before any embedding / network work.
@@ -330,35 +335,33 @@ pub async fn run_with_paths(
         client_embedding_model,
         client_code_embedding_model,
         limit: args.limit,
-        rerank: args.rerank,
+        placement,
+        rerank_model,
+        rerank_instructions: args.rerank_instructions.clone(),
         mode,
         code_mode: args.code_mode.clone(),
         filters,
     });
 
-    // Resolve the env-dependent rerank selection up front (synchronously) into
-    // owned data. The `ConfigEnv` trait carries no `Sync` guarantee, so threading
-    // an `&impl ConfigEnv` borrow through the `.await` below would make this
-    // future non-`Send` for arbitrary impls; resolving to owned values first keeps
-    // `DispatchSearch` env-free and its future `Send`. Cheap when `--rerank` is
-    // off (only a couple of lookups).
-    let reranker_id =
-        mn_core::config::resolve_reranker(args.reranker.as_deref(), &cfg.models, &env);
+    // Resolve the env-dependent Voyage base-url override up front (synchronously)
+    // into owned data. The `ConfigEnv` trait carries no `Sync` guarantee, so
+    // threading an `&impl ConfigEnv` borrow through the `.await` below would make
+    // this future non-`Send` for arbitrary impls; resolving to an owned value
+    // first keeps `DispatchSearch` env-free and its future `Send`.
     let voyage_base_url = env
         .var("MIDNIGHT_MANUAL_VOYAGE_BASE_URL")
         .filter(|s| !s.is_empty());
 
     let result = dispatch_search(DispatchSearch {
-        rerank: args.rerank,
+        placement,
         limit: args.limit,
         server_url,
         bearer: bearer.as_deref(),
         request: &request,
-        reranker_id: &reranker_id,
-        reranker_path: cfg.models.reranker_path.as_deref(),
+        rerank_model,
+        rerank_instructions: args.rerank_instructions.as_deref(),
         voyage_key: voyage_key.as_deref(),
         voyage_base_url: voyage_base_url.as_deref(),
-        cache_dir,
         json,
     })
     .await;
@@ -369,6 +372,13 @@ pub async fn run_with_paths(
     } else {
         Outcome::Error
     };
+    // One `Rerank` event per search (spec §6). On success the placement-specific
+    // facts come from the `RerankOutcome`; on failure the rerank never completed,
+    // so it is reported as not applied (the three-mechanism opt-out wraps `emit`).
+    let rerank_payload = rerank_event(placement, rerank_model, result.as_ref().ok());
+    telemetry
+        .emit(Event::new(Component::Cli, cli_version, rerank_payload))
+        .await;
     telemetry
         .emit(Event::new(
             Component::Cli,
@@ -380,7 +390,81 @@ pub async fn run_with_paths(
             },
         ))
         .await;
-    result
+    result.map(|_| ())
+}
+
+/// The rerank model name for the `Rerank` event: the resolved model on the
+/// `Local` / `Server` placements, `None` on `Off` (no rerank attempted).
+fn rerank_event_model(
+    placement: mn_core::config::RerankPlacement,
+    rerank_model: mn_core::rerank::RerankParam,
+) -> Option<String> {
+    use mn_core::config::RerankPlacement;
+    match placement {
+        RerankPlacement::Local | RerankPlacement::Server => {
+            rerank_model.model_name().map(str::to_owned)
+        }
+        RerankPlacement::Off => None,
+    }
+}
+
+/// Build the FR-109 `Rerank` event payload (spec §6) for one search. The
+/// placement / model come from the resolved request; `applied` / `reason` /
+/// `billed_tokens` come from the [`RerankOutcome`] on success, or are reported
+/// as "not applied" when the search failed before the rerank completed. The
+/// placement wire string comes from the shared
+/// [`mn_core::config::RerankPlacement::wire`] (one source of truth across the
+/// CLI + MCP clients).
+fn rerank_event(
+    placement: mn_core::config::RerankPlacement,
+    rerank_model: mn_core::rerank::RerankParam,
+    outcome: Option<&RerankOutcome>,
+) -> EventPayload {
+    EventPayload::Rerank {
+        placement: placement.wire().to_owned(),
+        model: rerank_event_model(placement, rerank_model),
+        applied: outcome.is_some_and(|o| o.applied),
+        reason: outcome.and_then(|o| o.reason.clone()),
+        billed_tokens: outcome.and_then(|o| o.billed_tokens),
+    }
+}
+
+/// Resolve the rerank placement + model and validate the instruction, failing
+/// fast before any embedding / network work.
+///
+/// Placement resolves with precedence `--rerank` flag > `MIDNIGHT_MANUAL_RERANK`
+/// env > config `[rerank].location`; `auto` (the flag default, passed through as
+/// absent) picks local BYOK when a Voyage key is present, else server (D6). A
+/// `local` placement with no key is a hard error rather than a silent degrade.
+///
+/// # Errors
+///
+/// Returns `anyhow::Error` when the instruction exceeds the cap, or when `local`
+/// was selected without a Voyage key.
+fn resolve_rerank(
+    args: &Args,
+    cfg: &mn_core::config::RerankConfig,
+    env: &impl mn_core::config::ConfigEnv,
+    has_voyage_key: bool,
+) -> Result<(mn_core::config::RerankPlacement, mn_core::rerank::RerankParam)> {
+    let placement = mn_core::config::resolve_rerank_placement(
+        (args.rerank != "auto").then_some(args.rerank.as_str()),
+        cfg,
+        env,
+        has_voyage_key,
+    );
+    let rerank_model =
+        mn_core::config::resolve_rerank_model(args.rerank_model.as_deref(), cfg, env);
+    if let Some(i) = args.rerank_instructions.as_deref() {
+        mn_core::rerank::validate_instruction(i).map_err(|e| anyhow!(e))?;
+    }
+    // Local placement requires a key: tell the user instead of silently degrading.
+    if matches!(placement, mn_core::config::RerankPlacement::Local) && !has_voyage_key {
+        anyhow::bail!(
+            "--rerank local needs a Voyage API key (--voyage-api-key, VOYAGE_API_KEY, or config)"
+        );
+    }
+    Ok((placement, rerank_model))
 }
 
 /// Which query embeddings the request needs: `(general, code)`. Mirrors the
@@ -663,8 +747,13 @@ struct SearchRequestParts {
     client_code_embedding_model: Option<String>,
     /// Caller's result limit.
     limit: u32,
-    /// Whether the client-side rerank pass runs (widens the cloud pool).
-    rerank: bool,
+    /// Where reranking runs (`Local` widens the cloud pool + tells the server
+    /// `none`; `Server` sends the model name; `Off` sends `none`).
+    placement: mn_core::config::RerankPlacement,
+    /// Voyage rerank model (only sent on the `Server` path).
+    rerank_model: mn_core::rerank::RerankParam,
+    /// Agent-supplied rerank instruction (only sent on the `Server` path).
+    rerank_instructions: Option<String>,
     /// Query mode (`hybrid` | `vector` | `fts`).
     mode: String,
     /// Raw `--code-mode` value; `None` defers to the server default.
@@ -673,21 +762,34 @@ struct SearchRequestParts {
     filters: SearchFilters,
 }
 
-/// Build the outgoing `/v1/search` body, sizing the candidate pool for the
-/// chosen path.
+/// Build the outgoing `/v1/search` body, sizing the candidate pool and the
+/// `rerank` parameter for the resolved placement.
 ///
-/// When `rerank` is set we widen the cloud `limit` to [`RERANK_FETCH`] and ask
-/// for relevance order (`sort_by = "score"`) so the cross-encoder can *promote* a
-/// chunk the cloud ranked below the caller's `limit` — not merely reorder the
-/// caller's top-N (this mirrors the MCP `search` tool). `apply_rerank` later
-/// truncates the reranked set back to `limit`. When `rerank` is off the body
-/// carries the caller's `limit` and omits `sort_by` (`skip_serializing_if`), so
-/// the wire body is byte-identical to the pre-Task-9.4 form.
+/// On the `Local` path we widen the cloud `limit` to [`RERANK_FETCH`] and ask
+/// for relevance order (`sort_by = "score"`) so the client-side reranker can
+/// *promote* a chunk the cloud ranked below the caller's `limit` — not merely
+/// reorder the caller's top-N (this mirrors the MCP `search` tool);
+/// [`apply_rerank`] later truncates the reranked set back to `limit`. `Local`
+/// and `Off` both send `rerank: "none"` (exactly one rerank pass, structurally);
+/// `Server` sends the resolved model name plus any instructions. `None`-valued
+/// `rerank` / `rerank_instructions` / `sort_by` are omitted on the wire
+/// (`skip_serializing_if`).
 fn build_search_request(parts: SearchRequestParts) -> SearchRequest {
-    let (cloud_limit, sort_by) = if parts.rerank {
+    use mn_core::config::RerankPlacement;
+    let local = matches!(parts.placement, RerankPlacement::Local);
+    let (cloud_limit, sort_by) = if local {
         (RERANK_FETCH, Some("score".to_owned()))
     } else {
         (parts.limit, None)
+    };
+    let (rerank, rerank_instructions) = match parts.placement {
+        RerankPlacement::Server => (
+            parts.rerank_model.model_name().map(str::to_owned),
+            parts.rerank_instructions.clone(),
+        ),
+        // Local reranks client-side; Off skips. Both tell the server "none"
+        // (exactly one rerank pass, structurally).
+        RerankPlacement::Local | RerankPlacement::Off => (Some("none".to_owned()), None),
     };
     SearchRequest {
         queries: parts.queries,
@@ -698,7 +800,26 @@ fn build_search_request(parts: SearchRequestParts) -> SearchRequest {
         code_mode: parts.code_mode,
         filters: parts.filters,
         sort_by,
+        rerank,
+        rerank_instructions,
     }
+}
+
+/// What the rerank stage did, for the FR-109 `Rerank` telemetry event
+/// (spec §6). Returned by [`dispatch_search`] so `run_with_paths` can emit one
+/// event per search next to the `CliCommand` event.
+#[derive(Debug, Default)]
+struct RerankOutcome {
+    /// Whether a rerank was actually applied to the result set (local pass ran,
+    /// or the server reported `search_metadata.rerank.applied`).
+    applied: bool,
+    /// Degrade reason when not applied (server path only; mirrors
+    /// `search_metadata.rerank.reason`).
+    reason: Option<String>,
+    /// Billed-equivalent tokens for a local rerank (`total_tokens` through
+    /// [`mn_core::rerank::RerankParam::billed_tokens`]); `None` on the server /
+    /// off paths (the server tracks its own metrics).
+    billed_tokens: Option<u64>,
 }
 
 /// Everything [`dispatch_search`] needs, already resolved off the `ConfigEnv`
@@ -706,8 +827,8 @@ fn build_search_request(parts: SearchRequestParts) -> SearchRequest {
 /// stays `Send`. Grouped into a struct to keep the function under the
 /// argument-count lint.
 struct DispatchSearch<'a> {
-    /// Whether to run the client-side rerank pass.
-    rerank: bool,
+    /// Resolved rerank placement; `Local` routes to the client-side Voyage path.
+    placement: mn_core::config::RerankPlacement,
     /// Caller's result limit.
     limit: u32,
     /// Cloud base URL.
@@ -716,47 +837,105 @@ struct DispatchSearch<'a> {
     bearer: Option<&'a str>,
     /// The fully-formed search request.
     request: &'a SearchRequest,
-    /// Resolved reranker catalog id (flag > env > config).
-    reranker_id: &'a str,
-    /// Backing dir for the `custom` catalog id.
-    reranker_path: Option<&'a Path>,
-    /// Voyage API key (required for Voyage catalog ids).
+    /// Resolved Voyage rerank model for the `Local` path. Its `model_name()` is
+    /// always `Some` for a model variant (off never routes here); its
+    /// `billed_tokens()` rate feeds the `Rerank` telemetry event.
+    rerank_model: mn_core::rerank::RerankParam,
+    /// Agent-supplied rerank instruction for the `Local` path; `None` derives
+    /// the same default the server uses.
+    rerank_instructions: Option<&'a str>,
+    /// Voyage API key (required for the `Local` path).
     voyage_key: Option<&'a str>,
     /// Resolved Voyage base-url override (self-host / proxy / test mock).
     voyage_base_url: Option<&'a str>,
-    /// On-disk fastembed model cache.
-    cache_dir: &'a Path,
     /// Render as NDJSON when set.
     json: bool,
 }
 
-/// Pick the search path based on `d.rerank`: the rerank path hands off to
-/// [`rerank_via_http`] with the pre-resolved reranker selection; the no-rerank
-/// path is the unchanged [`search_via_http`]. All env reads happen before this
-/// `async fn` (see [`DispatchSearch`]) so its future is `Send`.
+/// Pick the search path based on `d.placement`: `Local` hands off to
+/// [`rerank_via_http`] (client-side Voyage rerank); `Server` / `Off` fetch +
+/// render directly (the server already reranked, or nobody did). All env reads
+/// happen before this `async fn` (see [`DispatchSearch`]) so its future is
+/// `Send`.
+///
+/// Returns the [`RerankOutcome`] for the FR-109 `Rerank` telemetry event: on
+/// the `Server` / `Off` path it is read from the response's
+/// `search_metadata.rerank` (`applied` / `reason`); on the `Local` path it
+/// carries the actual rerank `applied` flag and billed tokens.
 ///
 /// # Errors
 ///
-/// Propagates the HTTP / decode / rerank-load errors from the chosen path.
-async fn dispatch_search(d: DispatchSearch<'_>) -> Result<()> {
-    if !d.rerank {
-        return search_via_http(d.server_url, d.bearer, d.request, d.json).await;
+/// Propagates the HTTP / decode / rerank errors from the chosen path.
+async fn dispatch_search(d: DispatchSearch<'_>) -> Result<RerankOutcome> {
+    use mn_core::config::RerankPlacement;
+    if !matches!(d.placement, RerankPlacement::Local) {
+        // Server / Off: fetch + render directly (mirroring `search_via_http`)
+        // so we can read the server's `search_metadata.rerank` outcome.
+        let resp = fetch_search(d.server_url, d.bearer, d.request).await?;
+        let outcome = server_rerank_outcome(d.placement, resp.search_metadata.as_ref());
+        let texts: Vec<String> = d.request.queries.iter().map(|q| q.text.clone()).collect();
+        println!("{}", render(&texts, &resp, d.json));
+        return Ok(outcome);
     }
+    // Local placement is guarded for a key + model in `run_with_paths`.
+    let model = d.rerank_model.model_name().unwrap_or("rerank-2.5");
+    let key = d
+        .voyage_key
+        .ok_or_else(|| anyhow!("local rerank reached dispatch without a Voyage key"))?;
     rerank_via_http(
         d.server_url,
         d.bearer,
         d.request,
-        RerankSelection {
-            reranker_id: d.reranker_id,
-            reranker_path: d.reranker_path,
-            voyage_key: d.voyage_key,
-            voyage_base_url: d.voyage_base_url,
-            cache_dir: d.cache_dir,
-        },
+        key,
+        d.voyage_base_url,
+        model,
+        d.rerank_model,
+        d.rerank_instructions,
         d.limit,
         d.json,
     )
     .await
+}
+
+/// Build the [`RerankOutcome`] for a non-local placement (spec §6).
+///
+/// On the `Server` placement the cloud performed the rerank, so `applied` /
+/// `reason` are read from the response's `search_metadata.rerank` object; the
+/// server always reports it, and a missing/legacy/malformed field is treated as
+/// "not applied" with no reason. On the `Off` placement the client opted out and
+/// knows the rerank was not applied without trusting the server echo, so it
+/// reports `applied=false` / `reason=None` — matching the MCP client so the two
+/// emit the same `reason` for the same logical situation.
+///
+/// The server `reason` is routed through [`mn_core::rerank::known_reason`] so
+/// only the documented closed set can reach the `Rerank` event — arbitrary
+/// server text is dropped, preserving the telemetry privacy invariant.
+/// `billed_tokens` is always `None` here — the server tracks its own metrics.
+fn server_rerank_outcome(
+    placement: mn_core::config::RerankPlacement,
+    search_metadata: Option<&serde_json::Value>,
+) -> RerankOutcome {
+    use mn_core::config::RerankPlacement;
+    if !matches!(placement, RerankPlacement::Server) {
+        // Off (the only other non-local placement reaching here): no rerank was
+        // requested anywhere; don't trust the server echo.
+        return RerankOutcome::default();
+    }
+    let rerank = search_metadata.and_then(|m| m.get("rerank"));
+    let applied = rerank
+        .and_then(|r| r.get("applied"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let reason = rerank
+        .and_then(|r| r.get("reason"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(mn_core::rerank::known_reason)
+        .map(str::to_owned);
+    RerankOutcome {
+        applied,
+        reason,
+        billed_tokens: None,
+    }
 }
 
 /// POST `/v1/search` with the supplied request and render the response.
@@ -818,88 +997,105 @@ pub async fn fetch_search(
     resp.json().await.context("parse /v1/search response body")
 }
 
-/// The reranker selection threaded into [`rerank_via_http`]. Grouped into a
-/// struct so the function stays under the argument-count lint while carrying
-/// everything [`mn_embedding::reranker::LoadedReranker::load`] needs.
-struct RerankSelection<'a> {
-    /// Catalog id (resolved flag > env > config).
-    reranker_id: &'a str,
-    /// Backing dir for the `custom` catalog id; `None` otherwise.
-    reranker_path: Option<&'a Path>,
-    /// Voyage API key (required for Voyage catalog ids).
-    voyage_key: Option<&'a str>,
-    /// Optional Voyage base-url override (self-host / proxy / test mock).
-    voyage_base_url: Option<&'a str>,
-    /// On-disk fastembed model cache.
-    cache_dir: &'a Path,
-}
-
-/// `--rerank` path: fetch `/v1/search`, load the configured reranker, rerank
-/// the candidates against the first query, re-order + truncate, then render.
+/// `Local` rerank path: fetch `/v1/search`, rerank the candidates against the
+/// first query via `VoyageAI`'s `/v1/rerank` (BYOK), re-order + truncate, then
+/// render.
 ///
 /// This mirrors the MCP `search` tool: the `request` passed here was built with
 /// a wider [`RERANK_FETCH`] candidate pool sorted by score (`sort_by =
 /// "score"`), the candidates are reranked against the first query, and
 /// [`apply_rerank`] truncates the reranked set back to the caller's `--limit`.
 /// Candidates are mapped back by [`mn_embedding::RerankResult::index`] (NOT
-/// positionally — a remote reranker like Voyage reorders), and each surviving
-/// result is stamped with a `rerank_score` in its `scores` bag.
+/// positionally — Voyage reorders), and each surviving result is stamped with a
+/// `rerank_score` (a 0–1 relevance) in its `scores` bag.
+///
+/// The instruction precedence matches the server so placement doesn't change
+/// results: an agent-supplied `instruction` wins; otherwise the same derived
+/// default the server uses (from `code_mode` exclusive / version filter).
+///
+/// Returns the [`RerankOutcome`] for the FR-109 `Rerank` event: `applied` is
+/// `true` once the Voyage call succeeds (`false` for an empty result set, where
+/// nothing is reranked), and `billed_tokens` is Voyage's reported `total_tokens`
+/// through `rerank_model`'s [`mn_core::rerank::RerankParam::billed_tokens`] rate.
 ///
 /// # Errors
 ///
-/// Returns `anyhow::Error` on the HTTP fetch failure, a reranker load failure
-/// (bad catalog id, missing model, missing Voyage key), or a rerank failure.
+/// Returns `anyhow::Error` on the HTTP fetch failure or a Voyage rerank failure.
+#[allow(clippy::too_many_arguments)]
 async fn rerank_via_http(
     server_url: &str,
     bearer: Option<&str>,
     request: &SearchRequest,
-    sel: RerankSelection<'_>,
+    voyage_key: &str,
+    voyage_base_url: Option<&str>,
+    model: &'static str,
+    rerank_model: mn_core::rerank::RerankParam,
+    instruction: Option<&str>,
     limit: u32,
     json: bool,
-) -> Result<()> {
+) -> Result<RerankOutcome> {
     let resp = fetch_search(server_url, bearer, request).await?;
     let texts: Vec<String> = request.queries.iter().map(|q| q.text.clone()).collect();
 
     // Empty result set: nothing to rerank — render straight through.
     if resp.results.is_empty() {
         println!("{}", render(&texts, &resp, json));
-        return Ok(());
+        return Ok(RerankOutcome::default());
     }
 
-    let spec = mn_embedding::reranker_catalog::resolve(sel.reranker_id, sel.reranker_path)
-        .with_context(|| format!("resolve reranker `{}`", sel.reranker_id))?;
-    let reranker = mn_embedding::reranker::LoadedReranker::load(
-        spec,
-        sel.cache_dir.to_path_buf(),
-        sel.voyage_key,
-        sel.voyage_base_url,
-    )
-    .await
-    .with_context(|| format!("load reranker `{}`", sel.reranker_id))?;
-
+    let mut reranker = mn_embedding::voyage::VoyageReranker::new(voyage_key, model);
+    if let Some(base) = voyage_base_url {
+        reranker = reranker.with_base_url(base);
+    }
     // Pivot on the first query (the most "user-facing" text for HyDE / expansion).
     let pivot = texts.first().cloned().unwrap_or_default();
+    // Agent instruction wins; else the same derived default the server uses
+    // (code_mode exclusive / version filter), so placement doesn't change results.
+    let derived;
+    let instr = if let Some(i) = instruction {
+        Some(i)
+    } else {
+        let code_exclusive = request.code_mode.as_deref() == Some("exclusive");
+        let version = request
+            .filters
+            .language_target
+            .any_of
+            .first()
+            .and_then(|lt| {
+                lt.version_satisfies
+                    .as_deref()
+                    .map(|v| (lt.name.as_str(), v))
+            });
+        derived = mn_core::rerank::default_instruction(code_exclusive, version);
+        derived.as_deref()
+    };
+    let composed = mn_core::rerank::compose_rerank_query(&pivot, instr);
     let docs: Vec<String> = resp.results.iter().map(|r| r.content.clone()).collect();
-    let scores = reranker
-        .rerank(pivot, docs)
+    let out = reranker
+        .rerank(composed, docs, None)
         .await
-        .with_context(|| format!("rerank with `{}`", sel.reranker_id))?;
-
-    let reordered = apply_rerank(resp.results, &scores, limit);
+        .context("voyage rerank")?;
+    // Apply the model's billing rate to Voyage's reported tokens (D5).
+    let billed_tokens = rerank_model.billed_tokens(out.total_tokens);
+    let reordered = apply_rerank(resp.results, &out.results, limit);
     let out = SearchResponse {
         results: reordered,
         search_metadata: resp.search_metadata,
     };
     println!("{}", render(&texts, &out, json));
-    Ok(())
+    Ok(RerankOutcome {
+        applied: true,
+        reason: None,
+        billed_tokens: Some(billed_tokens),
+    })
 }
 
-/// Re-order `results` by reranker score (descending) and truncate to `limit`,
-/// mapping each score back to its result by [`mn_embedding::RerankResult::index`]
-/// — NOT positionally, because a remote reranker (Voyage) may return results in
-/// a different order than the input. A `rerank_score` is stamped into each
-/// surviving result's `scores` JSON. Indices that fall outside `results` or
-/// repeat are dropped defensively.
+/// Re-order `results` by Voyage relevance score (0–1, descending) and truncate
+/// to `limit`, mapping each score back to its result by
+/// [`mn_embedding::RerankResult::index`] — NOT positionally, because Voyage may
+/// return results in a different order than the input. A `rerank_score` is
+/// stamped into each surviving result's `scores` JSON. Indices that fall
+/// outside `results` or repeat are dropped defensively.
 ///
 /// Pure (no model / IO) so it is unit-testable without a reranker or network.
 fn apply_rerank(
@@ -925,8 +1121,8 @@ fn apply_rerank(
     indexed.into_iter().map(|(_, r)| r).collect()
 }
 
-/// Record the raw reranker logit as `scores.rerank_score`, creating the
-/// `scores` object if the server didn't send one.
+/// Record the Voyage relevance score (0–1) as `scores.rerank_score`, creating
+/// the `scores` object if the server didn't send one.
 fn stamp_rerank_score(result: &mut SearchResult, score: f32) {
     let scores = result
         .scores
@@ -1059,13 +1255,21 @@ pub struct SearchRequest {
     pub code_mode: Option<String>,
     /// Per-result filters.
     pub filters: SearchFilters,
-    /// Optional ordering hint for the candidate pool. The rerank path sets this
-    /// to `"score"` so the cloud returns relevance-ordered candidates (rather
-    /// than its confidence-first default) before the cross-encoder reranks them.
-    /// `None` for the non-rerank path — `skip_serializing_if` then omits the key
-    /// entirely, keeping that wire body byte-identical to the pre-Task-9.4 form.
+    /// Optional ordering hint for the candidate pool. The local-rerank path sets
+    /// this to `"score"` so the cloud returns relevance-ordered candidates
+    /// (rather than its confidence-first default) before the client reranks
+    /// them. `None` otherwise — `skip_serializing_if` then omits the key.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sort_by: Option<String>,
+    /// Server-side rerank parameter: the Voyage model name on the `Server` path,
+    /// `"none"` on the `Local` / `Off` paths (exactly one rerank pass). `None`
+    /// only on the legacy no-placement build — `skip_serializing_if` omits it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rerank: Option<String>,
+    /// Agent-supplied rerank instruction forwarded on the `Server` path; `None`
+    /// (and omitted) otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rerank_instructions: Option<String>,
 }
 
 /// One {text, vector, code_vector} triple.
@@ -1400,8 +1604,9 @@ mod tests {
             queries_stdin: stdin,
             limit: 10,
             embedding_model: DEFAULT_EMBEDDING_MODEL.to_owned(),
-            rerank: false,
-            reranker: None,
+            rerank: "auto".to_owned(),
+            rerank_model: None,
+            rerank_instructions: None,
             mode: "hybrid".to_owned(),
             code_mode: None,
             kind: Vec::new(),
@@ -1507,14 +1712,20 @@ mod tests {
     }
 
     /// Default [`SearchRequestParts`] for the build tests: one hybrid query
-    /// pair carrying a general vector, no rerank, no code fields.
-    fn parts(queries: Vec<QueryPair>, limit: u32, rerank: bool) -> SearchRequestParts {
+    /// pair carrying a general vector, the given placement, no code fields.
+    fn parts(
+        queries: Vec<QueryPair>,
+        limit: u32,
+        placement: mn_core::config::RerankPlacement,
+    ) -> SearchRequestParts {
         SearchRequestParts {
             queries,
             client_embedding_model: "voyage-context-3@1".to_owned(),
             client_code_embedding_model: None,
             limit,
-            rerank,
+            placement,
+            rerank_model: mn_core::rerank::RerankParam::Rerank25,
+            rerank_instructions: None,
             mode: "hybrid".to_owned(),
             code_mode: None,
             filters: SearchFilters::default(),
@@ -1522,40 +1733,46 @@ mod tests {
     }
 
     #[test]
-    fn build_request_rerank_widens_pool_and_sets_score_sort() {
+    fn build_request_local_widens_pool_and_sets_score_sort() {
+        use mn_core::config::RerankPlacement;
         let q = vec![QueryPair {
             text: "x".to_owned(),
             vector: vec![0.0],
             code_vector: Vec::new(),
         }];
-        let req = build_search_request(parts(q, 5, true));
-        // Caller asked for 5 but the cloud pool is widened so the reranker can
-        // promote a below-cutoff candidate.
+        let req = build_search_request(parts(q, 5, RerankPlacement::Local));
+        // Caller asked for 5 but the cloud pool is widened so the local reranker
+        // can promote a below-cutoff candidate.
         assert_eq!(req.limit, RERANK_FETCH);
         assert_eq!(req.sort_by.as_deref(), Some("score"));
+        // Local always tells the server "none" (exactly one rerank pass).
+        assert_eq!(req.rerank.as_deref(), Some("none"));
         // sort_by serializes as the "score" key when present.
         let body = serde_json::to_value(&req).unwrap();
         assert_eq!(body["limit"], RERANK_FETCH);
         assert_eq!(body["sort_by"], "score");
+        assert_eq!(body["rerank"], "none");
     }
 
     #[test]
-    fn build_request_non_rerank_keeps_limit_and_omits_sort_by() {
+    fn build_request_server_keeps_limit_and_omits_sort_by() {
+        use mn_core::config::RerankPlacement;
         let q = vec![QueryPair {
             text: "x".to_owned(),
             vector: vec![0.0],
             code_vector: Vec::new(),
         }];
-        let req = build_search_request(parts(q, 5, false));
+        let req = build_search_request(parts(q, 5, RerankPlacement::Server));
         assert_eq!(req.limit, 5);
         assert!(req.sort_by.is_none());
-        // None must be OMITTED on the wire (skip_serializing_if), not null —
-        // proving the non-rerank body stays byte-identical to pre-Task-9.4.
+        // Server placement sends the model name (not "none") and the caller's limit.
+        assert_eq!(req.rerank.as_deref(), Some("rerank-2.5"));
+        // sort_by None must be OMITTED on the wire (skip_serializing_if), not null.
         let body = serde_json::to_value(&req).unwrap();
         assert_eq!(body["limit"], 5);
         assert!(
             body.as_object().unwrap().get("sort_by").is_none(),
-            "sort_by key must be absent for the non-rerank path"
+            "sort_by key must be absent for the server path"
         );
     }
 
@@ -1580,7 +1797,7 @@ mod tests {
             vector: Vec::new(), // exclusive: no general embedding was made
             code_vector: vec![0.5, 0.25],
         }];
-        let mut p = parts(q, 5, false);
+        let mut p = parts(q, 5, mn_core::config::RerankPlacement::Server);
         p.client_code_embedding_model = Some("voyage-code-3@1".to_owned());
         p.code_mode = Some("exclusive".to_owned());
         let body = serde_json::to_value(build_search_request(p)).unwrap();
@@ -1601,7 +1818,7 @@ mod tests {
             vector: Vec::new(),
             code_vector: Vec::new(),
         }];
-        let mut p = parts(q, 5, false);
+        let mut p = parts(q, 5, mn_core::config::RerankPlacement::Server);
         p.mode = "fts".to_owned();
         let body = serde_json::to_value(build_search_request(p)).unwrap();
         let top = body.as_object().unwrap();
@@ -1675,7 +1892,7 @@ mod tests {
     }
 
     #[test]
-    fn search_args_rerank_flag_defaults_false_and_reranker_parses() {
+    fn search_args_rerank_flags_default_and_parse() {
         use clap::Parser as _;
 
         #[derive(clap::Parser)]
@@ -1684,21 +1901,32 @@ mod tests {
             inner: Args,
         }
 
-        // Default: --rerank absent → false, --reranker absent → None.
+        // Defaults: --rerank → "auto", model/instructions → None.
         let p = Probe::parse_from(["search", "q"]);
-        assert!(!p.inner.rerank, "--rerank must default to false (opt-in)");
-        assert!(p.inner.reranker.is_none());
+        assert_eq!(p.inner.rerank, "auto", "--rerank must default to auto");
+        assert!(p.inner.rerank_model.is_none());
+        assert!(p.inner.rerank_instructions.is_none());
 
-        // Present: both flags parse.
+        // Present: all three flags parse with their value parsers.
         let p = Probe::parse_from([
             "search",
             "q",
             "--rerank",
-            "--reranker",
-            "voyage-rerank-2.5-lite",
+            "local",
+            "--rerank-model",
+            "rerank-2.5-lite",
+            "--rerank-instructions",
+            "Prefer prose.",
         ]);
-        assert!(p.inner.rerank);
-        assert_eq!(p.inner.reranker.as_deref(), Some("voyage-rerank-2.5-lite"));
+        assert_eq!(p.inner.rerank, "local");
+        assert_eq!(p.inner.rerank_model.as_deref(), Some("rerank-2.5-lite"));
+        assert_eq!(p.inner.rerank_instructions.as_deref(), Some("Prefer prose."));
+
+        // The value parser rejects an out-of-set placement.
+        assert!(
+            Probe::try_parse_from(["search", "q", "--rerank", "bogus"]).is_err(),
+            "values outside auto|local|server|off must be rejected at parse time"
+        );
     }
 
     #[test]
@@ -1750,5 +1978,200 @@ mod tests {
         assert!(build_filters(&bad_json.inner).is_err());
         let bad_date = Probe::parse_from(["search", "q", "--ingested-after", "not-a-date"]);
         assert!(build_filters(&bad_date.inner).is_err());
+    }
+
+    #[test]
+    fn build_search_request_rerank_wire_matrix() {
+        use mn_core::config::RerankPlacement;
+        use mn_core::rerank::RerankParam;
+        let base = || SearchRequestParts {
+            queries: vec![QueryPair {
+                text: "q".into(),
+                vector: vec![],
+                code_vector: vec![],
+            }],
+            client_embedding_model: "m@1".into(),
+            client_code_embedding_model: None,
+            limit: 10,
+            placement: RerankPlacement::Server,
+            rerank_model: RerankParam::Rerank25,
+            rerank_instructions: None,
+            mode: "hybrid".into(),
+            code_mode: None,
+            filters: SearchFilters::default(),
+        };
+
+        // Server placement: server reranks; caller's limit goes on the wire.
+        let r = build_search_request(base());
+        assert_eq!(r.rerank.as_deref(), Some("rerank-2.5"));
+        assert_eq!(r.limit, 10);
+        assert!(r.sort_by.is_none());
+
+        // Local placement: tell the server "none", over-fetch, sort by score.
+        let mut p = base();
+        p.placement = RerankPlacement::Local;
+        let r = build_search_request(p);
+        assert_eq!(r.rerank.as_deref(), Some("none"));
+        assert_eq!(r.limit, RERANK_FETCH);
+        assert_eq!(r.sort_by.as_deref(), Some("score"));
+
+        // Off: "none", caller's limit, no over-fetch.
+        let mut p = base();
+        p.placement = RerankPlacement::Off;
+        let r = build_search_request(p);
+        assert_eq!(r.rerank.as_deref(), Some("none"));
+        assert_eq!(r.limit, 10);
+
+        // Lite model + instructions ride along on the server path.
+        let mut p = base();
+        p.rerank_model = RerankParam::Rerank25Lite;
+        p.rerank_instructions = Some("Prefer prose.".into());
+        let r = build_search_request(p);
+        assert_eq!(r.rerank.as_deref(), Some("rerank-2.5-lite"));
+        assert_eq!(r.rerank_instructions.as_deref(), Some("Prefer prose."));
+    }
+
+    #[test]
+    fn server_rerank_outcome_parses_server_metadata_shapes() {
+        use mn_core::config::RerankPlacement;
+        let meta = |v: serde_json::Value| server_rerank_outcome(RerankPlacement::Server, Some(&v));
+
+        // Well-formed applied=true with a known reason omitted.
+        let o = meta(serde_json::json!({ "rerank": { "applied": true } }));
+        assert!(o.applied);
+        assert_eq!(o.reason, None);
+        assert_eq!(o.billed_tokens, None, "server tracks its own token metrics");
+
+        // Well-formed degrade: applied=false + a documented reason.
+        let o = meta(serde_json::json!({
+            "rerank": { "applied": false, "reason": "token_budget_exhausted" }
+        }));
+        assert!(!o.applied);
+        assert_eq!(o.reason.as_deref(), Some("token_budget_exhausted"));
+
+        // Missing `rerank` key: degrade silently to not-applied / no-reason.
+        let o = meta(serde_json::json!({ "other": 1 }));
+        assert!(!o.applied);
+        assert_eq!(o.reason, None);
+
+        // Missing `applied`: treated as not-applied.
+        let o = meta(serde_json::json!({ "rerank": { "reason": "disabled" } }));
+        assert!(!o.applied);
+        assert_eq!(o.reason.as_deref(), Some("disabled"));
+
+        // Non-bool `applied`: not coerced — treated as not-applied.
+        let o = meta(serde_json::json!({ "rerank": { "applied": "yes" } }));
+        assert!(!o.applied);
+
+        // Unknown / arbitrary reason text is dropped by the privacy allow-list
+        // (only the closed `mn_core::rerank::RERANK_REASONS` set survives).
+        let o = meta(serde_json::json!({
+            "rerank": { "applied": false, "reason": "rate limited: token=eyJabc" }
+        }));
+        assert_eq!(o.reason, None, "free-form server reason must not reach the event");
+
+        // No metadata at all on the server path: not-applied / no-reason.
+        let o = server_rerank_outcome(RerankPlacement::Server, None);
+        assert!(!o.applied);
+        assert_eq!(o.reason, None);
+    }
+
+    #[test]
+    fn server_rerank_outcome_off_ignores_metadata() {
+        use mn_core::config::RerankPlacement;
+        // Off opted out client-side; it must NOT trust the server echo, so even
+        // a present `applied:true` / reason is ignored (matches the MCP client,
+        // keeping `reason` comparable across clients for the same situation).
+        let meta = serde_json::json!({
+            "rerank": { "applied": true, "reason": "not_requested" }
+        });
+        let o = server_rerank_outcome(RerankPlacement::Off, Some(&meta));
+        assert!(!o.applied);
+        assert_eq!(o.reason, None);
+        assert_eq!(o.billed_tokens, None);
+    }
+
+    #[test]
+    fn rerank_event_payload_matrix() {
+        use mn_core::config::RerankPlacement;
+        use mn_core::rerank::RerankParam;
+
+        // Off: no model, not applied, no reason/tokens — regardless of outcome.
+        let p = rerank_event(RerankPlacement::Off, RerankParam::None, None);
+        match p {
+            EventPayload::Rerank {
+                placement,
+                model,
+                applied,
+                reason,
+                billed_tokens,
+            } => {
+                assert_eq!(placement, "off");
+                assert_eq!(model, None);
+                assert!(!applied);
+                assert_eq!(reason, None);
+                assert_eq!(billed_tokens, None);
+            }
+            _ => panic!("expected Rerank payload"),
+        }
+
+        // Local applied: model named, applied=true, billed tokens carried.
+        let outcome = RerankOutcome {
+            applied: true,
+            reason: None,
+            billed_tokens: Some(321),
+        };
+        let p = rerank_event(RerankPlacement::Local, RerankParam::Rerank25, Some(&outcome));
+        match p {
+            EventPayload::Rerank {
+                placement,
+                model,
+                applied,
+                billed_tokens,
+                ..
+            } => {
+                assert_eq!(placement, "local");
+                assert_eq!(model.as_deref(), Some("rerank-2.5"));
+                assert!(applied);
+                assert_eq!(billed_tokens, Some(321));
+            }
+            _ => panic!("expected Rerank payload"),
+        }
+
+        // Server degrade: model named, applied=false with a documented reason.
+        let outcome = RerankOutcome {
+            applied: false,
+            reason: Some("provider_error".to_owned()),
+            billed_tokens: None,
+        };
+        let p = rerank_event(RerankPlacement::Server, RerankParam::Rerank25Lite, Some(&outcome));
+        match p {
+            EventPayload::Rerank {
+                placement,
+                model,
+                applied,
+                reason,
+                ..
+            } => {
+                assert_eq!(placement, "server");
+                assert_eq!(model.as_deref(), Some("rerank-2.5-lite"));
+                assert!(!applied);
+                assert_eq!(reason.as_deref(), Some("provider_error"));
+            }
+            _ => panic!("expected Rerank payload"),
+        }
+
+        // Search failed before rerank (outcome=None): reported as not applied.
+        let p = rerank_event(RerankPlacement::Server, RerankParam::Rerank25, None);
+        match p {
+            EventPayload::Rerank {
+                applied, reason, billed_tokens, ..
+            } => {
+                assert!(!applied);
+                assert_eq!(reason, None);
+                assert_eq!(billed_tokens, None);
+            }
+            _ => panic!("expected Rerank payload"),
+        }
     }
 }

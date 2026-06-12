@@ -5,9 +5,9 @@
 //! 2. `$XDG_DATA_HOME/midnight-manual/models/`
 //! 3. `$HOME/.local/share/midnight-manual/models/`
 //!
-//! The cache holds the fastembed reranker model (`bge-reranker-base` by
-//! default); each model lives in its own subdirectory managed by fastembed.
-//! The corpus embedder is no longer local — embedding runs via VoyageAI.
+//! The cache holds the on-disk tokenizer assets used for local token counting
+//! (see `mn-content::tokens`); each lives in its own subdirectory. Embedding and
+//! reranking are both remote (VoyageAI), so no model weights are cached here.
 
 use std::path::PathBuf;
 

@@ -1,6 +1,6 @@
 [package]
 name = "mn-embedding"
-description = "VoyageAI embedding client plus the fastembed-rs bge-reranker-base cross-encoder."
+description = "VoyageAI embedding and reranking client."
 
 version       = { workspace = true }
 edition       = { workspace = true }
@@ -15,21 +15,13 @@ workspace = true
 
 [features]
 integration = []
-# Reserved for opt-in model-load tests. The reranker smoke test is `#[ignore]`-
-# gated (see tests/real_reranker_smoke.rs) rather than feature-gated, so nothing
-# references this today; kept as a stable knob for future model-load gating.
+# Reserved knob for future opt-in model-load tests. Nothing references it today
+# (embedding + reranking are both remote VoyageAI, so there are no model weights
+# to gate), but it is kept as a stable feature name.
 models = []
 
 [dependencies]
 mn-core      = { path = "../mn-core" }
-fastembed    = { workspace = true }
-# hf-hub is already in the lockfile (transitive via fastembed). We declare it as
-# a direct dep ONLY for the user-defined ONNX reranker download path. Match
-# fastembed's own feature selection EXACTLY — `default-features = false` plus the
-# `ureq` (blocking) + `native-tls` features — so this edge introduces no new
-# transitive crates (fastembed enables `hf-hub-native-tls` => `hf-hub?/ureq` +
-# `hf-hub?/native-tls`; the `tokio`/`reqwest` async stack stays off).
-hf-hub       = { version = "0.4.3", default-features = false, features = ["ureq", "native-tls"] }
 once_cell    = { workspace = true }
 sha2         = { workspace = true }
 serde        = { workspace = true }

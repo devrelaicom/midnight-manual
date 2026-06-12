@@ -1,10 +1,10 @@
 //! `mnm models <subcommand>` — local model management + corpus-side
 //! introspection.
 //!
-//! - `mnm models pull` downloads the reranker into the local model cache.
-//!   First call fetches ~270 MB from the upstream model registry; subsequent
-//!   calls are no-ops. The corpus embedder is VoyageAI (remote — BYOK or the
-//!   server's `/v1/embeddings` proxy), so nothing is downloaded for it.
+//! - `mnm models pull` ensures the local model-cache directory exists. Both the
+//!   embedder and the reranker are remote VoyageAI (BYOK or the cloud server's
+//!   `/v1/embeddings` and inline rerank), so there are no model weights to
+//!   download; the subcommand is kept as a no-op-friendly cache primer.
 //! - `mnm models active` GETs `/v1/models/active` so callers can verify
 //!   that the corpus's active model matches what their queries embed with.
 
@@ -30,8 +30,8 @@ pub struct Args {
 /// `models` sub-subcommands.
 #[derive(Debug, Subcommand)]
 pub enum ModelsCmd {
-    /// Download the reranker into the local cache (the corpus embedder is
-    /// remote VoyageAI, so nothing is fetched for it).
+    /// Ensure the local model-cache directory exists. Both the embedder and the
+    /// reranker are remote VoyageAI, so nothing is downloaded.
     Pull(PullArgs),
     /// Show the corpus's currently active embedding model.
     Active(ActiveArgs),
@@ -126,43 +126,24 @@ async fn run_pull(
     std::fs::create_dir_all(&cache_dir)
         .with_context(|| format!("create model cache dir at {}", cache_dir.display()))?;
 
-    // Load the bge reranker singleton directly (the MCP `pull_models` tool
-    // that used to wrap this was removed — MCP-side the reranker loads lazily
-    // on the first reranking search). Loading fetches the ONNX bundle into
-    // `cache_dir` if it isn't already on disk.
-    mn_embedding::reranker::global(cache_dir.clone())
-        .await
-        .map_err(|e| anyhow!("reranker init failed: {e}"))?;
-    // This is a fresh CLI process, so the load always happened in this call
-    // (the files may still have come from the on-disk cache).
-    let reranker_loaded = true;
-
+    // Both the embedder and the reranker are remote VoyageAI now, so there is
+    // nothing to download — `pull` only primes the cache directory.
     let duration_ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
     telemetry
         .emit(Event::new(
             Component::Cli,
             cli_version,
             EventPayload::PullModels {
-                // The corpus embedder is remote VoyageAI; `models pull` never
-                // downloads a local embedder, so this is always false.
+                // Nothing is fetched locally: both models are remote VoyageAI.
                 embedder_downloaded: false,
-                reranker_downloaded: reranker_loaded,
+                reranker_downloaded: false,
                 duration_ms,
                 outcome: Outcome::Ok,
             },
         ))
         .await;
 
-    println!(
-        "{}",
-        format_pull_output(
-            mn_embedding::RERANKER_MODEL_NAME,
-            reranker_loaded,
-            duration_ms,
-            &cache_dir,
-            json
-        )
-    );
+    println!("{}", format_pull_output(duration_ms, &cache_dir, json));
     Ok(())
 }
 
@@ -700,41 +681,22 @@ pub struct ActiveCode {
 #[derive(Debug, Serialize)]
 struct PullOutput<'a> {
     action: &'a str,
-    reranker: &'a str,
-    reranker_downloaded: bool,
     duration_ms: u32,
     cache_dir: String,
 }
 
-fn format_pull_output(
-    reranker: &str,
-    reranker_loaded: bool,
-    duration_ms: u32,
-    cache_dir: &Path,
-    json: bool,
-) -> String {
+fn format_pull_output(duration_ms: u32, cache_dir: &Path, json: bool) -> String {
     if json {
         let body = PullOutput {
             action: "models.pull",
-            reranker,
-            reranker_downloaded: reranker_loaded,
             duration_ms,
             cache_dir: cache_dir.display().to_string(),
         };
         return serde_json::to_string(&body).unwrap_or_default();
     }
     let mut out = String::new();
-    writeln!(out, "models pulled in {duration_ms} ms:").ok();
-    writeln!(
-        out,
-        "  reranker: {reranker} ({})",
-        if reranker_loaded {
-            "downloaded"
-        } else {
-            "cached"
-        },
-    )
-    .ok();
+    writeln!(out, "model cache primed in {duration_ms} ms:").ok();
+    writeln!(out, "  reranker: VoyageAI (remote — nothing to download)").ok();
     writeln!(out, "  embedder: VoyageAI (remote — nothing to download)").ok();
     write!(out, "  cache:    {}", cache_dir.display()).ok();
     out
@@ -813,23 +775,24 @@ mod tests {
 
     #[test]
     fn pull_human_output_describes_each_model() {
-        let s =
-            format_pull_output("bge-reranker-base", false, 1234, Path::new("/tmp/cache"), false);
+        let s = format_pull_output(1234, Path::new("/tmp/cache"), false);
         assert!(s.contains("1234 ms"));
-        assert!(s.contains("bge-reranker-base (cached)"));
-        // The embedder is remote Voyage now — no download line, but a note.
-        assert!(s.contains("VoyageAI"));
+        // Both models are remote VoyageAI now — nothing is downloaded.
+        assert!(s.contains("reranker: VoyageAI"));
+        assert!(s.contains("embedder: VoyageAI"));
         assert!(s.contains("/tmp/cache"));
     }
 
     #[test]
     fn pull_json_output_is_stable() {
-        let s = format_pull_output("reranker", true, 42, Path::new("/tmp/c"), true);
+        let s = format_pull_output(42, Path::new("/tmp/c"), true);
         let v: serde_json::Value = serde_json::from_str(&s).unwrap();
         assert_eq!(v["action"], "models.pull");
-        assert_eq!(v["reranker_downloaded"], true);
         assert_eq!(v["duration_ms"], 42);
-        // No embedder fields anymore (corpus embedder is remote Voyage).
+        assert_eq!(v["cache_dir"], "/tmp/c");
+        // No model-download fields anymore — both models are remote VoyageAI.
+        assert!(v.get("reranker").is_none());
+        assert!(v.get("reranker_downloaded").is_none());
         assert!(v.get("embedder").is_none());
         assert!(v.get("embedder_downloaded").is_none());
     }

@@ -3,10 +3,9 @@
 //! Pure, DB-free math: given a [`crate::provenance::Provenance`], an age in
 //! whole days, a query-side version constraint, and a normalized relevance
 //! term, produce a `trust_score`, a blended `confidence`, and a per-factor
-//! [`ConfidenceFactors`] breakdown. The relevance-normalization helpers
-//! ([`normalize_rrf`], [`normalize_rerank`]) are compiled-in, not
-//! policy-configurable, so every confidence score in the corpus stays
-//! reproducible (spec §"Relevance term").
+//! [`ConfidenceFactors`] breakdown. The relevance-normalization helper
+//! [`normalize_rrf`] is compiled-in, not policy-configurable, so every
+//! confidence score in the corpus stays reproducible (spec §"Relevance term").
 
 use serde::Serialize;
 
@@ -19,7 +18,7 @@ use crate::scoring_policy::ScoringPolicy;
 pub enum RelevanceSource {
     /// Normalized Reciprocal Rank Fusion score (cloud default, `rerank=false`).
     Rrf,
-    /// Normalized cross-encoder reranker score (MCP-side, `rerank=true`).
+    /// Voyage relevance score (server inline or client BYOK), `rerank=true`.
     Rerank,
 }
 
@@ -99,14 +98,6 @@ pub struct ScoreResult {
 pub fn normalize_rrf(raw_rrf_score: f64) -> f64 {
     let raw = raw_rrf_score.max(0.0);
     1.0 - 1.0 / (1.0 + raw)
-}
-
-/// Normalize a raw cross-encoder logit to `(0, 1)` via the logistic sigmoid.
-///
-/// `relevance_rerank = 1/(1 + exp(-logit))`. Compiled-in (spec §"Relevance term").
-#[must_use]
-pub fn normalize_rerank(raw_logit: f64) -> f64 {
-    1.0 / (1.0 + (-raw_logit).exp())
 }
 
 /// Clamp a scoring value into `[0, 1]`, logging a structured warning when the
@@ -216,7 +207,8 @@ impl ScoringPolicy {
 
     /// Score one candidate end to end: trust, blended confidence, and the
     /// per-factor breakdown. `relevance` must already be normalized to `[0, 1]`
-    /// via [`normalize_rrf`] or [`normalize_rerank`].
+    /// — via [`normalize_rrf`] for RRF scores, or directly for Voyage relevance
+    /// scores (which Voyage already returns in `[0, 1]`).
     #[must_use]
     pub fn score(
         &self,
@@ -465,13 +457,10 @@ mod tests {
     }
 
     #[test]
-    fn normalizers_are_bounded_and_monotonic() {
+    fn normalize_rrf_is_bounded_and_monotonic() {
         assert!((normalize_rrf(0.0) - 0.0).abs() < 1e-12);
         assert!(normalize_rrf(1.0) > normalize_rrf(0.5));
         assert!(normalize_rrf(1e9) < 1.0);
-        assert!((normalize_rerank(0.0) - 0.5).abs() < 1e-12);
-        assert!(normalize_rerank(10.0) > normalize_rerank(-10.0));
-        assert!(normalize_rerank(50.0) <= 1.0);
     }
 
     #[test]

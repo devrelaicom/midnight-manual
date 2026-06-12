@@ -146,7 +146,7 @@ async fn status_tool_works_without_model_load() {
     // proxy mode), so an exported VOYAGE_API_KEY cannot leak in.
     let cloud = mn_mcp::CloudClient::new("http://127.0.0.1:9", None).unwrap();
     let report = mn_mcp::status::assemble(&cloud, None).await;
-    assert_eq!(report.reranker, "bge-reranker-base");
+    assert_eq!(report.reranker, "rerank-2.5");
     // The shape is well-formed regardless of whether sibling tests have
     // loaded models.
     let json = serde_json::to_value(&report).unwrap();

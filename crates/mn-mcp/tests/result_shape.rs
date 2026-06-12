@@ -69,7 +69,7 @@ fn advanced_search_structured_conforms_to_output_schema() {
                              "total_candidates": 9 }
     });
     let opts = mn_mcp::render::SearchRenderOpts {
-        reranker_used: Some("bge-reranker-base".to_owned()),
+        reranker_used: Some("rerank-2.5".to_owned()),
         advanced: true,
         skill_installed: true,
     };
@@ -109,7 +109,7 @@ fn all_passthrough_projectors_conform_to_their_output_schema() {
             "daily": { "limit": 10_000_000_u64, "remaining": 9_900_000_u64 }
         })),
         voyage: mn_mcp::status::VoyageState::Valid,
-        reranker: "bge-reranker-base",
+        reranker: "rerank-2.5",
         reranker_loaded: true,
     };
     let status_env = serde_json::to_value(&status_report).expect("StatusReport serializes");

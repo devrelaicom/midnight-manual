@@ -70,6 +70,15 @@ pub struct SearchRequest {
     /// `code_mode != off`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_code_embedding_model: Option<String>,
+    /// Server-side rerank parameter: the `VoyageAI` model name on the `Server`
+    /// placement, `"none"` on the `Local` / `Off` placements (exactly one rerank
+    /// pass — `Local` reranks client-side). `None` omits the key on the wire.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rerank: Option<String>,
+    /// Agent-supplied rerank instruction forwarded on the `Server` placement;
+    /// `None` (and omitted) on `Local` / `Off`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rerank_instructions: Option<String>,
 }
 
 /// The corpus's active embedding models, decoded from `GET /v1/models/active`.

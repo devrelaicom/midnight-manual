@@ -35,7 +35,7 @@ pub fn installed_anywhere(env: &impl SkillEnv) -> bool {
         .any(|h| h.skill_file(Scope::User, &base).exists())
 }
 
-/// The three skill files, embedded at build time, as `(relative path, body)`.
+/// The skill files, embedded at build time, as `(relative path, body)`.
 /// This is the bundle the installer ships verbatim into every harness. `SKILL.md`
 /// is always entry 0.
 #[must_use]
@@ -44,6 +44,7 @@ pub const fn skill_files() -> &'static [(&'static str, &'static str)] {
         ("SKILL.md", SKILL_MD),
         ("references/filters-and-modes.md", REF_FILTERS_AND_MODES),
         ("references/advanced-techniques.md", REF_ADVANCED_TECHNIQUES),
+        ("references/rerank-instructions.md", REF_RERANK_INSTRUCTIONS),
     ]
 }
 
@@ -59,6 +60,8 @@ const REF_FILTERS_AND_MODES: &str =
     include_str!("../assets/midnight-advanced-search/references/filters-and-modes.md");
 const REF_ADVANCED_TECHNIQUES: &str =
     include_str!("../assets/midnight-advanced-search/references/advanced-techniques.md");
+const REF_RERANK_INSTRUCTIONS: &str =
+    include_str!("../assets/midnight-advanced-search/references/rerank-instructions.md");
 
 #[cfg(test)]
 mod tests {
@@ -127,6 +130,7 @@ mod tests {
         let skill = skill_markdown();
         assert!(skill.contains("references/filters-and-modes.md"));
         assert!(skill.contains("references/advanced-techniques.md"));
+        assert!(skill.contains("references/rerank-instructions.md"));
     }
 
     #[test]

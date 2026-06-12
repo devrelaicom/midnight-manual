@@ -129,7 +129,7 @@ tree-sitter      = "0.25"     # selects 0.25.10
 tree-sitter-language = "0.1"  # selects 0.1.7
 # text-splitter: code+tokenizers features. Pinned to 0.27 (last release on the
 # tokenizers-0.21 line; 0.28+ requires tokenizers 0.22 which cannot unify with
-# the workspace tokenizers 0.21 that fastembed + tokens.rs depend on).
+# the workspace tokenizers 0.21 that tokens.rs depends on).
 text-splitter    = { version = "0.27", features = ["code", "tokenizers"] }
 # Directory walker honoring .gitignore (used by the code ingest walker).
 ignore           = "0.4"
@@ -154,12 +154,10 @@ tree-sitter-haskell    = "0.23"   # selects 0.23.1
 tree-sitter-java       = "0.23"   # selects 0.23.5
 
 # ML
-fastembed        = "4"
-# tokenizers is already a transitive dep of fastembed; we promote it to a
-# direct workspace dep so mn-content can compute real BPE token counts
-# without dragging in the embedder. default-features disabled to drop the
-# `progressbar` (indicatif) and `onig` (Oniguruma C lib) baggage we do not
-# need for offline encode-only usage.
+# A direct workspace dep so mn-content can compute real BPE token counts that
+# match the production embedder, without dragging in any model runtime.
+# default-features disabled to drop the `progressbar` (indicatif) and `onig`
+# (Oniguruma C lib) baggage we do not need for offline encode-only usage.
 tokenizers       = { version = "0.21", default-features = false, features = ["fancy-regex"] }
 
 # Observability

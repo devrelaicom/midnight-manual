@@ -41,8 +41,9 @@ fn make_args(query: &str) -> Args {
         queries_stdin: false,
         limit: 5,
         embedding_model: DEFAULT_EMBEDDING_MODEL.to_owned(),
-        rerank: false,
-        reranker: None,
+        rerank: "auto".to_owned(),
+        rerank_model: None,
+        rerank_instructions: None,
         mode: "hybrid".to_owned(),
         code_mode: None,
         kind: vec![],
@@ -172,7 +173,6 @@ async fn run_with_paths_server_mode_carries_corpus_wire_id() {
         .mount(&server)
         .await;
 
-    let cache_dir = tempdir().unwrap();
     let auth_dir = tempdir().unwrap();
     // auth_path points at a non-existent file so bearer resolves to None (anonymous).
     let auth_path = auth_dir.path().join("auth.toml");
@@ -181,7 +181,6 @@ async fn run_with_paths_server_mode_carries_corpus_wire_id() {
         make_args("deploy a Midnight contract"),
         &server.uri(),
         Some(&auth_path),
-        cache_dir.path(),
         None, // config_path (default discovery)
         None, // no BYOK key → server-proxy mode
         &TelemetryClient::Disabled,
@@ -279,7 +278,6 @@ async fn explicit_embedding_model_override_skips_active_fetch() {
         .mount(&server)
         .await;
 
-    let cache_dir = tempdir().unwrap();
     let auth_dir = tempdir().unwrap();
     let auth_path = auth_dir.path().join("auth.toml");
 
@@ -296,7 +294,6 @@ async fn explicit_embedding_model_override_skips_active_fetch() {
         args,
         &server.uri(),
         Some(&auth_path),
-        cache_dir.path(),
         None, // config_path (default discovery)
         None, // no BYOK key
         &TelemetryClient::Disabled,
@@ -362,74 +359,79 @@ async fn mount_capturing_search(server: &MockServer) -> Arc<Mutex<serde_json::Va
 }
 
 // ---------------------------------------------------------------------------
-// Test 4: --rerank widens the cloud pool to RERANK_FETCH and sorts by score
+// Test 4: --rerank local widens the cloud pool to RERANK_FETCH, sorts by score,
+// and tells the server "none" (exactly one rerank pass).
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn rerank_widens_pool_and_requests_score_sort() {
+async fn local_rerank_widens_pool_and_requests_score_sort() {
     let server = MockServer::start().await;
     let captured = mount_capturing_search(&server).await;
 
-    let cache_dir = tempdir().unwrap();
     let auth_dir = tempdir().unwrap();
     let auth_path = auth_dir.path().join("auth.toml");
 
     let mut args = make_args("how do shielded transactions work?");
-    // Caller asks for 5; the rerank path must override the CLOUD limit to the
-    // wider RERANK_FETCH pool (50) so the cross-encoder can promote a candidate
-    // ranked below 5. The empty response short-circuits before any model load.
+    // Caller asks for 5; the local rerank path must override the CLOUD limit to
+    // the wider RERANK_FETCH pool (50) so the reranker can promote a candidate
+    // ranked below 5. `mode=fts` embeds nothing, so the (fake) BYOK key below is
+    // used only to pick local placement — never to embed — and the empty search
+    // response short-circuits before any Voyage rerank call.
     args.limit = 5;
-    args.rerank = true;
+    args.mode = "fts".to_owned();
+    args.rerank = "local".to_owned();
 
     run_with_paths(
         args,
         &server.uri(),
         Some(&auth_path),
-        cache_dir.path(),
-        None, // config_path (default discovery)
-        None, // no BYOK key → server-proxy mode
+        None,             // config_path (default discovery)
+        Some("test-key"), // BYOK key → local placement (never reached: empty results)
         &TelemetryClient::Disabled,
         "0.0.0-test",
         false,
     )
     .await
-    .expect("rerank run_with_paths should succeed (empty results short-circuit)");
+    .expect("local rerank run_with_paths should succeed (empty results short-circuit)");
 
     let body = captured.lock().unwrap().clone();
     assert_eq!(
         body["limit"], 50_u32,
-        "rerank path must request RERANK_FETCH (50) candidates, not the caller's --limit; got: {}",
+        "local rerank path must request RERANK_FETCH (50) candidates, not --limit; got: {}",
         body["limit"]
     );
     assert_eq!(
         body["sort_by"], "score",
-        "rerank path must ask the cloud for relevance order; got: {}",
+        "local rerank path must ask the cloud for relevance order; got: {}",
         body["sort_by"]
+    );
+    assert_eq!(
+        body["rerank"], "none",
+        "local rerank path must tell the server `none` (one rerank pass); got: {}",
+        body["rerank"]
     );
 }
 
 // ---------------------------------------------------------------------------
-// Test 5: non-rerank keeps the caller's limit and OMITS sort_by entirely
+// Test 5: server placement keeps the caller's limit and OMITS sort_by entirely
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn non_rerank_keeps_limit_and_omits_sort_by() {
+async fn server_rerank_keeps_limit_and_omits_sort_by() {
     let server = MockServer::start().await;
     let captured = mount_capturing_search(&server).await;
 
-    let cache_dir = tempdir().unwrap();
     let auth_dir = tempdir().unwrap();
     let auth_path = auth_dir.path().join("auth.toml");
 
     let mut args = make_args("how do shielded transactions work?");
     args.limit = 5;
-    args.rerank = false; // explicit: the default, but pin it for clarity
+    args.rerank = "server".to_owned(); // server reranks inline; no client over-fetch
 
     run_with_paths(
         args,
         &server.uri(),
         Some(&auth_path),
-        cache_dir.path(),
         None,
         None,
         &TelemetryClient::Disabled,
@@ -437,21 +439,27 @@ async fn non_rerank_keeps_limit_and_omits_sort_by() {
         false,
     )
     .await
-    .expect("non-rerank run_with_paths should succeed");
+    .expect("server-rerank run_with_paths should succeed");
 
     let body = captured.lock().unwrap().clone();
     assert_eq!(
         body["limit"], 5_u32,
-        "non-rerank path must forward the caller's --limit unchanged; got: {}",
+        "server-rerank path must forward the caller's --limit unchanged; got: {}",
         body["limit"]
     );
-    // skip_serializing_if = "Option::is_none" must drop the key entirely (not
-    // serialize it as null) so the wire body is byte-identical to pre-Task-9.4.
+    // Server placement sends the resolved model name (the default rerank-2.5).
+    assert_eq!(
+        body["rerank"], "rerank-2.5",
+        "server placement must send the rerank model name; got: {}",
+        body["rerank"]
+    );
+    // skip_serializing_if = "Option::is_none" must drop sort_by entirely (not
+    // serialize it as null) on the server path — no client-side over-fetch.
     let obj = body
         .as_object()
         .expect("/v1/search body must be a JSON object");
     assert!(
         !obj.contains_key("sort_by"),
-        "non-rerank wire body must OMIT sort_by (skip_serializing_if), but it was present: {body}"
+        "server-rerank wire body must OMIT sort_by (skip_serializing_if), but it was present: {body}"
     );
 }

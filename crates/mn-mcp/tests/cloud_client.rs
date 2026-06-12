@@ -28,6 +28,8 @@ fn make_search_req() -> SearchRequest {
         mode: None,
         code_mode: None,
         client_code_embedding_model: None,
+        rerank: None,
+        rerank_instructions: None,
     }
 }
 
@@ -39,6 +41,10 @@ fn search_request_omits_absent_code_fields_from_the_wire() {
     assert!(v.get("code_mode").is_none());
     assert!(v.get("client_code_embedding_model").is_none());
     assert!(v["queries"][0].get("code_vector").is_none());
+    // The rerank knobs (added by the Voyage-reranking work) are likewise
+    // `skip_serializing_if = Option::is_none`, so they too must be absent.
+    assert!(v.get("rerank").is_none());
+    assert!(v.get("rerank_instructions").is_none());
 }
 
 #[test]

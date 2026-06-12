@@ -1,11 +1,13 @@
-//! `POST /v1/search` — hybrid FTS + pgvector retrieval.
+//! `POST /v1/search` — hybrid FTS + pgvector retrieval, then inline rerank.
 //!
 //! For each distinct query pair the handler runs a pgvector cosine search, a
 //! Postgres full-text search, and — when the effective `code_mode` is not
 //! `off` — a second cosine search over the partial voyage-code-3
 //! `code_embedding` index, then fuses every ranked list — across all modes and
-//! all query pairs — in a single Reciprocal Rank Fusion pass (k=60).
-//! Reranking and confidence scoring land in later phases.
+//! all query pairs — in a single Reciprocal Rank Fusion pass (k=60). When
+//! `rerank != "none"` it then reranks the top candidate pool inline via Voyage
+//! (server key, charged to the caller's token budget), degrading to RRF order
+//! on any failure (spec §1). Confidence scoring blends trust × relevance.
 
 use axum::extract::{Extension, State};
 use axum::response::{IntoResponse, Response};
@@ -87,6 +89,14 @@ pub struct SearchRequest {
     /// Single-query convenience form: the voyage-code-3 embedding for `query`.
     #[serde(default)]
     pub code_vector: Option<Vec<f32>>,
+    /// Server-side rerank model, or `"none"` to skip (spec §1). Omitted ⇒
+    /// `rerank-2.5`. Clients that rerank locally always send `"none"`.
+    #[serde(default)]
+    pub rerank: Option<mn_core::rerank::RerankParam>,
+    /// Optional natural-language rerank instruction (≤400 chars; replaces the
+    /// derived default wholesale, D4). Ignored when rerank is `"none"`.
+    #[serde(default)]
+    pub rerank_instructions: Option<String>,
 }
 
 /// Whether the code-vector ranked list joins the RRF pool (D5/D6).
@@ -227,6 +237,9 @@ pub struct ScoreBreakdown {
     pub confidence: f64,
     /// Per-factor breakdown explaining the trust + confidence values.
     pub confidence_factors: ConfidenceFactors,
+    /// Voyage relevance score in [0, 1]; present only when the server reranked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rerank_score: Option<f64>,
 }
 
 /// Per-query timings and counters.
@@ -253,6 +266,47 @@ pub struct SearchMetadata {
     pub sort_by: SortBy,
     /// The effective code_mode applied (request value or mode-derived default).
     pub code_mode: CodeMode,
+    /// Outcome of the inline rerank stage (spec §1), reported on every response.
+    pub rerank: RerankMetadata,
+}
+
+/// Outcome of the rerank stage, reported on every response (spec §1).
+#[derive(Debug, Serialize)]
+pub struct RerankMetadata {
+    /// Whether a Voyage rerank was applied to this result set.
+    pub applied: bool,
+    /// The model attempted/applied; absent when rerank was `"none"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<&'static str>,
+    /// Why rerank was not applied: `not_requested` | `token_budget_exhausted`
+    /// | `provider_error` | `disabled`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<&'static str>,
+}
+
+/// Server-side rerank candidate-pool floor (mirrors the clients' RERANK_FETCH).
+const RERANK_POOL: u32 = 50;
+
+/// Pool size: at least [`RERANK_POOL`], never below the caller's `limit`.
+const fn rerank_pool_size(limit: u32) -> u32 {
+    if limit > RERANK_POOL {
+        limit
+    } else {
+        RERANK_POOL
+    }
+}
+
+/// Pre-gate estimate of a rerank's token cost, in Voyage's formula
+/// `(query_tokens × num_documents) + sum(document_tokens)`, using the same
+/// ~4-bytes/token heuristic as the embeddings route. The reservation is
+/// settled against Voyage's reported count, so slack here only affects
+/// in-flight gating, never the final balance.
+fn rerank_token_estimate(query: &str, docs: &[String]) -> u64 {
+    if docs.is_empty() {
+        return 0;
+    }
+    let est = |s: &str| (s.len() as u64).div_ceil(4).max(1);
+    est(query) * docs.len() as u64 + docs.iter().map(|d| est(d)).sum::<u64>()
 }
 
 /// One per-query record.
@@ -293,6 +347,8 @@ async fn search(
     State(state): State<AppState>,
     Extension(req_id): Extension<RequestId>,
     rl: Option<Extension<RateLimitContext>>,
+    headers: axum::http::HeaderMap,
+    auth: Option<Extension<crate::middleware::bearer::AuthContext>>,
     Json(req): Json<SearchRequest>,
 ) -> Response {
     let rid = req_id.as_str();
@@ -392,6 +448,19 @@ async fn search(
                 .build(),
             rid,
         );
+    }
+
+    // Instruction cap (spec §1): reject, never truncate silently.
+    if let Some(instr) = req.rerank_instructions.as_deref() {
+        if let Err(msg) = mn_core::rerank::validate_instruction(instr) {
+            return error::into_response(
+                CoreError::builder(ErrorCode::InvalidRequest)
+                    .message(msg)
+                    .remediation("shorten rerank_instructions to 400 characters or fewer")
+                    .build(),
+                rid,
+            );
+        }
     }
 
     // Model-mismatch guard. The active corpus model is resolved at boot (and
@@ -763,6 +832,7 @@ async fn search(
             matched_queries,
             relevance,
             score,
+            rerank_score: None,
             source_slug: row.source_slug.clone(),
             source_display_name: row.source_display_name.clone(),
             source_path: row.source_path.clone(),
@@ -772,6 +842,38 @@ async fn search(
             symbol_path: row.symbol_path.clone(),
         });
     }
+
+    // ---- Rerank stage (spec §1). Degrades, never fails search. ----
+    // Pool by relevance (RRF score) order, dedup overlaps first (don't pay
+    // Voyage for dupes), then keep the top max(limit, 50). The Voyage relevance
+    // scores then drive recomputed confidences for min_confidence/sort/truncate.
+    let rerank_param = req.rerank.unwrap_or_default();
+    let rerank_meta = if let Some(model) = rerank_param.model_name() {
+        sort_candidates(&mut scored, SortBy::Score);
+        let dedup_stats_early;
+        (scored, dedup_stats_early) = if dedup_enabled() {
+            mn_retrieval::dedup::trim_overlaps(scored)
+        } else {
+            (scored, mn_retrieval::dedup::DedupStats::default())
+        };
+        scored.truncate(rerank_pool_size(limit) as usize);
+        rerank_stage(
+            &state,
+            &req,
+            &queries,
+            &headers,
+            auth.as_ref().map(|Extension(c)| c),
+            model,
+            rerank_param,
+            &mut scored,
+            rid,
+        )
+        .await
+        // dedup already ran for this path; remember its stats
+        .with_dedup(dedup_stats_early)
+    } else {
+        RerankOutcome::not_requested()
+    };
 
     // Drop candidates below the confidence floor before applying `limit` (#10).
     let min_confidence = req.min_confidence.clamp(0.0, 1.0);
@@ -784,14 +886,27 @@ async fn search(
     // duplicate does not shrink the result page below `limit`. Dedup keeps the
     // first-seen (best-ranked) chunk's bytes, so it assumes a quality-descending
     // sort; every current `SortBy` variant is "higher = better". A future
-    // recency/ascending sort would need to dedup before sorting instead.
+    // recency/ascending sort would need to dedup before sorting instead. When
+    // the rerank path already deduped pre-Voyage, reuse its stats and skip a
+    // second pass.
     sort_candidates(&mut scored, req.sort_by);
-    let (mut scored, dedup_stats) = if dedup_enabled() {
-        mn_retrieval::dedup::trim_overlaps(scored)
-    } else {
-        (scored, mn_retrieval::dedup::DedupStats::default())
+    let dedup_stats = match rerank_meta.dedup {
+        // The rerank path already deduped pre-Voyage; reuse those stats.
+        Some(early) => early,
+        None if dedup_enabled() => {
+            let (deduped, overlap_stats) = mn_retrieval::dedup::trim_overlaps(scored);
+            scored = deduped;
+            overlap_stats
+        }
+        None => mn_retrieval::dedup::DedupStats::default(),
     };
     scored.truncate(limit as usize);
+
+    if rerank_meta.meta.applied {
+        metrics::counter!("rerank_applied_total").increment(1);
+    } else if let Some(reason) = rerank_meta.meta.reason.filter(|r| *r != "not_requested") {
+        metrics::counter!("rerank_degraded_total", "reason" => reason).increment(1);
+    }
 
     let results: Vec<SearchResult> = scored
         .into_iter()
@@ -809,9 +924,158 @@ async fn search(
             filtered_by_confidence,
             sort_by: req.sort_by,
             code_mode,
+            rerank: rerank_meta.meta,
         },
     })
     .into_response()
+}
+
+/// Everything the rerank stage produced: the metadata for the response plus
+/// (for the rerank path) the dedup stats already accounted.
+struct RerankOutcome {
+    meta: RerankMetadata,
+    /// `Some` when the rerank path ran dedup early (so the main flow must skip
+    /// its own dedup pass); `None` on the not-requested path.
+    dedup: Option<mn_retrieval::dedup::DedupStats>,
+}
+
+impl RerankOutcome {
+    const fn not_requested() -> Self {
+        Self {
+            meta: RerankMetadata {
+                applied: false,
+                model: None,
+                reason: Some("not_requested"),
+            },
+            dedup: None,
+        }
+    }
+    const fn with_dedup(mut self, stats: mn_retrieval::dedup::DedupStats) -> Self {
+        self.dedup = Some(stats);
+        self
+    }
+}
+
+/// Run the Voyage rerank over the pooled candidates, charging billed-equivalent
+/// tokens to the caller's windows + the global cap. Mutates `scored` in place
+/// (relevance, confidence, factors, rerank_score). Every failure path degrades
+/// to RRF order with a `reason` — a flaky upstream or an empty budget never
+/// fails the search (spec D3).
+#[allow(clippy::too_many_arguments)]
+async fn rerank_stage(
+    state: &AppState,
+    req: &SearchRequest,
+    queries: &[QueryPair],
+    headers: &axum::http::HeaderMap,
+    auth: Option<&crate::middleware::bearer::AuthContext>,
+    model: &'static str,
+    param: mn_core::rerank::RerankParam,
+    scored: &mut [ScoredCandidate],
+    rid: &str,
+) -> RerankOutcome {
+    let degraded = |reason: &'static str| RerankOutcome {
+        meta: RerankMetadata {
+            applied: false,
+            model: Some(model),
+            reason: Some(reason),
+        },
+        dedup: None,
+    };
+
+    // Kill switch / no platform key -> disabled.
+    if !state.cfg.server_rerank_enabled {
+        return degraded("disabled");
+    }
+    let Some(key) = state.cfg.voyage_api_key.as_deref() else {
+        return degraded("disabled");
+    };
+    if scored.is_empty() {
+        // Nothing to rerank; report applied (a no-op rerank is not a failure).
+        return RerankOutcome {
+            meta: RerankMetadata {
+                applied: true,
+                model: Some(model),
+                reason: None,
+            },
+            dedup: None,
+        };
+    }
+
+    // Compose the rerank query: first query text + (agent instruction, else
+    // derived default per spec §3). The derived default is only materialized
+    // when the agent supplied none.
+    let pivot = queries.first().map(|q| q.text.as_str()).unwrap_or_default();
+    let agent_instruction = req.rerank_instructions.as_deref();
+    let derived: Option<String> = if agent_instruction.is_some() {
+        None
+    } else {
+        let code_exclusive = matches!(req.code_mode, Some(CodeMode::Exclusive));
+        let version = req.filters.language_target.any_of.first().and_then(|lt| {
+            lt.version_satisfies
+                .as_deref()
+                .map(|v| (lt.name.as_str(), v))
+        });
+        mn_core::rerank::default_instruction(code_exclusive, version)
+    };
+    let instruction = agent_instruction.or(derived.as_deref());
+    let composed = mn_core::rerank::compose_rerank_query(pivot, instruction);
+    let docs: Vec<String> = scored.iter().map(|c| c.content.clone()).collect();
+
+    // Gate-then-charge against the shared Voyage token budget (spec §2).
+    let client_ip =
+        crate::middleware::rate_limit::client_ip(headers, &state.cfg.rate_limit_client_ip_header);
+    let (subject, _tier, limits) = state.token_limiter.resolve(&client_ip, auth);
+    let now = OffsetDateTime::now_utc().unix_timestamp();
+    let estimate = param.billed_tokens(rerank_token_estimate(&composed, &docs));
+    let Ok(reservation) = state
+        .token_limiter
+        .reserve(&subject, limits, estimate, now, false)
+    else {
+        return degraded("token_budget_exhausted");
+    };
+
+    // Call Voyage. Errors release the reservation and degrade.
+    let mut reranker = mn_embedding::voyage::VoyageReranker::new(key, model);
+    if let Some(base) = state.cfg.voyage_base_url.as_deref() {
+        reranker = reranker.with_base_url(base);
+    }
+    let out = match reranker.rerank(composed, docs, None).await {
+        Ok(o) => o,
+        Err(e) => {
+            state.token_limiter.release(&subject, reservation, false);
+            tracing::warn!(request_id = rid, error = %e, "voyage rerank failed; degrading");
+            return degraded("provider_error");
+        }
+    };
+    let billed = param.billed_tokens(out.total_tokens);
+    state
+        .token_limiter
+        .settle(&subject, reservation, billed, now, false);
+    metrics::counter!("rerank_billed_tokens_total").increment(billed);
+
+    // Rescore in place: Voyage relevance_score is already in [0, 1] — used
+    // directly, no sigmoid. Indices refer into the pool (== `scored`) order.
+    for s in &out.results {
+        let Some(c) = scored.get_mut(s.index) else {
+            continue;
+        };
+        let relevance = f64::from(s.score).clamp(0.0, 1.0);
+        c.relevance = relevance;
+        c.rerank_score = Some(f64::from(s.score));
+        c.score.confidence = state
+            .scoring_policy
+            .confidence(c.score.trust_score, relevance);
+        c.score.factors.relevance_source = RelevanceSource::Rerank;
+        c.score.factors.relevance_multiplier = relevance;
+    }
+    RerankOutcome {
+        meta: RerankMetadata {
+            applied: true,
+            model: Some(model),
+            reason: None,
+        },
+        dedup: None,
+    }
 }
 
 /// A fused candidate with its computed scores, awaiting filter/sort/truncate.
@@ -831,6 +1095,8 @@ struct ScoredCandidate {
     /// Normalized RRF relevance term (used when `sort_by = relevance`).
     relevance: f64,
     score: ScoreResult,
+    /// Voyage relevance score in [0, 1]; `Some` only after the server reranked.
+    rerank_score: Option<f64>,
     source_slug: String,
     source_display_name: String,
     source_path: String,
@@ -852,6 +1118,7 @@ impl ScoredCandidate {
                 trust_score: self.score.trust_score,
                 confidence: self.score.confidence,
                 confidence_factors: self.score.factors,
+                rerank_score: self.rerank_score,
             })
         } else {
             None
@@ -1541,6 +1808,8 @@ mod tests {
             code_mode: None,
             client_code_embedding_model: None,
             code_vector: None,
+            rerank: None,
+            rerank_instructions: None,
         }
     }
 
@@ -1749,6 +2018,7 @@ mod tests {
                     relevance_multiplier: 0.0,
                 },
             },
+            rerank_score: None,
             source_slug: "compact-docs".into(),
             source_display_name: "Compact Docs".into(),
             source_path: "docs/intro.md".into(),
@@ -1778,5 +2048,52 @@ mod tests {
             .filter_map(|s| s.get("name").and_then(|n| n.as_str()).map(str::to_owned))
             .collect();
         assert_eq!(names, vec!["Foo".to_string(), "bar".to_string()]);
+    }
+}
+
+#[cfg(test)]
+mod rerank_tests {
+    use super::*;
+
+    #[test]
+    fn rerank_pool_is_max_of_limit_and_floor() {
+        assert_eq!(rerank_pool_size(10), 50);
+        assert_eq!(rerank_pool_size(50), 50);
+        assert_eq!(rerank_pool_size(80), 80);
+    }
+
+    #[test]
+    fn rerank_token_estimate_multiplies_query_by_docs() {
+        // 8-char query ≈ 2 tokens; two 4-char docs ≈ 1 token each.
+        // (2 × 2) + (1 + 1) = 6.
+        let docs = vec!["aaaa".to_owned(), "bbbb".to_owned()];
+        assert_eq!(rerank_token_estimate("qqqqqqqq", &docs), 6);
+        // Empty docs -> 0 (no Voyage call would be made anyway).
+        assert_eq!(rerank_token_estimate("qqqqqqqq", &[]), 0);
+    }
+
+    #[test]
+    fn rerank_metadata_serializes_per_spec() {
+        let applied = RerankMetadata {
+            applied: true,
+            model: Some("rerank-2.5"),
+            reason: None,
+        };
+        let v = serde_json::to_value(&applied).unwrap();
+        assert_eq!(v, serde_json::json!({"applied": true, "model": "rerank-2.5"}));
+
+        let degraded = RerankMetadata {
+            applied: false,
+            model: Some("rerank-2.5-lite"),
+            reason: Some("token_budget_exhausted"),
+        };
+        let v = serde_json::to_value(&degraded).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({
+                "applied": false, "model": "rerank-2.5-lite",
+                "reason": "token_budget_exhausted"
+            })
+        );
     }
 }

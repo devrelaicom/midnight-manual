@@ -7,10 +7,9 @@
 //! match what the embedder actually consumes — not a coarse whitespace
 //! approximation.
 //!
-//! We tokenize with the same `bge-base-en-v1.5` `WordPiece` vocabulary the
-//! `mn-embedding` crate uses. The `tokenizers` crate is already a transitive
-//! dependency of `fastembed`; this module promotes it to a direct dependency
-//! so ingest planning can encode text without loading the 450 MB ONNX model.
+//! We tokenize with a vendored `bge-base-en-v1.5` `WordPiece` vocabulary via
+//! the `tokenizers` crate (a direct workspace dependency) so ingest planning can
+//! encode text offline, without loading any model runtime.
 //!
 //! Design note: `docs/superpowers/specs/2026-05-27-bpe-token-counts-design.md`
 //! Original requirement: `docs/superpowers/specs/2026-05-25-ingest-ux-design.md`

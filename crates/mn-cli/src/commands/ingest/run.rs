@@ -508,7 +508,7 @@ async fn run_inner(
     // missing key / unreachable model resolves fast without leaving an orphaned
     // `building` source_version. We build the BYOK `VoyageEmbedder` once here so
     // every batch reuses the same client; the corpus is always embedded
-    // CLI-side now (the old local-fastembed and server-side-embed branches are
+    // CLI-side now (the old local-model and server-side-embed branches are
     // gone), so the server never has to load an embedding model.
     let bearer = resolve_admin_bearer_str(&token);
     let env = mn_core::config::StdEnv;

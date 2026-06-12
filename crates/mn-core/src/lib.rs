@@ -16,6 +16,7 @@ pub mod limits;
 pub mod model_id;
 pub mod paths;
 pub mod provenance;
+pub mod rerank;
 pub mod scoring;
 pub mod scoring_policy;
 pub mod types;
