@@ -998,7 +998,7 @@ git commit -m "feat(mn-retrieval): range version_satisfies + per-facet version o
 - Modify: `crates/mn-server/src/routes/search.rs` (request struct :44-100, scoring loop :775-844, rerank derivation :1013-1018, metadata :247-271, predicates :1580-1582)
 - Test: `crates/mn-server/tests/search_route.rs` (extend the FR-033 tests)
 
-- [ ] **Step 1: Add the request field + metadata echo.** In `SearchRequest` after `include_scores` (search.rs:80):
+- [x] **Step 1: Add the request field + metadata echo.** In `SearchRequest` after `include_scores` (search.rs:80):
 
 ```rust
     /// Version-matching mode for the semver-bearing facets (spec §3): strict
@@ -1017,7 +1017,7 @@ In `SearchMetadata` after `code_mode` (`:268`):
 
 and populate it in the response assembly (`:926`): `version_match: req.version_match,`. (`VersionMatchMode` already derives `Serialize`.)
 
-- [ ] **Step 2: Gate the SQL name predicates on strict mode.** In `push_filter_predicates` the two name-gate calls (`:1581-1582`) move behind the mode. `push_filter_predicates` and `push_filter_joins`/`needs_document_join` gain a `mode: VersionMatchMode` parameter (thread it through from `vector_search`/`code_vector_search`/`fts_search`, which gain the same parameter from the handler — `req.version_match`):
+- [x] **Step 2: Gate the SQL name predicates on strict mode.** In `push_filter_predicates` the two name-gate calls (`:1581-1582`) move behind the mode. `push_filter_predicates` and `push_filter_joins`/`needs_document_join` gain a `mode: VersionMatchMode` parameter (thread it through from `vector_search`/`code_vector_search`/`fts_search`, which gain the same parameter from the handler — `req.version_match`):
 
 ```rust
     // -- language_target / sdk_dependency: name membership in SQL (strict only;
@@ -1030,7 +1030,7 @@ and populate it in the response assembly (`:926`): `version_match: req.version_m
 
 In `needs_document_join` (`:1489-1501`) the `language_target`/`sdk_dependency` terms also become mode-aware — permissive must NOT force the document join for these two facets (provenance is fetched post-RRF anyway): change the signature to `needs_document_join(f: &SearchFilters, mode: VersionMatchMode)` and wrap the two terms in `(mode == VersionMatchMode::Strict && (...))`.
 
-- [ ] **Step 3: Replace the post-match + scoring-input block.** Replace search.rs:775-802 (the `version_query` construction and the `semver_post_match` gate inside the loop) with:
+- [x] **Step 3: Replace the post-match + scoring-input block.** Replace search.rs:775-802 (the `version_query` construction and the `semver_post_match` gate inside the loop) with:
 
 ```rust
     let mode = req.version_match;
@@ -1154,7 +1154,7 @@ fn version_decision(
 }
 ```
 
-- [ ] **Step 4: Rerank derivation uses the first version-bearing element** (search.rs:1013-1017, per the spec clarification in the header):
+- [x] **Step 4: Rerank derivation uses the first version-bearing element** (search.rs:1013-1017, per the spec clarification in the header):
 
 ```rust
         let version = req
@@ -1166,12 +1166,12 @@ fn version_decision(
             .and_then(|lt| lt.version_satisfies.as_deref().map(|v| (lt.name.as_str(), v)));
 ```
 
-- [ ] **Step 5: Compile + unit tests**
+- [x] **Step 5: Compile + unit tests**
 
 Run: `cargo build -p mn-server && cargo test -p mn-server --lib 2>&1 | tail -3` (route unit tests live in the binary crate's modules)
 Expected: builds; existing unit tests pass.
 
-- [ ] **Step 6: Integration tests** (append to `crates/mn-server/tests/search_route.rs`, modeled on the existing `semver_filters_language_target_and_sdk_dependency` fixture at :1148-1172 which seeds a chunk with `language_targets: [{compact, >=0.23}]`):
+- [x] **Step 6: Integration tests** (append to `crates/mn-server/tests/search_route.rs`, modeled on the existing `semver_filters_language_target_and_sdk_dependency` fixture at :1148-1172 which seeds a chunk with `language_targets: [{compact, >=0.23}]`):
 
 Cover, with exact assertions:
 1. `permissive_is_default_and_soft`: a `language_target {name:"compact", version_satisfies:"0.31"}` filter with NO `version_match` field returns BOTH the declaring chunk (factors: `version_match_class == "satisfies"`, `version_match_multiplier > 1.0`) and a provenance-less chunk (`version_match_class == "silent"`, multiplier 1.0). `search_metadata.version_match == "permissive"`.
@@ -1181,12 +1181,12 @@ Cover, with exact assertions:
 5. `range_request_accepted`: `version_satisfies: ">=0.23"` validates and matches the declaring chunk (Satisfies via intersection).
 6. `invalid_version_match_value_400s`: body `"version_match": "fuzzy"` → 400.
 
-- [ ] **Step 7: Compile integration tests, run unit suite**
+- [x] **Step 7: Compile integration tests, run unit suite**
 
 Run: `cargo test -p mn-server --no-run --features integration && cargo test -p mn-server`
 Expected: compiles; unit tests pass (integration runs in CI).
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add crates/mn-server/src crates/mn-server/tests
