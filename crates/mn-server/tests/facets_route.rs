@@ -7,10 +7,10 @@ mod common;
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use axum::Router;
-use mn_core::provenance::Provenance;
-use mn_core::types::{DocumentKind, NodeKind, SourceKind};
+use mn_core::provenance::{LanguageTarget, Provenance, SdkDependency};
+use mn_core::types::{DocumentKind, NodeKind, PackageKind, SourceKind};
 use mn_server::{app, config::ServerConfig};
-use mn_store::entities::{document, embedding_model, node, source, source_version};
+use mn_store::entities::{document, embedding_model, node, package, source, source_version};
 use tower::ServiceExt as _;
 use uuid::Uuid;
 
@@ -224,6 +224,126 @@ async fn symbol_and_heading_path_advertise_type_only() {
     assert!(
         heading.get("values").is_none(),
         "heading_path must not enumerate values: {heading}"
+    );
+}
+
+/// Seed one finalized (active) `source_version` carrying a single package row
+/// with the given name + version, so the `package` version drill has data.
+async fn seed_package(pool: &sqlx::PgPool, name: &str, version: &str) {
+    let model_id = embedding_model::upsert(pool, "voyage-code-3", 1, 1024, "voyageai")
+        .await
+        .unwrap();
+    let slug = format!("facets-route-pkg-{}", Uuid::new_v4());
+    let source_id = source::insert(pool, &slug, "Facets pkg", SourceKind::DocsSite, None, 5)
+        .await
+        .unwrap();
+    let (sv_id, _) = source_version::create_building(pool, source_id, model_id, None, "0.1.0", "h")
+        .await
+        .unwrap();
+    package::upsert(pool, sv_id, PackageKind::Npm, name, Some(version), None)
+        .await
+        .unwrap();
+    // REQUIRED: flips is_active=true, which the drill queries filter on.
+    source_version::finalize(pool, sv_id).await.unwrap();
+}
+
+#[tokio::test]
+async fn language_target_two_level_drill() {
+    let h = common::boot().await;
+    let provenance = Provenance {
+        language_targets: vec![LanguageTarget {
+            name: "compact".into(),
+            version_constraint: Some(">=0.23".into()),
+        }],
+        ..Default::default()
+    };
+    seed_documents(&h.pool, &[("compact", provenance)]).await;
+    let app = app::build_resolved(h.pool.clone(), cfg())
+        .await
+        .expect("build app");
+
+    // Level 1: enumerate the language-target names.
+    let (status, names) = get(app.clone(), "/v1/facets?facet=language_target").await;
+    assert_eq!(status, StatusCode::OK, "{names}");
+    assert_eq!(names["values"], serde_json::json!(["compact"]), "{names}");
+
+    // Level 2: enumerate the version constraints within `compact`.
+    let (status, versions) =
+        get(app.clone(), "/v1/facets?facet=language_target&within=compact").await;
+    assert_eq!(status, StatusCode::OK, "{versions}");
+    assert_eq!(versions["values"], serde_json::json!([">=0.23"]), "{versions}");
+    assert_eq!(versions["within"], "compact", "{versions}");
+}
+
+#[tokio::test]
+async fn sdk_dependency_level_one_composite() {
+    let h = common::boot().await;
+    let provenance = Provenance {
+        sdk_dependencies: vec![SdkDependency {
+            kind: "npm".into(),
+            name: "@midnight-ntwrk/midnight-js".into(),
+            version_constraint: Some("^1.4.0".into()),
+        }],
+        ..Default::default()
+    };
+    seed_documents(&h.pool, &[("typescript", provenance)]).await;
+    let app = app::build_resolved(h.pool.clone(), cfg())
+        .await
+        .expect("build app");
+
+    let (status, names) = get(app.clone(), "/v1/facets?facet=sdk_dependency").await;
+    assert_eq!(status, StatusCode::OK, "{names}");
+    assert_eq!(
+        names["values"],
+        serde_json::json!(["npm:@midnight-ntwrk/midnight-js"]),
+        "{names}"
+    );
+}
+
+#[tokio::test]
+async fn package_version_drill() {
+    let h = common::boot().await;
+    seed_package(&h.pool, "@midnight-ntwrk/midnight-js", "1.4.0").await;
+    let app = app::build_resolved(h.pool.clone(), cfg())
+        .await
+        .expect("build app");
+
+    let (status, versions) =
+        get(app.clone(), "/v1/facets?facet=package&within=@midnight-ntwrk/midnight-js").await;
+    assert_eq!(status, StatusCode::OK, "{versions}");
+    assert_eq!(versions["values"], serde_json::json!(["1.4.0"]), "{versions}");
+    assert_eq!(versions["within"], "@midnight-ntwrk/midnight-js", "{versions}");
+}
+
+#[tokio::test]
+async fn version_drill_invalid_params_return_typed_400() {
+    let h = common::boot().await;
+    let app = app::build_resolved(h.pool.clone(), cfg())
+        .await
+        .expect("build app");
+
+    // `verified` is a bool facet: not drillable at all.
+    let (status, v) = get(app.clone(), "/v1/facets?facet=verified").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
+    assert_eq!(v["error"]["code"], "invalid_request", "{v}");
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("not drillable"),
+        "{v}"
+    );
+
+    // `language` is drillable at level 1 but has no `within` second level.
+    let (status, v) = get(app.clone(), "/v1/facets?facet=language&within=x").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
+    assert_eq!(v["error"]["code"], "invalid_request", "{v}");
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("has no `within` drill level"),
+        "{v}"
     );
 }
 
