@@ -1619,7 +1619,7 @@ git commit -m "feat(mn-content): pragma + allowlisted-dependency version extract
 **Files:**
 - Modify: `crates/mn-content/src/ingest/plan.rs` (`WalkContext` :177-193, `merge_provenance` :332-370, call site :315-318), `crates/mn-content/src/manifest/mod.rs:44-70` (node flag), `crates/mn-content/src/manifest/resolve.rs` (ResolvedLeaf + inheritance)
 
-- [ ] **Step 1: Failing tests** (append to plan.rs tests module):
+- [x] **Step 1: Failing tests** (append to plan.rs tests module):
 
 ```rust
 #[test]
@@ -1674,9 +1674,9 @@ root:
 
 (Complete the fixture with the same tempdir scaffolding the neighboring resolve tests use — read them first and mirror exactly.)
 
-- [ ] **Step 2: Run to verify failure** — `cargo test -p mn-content merge_precedence no_extract 2>&1 | tail -3`.
+- [x] **Step 2: Run to verify failure** — `cargo test -p mn-content merge_precedence no_extract 2>&1 | tail -3`.
 
-- [ ] **Step 3: Implement.**
+- [x] **Step 3: Implement.**
 
 1. `ManifestNode` gains (after `provenance`):
 
@@ -1706,9 +1706,9 @@ fn overlay(top: &Provenance, base: &Provenance) -> Provenance {
 
 Call site (:315-318): `merge_provenance(&walked.split.provenance, &walked.extracted, &walked.resolved.provenance_override)`. Fix every `WalkContext` construction the compiler flags (plan.rs tests, mn-cli run.rs — for now pass `Provenance::default()`; Task 10 fills it).
 
-- [ ] **Step 4: Run** — `cargo test -p mn-content && cargo build --workspace` → PASS.
+- [x] **Step 4: Run** — `cargo test -p mn-content && cargo build --workspace` → PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/mn-content crates/mn-cli
