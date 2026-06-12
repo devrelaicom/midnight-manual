@@ -1383,11 +1383,11 @@ git commit -m "feat: populate package.version from Cargo.toml/package.json (was 
 - Create: `crates/mn-content/src/extract.rs`
 - Modify: `crates/mn-content/src/lib.rs` (`pub mod extract;`), `crates/mn-content/src/code/compact.rs` (pragma helper, behind the existing `compact` feature)
 
-- [ ] **Step 1: Confirm the OpenZeppelin Compact npm scope** (allowlist accuracy):
+- [x] **Step 1: Confirm the OpenZeppelin Compact npm scope** (allowlist accuracy):
 
 Run: `npm search openzeppelin compact --searchlimit 5 2>/dev/null || true` and check the scope used by OpenZeppelin's Compact contracts repo (e.g. `@openzeppelin-compact/...`). Use whatever scope exists in the allowlist below; if none exists on npm, keep only `@midnight-ntwrk/`.
 
-- [ ] **Step 2: Failing tests.** In `crates/mn-content/src/code/compact.rs` tests (feature-gated module):
+- [x] **Step 2: Failing tests.** In `crates/mn-content/src/code/compact.rs` tests (feature-gated module):
 
 ```rust
 #[test]
@@ -1452,9 +1452,9 @@ mod tests {
 }
 ```
 
-- [ ] **Step 3: Run to verify failure** — `cargo test -p mn-content extract compact 2>&1 | tail -3` → compile errors.
+- [x] **Step 3: Run to verify failure** — `cargo test -p mn-content extract compact 2>&1 | tail -3` → compile errors.
 
-- [ ] **Step 4: Implement.**
+- [x] **Step 4: Implement.**
 
 `compact.rs` (next to `detect_module_package`, same feature gate):
 
@@ -1603,9 +1603,9 @@ fn workspace_constraint(manifest: &Path, source_root: &Path, dep: &str) -> Optio
 }
 ```
 
-- [ ] **Step 5: Run** — `cargo test -p mn-content` → PASS.
+- [x] **Step 5: Run** — `cargo test -p mn-content` → PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/mn-content
