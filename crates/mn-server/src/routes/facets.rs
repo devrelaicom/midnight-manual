@@ -59,6 +59,10 @@ struct FacetsQuery {
     cursor: Option<String>,
     /// Drill-down page size, 1..=[`DRILL_MAX_LIMIT`].
     limit: Option<i64>,
+    /// Second drill level: the level-1 value to enumerate within (e.g. the
+    /// language-target name, the `kind:name` dependency composite, or the
+    /// package name).
+    within: Option<String>,
 }
 
 async fn get_facets(
@@ -71,7 +75,15 @@ async fn get_facets(
     // Drill-down mode bypasses the overview cache entirely: it must never be
     // answered FROM the cached overview body, and must never write INTO it.
     if let Some(f) = q.facet.as_deref() {
-        return facet_values_page(&state, rid, f, q.cursor.as_deref(), q.limit).await;
+        return facet_values_page(
+            &state,
+            rid,
+            f,
+            q.cursor.as_deref(),
+            q.limit,
+            q.within.as_deref(),
+        )
+        .await;
     }
 
     // Serve a fresh-enough cached body if present.
@@ -105,6 +117,17 @@ async fn get_facets(
                 entry["values"] = v.values.clone();
                 entry["truncated"] = json!(v.truncated);
                 entry["total"] = json!(v.total);
+            }
+            // Advertise the two-level drill ordering for facets that support a
+            // `within` second drill (spec §4): level-1 enumerates the name,
+            // level-2 the version value within it. Drives discoverability of
+            // the `?facet=…&within=…` path without the client guessing keys.
+            if let Some(levels) = match d.key {
+                "language_target" | "sdk_dependency" => Some(["name", "version_constraint"]),
+                "package" => Some(["name", "version"]),
+                _ => None,
+            } {
+                entry["drill_levels"] = json!(levels);
             }
             entry
         })
@@ -152,20 +175,26 @@ const PACKAGE_COUNT_SQL: &str = "SELECT count(DISTINCT p.name) FROM package p \
      JOIN source_version sv ON sv.id = p.source_version_id \
      WHERE sv.is_active = true";
 
-/// Per-facet `(sql_page, sql_count)` for the drillable open-set facets. The
-/// page query takes (`$1` = after-value keyset bound, `$2` = limit+1) and
-/// yields a `v` text column ordered ascending. Join/filter shapes mirror the
+/// Per-facet drill SQL. Level 1 (`within = false`) enumerates names; level 2
+/// (`within = true`) enumerates version values inside one name (spec §4).
+/// Returns `(page_sql, count_sql, takes_within)`.
+///
+/// The page query takes (`$1` = after-value keyset bound, `$2` = limit+1) and
+/// yields a `v` text column ordered ascending; level-2 page queries also take
+/// `$3` = the `within` value. The count query takes no binds for level 1 and
+/// `$1` = the `within` value for level 2. Join/filter shapes mirror the
 /// corresponding `corpus_values` queries exactly so totals agree. `symbol` and
 /// `heading_path` are intentionally not drillable (extreme cardinality, same
 /// rationale as their omission from the overview).
-fn drill_queries(facet: &str) -> Option<(&'static str, &'static str)> {
-    match facet {
-        "source_slug" => Some((
+fn drill_queries(facet: &str, within: bool) -> Option<(&'static str, &'static str, bool)> {
+    match (facet, within) {
+        ("source_slug", false) => Some((
             "SELECT s.slug AS v FROM source s WHERE s.retired_at IS NULL AND s.slug > $1 \
              ORDER BY v LIMIT $2",
             "SELECT count(*) FROM source s WHERE s.retired_at IS NULL",
+            false,
         )),
-        "language" => Some((
+        ("language", false) => Some((
             "SELECT DISTINCT d.language AS v FROM document d \
              JOIN source_version sv ON sv.id = d.source_version_id \
              WHERE sv.is_active = true AND d.language IS NOT NULL AND d.language > $1 \
@@ -173,19 +202,84 @@ fn drill_queries(facet: &str) -> Option<(&'static str, &'static str)> {
             "SELECT count(DISTINCT d.language) FROM document d \
              JOIN source_version sv ON sv.id = d.source_version_id \
              WHERE sv.is_active = true AND d.language IS NOT NULL",
+            false,
         )),
-        "tags" => Some((
+        ("tags", false) => Some((
             "SELECT DISTINCT tag AS v FROM document d \
              JOIN source_version sv ON sv.id = d.source_version_id \
              CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(d.provenance->'tags','[]'::jsonb)) AS tag \
              WHERE sv.is_active = true AND tag > $1 ORDER BY v LIMIT $2",
             TAGS_COUNT_SQL,
+            false,
         )),
-        "package" => Some((
+        ("package", false) => Some((
             "SELECT DISTINCT p.name AS v FROM package p \
              JOIN source_version sv ON sv.id = p.source_version_id \
              WHERE sv.is_active = true AND p.name > $1 ORDER BY v LIMIT $2",
             PACKAGE_COUNT_SQL,
+            false,
+        )),
+        ("package", true) => Some((
+            "SELECT DISTINCT p.version AS v FROM package p \
+             JOIN source_version sv ON sv.id = p.source_version_id \
+             WHERE sv.is_active = true AND p.name = $3 AND p.version IS NOT NULL \
+             AND p.version > $1 ORDER BY v LIMIT $2",
+            "SELECT count(DISTINCT p.version) FROM package p \
+             JOIN source_version sv ON sv.id = p.source_version_id \
+             WHERE sv.is_active = true AND p.name = $1 AND p.version IS NOT NULL",
+            true,
+        )),
+        ("language_target", false) => Some((
+            "SELECT DISTINCT lt->>'name' AS v FROM document d \
+             JOIN source_version sv ON sv.id = d.source_version_id \
+             CROSS JOIN LATERAL jsonb_array_elements(COALESCE(d.provenance->'language_targets','[]'::jsonb)) lt \
+             WHERE sv.is_active = true AND lt->>'name' IS NOT NULL AND lt->>'name' > $1 \
+             ORDER BY v LIMIT $2",
+            "SELECT count(DISTINCT lt->>'name') FROM document d \
+             JOIN source_version sv ON sv.id = d.source_version_id \
+             CROSS JOIN LATERAL jsonb_array_elements(COALESCE(d.provenance->'language_targets','[]'::jsonb)) lt \
+             WHERE sv.is_active = true AND lt->>'name' IS NOT NULL",
+            false,
+        )),
+        ("language_target", true) => Some((
+            "SELECT DISTINCT lt->>'version_constraint' AS v FROM document d \
+             JOIN source_version sv ON sv.id = d.source_version_id \
+             CROSS JOIN LATERAL jsonb_array_elements(COALESCE(d.provenance->'language_targets','[]'::jsonb)) lt \
+             WHERE sv.is_active = true AND lt->>'name' = $3 \
+             AND lt->>'version_constraint' IS NOT NULL AND lt->>'version_constraint' > $1 \
+             ORDER BY v LIMIT $2",
+            "SELECT count(DISTINCT lt->>'version_constraint') FROM document d \
+             JOIN source_version sv ON sv.id = d.source_version_id \
+             CROSS JOIN LATERAL jsonb_array_elements(COALESCE(d.provenance->'language_targets','[]'::jsonb)) lt \
+             WHERE sv.is_active = true AND lt->>'name' = $1 \
+             AND lt->>'version_constraint' IS NOT NULL",
+            true,
+        )),
+        ("sdk_dependency", false) => Some((
+            "SELECT DISTINCT (dep->>'kind') || ':' || (dep->>'name') AS v FROM document d \
+             JOIN source_version sv ON sv.id = d.source_version_id \
+             CROSS JOIN LATERAL jsonb_array_elements(COALESCE(d.provenance->'sdk_dependencies','[]'::jsonb)) dep \
+             WHERE sv.is_active = true AND dep->>'name' IS NOT NULL \
+             AND (dep->>'kind') || ':' || (dep->>'name') > $1 ORDER BY v LIMIT $2",
+            "SELECT count(DISTINCT (dep->>'kind') || ':' || (dep->>'name')) FROM document d \
+             JOIN source_version sv ON sv.id = d.source_version_id \
+             CROSS JOIN LATERAL jsonb_array_elements(COALESCE(d.provenance->'sdk_dependencies','[]'::jsonb)) dep \
+             WHERE sv.is_active = true AND dep->>'name' IS NOT NULL",
+            false,
+        )),
+        ("sdk_dependency", true) => Some((
+            "SELECT DISTINCT dep->>'version_constraint' AS v FROM document d \
+             JOIN source_version sv ON sv.id = d.source_version_id \
+             CROSS JOIN LATERAL jsonb_array_elements(COALESCE(d.provenance->'sdk_dependencies','[]'::jsonb)) dep \
+             WHERE sv.is_active = true AND (dep->>'kind') || ':' || (dep->>'name') = $3 \
+             AND dep->>'version_constraint' IS NOT NULL AND dep->>'version_constraint' > $1 \
+             ORDER BY v LIMIT $2",
+            "SELECT count(DISTINCT dep->>'version_constraint') FROM document d \
+             JOIN source_version sv ON sv.id = d.source_version_id \
+             CROSS JOIN LATERAL jsonb_array_elements(COALESCE(d.provenance->'sdk_dependencies','[]'::jsonb)) dep \
+             WHERE sv.is_active = true AND (dep->>'kind') || ':' || (dep->>'name') = $1 \
+             AND dep->>'version_constraint' IS NOT NULL",
+            true,
         )),
         _ => None,
     }
@@ -201,6 +295,7 @@ async fn facet_values_page(
     facet: &str,
     cursor: Option<&str>,
     limit: Option<i64>,
+    within: Option<&str>,
 ) -> Response {
     use sqlx::Row as _;
     let limit = limit.unwrap_or(DRILL_DEFAULT_LIMIT);
@@ -211,11 +306,22 @@ async fn facet_values_page(
             rid,
         );
     }
-    let Some((page_sql, count_sql)) = drill_queries(facet) else {
+    let Some((page_sql, count_sql, takes_within)) = drill_queries(facet, within.is_some()) else {
+        // A `within` request on a facet that has no second drill level (e.g.
+        // `language`, `tags`, `source_slug`) is a distinct error from a facet
+        // that is not drillable at all.
+        if within.is_some() && drill_queries(facet, false).is_some() {
+            return error::bad_request(
+                format!("facet `{facet}` has no `within` drill level"),
+                "drop the `within` param, or drill a version facet: \
+                 language_target, sdk_dependency, package",
+                rid,
+            );
+        }
         return error::bad_request(
             format!("facet `{facet}` is not drillable"),
-            "drillable facets: source_slug, language, tags, package \
-             (closed-enum facets list all values in the overview)",
+            "drillable facets: source_slug, language, tags, package, language_target, \
+             sdk_dependency (closed-enum facets list all values in the overview)",
             rid,
         );
     };
@@ -232,7 +338,16 @@ async fn facet_values_page(
             }
         },
     };
-    let total: i64 = match sqlx::query_scalar(count_sql).fetch_one(&state.pool).await {
+    // Level-2 drills bind the `within` value: as `$1` for the count query (its
+    // only bind) and as `$3` for the page query (after `$1` = keyset, `$2` =
+    // limit+1). `within` is `Some` whenever `takes_within` is true (the level-2
+    // arms are only reachable via `within.is_some()`).
+    let within = within.unwrap_or_default();
+    let mut count_query = sqlx::query_scalar(count_sql);
+    if takes_within {
+        count_query = count_query.bind(within);
+    }
+    let total: i64 = match count_query.fetch_one(&state.pool).await {
         Ok(n) => n,
         Err(e) => {
             tracing::warn!(request_id = rid, error = %e, "facet count failed");
@@ -241,12 +356,13 @@ async fn facet_values_page(
     };
     // Over-fetch by one row to learn whether another page exists without a
     // second query.
-    let rows = match sqlx::query(page_sql)
+    let mut page_query = sqlx::query(page_sql)
         .bind(&after)
-        .bind(limit.saturating_add(1))
-        .fetch_all(&state.pool)
-        .await
-    {
+        .bind(limit.saturating_add(1));
+    if takes_within {
+        page_query = page_query.bind(within);
+    }
+    let rows = match page_query.fetch_all(&state.pool).await {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(request_id = rid, error = %e, "facet page failed");
@@ -264,13 +380,19 @@ async fn facet_values_page(
     } else {
         None
     };
-    Json(json!({
+    let mut body = json!({
         "facet": facet,
         "values": values,
         "total": total,
         "next_cursor": next_cursor,
-    }))
-    .into_response()
+    });
+    // Echo the level-2 anchor so callers can correlate a page with its drill
+    // value. `takes_within` is true iff a level-2 arm matched, which only
+    // happens when `within` was supplied.
+    if takes_within {
+        body["within"] = json!(within);
+    }
+    Json(body).into_response()
 }
 
 /// Bounded sample values for open-set facets, keyed by facet name.
