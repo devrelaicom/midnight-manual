@@ -622,6 +622,15 @@
             "description": "Optional rerank instruction (max 400 chars). Guides relevance: emphasize aspects, filter document kinds, or disambiguate terms. Replaces the derived default instruction. Keep it terse — instruction tokens are multiplied by the candidate-pool size. See the midnight-advanced-search skill for guidance.",
             "maxLength": 400,
             "type": "string"
+          },
+          "version_match": {
+            "default": "permissive",
+            "description": "Version-filter semantics: permissive (default) biases ranking and drops only breaking mismatches among version-declaring content; strict hard-filters to satisfying content only.",
+            "enum": [
+              "strict",
+              "permissive"
+            ],
+            "type": "string"
           }
         },
         "required": [
@@ -1194,7 +1203,9 @@
               "source_slug",
               "language",
               "tags",
-              "package"
+              "package",
+              "language_target",
+              "sdk_dependency"
             ],
             "type": "string"
           },
@@ -1203,6 +1214,10 @@
             "maximum": 200,
             "minimum": 1,
             "type": "integer"
+          },
+          "within": {
+            "description": "Second drill level: enumerate version values within one name (language_target/sdk_dependency) or one package name.",
+            "type": "string"
           }
         },
         "type": "object"

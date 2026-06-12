@@ -30,6 +30,7 @@ fn make_search_req() -> SearchRequest {
         client_code_embedding_model: None,
         rerank: None,
         rerank_instructions: None,
+        version_match: None,
     }
 }
 

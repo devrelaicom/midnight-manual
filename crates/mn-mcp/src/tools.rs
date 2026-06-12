@@ -152,8 +152,9 @@ pub fn list() -> ToolsListResult {
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "facet": { "type": "string", "enum": ["source_slug", "language", "tags", "package"],
+                        "facet": { "type": "string", "enum": ["source_slug", "language", "tags", "package", "language_target", "sdk_dependency"],
                             "description": "Drill into one open-set facet's full value list. Omit for the overview." },
+                        "within": { "type": "string", "description": "Second drill level: enumerate version values within one name (language_target/sdk_dependency) or one package name." },
                         "cursor": { "type": "string", "description": "Opaque token from a previous drill-down response." },
                         "limit": { "type": "integer", "minimum": 1, "maximum": 200, "default": 50 }
                     },
@@ -282,6 +283,8 @@ fn advanced_search_input_schema() -> serde_json::Value {
                 "description": "Max results returned." },
             "rerank": { "type": "boolean", "default": true,
                 "description": "Apply VoyageAI reranking against the first query (server-side, or locally with your own VOYAGE_API_KEY). Disable for lowest latency." },
+            "version_match": { "type": "string", "enum": ["strict", "permissive"], "default": "permissive",
+                "description": "Version-filter semantics: permissive (default) biases ranking and drops only breaking mismatches among version-declaring content; strict hard-filters to satisfying content only." },
             "rerank_instructions": {
                 "type": "string",
                 "maxLength": 400,
@@ -829,6 +832,7 @@ fn build_search_request(
         client_code_embedding_model: code_wire,
         rerank,
         rerank_instructions,
+        version_match: parsed.version_match.clone(),
     }
 }
 
@@ -1003,6 +1007,10 @@ pub struct ParsedSearchArgs {
     /// time. Replaces the derived default on whichever placement reranks.
     /// `None` (always, for basic search) defers to the derived default.
     pub rerank_instructions: Option<String>,
+    /// Version-matching mode (`strict` | `permissive`), validated at parse time
+    /// (basic search: always `None`). `None` defers to the server default
+    /// (`permissive`).
+    pub version_match: Option<String>,
 }
 
 /// Parse arguments for the basic `search` tool: `{query, mode?, limit?}`.
@@ -1047,6 +1055,7 @@ pub fn parse_basic_search_args(v: &serde_json::Value) -> Result<ParsedSearchArgs
         mode,
         code_mode: parse_code_mode_arg(obj, mode)?,
         rerank_instructions: None,
+        version_match: None,
     })
 }
 
@@ -1111,6 +1120,20 @@ pub fn parse_advanced_search_args(v: &serde_json::Value) -> Result<ParsedSearchA
         Some(_) => return Err("`rerank_instructions` must be a string".to_owned()),
     };
 
+    // Parse + validate the optional version-matching mode. Reject any value
+    // outside the two documented modes (and any non-string) with a message that
+    // names both, so a typo never silently degrades to the server default.
+    let version_match = match obj.get("version_match") {
+        None => None,
+        Some(serde_json::Value::String(s)) if s == "strict" || s == "permissive" => Some(s.clone()),
+        Some(serde_json::Value::String(s)) => {
+            return Err(format!("`version_match` must be `strict` or `permissive` (got `{s}`)"));
+        }
+        Some(_) => {
+            return Err("`version_match` must be a string (`strict` or `permissive`)".to_owned())
+        }
+    };
+
     let filters = obj.get("filters").cloned();
 
     // Validate the filters object against the registry before forwarding (fail fast).
@@ -1131,6 +1154,7 @@ pub fn parse_advanced_search_args(v: &serde_json::Value) -> Result<ParsedSearchA
         mode,
         code_mode: parse_code_mode_arg(obj, mode)?,
         rerank_instructions,
+        version_match,
     })
 }
 
@@ -1680,8 +1704,8 @@ pub async fn run_list_sources(
     cloud.list_sources(&params).await
 }
 
-/// Dispatch `facets`. Forwards the drill-down arguments (`facet`, `cursor`,
-/// `limit`) to `GET /v1/facets` as query params — only keys present in
+/// Dispatch `facets`. Forwards the drill-down arguments (`facet`, `within`,
+/// `cursor`, `limit`) to `GET /v1/facets` as query params — only keys present in
 /// `args` are sent, so a no-argument call yields the overview shape.
 /// Non-string JSON scalars are rendered in their query-string form (`50`);
 /// the input schema forbids object/array values, so no further validation
@@ -1695,7 +1719,7 @@ pub async fn run_facets(
     cloud: &Arc<CloudClient>,
 ) -> Result<serde_json::Value, CloudError> {
     let mut params: Vec<(&str, String)> = Vec::new();
-    for key in ["facet", "cursor", "limit"] {
+    for key in ["facet", "within", "cursor", "limit"] {
         if let Some(v) = args.get(key) {
             let s = match v {
                 serde_json::Value::String(s) => s.clone(),
@@ -1979,6 +2003,35 @@ mod tests {
         assert!(parse_advanced_search_args(&ok).is_ok());
     }
 
+    #[test]
+    fn version_match_parsed_and_forwarded() {
+        let args = serde_json::json!({
+            "queries": ["q"],
+            "version_match": "strict",
+            "filters": { "language_target": { "any_of": [{ "name": "compact", "version_satisfies": ">=0.23" }] } }
+        });
+        let parsed = parse_advanced_search_args(&args).unwrap();
+        assert_eq!(parsed.version_match.as_deref(), Some("strict"));
+        // range syntax now validates (was a 400 under concrete-only semantics)
+
+        // Omitted defers to the server default (permissive).
+        let none = parse_advanced_search_args(&serde_json::json!({ "queries": ["q"] })).unwrap();
+        assert_eq!(none.version_match, None);
+
+        // Only the two documented values are accepted; the error names them.
+        let err = parse_advanced_search_args(
+            &serde_json::json!({ "queries": ["q"], "version_match": "loose" }),
+        )
+        .unwrap_err();
+        assert!(err.contains("strict"), "error names `strict`: {err}");
+        assert!(err.contains("permissive"), "error names `permissive`: {err}");
+        // Non-string values are rejected too.
+        assert!(parse_advanced_search_args(
+            &serde_json::json!({ "queries": ["q"], "version_match": 1 })
+        )
+        .is_err());
+    }
+
     fn result_with_trust(chunk: &str, trust: f64) -> serde_json::Value {
         json!({
             "chunk_id": chunk,
@@ -2126,6 +2179,7 @@ mod tests {
             mode: "hybrid",
             code_mode: None,
             rerank_instructions: None,
+            version_match: None,
         }
     }
 

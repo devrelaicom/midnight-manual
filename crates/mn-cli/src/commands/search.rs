@@ -129,6 +129,11 @@ pub struct Args {
     #[arg(long, default_value = "hybrid", value_parser = ["hybrid", "vector", "fts"])]
     pub mode: String,
 
+    /// Version-filter semantics: permissive (default) biases ranking; strict
+    /// hard-filters. Only meaningful with a version-bearing --filter-json.
+    #[arg(long, value_parser = ["strict", "permissive"])]
+    pub version_match: Option<String>,
+
     /// Code-vector fusion mode: on (default for hybrid/vector), off, or
     /// exclusive (code vectors replace the general vector list). Incompatible
     /// with --mode fts.
@@ -340,6 +345,7 @@ pub async fn run_with_paths(
         rerank_instructions: args.rerank_instructions.clone(),
         mode,
         code_mode: args.code_mode.clone(),
+        version_match: args.version_match.clone(),
         filters,
     });
 
@@ -367,18 +373,60 @@ pub async fn run_with_paths(
     .await;
 
     let duration_ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
-    let outcome = if result.is_ok() {
-        Outcome::Ok
-    } else {
-        Outcome::Error
-    };
-    // One `Rerank` event per search (spec §6). On success the placement-specific
-    // facts come from the `RerankOutcome`; on failure the rerank never completed,
-    // so it is reported as not applied (the three-mechanism opt-out wraps `emit`).
-    let rerank_payload = rerank_event(placement, rerank_model, result.as_ref().ok());
+    emit_search_telemetry(EmitSearchTelemetry {
+        telemetry,
+        cli_version,
+        placement,
+        rerank_model,
+        outcome: result.as_ref().ok(),
+        ok: result.is_ok(),
+        duration_ms,
+    })
+    .await;
+    result.map(|_| ())
+}
+
+/// Inputs to [`emit_search_telemetry`] — grouped to keep the call free of a long
+/// positional argument list.
+struct EmitSearchTelemetry<'a> {
+    /// Telemetry sink (the three-mechanism opt-out wraps each `emit`).
+    telemetry: &'a TelemetryClient,
+    /// Reporting component version for the event envelope.
+    cli_version: &'a str,
+    /// Resolved rerank placement (drives the `Rerank` event's wire fields).
+    placement: mn_core::config::RerankPlacement,
+    /// Resolved Voyage rerank model.
+    rerank_model: mn_core::rerank::RerankParam,
+    /// The search's [`RerankOutcome`] on success; `None` when the search failed
+    /// before the rerank completed (reported as not applied).
+    outcome: Option<&'a RerankOutcome>,
+    /// Whether the overall search succeeded (the `CliCommand` outcome).
+    ok: bool,
+    /// End-to-end search duration in milliseconds.
+    duration_ms: u32,
+}
+
+/// Emit the two FR-109 events for one search (spec §6): the `Rerank` event and
+/// the `CliCommand` event. Factored out of [`run_with_paths`] so the dispatch
+/// body stays focused on the request round-trip.
+async fn emit_search_telemetry(args: EmitSearchTelemetry<'_>) {
+    let EmitSearchTelemetry {
+        telemetry,
+        cli_version,
+        placement,
+        rerank_model,
+        outcome,
+        ok,
+        duration_ms,
+    } = args;
+    // One `Rerank` event per search. On success the placement-specific facts come
+    // from the `RerankOutcome`; on failure the rerank never completed, so it is
+    // reported as not applied (the three-mechanism opt-out wraps each `emit`).
+    let rerank_payload = rerank_event(placement, rerank_model, outcome);
     telemetry
         .emit(Event::new(Component::Cli, cli_version, rerank_payload))
         .await;
+    let outcome = if ok { Outcome::Ok } else { Outcome::Error };
     telemetry
         .emit(Event::new(
             Component::Cli,
@@ -390,7 +438,6 @@ pub async fn run_with_paths(
             },
         ))
         .await;
-    result.map(|_| ())
 }
 
 /// The rerank model name for the `Rerank` event: the resolved model on the
@@ -758,6 +805,9 @@ struct SearchRequestParts {
     mode: String,
     /// Raw `--code-mode` value; `None` defers to the server default.
     code_mode: Option<String>,
+    /// Raw `--version-match` value (`strict` | `permissive`); `None` defers to
+    /// the server default (`permissive`).
+    version_match: Option<String>,
     /// Per-result filters.
     filters: SearchFilters,
 }
@@ -798,6 +848,7 @@ fn build_search_request(parts: SearchRequestParts) -> SearchRequest {
         limit: cloud_limit,
         mode: parts.mode,
         code_mode: parts.code_mode,
+        version_match: parts.version_match,
         filters: parts.filters,
         sort_by,
         rerank,
@@ -1253,6 +1304,10 @@ pub struct SearchRequest {
     /// the key entirely.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub code_mode: Option<String>,
+    /// Version-matching mode (`strict` | `permissive`). `None` defers to the
+    /// server default (`permissive`) and omits the key on the wire.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version_match: Option<String>,
     /// Per-result filters.
     pub filters: SearchFilters,
     /// Optional ordering hint for the candidate pool. The local-rerank path sets
@@ -1608,6 +1663,7 @@ mod tests {
             rerank_model: None,
             rerank_instructions: None,
             mode: "hybrid".to_owned(),
+            version_match: None,
             code_mode: None,
             kind: Vec::new(),
             language: Vec::new(),
@@ -1728,6 +1784,7 @@ mod tests {
             rerank_instructions: None,
             mode: "hybrid".to_owned(),
             code_mode: None,
+            version_match: None,
             filters: SearchFilters::default(),
         }
     }
@@ -1998,6 +2055,7 @@ mod tests {
             rerank_instructions: None,
             mode: "hybrid".into(),
             code_mode: None,
+            version_match: None,
             filters: SearchFilters::default(),
         };
 

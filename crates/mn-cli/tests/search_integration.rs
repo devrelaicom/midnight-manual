@@ -29,6 +29,7 @@ fn make_request(query: &str, limit: u32) -> SearchRequest {
         limit,
         mode: "hybrid".to_owned(),
         code_mode: None,
+        version_match: None,
         filters: SearchFilters::default(),
         // Non-rerank path: omitted on the wire (skip_serializing_if).
         sort_by: None,
@@ -113,6 +114,7 @@ async fn multi_query_request_sends_all_pairs() {
         limit: 10,
         mode: "hybrid".to_owned(),
         code_mode: None,
+        version_match: None,
         filters: SearchFilters::default(),
         sort_by: None,
         rerank: None,
