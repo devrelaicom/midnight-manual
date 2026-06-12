@@ -10,6 +10,7 @@ pub mod chunk;
 pub mod code;
 pub mod content_hash;
 pub mod context_group;
+pub mod extract;
 pub mod frontmatter;
 pub mod ingest;
 pub mod language;
