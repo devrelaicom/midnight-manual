@@ -175,8 +175,10 @@ classify(requested: Interval, declared: Option<Interval>)
   role and patch plays the minor role; if major == 0 and minor == 0, every mismatch is
   Breaking. A declared target with no `version_constraint` is `Satisfies` for any
   request (unchanged).
-- An unparseable **declared** constraint never satisfies (unchanged) and classifies as
-  Breaking.
+- An unparseable **declared** constraint classifies as `Unknown`: strict drops it (it
+  never satisfies — unchanged from today), permissive scores it neutral (unknowable is
+  not provably incompatible; treating it like Silent avoids punishing content for
+  malformed metadata more than for absent metadata).
 
 Multi-element requests: classification runs against **every** requested `any_of`
 element with a matching name; the best class wins (fixes today's first-element-only
@@ -234,9 +236,11 @@ defaults updated to match.
 ### 3.5 Result exposure
 
 `ConfidenceFactors` gains `version_match_class`
-(`"satisfies" | "near_miss" | "silent"`; Breaking results never appear) and
+(`"satisfies" | "near_miss" | "silent" | "unknown"`; Breaking results never appear) and
 `version_distance: Option<u32>`, alongside the existing `version_match_multiplier`,
-`language_target_query`, and `language_targets_chunk`. The query echo extends to the
+`language_target_query`, and `language_targets_chunk`. Both new fields are present only
+when the request carried a version-bearing filter; otherwise they are omitted (and the
+multiplier stays 1.00, as today). The query echo extends to the
 winning element and to `sdk_dependency` when that facet drove the multiplier.
 
 ### 3.6 Rerank interaction
@@ -310,8 +314,8 @@ CLAUDE.md gets a Recent Changes entry.
 
 - **mn-core**: proptest — interval desugar + intersection agree with
   `VersionReq::matches` on generated version/requirement pairs; classifier table tests
-  (0.x role shift, 0.0.x, pre-release stripping, unbounded constraints, distance at
-  boundaries); penalty-curve pins (`floor` clamp, step math); policy TOML round-trip
+  (0.x role shift, 0.0.x, pre-release stripping, unbounded constraints, unparseable
+  declared constraints per mode, distance at boundaries); penalty-curve pins (`floor` clamp, step math); policy TOML round-trip
   with the new knobs and rejection of `unsatisfied`.
 - **mn-retrieval**: validation accepts concrete + range, rejects garbage/empty
   intervals; `semver_post_match` successor (`classify_post_match`) unit tests per mode.
