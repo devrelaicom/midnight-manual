@@ -755,7 +755,7 @@ git commit -m "feat(mn-core): precomputed VersionScoreInput + class/distance fac
 **Files:**
 - Modify: `crates/mn-retrieval/src/filters.rs` (`check_semver` :359-366, `version_satisfies` :394-401, `semver_post_match` :279-313 replaced, new types, tests)
 
-- [ ] **Step 1: Write the failing tests** (append to filters.rs tests; adjust `rejects_malformed_version_satisfies` to add range-acceptance pins):
+- [x] **Step 1: Write the failing tests** (append to filters.rs tests; adjust `rejects_malformed_version_satisfies` to add range-acceptance pins):
 
 ```rust
 #[test]
@@ -838,9 +838,9 @@ fn version_outcomes_classify_per_facet() {
 }
 ```
 
-- [ ] **Step 2: Run to verify failure** — `cargo test -p mn-retrieval filters 2>&1 | tail -5` → compile errors.
+- [x] **Step 2: Run to verify failure** — `cargo test -p mn-retrieval filters 2>&1 | tail -5` → compile errors.
 
-- [ ] **Step 3: Implement.**
+- [x] **Step 3: Implement.**
 
 1. Mode enum (new, in filters.rs above `SearchFilters`):
 
@@ -981,9 +981,9 @@ impl SearchFilters {
 
 4. Update the two existing tests that called `semver_post_match` (`semver_post_match_filters_by_version`, `empty_filter_post_matches_anything`) to use `version_outcomes` semantics (Satisfies vs Breaking; empty filters → both `None`).
 
-- [ ] **Step 4: Run** — `cargo test -p mn-retrieval` → PASS. `cargo build -p mn-server` still broken (Task 5).
+- [x] **Step 4: Run** — `cargo test -p mn-retrieval` → PASS. `cargo build -p mn-server` still broken (Task 5).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/mn-retrieval/src/filters.rs
