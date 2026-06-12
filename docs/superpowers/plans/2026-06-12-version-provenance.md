@@ -1201,7 +1201,7 @@ git commit -m "feat(mn-server): strict/permissive version matching in /v1/search
 - Modify: `crates/mn-server/src/routes/facets.rs` (`FacetsQuery` :55-62, `drill_queries` :161-192, `facet_values_page` :198-274, overview descriptors)
 - Test: `crates/mn-server/tests/facets_route.rs` (or the existing facets integration test file — check `ls crates/mn-server/tests/ | grep -i facet` and append there)
 
-- [ ] **Step 1: Extend the query params.** `FacetsQuery` gains:
+- [x] **Step 1: Extend the query params.** `FacetsQuery` gains:
 
 ```rust
     /// Second drill level: the level-1 value to enumerate within (e.g. the
@@ -1210,7 +1210,7 @@ git commit -m "feat(mn-server): strict/permissive version matching in /v1/search
     within: Option<String>,
 ```
 
-- [ ] **Step 2: Rework `drill_queries`.** New signature returns whether a `within` bind is used; level-1 vs level-2 SQL per facet:
+- [x] **Step 2: Rework `drill_queries`.** New signature returns whether a `within` bind is used; level-1 vs level-2 SQL per facet:
 
 ```rust
 /// Per-facet drill SQL. Level 1 (`within = None`) enumerates names; level 2
@@ -1291,9 +1291,9 @@ fn drill_queries(facet: &str, within: bool) -> Option<(&'static str, &'static st
 
 (Keep the four existing level-1 strings verbatim from :163-189 — they're elided above only for plan brevity; copy them in place.)
 
-- [ ] **Step 3: Thread `within` through `facet_values_page`.** Resolve `(page_sql, count_sql, takes_within) = drill_queries(facet, q.within.is_some())`; when `None` and `q.within.is_some()` the error message reads `facet `{facet}` has no `within` drill level`; the no-within not-drillable message becomes `"drillable facets: source_slug, language, tags, package, language_target, sdk_dependency"`. Bind order: count query binds `within` as `$1` when `takes_within`; page query binds `(after, limit+1, within)`. Response JSON gains `"within": q.within` when present.
+- [x] **Step 3: Thread `within` through `facet_values_page`.** Resolve `(page_sql, count_sql, takes_within) = drill_queries(facet, q.within.is_some())`; when `None` and `q.within.is_some()` the error message reads `facet `{facet}` has no `within` drill level`; the no-within not-drillable message becomes `"drillable facets: source_slug, language, tags, package, language_target, sdk_dependency"`. Bind order: count query binds `within` as `$1` when `takes_within`; page query binds `(after, limit+1, within)`. Response JSON gains `"within": q.within` when present.
 
-- [ ] **Step 4: Overview advertises the levels.** Where the overview assembles descriptors for object-set facets (find the loop over `facets::facets()` in this file building the JSON body), add for the two version facets and package:
+- [x] **Step 4: Overview advertises the levels.** Where the overview assembles descriptors for object-set facets (find the loop over `facets::facets()` in this file building the JSON body), add for the two version facets and package:
 
 ```rust
 // language_target / sdk_dependency / package gain drill metadata:
@@ -1303,9 +1303,9 @@ fn drill_queries(facet: &str, within: bool) -> Option<(&'static str, &'static st
 
 (Exact splice point: read the overview-builder function in this file first; it iterates the registry and pattern-matches keys for `values`/`total` — add a `drill_levels` key in the same match.)
 
-- [ ] **Step 5: Integration tests** (CI): seed provenance-bearing documents (reuse the search_route.rs fixture style) and assert: level-1 `?facet=language_target` returns `["compact"]`; level-2 `?facet=language_target&within=compact` returns `[">=0.23"]`; `?facet=sdk_dependency` returns `["npm:@midnight-ntwrk/midnight-js"]`; `?facet=package&within=<name>` returns the version; `?facet=verified` still 400s; `?facet=language&within=x` 400s with the no-level message.
+- [x] **Step 5: Integration tests** (CI): seed provenance-bearing documents (reuse the search_route.rs fixture style) and assert: level-1 `?facet=language_target` returns `["compact"]`; level-2 `?facet=language_target&within=compact` returns `[">=0.23"]`; `?facet=sdk_dependency` returns `["npm:@midnight-ntwrk/midnight-js"]`; `?facet=package&within=<name>` returns the version; `?facet=verified` still 400s; `?facet=language&within=x` 400s with the no-level message.
 
-- [ ] **Step 6: Compile + commit**
+- [x] **Step 6: Compile + commit**
 
 ```bash
 cargo test -p mn-server --no-run --features integration && cargo test -p mn-server
