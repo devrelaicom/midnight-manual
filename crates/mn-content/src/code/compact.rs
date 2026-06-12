@@ -211,8 +211,48 @@ pub fn detect_module_package(body: &str) -> Option<PackageRef> {
     Some(PackageRef {
         kind: "compact".to_string(),
         name: first,
+        version: None,
         manifest_path: None,
     })
+}
+
+/// Extract the `pragma language_version <expr>;` constraint (spec §1.1).
+///
+/// Only the `language_version` pragma is read — the legacy `pragma compact X`
+/// form states a compiler version. The expression is normalized (whitespace
+/// stripped, `&&` → `,`) and must parse as a `semver::VersionReq`, else `None`
+/// (warn-and-skip, never fatal).
+#[must_use]
+pub fn detect_language_version(body: &str) -> Option<String> {
+    if body.trim().is_empty() {
+        return None;
+    }
+    let parsed = compactp_parser::parse(body);
+    let root = SyntaxNode::new_root(parsed.green);
+    let file = SourceFile::cast(root)?;
+    for pragma in file.pragmas() {
+        let Some(name) = pragma.name() else { continue };
+        if name.text() != "language_version" {
+            continue;
+        }
+        let full = pragma.syntax().text().to_string();
+        let expr = full
+            .trim_start()
+            .strip_prefix("pragma")?
+            .trim_start()
+            .strip_prefix("language_version")?
+            .trim()
+            .trim_end_matches(';')
+            .trim()
+            .replace("&&", ",");
+        let normalized: String = expr.split_whitespace().collect::<Vec<_>>().join("");
+        if normalized.is_empty() || semver::VersionReq::parse(&normalized).is_err() {
+            tracing::warn!(expr = %expr, "unparseable language_version pragma; skipping extraction");
+            return None;
+        }
+        return Some(normalized);
+    }
+    None
 }
 
 /// Map a CST node to a symbol segment if it is a named Compact item.
@@ -369,6 +409,19 @@ mod tests {
     #[test]
     fn multiple_modules_is_none() {
         assert!(detect_module_package(TWO_MODULES).is_none());
+    }
+
+    #[test]
+    fn language_version_pragma_extracted() {
+        let body = "pragma language_version >= 0.23;\nledger x: Uint<8>;\n";
+        assert_eq!(detect_language_version(body).as_deref(), Some(">=0.23"));
+        // legacy compiler pragma is NOT extracted (spec §1.1)
+        assert_eq!(detect_language_version("pragma compact 0.15.0;\n"), None);
+        // conjunction normalizes && → comma
+        let body = "pragma language_version >= 0.13 && <= 0.17;\n";
+        assert_eq!(detect_language_version(body).as_deref(), Some(">=0.13,<=0.17"));
+        // garbage expr (won't parse as VersionReq) → None
+        assert_eq!(detect_language_version("pragma language_version banana;\n"), None);
     }
 
     #[test]

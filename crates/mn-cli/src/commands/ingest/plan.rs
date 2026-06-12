@@ -77,6 +77,8 @@ pub async fn run(args: Args, server: Option<&str>, _json: bool) -> Result<()> {
             content: &doc.content,
             split: &doc.split,
             resolved: &doc.resolved,
+            // Task 10 fills machine-extracted provenance; empty for now.
+            extracted: mn_core::provenance::Provenance::default(),
             source_modified_at: doc.source_modified_at,
             package: None,
         };

@@ -1320,7 +1320,7 @@ git commit -m "feat(mn-server): two-level facet drill for language_target/sdk_de
 **Files:**
 - Modify: `crates/mn-core/src/types.rs:241-248` (PackageRef), `crates/mn-content/src/package.rs` (DetectedPackage + detect), `crates/mn-content/src/code/compact.rs:211-215` (struct literal), `crates/mn-cli/src/commands/ingest/run.rs:1458-1472` (mapping), `crates/mn-server/src/routes/admin_ingest.rs:915` (upsert call)
 
-- [ ] **Step 1: Failing test** (append to `crates/mn-content/src/package.rs` tests):
+- [x] **Step 1: Failing test** (append to `crates/mn-content/src/package.rs` tests):
 
 ```rust
 #[test]
@@ -1346,9 +1346,9 @@ fn version_extracted_from_manifests() {
 }
 ```
 
-- [ ] **Step 2: Run to verify failure** — `cargo test -p mn-content package 2>&1 | tail -3` → no field `version`.
+- [x] **Step 2: Run to verify failure** — `cargo test -p mn-content package 2>&1 | tail -3` → no field `version`.
 
-- [ ] **Step 3: Implement.**
+- [x] **Step 3: Implement.**
 
 1. `DetectedPackage` gains `pub version: Option<String>` (doc: `/// [package].version / .version from the manifest, when declared.`). In `detect`, read it alongside the name: cargo arm `v.get("package").and_then(|p| p.get("version")).and_then(toml::Value::as_str).map(str::to_owned)`; npm arm `v.get("version").and_then(serde_json::Value::as_str).map(str::to_owned)`.
 2. `PackageRef` (types.rs:241-248) gains:
@@ -1366,9 +1366,9 @@ fn version_extracted_from_manifests() {
             package::upsert(pool, sv_id, kind, &pkg.name, pkg.version.as_deref(), pkg.manifest_path.as_deref())
 ```
 
-- [ ] **Step 4: Run** — `cargo test -p mn-content && cargo build --workspace` → PASS/builds.
+- [x] **Step 4: Run** — `cargo test -p mn-content && cargo build --workspace` → PASS/builds.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/mn-core/src/types.rs crates/mn-content/src crates/mn-cli/src crates/mn-server/src
@@ -1383,11 +1383,11 @@ git commit -m "feat: populate package.version from Cargo.toml/package.json (was 
 - Create: `crates/mn-content/src/extract.rs`
 - Modify: `crates/mn-content/src/lib.rs` (`pub mod extract;`), `crates/mn-content/src/code/compact.rs` (pragma helper, behind the existing `compact` feature)
 
-- [ ] **Step 1: Confirm the OpenZeppelin Compact npm scope** (allowlist accuracy):
+- [x] **Step 1: Confirm the OpenZeppelin Compact npm scope** (allowlist accuracy):
 
 Run: `npm search openzeppelin compact --searchlimit 5 2>/dev/null || true` and check the scope used by OpenZeppelin's Compact contracts repo (e.g. `@openzeppelin-compact/...`). Use whatever scope exists in the allowlist below; if none exists on npm, keep only `@midnight-ntwrk/`.
 
-- [ ] **Step 2: Failing tests.** In `crates/mn-content/src/code/compact.rs` tests (feature-gated module):
+- [x] **Step 2: Failing tests.** In `crates/mn-content/src/code/compact.rs` tests (feature-gated module):
 
 ```rust
 #[test]
@@ -1452,9 +1452,9 @@ mod tests {
 }
 ```
 
-- [ ] **Step 3: Run to verify failure** — `cargo test -p mn-content extract compact 2>&1 | tail -3` → compile errors.
+- [x] **Step 3: Run to verify failure** — `cargo test -p mn-content extract compact 2>&1 | tail -3` → compile errors.
 
-- [ ] **Step 4: Implement.**
+- [x] **Step 4: Implement.**
 
 `compact.rs` (next to `detect_module_package`, same feature gate):
 
@@ -1603,9 +1603,9 @@ fn workspace_constraint(manifest: &Path, source_root: &Path, dep: &str) -> Optio
 }
 ```
 
-- [ ] **Step 5: Run** — `cargo test -p mn-content` → PASS.
+- [x] **Step 5: Run** — `cargo test -p mn-content` → PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/mn-content
@@ -1619,7 +1619,7 @@ git commit -m "feat(mn-content): pragma + allowlisted-dependency version extract
 **Files:**
 - Modify: `crates/mn-content/src/ingest/plan.rs` (`WalkContext` :177-193, `merge_provenance` :332-370, call site :315-318), `crates/mn-content/src/manifest/mod.rs:44-70` (node flag), `crates/mn-content/src/manifest/resolve.rs` (ResolvedLeaf + inheritance)
 
-- [ ] **Step 1: Failing tests** (append to plan.rs tests module):
+- [x] **Step 1: Failing tests** (append to plan.rs tests module):
 
 ```rust
 #[test]
@@ -1674,9 +1674,9 @@ root:
 
 (Complete the fixture with the same tempdir scaffolding the neighboring resolve tests use — read them first and mirror exactly.)
 
-- [ ] **Step 2: Run to verify failure** — `cargo test -p mn-content merge_precedence no_extract 2>&1 | tail -3`.
+- [x] **Step 2: Run to verify failure** — `cargo test -p mn-content merge_precedence no_extract 2>&1 | tail -3`.
 
-- [ ] **Step 3: Implement.**
+- [x] **Step 3: Implement.**
 
 1. `ManifestNode` gains (after `provenance`):
 
@@ -1706,9 +1706,9 @@ fn overlay(top: &Provenance, base: &Provenance) -> Provenance {
 
 Call site (:315-318): `merge_provenance(&walked.split.provenance, &walked.extracted, &walked.resolved.provenance_override)`. Fix every `WalkContext` construction the compiler flags (plan.rs tests, mn-cli run.rs — for now pass `Provenance::default()`; Task 10 fills it).
 
-- [ ] **Step 4: Run** — `cargo test -p mn-content && cargo build --workspace` → PASS.
+- [x] **Step 4: Run** — `cargo test -p mn-content && cargo build --workspace` → PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/mn-content crates/mn-cli
@@ -1723,7 +1723,7 @@ git commit -m "feat(mn-content): three-layer provenance merge + no_extract manif
 - Modify: `crates/mn-cli/src/commands/ingest/run.rs` (walk loop :400-413, summary output, new helper near `detect_package_ref` :1458)
 - Test: `crates/mn-cli/src/commands/ingest/run.rs` tests module (next to the existing `detect_package_ref` tests :2078)
 
-- [ ] **Step 1: Failing test** (append to run.rs tests):
+- [x] **Step 1: Failing test** (append to run.rs tests):
 
 ```rust
 #[test]
@@ -1757,9 +1757,9 @@ fn extracted_provenance_for_code_files() {
 
 (Adjust the `DocumentKind` path to wherever the enum actually lives — `grep -rn "enum DocumentKind" crates/` first; it is the same type `WalkContext.kind` uses.)
 
-- [ ] **Step 2: Run to verify failure** — `cargo test -p mn-cli extracted_provenance 2>&1 | tail -3`.
+- [x] **Step 2: Run to verify failure** — `cargo test -p mn-cli extracted_provenance 2>&1 | tail -3`.
 
-- [ ] **Step 3: Implement.** Helper next to `detect_package_ref`:
+- [x] **Step 3: Implement.** Helper next to `detect_package_ref`:
 
 ```rust
 /// Machine-extract version provenance for one walked file (spec §1.1): code
@@ -1819,9 +1819,9 @@ Report counts: after `builder.finalize()`, compute and add to the `phase_done("c
 
 …emitted as `"docs_with_language_targets"` / `"docs_with_sdk_dependencies"` keys.
 
-- [ ] **Step 4: Run** — `cargo test -p mn-cli && cargo clippy -p mn-cli --all-targets -- -D warnings` → PASS.
+- [x] **Step 4: Run** — `cargo test -p mn-cli && cargo clippy -p mn-cli --all-targets -- -D warnings` → PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/mn-cli crates/mn-content

@@ -398,12 +398,18 @@ async fn run_inner(
         PlanBuilder::new(&args.source_slug, SourceKind::DocsSite, &revision, PriorState::default())
             .with_chunker_config(chunker_config);
     for doc in &walked_docs {
+        let extracted = if doc.resolved.no_extract {
+            Provenance::default()
+        } else {
+            build_extracted(&source_root, &doc.rel_path, &doc.content, doc.resolved.kind)
+        };
         let ctx = WalkContext {
             path: doc.rel_path.clone(),
             kind: doc.resolved.kind,
             content: &doc.content,
             split: &doc.split,
             resolved: &doc.resolved,
+            extracted,
             source_modified_at: doc.source_modified_at,
             package: detect_package_ref(&source_root, &doc.rel_path, &doc.content),
         };
@@ -413,11 +419,24 @@ async fn run_inner(
     }
     let plan = builder.finalize();
 
+    let docs_with_language_targets = plan
+        .new_documents
+        .iter()
+        .filter(|d| !d.provenance.language_targets.is_empty())
+        .count();
+    let docs_with_sdk_dependencies = plan
+        .new_documents
+        .iter()
+        .filter(|d| !d.provenance.sdk_dependencies.is_empty())
+        .count();
+
     reporter.phase_done(
         "chunk",
         serde_json::json!({
             "documents": plan.stats.documents_added,
             "chunks": plan.stats.chunks_emitted,
+            "docs_with_language_targets": docs_with_language_targets,
+            "docs_with_sdk_dependencies": docs_with_sdk_dependencies,
         }),
     );
 
@@ -751,11 +770,16 @@ async fn run_inner(
     println!(
         "{}",
         format_success(
-            &args.source_slug,
-            finalize.revision,
-            finalize.demoted_revision,
-            stats.added,
-            stats.carried,
+            &SuccessOutput {
+                action: "ingest",
+                source_slug: &args.source_slug,
+                revision: finalize.revision,
+                demoted_revision: finalize.demoted_revision,
+                documents_added: stats.added,
+                documents_carried: stats.carried,
+                docs_with_language_targets,
+                docs_with_sdk_dependencies,
+            },
             json,
         )
     );
@@ -1467,8 +1491,40 @@ fn detect_package_ref(
     mn_content::package::detect(&abs, source_root).map(|p| mn_core::types::PackageRef {
         kind: p.kind,
         name: p.name,
+        version: p.version,
         manifest_path: Some(p.manifest_path.display().to_string()),
     })
+}
+
+/// Machine-extract version provenance for one walked file (spec §1.1): code
+/// documents only — pragma constraints for `.compact`, allowlisted manifest
+/// dependencies for files in an npm/cargo package. Prose gets nothing.
+fn build_extracted(
+    source_root: &std::path::Path,
+    rel_path: &std::path::Path,
+    content: &str,
+    kind: mn_core::types::DocumentKind,
+) -> mn_core::provenance::Provenance {
+    use mn_core::provenance::{LanguageTarget, Provenance};
+    if kind != mn_core::types::DocumentKind::Code {
+        return Provenance::default();
+    }
+    let mut out = Provenance::default();
+    if rel_path.extension().and_then(|e| e.to_str()) == Some("compact") {
+        if let Some(expr) = mn_content::detect_language_version(content) {
+            out.language_targets = vec![LanguageTarget {
+                name: "compact".into(),
+                version_constraint: Some(expr),
+            }];
+        }
+    }
+    let abs = source_root.join(rel_path);
+    if let Some(pkg) = mn_content::package::detect(&abs, source_root) {
+        let manifest_abs = source_root.join(&pkg.manifest_path);
+        out.sdk_dependencies =
+            mn_content::extract::extract_manifest_deps(&manifest_abs, source_root);
+    }
+    out
 }
 
 #[derive(Debug, Serialize)]
@@ -1488,6 +1544,8 @@ struct SuccessOutput<'a> {
     demoted_revision: Option<i32>,
     documents_added: usize,
     documents_carried: usize,
+    docs_with_language_targets: usize,
+    docs_with_sdk_dependencies: usize,
 }
 
 fn format_dry_run(source_slug: &str, documents: usize, chunks: usize, json: bool) -> String {
@@ -1507,30 +1565,16 @@ fn format_dry_run(source_slug: &str, documents: usize, chunks: usize, json: bool
     }
 }
 
-fn format_success(
-    source_slug: &str,
-    revision: i32,
-    demoted_revision: Option<i32>,
-    added: usize,
-    carried: usize,
-    json: bool,
-) -> String {
+fn format_success(out: &SuccessOutput<'_>, json: bool) -> String {
     if json {
-        let body = SuccessOutput {
-            action: "ingest",
-            source_slug,
-            revision,
-            demoted_revision,
-            documents_added: added,
-            documents_carried: carried,
-        };
-        serde_json::to_string(&body).unwrap_or_default()
-    } else if let Some(prev) = demoted_revision {
-        format!(
-            "ingested `{source_slug}` rev {revision} (was {prev}); +{added} new, {carried} carried"
-        )
+        return serde_json::to_string(out).unwrap_or_default();
+    }
+    let (slug, rev, added, carried) =
+        (out.source_slug, out.revision, out.documents_added, out.documents_carried);
+    if let Some(prev) = out.demoted_revision {
+        format!("ingested `{slug}` rev {rev} (was {prev}); +{added} new, {carried} carried")
     } else {
-        format!("ingested `{source_slug}` rev {revision} (first version); +{added} new")
+        format!("ingested `{slug}` rev {rev} (first version); +{added} new")
     }
 }
 
@@ -1594,14 +1638,38 @@ mod tests {
 
     #[test]
     fn success_human_output_first_version() {
-        let s = format_success("docs", 1, None, 5, 0, false);
+        let s = format_success(
+            &SuccessOutput {
+                action: "ingest",
+                source_slug: "docs",
+                revision: 1,
+                demoted_revision: None,
+                documents_added: 5,
+                documents_carried: 0,
+                docs_with_language_targets: 0,
+                docs_with_sdk_dependencies: 0,
+            },
+            false,
+        );
         assert!(s.contains("first version"));
         assert!(s.contains("+5 new"));
     }
 
     #[test]
     fn success_human_output_with_demote() {
-        let s = format_success("docs", 2, Some(1), 3, 4, false);
+        let s = format_success(
+            &SuccessOutput {
+                action: "ingest",
+                source_slug: "docs",
+                revision: 2,
+                demoted_revision: Some(1),
+                documents_added: 3,
+                documents_carried: 4,
+                docs_with_language_targets: 0,
+                docs_with_sdk_dependencies: 0,
+            },
+            false,
+        );
         assert!(s.contains("rev 2"));
         assert!(s.contains("was 1"));
         assert!(s.contains("+3 new"));
@@ -2075,8 +2143,49 @@ mod tests {
 
 #[cfg(test)]
 mod compact_package_routing_tests {
-    use super::detect_package_ref;
+    use super::{build_extracted, detect_package_ref};
     use std::path::Path;
+
+    #[test]
+    fn extracted_provenance_for_code_files() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("src")).unwrap();
+        std::fs::write(
+            root.path().join("package.json"),
+            r#"{"name":"app","version":"1.0.0","dependencies":{"@midnight-ntwrk/midnight-js":"^1.4.0"}}"#,
+        )
+        .unwrap();
+        std::fs::write(root.path().join("src/x.compact"), "pragma language_version >= 0.23;\n")
+            .unwrap();
+        std::fs::write(root.path().join("src/y.ts"), "export const x = 1;").unwrap();
+        std::fs::write(root.path().join("README.md"), "# hi").unwrap();
+
+        let compact = build_extracted(
+            root.path(),
+            Path::new("src/x.compact"),
+            "pragma language_version >= 0.23;\n",
+            mn_core::types::DocumentKind::Code,
+        );
+        assert_eq!(compact.language_targets[0].name, "compact");
+        assert_eq!(compact.language_targets[0].version_constraint.as_deref(), Some(">=0.23"));
+
+        let ts = build_extracted(
+            root.path(),
+            Path::new("src/y.ts"),
+            "export const x = 1;",
+            mn_core::types::DocumentKind::Code,
+        );
+        assert_eq!(ts.sdk_dependencies.len(), 1);
+
+        // prose: never extracted (spec §1)
+        let md = build_extracted(
+            root.path(),
+            Path::new("README.md"),
+            "# hi",
+            mn_core::types::DocumentKind::Markdown,
+        );
+        assert!(md.language_targets.is_empty() && md.sdk_dependencies.is_empty());
+    }
 
     #[test]
     fn compact_file_routes_to_module_detection() {

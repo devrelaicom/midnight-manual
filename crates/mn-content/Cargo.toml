@@ -70,6 +70,7 @@ compactp_parser       = { workspace = true, optional = true }
 compactp_ast          = { workspace = true, optional = true }
 compactp_syntax       = { workspace = true, optional = true }
 tokenizers            = { workspace = true }
+semver                = { workspace = true }
 serde                 = { workspace = true }
 serde_json            = { workspace = true }
 toml                  = { workspace = true }

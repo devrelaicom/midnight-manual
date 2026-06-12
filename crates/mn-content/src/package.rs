@@ -9,6 +9,8 @@ pub struct DetectedPackage {
     pub kind: String,
     /// Package name (`[package].name` or `package.json` `.name`).
     pub name: String,
+    /// `[package].version` / `.version` from the manifest, when declared.
+    pub version: Option<String>,
     /// Manifest path relative to `root`.
     pub manifest_path: PathBuf,
 }
@@ -34,6 +36,11 @@ pub fn detect(file: &Path, root: &Path) -> Option<DetectedPackage> {
                         return Some(DetectedPackage {
                             kind: "rust".into(),
                             name: name.into(),
+                            version: v
+                                .get("package")
+                                .and_then(|p| p.get("version"))
+                                .and_then(toml::Value::as_str)
+                                .map(str::to_owned),
                             manifest_path: rel(&cargo, root),
                         });
                     }
@@ -49,6 +56,10 @@ pub fn detect(file: &Path, root: &Path) -> Option<DetectedPackage> {
                         return Some(DetectedPackage {
                             kind: "npm".into(),
                             name: name.into(),
+                            version: v
+                                .get("version")
+                                .and_then(serde_json::Value::as_str)
+                                .map(str::to_owned),
                             manifest_path: rel(&pkg, root),
                         });
                     }
@@ -106,5 +117,27 @@ mod tests {
         let pkg = detect(&f, dir.path()).unwrap();
         assert_eq!(pkg.kind, "npm");
         assert_eq!(pkg.name, "@scope/web");
+    }
+
+    #[test]
+    fn version_extracted_from_manifests() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"midnight-foo\"\nversion = \"0.3.1\"\n",
+        )
+        .unwrap();
+        fs::create_dir_all(dir.path().join("src")).unwrap();
+        let f = dir.path().join("src/lib.rs");
+        fs::write(&f, "fn x() {}").unwrap();
+        assert_eq!(detect(&f, dir.path()).unwrap().version.as_deref(), Some("0.3.1"));
+
+        let dir2 = tempfile::tempdir().unwrap();
+        fs::write(dir2.path().join("package.json"), r#"{"name":"@scope/web","version":"2.1.0"}"#)
+            .unwrap();
+        let f2 = dir2.path().join("src/index.ts");
+        fs::create_dir_all(f2.parent().unwrap()).unwrap();
+        fs::write(&f2, "export const x=1;").unwrap();
+        assert_eq!(detect(&f2, dir2.path()).unwrap().version.as_deref(), Some("2.1.0"));
     }
 }
