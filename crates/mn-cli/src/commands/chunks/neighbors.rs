@@ -1,11 +1,9 @@
 //! `mnm chunks neighbors <chunk-id>` — convenience verb that composes
 //! `prev` + `show` + `next` into one rendering.
 //!
-//! Deferred from the chunk + document navigation design
-//! (`docs/superpowers/specs/2026-05-25-chunk-document-navigation-design.md`
-//! §8). The design called it "trivial to script", which it is — this verb
-//! just shaves the three calls down to one for operators reading a chunk
-//! in context.
+//! Deferred from the chunk + document navigation design (§8). The design
+//! called it "trivial to script", which it is — this verb just shaves the
+//! three calls down to one for operators reading a chunk in context.
 //!
 //! The default `--count` is **2** chunks each side (so the rendered window
 //! is five chunks wide, centred on the anchor). That's deliberately

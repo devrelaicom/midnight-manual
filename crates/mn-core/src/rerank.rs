@@ -1,4 +1,4 @@
-//! Shared reranking vocabulary (spec: docs/superpowers/specs/2026-06-11-voyage-reranking-design.md).
+//! Shared reranking vocabulary for the `VoyageAI` reranking design.
 //!
 //! Used identically by the server's inline rerank stage and by clients
 //! reranking locally (BYOK), so the same search reranks the same way

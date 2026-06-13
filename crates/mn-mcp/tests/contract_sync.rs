@@ -1,18 +1,15 @@
-//! The public contract artifact must mirror `tools::list()` exactly
-//! (Constitution I / FR-037). `contracts/mcp-tools.json` keeps a prose
-//! preamble (`$schema`, `title`, `description`, `version`, `error_envelope`);
-//! its `tools` key is the wire-format `tools/list` array and is generated,
-//! never hand-edited. Regenerate with:
+//! The public contract artifact must mirror `tools::list()` exactly.
+//! `tests/contract/mcp-tools.json` keeps a prose preamble (`$schema`,
+//! `title`, `description`, `version`, `error_envelope`); its `tools` key is
+//! the wire-format `tools/list` array and is generated, never hand-edited.
+//! Regenerate with:
 //!
 //! ```sh
 //! VOYAGE_API_KEY= REGENERATE_CONTRACT=1 cargo test -p mn-mcp --test contract_sync
 //! ```
 
 /// Path to the contract artifact, relative to this crate's manifest.
-const CONTRACT_PATH: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../specs/001-rag-platform/contracts/mcp-tools.json"
-);
+const CONTRACT_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/contract/mcp-tools.json");
 
 #[test]
 fn mcp_tools_json_mirrors_tools_list() {

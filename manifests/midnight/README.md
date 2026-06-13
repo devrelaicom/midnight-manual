@@ -4,8 +4,7 @@ Directory-level `hierarchy.yaml` manifests for the default Midnight corpus
 (`midnight-manual`). One file per source repo; **no individual-file leaves** —
 each manifest pins whole directories via `path:` + glob `include`/`exclude`.
 Owner and trust live in each manifest's `root.provenance` (which inherits to all
-descendants). See the design spec
-`docs/superpowers/specs/2026-06-01-midnight-ingestion-manifests-design.md`.
+descendants).
 
 ## Provenance / trust model
 

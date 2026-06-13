@@ -1,5 +1,5 @@
-//! Per-facet match model for `POST /v1/search` filters (see
-//! docs/superpowers/specs/2026-06-04-search-facets-query-modes-design.md).
+//! Per-facet match model for `POST /v1/search` filters (search facets and
+//! query-modes design).
 //!
 //! Every facet is one of: a set-match (`{any_of, none_of}`) over strings or
 //! structured elements, a bare bool, or a range. Combination is AND across

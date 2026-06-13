@@ -1,9 +1,8 @@
 //! Canonical wire types — the shapes returned by `/v1/search`, `/v1/chunks/...`, and the MCP `search` tool.
 //!
-//! Mirror the SQL schema in
-//! [`specs/001-rag-platform/data-model.md`](../../../../specs/001-rag-platform/data-model.md)
-//! but with the application-layer Rust ergonomics (UUIDs as typed handles, enums
-//! for status fields, `Provenance` materialized from the JSONB column, etc.).
+//! Mirror the data-model schema reference but with application-layer Rust
+//! ergonomics (UUIDs as typed handles, enums for status fields, `Provenance`
+//! materialized from the JSONB column, etc.).
 
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;

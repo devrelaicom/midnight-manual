@@ -68,7 +68,7 @@ need different defaults, create the source explicitly first:
 ```bash
 MIDNIGHT_MANUAL_SHOW_ADMIN_CMDS=1 mnm sources create \
     --slug their-source \
-    --kind docs-site \
+    --kind docs_site \
     --display-name "Their Project" \
     --retention-count 10
 ```

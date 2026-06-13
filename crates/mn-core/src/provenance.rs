@@ -2,10 +2,9 @@
 //! drives the confidence-scoring blend in Phase 9 (US6, D24).
 //!
 //! The DB column is `jsonb` so unknown keys are tolerated at the storage layer;
-//! validation happens at the application boundary (Constitution VIII). The
-//! struct here is the canonical Rust mirror — see `data-model.md` §"JSONB
-//! schemas" for the wire shape and `specs/001-rag-platform/spec.md` US6 for the
-//! per-field scoring impact.
+//! validation happens at the application boundary. The struct here is the
+//! canonical Rust mirror — see the data-model schema reference §"JSONB schemas"
+//! for the wire shape and US6 for the per-field scoring impact.
 
 use serde::{Deserialize, Serialize};
 use time::Date;

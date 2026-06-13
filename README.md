@@ -11,9 +11,10 @@
 <p align="center">
   <img src="https://img.shields.io/badge/built_with-Rust_1.91-CE412B" alt="Rust 1.91">
   <img src="https://img.shields.io/badge/interface-MCP_+_CLI_+_HTTP-4C6FFF" alt="MCP + CLI + HTTP">
-  <img src="https://img.shields.io/badge/models-remote_embed_%2B_rerank-2DBfA5" alt="models: remote embed + rerank">
+  <img src="https://img.shields.io/badge/models-VoyageAI_embed_%2B_rerank-2DBfA5" alt="models: VoyageAI embed + rerank">
   <img src="https://img.shields.io/badge/telemetry-opt--out_%E2%80%A2_canary--enforced-6E56CF" alt="privacy">
-  <img src="https://img.shields.io/badge/status-pre--production-E5A000" alt="pre-production">
+  <img src="https://img.shields.io/badge/license-Apache--2.0-3DA639" alt="Apache-2.0">
+  <img src="https://img.shields.io/badge/status-v0.1.0_pre--production-E5A000" alt="v0.1.0 pre-production">
 </p>
 
 `midnight-manual` is one Cargo workspace that ships three things that work together:
@@ -51,7 +52,15 @@
 
 ## Quick start
 
-You need a [Rust toolchain](https://rustup.rs) (1.91+) — nothing else. The corpus is hosted, and both embedding and reranking run through VoyageAI (proxied by the hosted server) — **no model is fetched to your machine**. There is **no database, no API key, and no account** required to search.
+The corpus is hosted, and both embedding and reranking run through VoyageAI (proxied by the hosted server) — **no model is fetched to your machine**. There is **no database, no API key, and no account** required to search.
+
+> **Prebuilt binaries & Homebrew.** Each tagged release ships `cargo-dist` shell/PowerShell installers (SHA256-verified) for macOS, Linux (gnu + musl), and Windows across [the Releases page](https://github.com/devrelaicom/midnight-manual/releases), plus a Homebrew tap:
+>
+> ```bash
+> brew install midnight-network/tap/midnight-manual   # installs both `midnight-manual` and `mnm`
+> ```
+>
+> Building from source (below) needs only a [Rust toolchain](https://rustup.rs) (1.91+).
 
 ### 1. Build the CLI from source
 
@@ -150,8 +159,8 @@ It exposes **13 tools**, grouped by what they do:
 
 | Tool | What it does |
 | --- | --- |
-| **`search`** | The simple surface: hybrid full-text + vector retrieval from a single `query` (switch `mode` to `fts` or `vector` to pin one half). `limit` defaults to 10, capped at 50. Every hit carries a confidence score and per-factor trust breakdown. |
-| **`advanced_search`** | Full-control retrieval: fuses 1–10 `queries` via RRF (HyDE / expansion / step-back), restricts by per-facet `filters` (source, attribution tier, language, package, symbol, freshness, …), switches `mode`, toggles VoyageAI `rerank` (on by default), and accepts `rerank_instructions` (≤400 chars). Call `facets` first to discover valid filter values. |
+| **`search`** | The simple surface: hybrid full-text + vector retrieval from a single `query` (switch `mode` to `fts` or `vector` to pin one half). `limit` defaults to 10, capped at 50. Optional `code_mode` (`on`/`off`/`exclusive`) folds in the `voyage-code-3` code vector. Every hit carries a confidence score and per-factor trust breakdown. |
+| **`advanced_search`** | Full-control retrieval: fuses 1–10 `queries` via RRF (HyDE / expansion / step-back), restricts by per-facet `filters` (source, attribution tier, language, package, version target, …), switches `mode` and `code_mode`, toggles VoyageAI `rerank` (on by default), accepts `rerank_instructions` (≤400 chars), and sets `version_match` (`permissive` default / `strict`). Call `facets` first to discover valid filter values. |
 
 ### Read a hit in context
 
@@ -170,15 +179,15 @@ A search result is a chunk. These tools let your assistant pull exactly as much 
 
 | Tool | What it does |
 | --- | --- |
-| **`list_sources`** | Enumerate corpus sources (paginated) — slug, display name, kind, active revision. The slugs feed `advanced_search` filters. |
-| **`facets`** | Discover the filter dimensions `advanced_search` accepts and the values present in the corpus — call it bare for the overview, or drill into one facet's full value list. |
+| **`list_sources`** | Enumerate corpus sources (paginated; filter by kind, created window, retired) — slug, display name, kind, active revision. The slugs feed `advanced_search` filters. |
+| **`facets`** | Discover the filter dimensions `advanced_search` accepts and the values present in the corpus — call it bare for the overview, `facet=` to drill one open-set facet (`source_slug`, `language`, `tags`, `package`, `language_target`, `sdk_dependency`), and `within=` for the second drill level (the version values within a name). |
 | **`status`** | Diagnose the retrieval setup: cloud reachability, auth state, both limit families (request rate + token budget), VoyageAI key validity, and rerank configuration. Call it when searches misbehave. |
-| **`install_search_skill`** | Install the Advanced Search Skill (`SKILL.md`) into your detected AI harness(es); reports the paths written and the per-harness reload step. |
+| **`install_search_skill`** | Install/update the `midnight-advanced-search` skill (`SKILL.md`) into your detected AI harness(es); reports the paths written and the per-harness reload step. The only non-read-only tool. |
 
 ### Why it's good
 
 - **Hybrid retrieval, not just vectors.** Lexical (PostgreSQL full-text) and semantic (pgvector) results are fused with [Reciprocal Rank Fusion](#deep-dives) so exact-term matches and conceptual matches both surface.
-- **VoyageAI reranking.** `advanced_search` re-scores the candidate set with VoyageAI's reranker (`rerank-2.5` by default — see [Models](#models)) for precision on hard queries. It's on by default; flip `rerank: false` for lowest latency.
+- **VoyageAI reranking.** `advanced_search` re-scores the candidate set with VoyageAI's reranker (`rerank-2.5` by default — see [Models](#models)) for precision on hard queries. It's on by default; set `rerank: false` for lowest latency. On any rerank failure the server **degrades to RRF order and flags why** (a closed-set reason) rather than failing the search.
 - **Confidence you can reason about.** Each result blends a **trust score** (source attribution, verification, freshness, deprecation, version-match) with relevance — and returns the factor breakdown so your assistant can say *why* a passage is trustworthy without another round-trip.
 - **Structured errors that self-correct.** Failures come back as machine-readable envelopes with remediation guidance and `suggested_next_actions` (a stale chunk id, say, suggests a fresh `search`); if the corpus's embedding model has rolled forward, `search` returns an `embedding_model_mismatch` envelope naming both models and the fix — no cryptic failures.
 
@@ -188,34 +197,27 @@ A search result is a chunk. These tools let your assistant pull exactly as much 
 
 ## Advanced search skills
 
-The MCP server gives your assistant the *power tools* — hybrid retrieval, reranking, trust scoring, chunk navigation. The **Advanced Search Skill** teaches it the *technique*: how to combine those tools like a seasoned researcher instead of firing one naive query and hoping. It's a persistent, auto-loaded [Agent Skill](https://agentskills.io) (`SKILL.md`) — once installed, your agent reaches for the right retrieval pattern on its own, no prompting required.
+The MCP server gives your assistant the *power tools* — hybrid retrieval, reranking, trust scoring, chunk navigation. The **`midnight-advanced-search` skill** teaches it the *technique*: how to combine those tools like a seasoned researcher instead of firing one naive query and hoping. It's a persistent, auto-loaded [Agent Skill](https://agentskills.io) (`SKILL.md`) — once installed, your agent reaches for the right retrieval pattern on its own, no prompting required. The skill ships in the repo at [`crates/mn-skills/assets/midnight-advanced-search/`](crates/mn-skills/assets/midnight-advanced-search/).
 
-### Install it in one line
+### Install it in one step
 
-From inside your AI harness, run the bootstrap prompt:
-
-```text
-/mnm:add-advanced-search-skill
-```
-
-The agent checks whether the skill is already present and, if not, installs it through the MCP server, then tells you to reload skills. No manual file copying.
-
-> The exact slash spelling depends on your client — some namespace MCP prompts (e.g. `/mcp__midnight-manual__add_advanced_search_skill`). Your client's prompt menu will list it.
+Ask your assistant to install it — the MCP server exposes an **`install_search_skill`** tool that writes the `SKILL.md` into every harness it detects and reports the per-harness reload step. Or run the CLI yourself (see [Manual & scripted install](#manual--scripted-install) below). Either way, no manual file copying.
 
 ### What the skill teaches
 
 | Technique | How it works | Why it helps |
 | --- | --- | --- |
-| **HyDE** (pseudo-answer) | The agent drafts a 1–2 sentence hypothetical answer and searches with it alongside the question; both embeddings fuse via RRF. | Lifts recall when the question is short or uses different words than the docs. |
-| **Multi-query** | 2–3 paraphrases varying vocabulary and breadth, fused in a single `advanced_search` call. | Beats synonym mismatch between your phrasing and the corpus's. |
-| **Step-back** | Pairs the specific question with a more abstract framing. | Rescues over-specific questions and raw error messages. |
-| **Lexical anchoring** | Sends exact identifiers / error codes verbatim so the full-text half of hybrid search nails exact matches. | Catches the precise symbol, flag, or error the vector half would blur. |
-| **Symbol-aware code search** | Scopes by `package` / `language`, then navigates hits by their structured `symbol_path`. | Lands on the *named* circuit, contract, or function — not an arbitrary window. |
+| **HyDE** (pseudo-answer) | The agent drafts a 1–2 sentence hypothetical answer phrased like documentation (it need not be correct — only its vector position matters) and searches it alongside the bare question; both fuse via RRF. Cost: 2 queries. | Lifts recall when the question is short or uses different words than the docs. |
+| **Multi-query** | 2–3 paraphrases varying vocabulary and breadth, plus the original, fused in a single `advanced_search` call. Cost: the distinct query count. | Beats synonym mismatch between your phrasing and the corpus's. |
+| **Step-back** | Pairs the specific question (a raw error, say) with a more abstract framing. Cost: 2 queries. | Rescues over-specific questions and raw error messages. |
+| **Lexical anchoring** | Sends exact identifiers / error codes verbatim so the full-text half of hybrid search nails exact matches; the reliable lever for version strings, too. | Catches the precise symbol, flag, or error the vector half would blur. |
+| **Symbol-aware code search** | Scopes by `package` / `language` and uses `code_mode` (general `voyage-context-3` + code `voyage-code-3` dual vectors; `exclusive` for code-shaped queries), then navigates hits by their structured `symbol_path`. | Lands on the *named* circuit, contract, or function — not an arbitrary window. |
+| **Version-matched retrieval** | `version_satisfies` (a concrete version *or* a semver range) with `version_match` `permissive`/`strict` against versions extracted from Compact pragmas + package manifests. | Avoids answers pinned to the wrong Compact / SDK version. |
 | **Retrieve-read-retrieve** | Broad first pass → read hits with `get_chunk_next` / `get_chunk_parents` → refine with newly-learned terms → search again. | Converges on precise answers the way a human researcher iterates. |
 | **Trust-weighted selection** | Ranks and prunes on each result's `trust_score` and `confidence_factors` (attribution, verification, freshness, version-match). | Authoritative, version-matched sources rise; stale or deprecated ones sink. |
 | **Cross-source comparison** | Pulls from multiple sources and surfaces disagreement instead of silently picking one. | Compensates for the deliberate absence of automatic contradiction detection. |
 
-Worked examples for every pattern live in [`docs/cookbook/query-enhancement.md`](docs/cookbook/query-enhancement.md).
+Worked examples for every pattern — the exact prompt the agent emits, the resulting `queries` array, and the token cost — are folded into the bundled skill at [`crates/mn-skills/assets/midnight-advanced-search/`](crates/mn-skills/assets/midnight-advanced-search/).
 
 ### Manual & scripted install
 
@@ -358,15 +360,18 @@ mnm models active        # the corpus's active embedding model
 
 ## Models
 
+Everything runs remotely on VoyageAI — **nothing is downloaded, run, or cached on your machine** (no Python, no ONNX, no model files, no GPU).
+
 | Role | Model | Where it runs | Notes |
 | --- | --- | --- | --- |
-| Embedder | **`voyage-code-3`** | VoyageAI (remote) | 1024-dimensional embeddings. Your client embeds queries via VoyageAI — bring-your-own-key, or proxied through the server's `/v1/embeddings`. |
-| Reranker | **`rerank-2.5`** (or `rerank-2.5-lite`) | VoyageAI (remote) | Used when `rerank` is requested (on by default). `rerank-2.5-lite` is lower latency and billed at half tokens server-side. |
+| General embedder | **`voyage-context-3`** | VoyageAI (remote) | *Contextualized* embeddings: each document's chunks are embedded together, so every chunk vector carries document-level context. 1024-dimensional by default (Matryoshka-configurable 256/512/1024/2048). A query is embedded as a single-chunk document. |
+| Code embedder | **`voyage-code-3`** | VoyageAI (remote) | A *second* vector on code chunks. At query time `code_mode` (`on`/`off`/`exclusive`) decides whether this code-vector list joins the RRF fusion — `on` is the hybrid/vector default, `exclusive` swaps in the code list for API-shaped / identifier queries. (`code_mode` is forced `off` for `mode=fts`.) |
+| Reranker | **`rerank-2.5`** (or `rerank-2.5-lite`) | VoyageAI (remote) | Used when `rerank` is requested (on by default). `rerank-2.5-lite` is lower latency and billed at half tokens server-side. `rerank: none` keeps RRF order. |
 
-- **Nothing to download.** Both the embedder and the reranker are remote VoyageAI calls — no Python, no ONNX, no model files on disk, no GPU. The `models.cache_dir` setting only governs the (now-empty) cache directory.
-- **Two rerank placements.** With a `VOYAGE_API_KEY` your client reranks directly against your own Voyage account (BYOK); without one, the server reranks inline in `/v1/search` under its own key, charged to your token budget. `--rerank auto` (the default) picks local when a key is present, else server; `--rerank off` skips it. On any rerank failure the server degrades to RRF order rather than failing the search.
+- **Dual contextualized embeddings.** General corpus chunks use `voyage-context-3`; code chunks additionally get a `voyage-code-3` vector. The two ranked lists fuse via RRF, gated per request by `code_mode`. The `models.cache_dir` setting only governs a (now-empty) cache directory — nothing is fetched there.
+- **Two rerank placements.** With a `VOYAGE_API_KEY` your client reranks directly against your own Voyage account (BYOK); without one, the server reranks inline in `/v1/search` under its own key, charged to your token budget. `--rerank auto` (the default) picks local when a key is present, else server; `--rerank off` skips it. On any rerank failure the server **degrades to RRF order and flags the reason** rather than failing the search.
 - **Inspect.** `mnm models pull` just ensures the model-cache directory exists (nothing is fetched); `mnm models active` shows which embedding model the corpus is on.
-- **Version-aware.** The corpus advertises its active embedding model as `name@revision` (e.g. `voyage-code-3@1`). If the corpus rolls forward, clients are told to re-embed against the new model rather than silently returning mis-scored results.
+- **Version-aware.** The corpus advertises its active embedding model as `name@revision` (e.g. `voyage-context-3@1`). If the corpus rolls forward, clients are told to re-embed against the new model rather than silently returning mis-scored results.
 
 ---
 
@@ -549,11 +554,11 @@ A background sweep job retires stale and aborted versions on a grace window, so 
 
 `midnight-manual-server` is the corpus host. Most people never run it — they use the hosted instance — but it's a single self-contained binary if you want your own.
 
-- **Stack:** `axum` + `tower` over PostgreSQL 16 with the `pgvector` extension. An HNSW index powers vector search; a GIN index powers full-text. 
-- **API surface:** anonymous **read** endpoints (`/v1/search`, `/v1/chunks/{id}`, `/v1/documents/{id}`, `/v1/sources/{slug}`, `/v1/models/active`) and authenticated **admin** endpoints (the ingest-run protocol, rate-limit management).
-- **Tiered rate limiting.** Anonymous traffic is limited per-IP; signing in via **GitHub OAuth** (org membership → a 30-day read-uplift token) raises your limit; admins can add per-CIDR overrides. A tier guard runs before the role guard, so an uplift token can never gain write access.
-- **Operable by default.** `/health` for readiness, `/metrics` in Prometheus format, request-ID propagation on every request for traceability, and automatic migrations on startup.
-- **Ships small.** Multi-stage Docker build onto `gcr.io/distroless/cc` (no shell, no toolchain), built for `linux/amd64` + `linux/arm64`, deployed on Fly.io.
+- **Stack:** `axum` + `tower` over PostgreSQL 16 with the `pgvector` extension. An HNSW index powers vector search; a GIN index powers full-text.
+- **API surface:** anonymous **read** endpoints (`/v1/search` with inline rerank, `/v1/embeddings` proxy, `/v1/facets`, `/v1/chunks/{id}` + batch `/v1/chunks` + `/next`/`/prev`/`/parents`, `/v1/documents/{id}` + `/chunks`, `/v1/sources` + `/{slug}` + `/versions`, `/v1/models/active`, `/v1/me`) and authenticated **admin** endpoints (the ingest-run protocol, version promote/retire, rate-limit + token-limit management). Auth is Ed25519 challenge-response plus GitHub OAuth read-uplift.
+- **Tiered rate limiting.** Anonymous traffic is limited per-IP; signing in via **GitHub OAuth** (a 30-day read-uplift token) raises your limit; admins can add per-CIDR overrides. A tier guard runs before the role guard, so an uplift token can never gain write access.
+- **Operable by default.** `/healthz` (liveness) and `/readyz` (readiness), `/metrics` in Prometheus format, request-ID propagation on every request for traceability, and automatic migrations on startup.
+- **Ships small.** Multi-stage Docker build onto `gcr.io/distroless/cc` (no shell, no toolchain), built for `linux/amd64` + `linux/arm64`, published to `ghcr.io/midnight-network/midnight-manual`, and deployed on Fly.io. The server is Docker-only — it's not part of the prebuilt binary matrix.
 
 Run your own against a local Postgres:
 
@@ -574,11 +579,12 @@ Telemetry is **opt-out**, carries **no** query content, chunk content, bearer to
 
 ### What is collected
 
-Six event types, each a fixed shape of coarse scalars and closed enums:
+Seven event types, each a fixed shape of coarse scalars and closed enums:
 
 | Event | Fields | Source |
 | --- | --- | --- |
 | `mcp_tool_call` | `tool_name`, `latency_ms`, `result_count`, `model_state`, `rerank_on`, `outcome` | MCP |
+| `rerank` | where rerank ran, the model, whether applied, and a closed-set degrade reason — all coarse scalars/enums | CLI / MCP / server |
 | `cli_command` | `command`, `duration_ms`, `outcome` | CLI |
 | `ingest_complete` | `documents_added/updated/skipped`, `duration_ms`, `outcome` | CLI (admin) |
 | `pull_models` | `embedder_downloaded`, `reranker_downloaded`, `duration_ms`, `outcome` | CLI |
@@ -619,7 +625,7 @@ The indexed corpus is built from **public Midnight repositories** — the docs s
 
 ### Where query text goes — two embedding paths
 
-Query embedding uses VoyageAI's **`voyage-code-3`** model (1024-dimensional). Reranking, when you ask for it (on by default), also goes through VoyageAI. Which path your query text takes depends on whether you supply your own Voyage key:
+Query embedding uses VoyageAI's contextualized **`voyage-context-3`** model (1024-dimensional), with a second **`voyage-code-3`** vector for code chunks. Reranking, when you ask for it (on by default), also goes through VoyageAI. Which path your query text takes depends on whether you supply your own Voyage key:
 
 | Path | When it applies | What text reaches Voyage |
 | --- | --- | --- |
@@ -680,7 +686,8 @@ Configuration resolves in a clear precedence order — **command-line flag › e
 url = "https://midnight-manual.midnightntwrk.expert"
 
 [models]
-embedding = "voyage-code-3"          # remote VoyageAI embedder
+embedding      = "voyage-context-3"  # remote VoyageAI general embedder (contextualized)
+code_embedding = "voyage-code-3"     # remote VoyageAI code embedder (second vector)
 # voyage_api_key = "…"                # optional — BYOK embedding + reranking (else server-proxied)
 # voyage_timeout_secs = 120           # optional — per-request Voyage embed timeout
 
@@ -740,7 +747,7 @@ Lexical and semantic candidate lists are merged with **Reciprocal Rank Fusion** 
 
 ### Multi-query / HyDE
 
-`search` accepts an array of `queries` (1–50). Pair a literal query with a hypothetical-answer (HyDE) or step-back rephrase and let RRF fuse the results — a simple, powerful recall boost. See [`docs/cookbook/query-enhancement.md`](docs/cookbook/query-enhancement.md).
+`advanced_search` accepts an array of `queries` (1–10 distinct, de-duped, fused with RRF `k=60` across both retrieval modes in a single pass; rate-limit cost is `max(1, N)` distinct queries). Pair a literal query with a hypothetical-answer (HyDE) or step-back rephrase and let RRF fuse the results — a simple, powerful recall boost. The per-result `scores.matched_queries` indices and the `search_metadata.per_query` diagnostics tell you which formulations actually contributed. Worked examples live in the bundled skill at [`crates/mn-skills/assets/midnight-advanced-search/`](crates/mn-skills/assets/midnight-advanced-search/).
 
 ### Built for speed and many platforms
 
@@ -750,11 +757,13 @@ Cold-start to MCP handshake is sub-500 ms; p95 retrieval is under a second again
 
 ## Project links
 
-- **Spec:** [`specs/001-rag-platform/spec.md`](specs/001-rag-platform/spec.md)
-- **Architecture & plan:** [`specs/001-rag-platform/plan.md`](specs/001-rag-platform/plan.md)
-- **Constitution** (non-negotiable principles): [`CONSTITUTION.md`](CONSTITUTION.md)
-- **Query-enhancement cookbook:** [`docs/cookbook/query-enhancement.md`](docs/cookbook/query-enhancement.md)
-- **Guide for AI assistants working in this repo:** [`CLAUDE.md`](CLAUDE.md)
+- **Source & issues:** [github.com/devrelaicom/midnight-manual](https://github.com/devrelaicom/midnight-manual)
+- **Landing page:** [manual.midnightntwrk.expert](https://manual.midnightntwrk.expert)
+- **Hosted search API:** [midnight-manual.midnightntwrk.expert](https://midnight-manual.midnightntwrk.expert)
+- **Advanced-search skill:** [`crates/mn-skills/assets/midnight-advanced-search/SKILL.md`](crates/mn-skills/assets/midnight-advanced-search/SKILL.md)
+- **Deploy runbook (operators):** [`docs/README-deploy.md`](docs/README-deploy.md)
+- **Ingesting content (operators):** [`docs/cookbook/ingesting-content.md`](docs/cookbook/ingesting-content.md)
+- **License:** [Apache-2.0](LICENSE)
 
 ---
 

@@ -33,8 +33,9 @@ use crate::server::ServerConfig;
 
 /// Build the static tool manifest sent in response to `tools/list`.
 ///
-/// All thirteen tools declared in spec.md US5 / contracts/mcp-tools.json, in
-/// canonical registration order (search pair, chunk reads, document reads,
+/// All thirteen tools, mirrored by the `tests/contract/mcp-tools.json`
+/// snapshot, in canonical registration order (search pair, chunk reads,
+/// document reads,
 /// corpus discovery, diagnostics, local install). Schemas here are kept in
 /// sync with the canonical document by way of the contract tests in `tests/`.
 #[must_use]

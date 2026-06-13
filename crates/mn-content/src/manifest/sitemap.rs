@@ -1,6 +1,6 @@
 //! Parse `<urlset>` and `<sitemapindex>` XML into a flat list of URLs.
 //!
-//! Spec: §1.2 of docs/superpowers/specs/2026-05-25-ingest-ux-design.md
+//! Implements the sitemap-URL parsing described in §1.2 of the ingest UX design.
 
 use std::path::Path;
 use thiserror::Error;
