@@ -1905,7 +1905,7 @@ git commit -m "feat(clients): version_match on advanced_search/mnm search; facet
 - Create: `crates/mn-skills/tests/version_examples_validate.rs`
 - Modify: `crates/mn-skills/Cargo.toml` (dev-deps: `mn-retrieval`, `mn-core`, `regex` if not present — check `grep -n regex Cargo.toml`)
 
-- [ ] **Step 1: Write the drift-guard test first**
+- [x] **Step 1: Write the drift-guard test first**
 
 ```rust
 //! Every `version_satisfies` example value shipped in the skill must be
@@ -1940,9 +1940,9 @@ fn skill_version_satisfies_examples_parse() {
 
 (`walkdir` is already used elsewhere in the workspace — `grep -n walkdir Cargo.toml`; add `regex`/`walkdir` to mn-skills dev-deps as needed.)
 
-- [ ] **Step 2: Run** — passes already (the existing range examples now parse!). It pins the contract for future edits. If `regex` adds dependency weight concerns, hand-roll the scan with `split("version_satisfies")` — keep the assertion the same.
+- [x] **Step 2: Run** — passes already (the existing range examples now parse!). It pins the contract for future edits. If `regex` adds dependency weight concerns, hand-roll the scan with `split("version_satisfies")` — keep the assertion the same.
 
-- [ ] **Step 3: Rewrite the skill content.** Required edits (keep each file's existing heading style and the facet-key backticks the `catalog_documents_every_facet_key` test scans for):
+- [x] **Step 3: Rewrite the skill content.** Required edits (keep each file's existing heading style and the facet-key backticks the `catalog_documents_every_facet_key` test scans for):
 
 1. **filters-and-modes.md catalog rows** — `version_satisfies` column text becomes: `a concrete version (e.g. "0.31") or a semver range (e.g. ">=0.23"); matched against the target's declared constraint`. Sharp-edges section replaces the "cannot be negated"-adjacent semver sentence with the **two modes**: permissive default (bias; breaking drops; version-silent content unaffected), `version_match: "strict"` for hard pinning. Document the new `within` drill levels under the facets section.
 2. **SKILL.md "Match the user's version & freshness"** — rewrite around the two-regime model:
@@ -1955,9 +1955,9 @@ fn skill_version_satisfies_examples_parse() {
 3. **advanced-techniques.md technique B** — keep the worked example (its range syntax is now valid); add a strict-mode variant line and the new recovery rung.
 4. **rerank-instructions.md** — note the derived default now comes from the first version-bearing `language_target` element; the "re-state the version preference when overriding" guidance stands.
 
-- [ ] **Step 4: Run the skill drift guards** — `cargo test -p mn-skills` → PASS (catalog coverage + the new example guard).
+- [x] **Step 4: Run the skill drift guards** — `cargo test -p mn-skills` → PASS (catalog coverage + the new example guard).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/mn-skills
