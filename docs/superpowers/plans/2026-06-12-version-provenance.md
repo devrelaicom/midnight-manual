@@ -2006,7 +2006,7 @@ git commit -m "docs: version-provenance contract + README/cookbook/CLAUDE.md upd
 **Files:**
 - Create: `docs/cookbook/version-recall-probe.md`
 
-- [ ] **Step 1: Write the probe doc** — a manual experiment (real embeddings; not CI):
+- [x] **Step 1: Write the probe doc** — a manual experiment (real embeddings; not CI):
 
 ```markdown
 # Version-recall probe (manual)
@@ -2034,7 +2034,7 @@ docs (`mnm search --json | jq '.results[].source_path'`).
 Record the outcome here with the date and corpus model.
 ```
 
-- [ ] **Step 2: Full CI-surface check** (per the project rule — package builds miss test targets and feature-gated files):
+- [x] **Step 2: Full CI-surface check** (per the project rule — package builds miss test targets and feature-gated files):
 
 ```bash
 cargo fmt --check
@@ -2045,9 +2045,9 @@ cargo test -p mn-server --no-run --features integration
 
 Expected: all green (integration executes in CI). Fix anything flagged.
 
-- [ ] **Step 3: Spec coverage re-read** — open `docs/superpowers/specs/2026-06-12-version-provenance-design.md` and confirm: §1 → Tasks 7-10, §2 → Task 1+4, §3 → Tasks 2+3+5, §4 → Task 6, §5 → Tasks 12-13, §6 → Tasks 4+5+8 error paths, §7 → tests throughout + Task 14, §9 → CLAUDE.md note. Fix anything missed before declaring done.
+- [x] **Step 3: Spec coverage re-read** — open `docs/superpowers/specs/2026-06-12-version-provenance-design.md` and confirm: §1 → Tasks 7-10, §2 → Task 1+4, §3 → Tasks 2+3+5, §4 → Task 6, §5 → Tasks 12-13, §6 → Tasks 4+5+8 error paths, §7 → tests throughout + Task 14, §9 → CLAUDE.md note. Fix anything missed before declaring done.
 
-- [ ] **Step 4: Commit stragglers; do NOT push** — integration tests run in CI on the PR.
+- [x] **Step 4: Commit stragglers; do NOT push** — integration tests run in CI on the PR.
 
 ```bash
 git add -A && git commit -m "docs: version-recall probe + final checks"
