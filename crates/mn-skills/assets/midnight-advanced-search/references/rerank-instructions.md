@@ -3,8 +3,10 @@
 `advanced_search` accepts `rerank_instructions` (max 400 chars): a
 natural-language directive that steers how the candidate pool is reranked. It
 **replaces** the derived default (code-focused under `code_mode=exclusive`;
-version-preferring when a `language_target` filter carries `version_satisfies`),
-so fold those concerns back in yourself when you override. The three shapes —
+version-preferring when a `language_target` filter carries `version_satisfies`
+— derived from the **first `language_target` element that carries a
+`version_satisfies`**), so fold those concerns back in yourself when you
+override. The three shapes —
 **emphasis** (what matters in the match), **filtering** (what kind of document),
 and **disambiguation** (what an ambiguous term means) — are in `SKILL.md`; this
 file works them against the real corpus. Every concrete value is illustrative —

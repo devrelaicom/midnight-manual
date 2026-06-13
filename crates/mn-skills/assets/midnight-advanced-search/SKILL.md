@@ -177,18 +177,45 @@ See references/rerank-instructions.md for worked examples against this corpus.
 ## Match the user's version & freshness
 
 The corpus spans versions and eras; an unfiltered hit may be for the wrong
-toolchain. To avoid stale, confidently-wrong answers, use `advanced_search`
-filters:
+toolchain. Two regimes handle the two ways content carries version information.
 
-- Pin to the user's toolchain with `version_satisfies` on `language_target` /
-  `sdk_dependency` (e.g. `{ "name": "compact", "version_satisfies": ">=0.23" }`
-  — confirm the real names/versions via `facets`).
-- Add `"deprecated": false` to drop superseded guidance.
-- Add a recency floor (`ingested_at` / `source_modified_at` `{ "after": "…" }`)
-  to prefer current docs.
+**Regime 1 — content that declares a target (mostly code).** Pin to the user's
+toolchain with `version_satisfies` on `language_target` / `sdk_dependency`. The
+value is a concrete version (e.g. `{ "name": "compact", "version_satisfies":
+"0.31" }`) or a semver range (e.g. `{ "name": "compact", "version_satisfies":
+">=0.23" }`). Confirm the real names/versions via `facets` first.
+
+- **Default (`permissive`) is safe on any search.** It *biases* ranking rather
+  than hard-gating: among content that declares the target, only *breaking*
+  mismatches drop; near-misses are kept but penalized by distance; and
+  version-silent content (which declares no target) is untouched. So you can add
+  a version filter to almost any query without nuking recall.
+- **For an exact pin, add `"version_match": "strict"`** at the request level —
+  any candidate that doesn't satisfy the version is dropped, not just penalized.
+  Use it when the user needs one precise toolchain, typically together with
+  `code_mode` for code-shaped hunts.
+
+**Regime 2 — prose (tutorials, guides, conceptual docs) rarely declares a
+target.** A version filter can't bind to what isn't declared, so instead:
+
+- Put the version in the **query text** ("deploy a contract with compact 0.31").
+- Add freshness floors: `ingested_at` / `source_modified_at`
+  `{ "after": "…" }`, plus `"deprecated": false` to drop superseded guidance.
+
+**Support-matrix playbook (compatibility questions).** For "what SDK works with
+node X?"-style questions, don't guess version pairings — retrieve the matrix
+first: query `"support matrix"` scoped to `{ "source_slug": { "any_of":
+["midnight-docs"] } }`, read the concrete versions off the matrix page, then
+issue version-pinned follow-ups using those exact versions.
+
+**Discovery.** Confirm the corpus actually covers a version before pinning to
+it: `facets` with `{"facet": "language_target"}` lists the target names, then
+`{"facet": "language_target", "within": "<name>"}` enumerates the declared
+version constraints inside that name. Pin only to versions the corpus declares.
 
 This version+freshness stack is the structural antidote to stale answers. See
-technique B in `references/advanced-techniques.md` for the staleness-diff move.
+technique B in `references/advanced-techniques.md` for the staleness-diff move
+and the strict-mode variant.
 
 ## Filter for precision, and self-correct
 
@@ -204,7 +231,9 @@ exclude `none_of`.
   `facets` → fix → retry.
 - **Filter ladder.** Start tight; if results are too few, relax ONE facet at a
   time (least-load-bearing first — usually recency, then `verified`, then
-  version) until results appear.
+  version) until results appear. The version rung is itself a sub-ladder: zero
+  results under `version_match: "strict"` → retry `permissive` (which keeps
+  penalized near-misses) → only then drop the version filter entirely.
 
 ## Query techniques
 
