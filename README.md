@@ -730,7 +730,7 @@ Most retrieval systems give you a relevance score and stop. `midnight-manual` mu
 - **Verification** — verified by the Foundation, a partner, someone, or unverified.
 - **Freshness** — exponential decay by age, so fast-moving docs don't out-rank by staleness.
 - **Deprecation** — flagged-deprecated content is down-weighted.
-- **Version match** — content that targets the language/SDK version you're asking about is boosted.
+- **Version match** — content that satisfies the language/SDK version you're asking about is boosted, a near-miss is penalized in proportion to how far off it is, and breaking mismatches are excluded; `strict` mode hard-filters to satisfying content. Version targets are extracted from Compact pragmas and package manifests at ingest.
 
 The result carries the **per-factor breakdown**, so your assistant can explain *why* a passage scored the way it did — "Foundation-authored, verified, recent, version matches" — without another call. The scoring policy is data-driven (loaded from a policy file), so trust weights can be tuned without a rebuild.
 

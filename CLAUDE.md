@@ -34,6 +34,15 @@ See `CONSTITUTION.md` for non-negotiable principles. See `specs/001-rag-platform
 
 ## Recent Changes
 
+- 2026-06-13 — Version provenance & matching: per-document extraction at ingest
+  (Compact `language_version` pragma → `language_targets`; allowlisted
+  `@midnight-ntwrk/*` + `@openzeppelin/compact-*` npm deps and `midnight-*`/`mn-*`
+  cargo deps → `sdk_dependencies`; `package.version` populated). `version_satisfies`
+  accepts a concrete version or a semver range; `version_match` is `strict` |
+  `permissive` (permissive default — satisfying boost / distance-scaled near-miss
+  penalty / breaking-mismatch drop, with the 0.x role shift). `/v1/facets` gains a
+  two-level drill for version facets; the search skill is rewritten (two-regime
+  guidance + support-matrix playbook). Re-ingest required to populate provenance.
 - 2026-06-11 — VoyageAI reranking: inline server rerank in `/v1/search`
   (`rerank` = rerank-2.5 default | rerank-2.5-lite at half-rate billing | none;
   degrade-and-flag on budget/provider failure; `MIDNIGHT_MANUAL_SERVER_RERANK`

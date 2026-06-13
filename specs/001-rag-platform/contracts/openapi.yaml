@@ -1118,6 +1118,15 @@ components:
           description: >-
             Optional natural-language rerank instruction appended to the query;
             replaces the derived default. Ignored when rerank is "none".
+        version_match:
+          type: string
+          enum: [strict, permissive]
+          default: permissive
+          description: >-
+            Controls how declared version provenance affects results. `permissive`
+            biases ranking toward version-satisfying content and drops only
+            breaking mismatches among content that declares a version. `strict`
+            hard-filters the result set down to version-satisfying content.
 
     SearchFilters:
       type: object
@@ -1327,7 +1336,12 @@ components:
       description: One `language_target` element; semver evaluated server-side post-fetch.
       properties:
         name: { type: string }
-        version_satisfies: { type: string, description: Optional semver requirement (FR-033). }
+        version_satisfies:
+          type: string
+          description: >-
+            Concrete version (e.g. "0.31") or semver range (e.g. ">=0.23"),
+            matched against the document's declared constraint. Unparseable
+            values are a 400.
 
     SdkDependencyMatch:
       type: object
@@ -1337,7 +1351,12 @@ components:
       properties:
         kind: { type: string }
         name: { type: string }
-        version_satisfies: { type: string, description: Optional semver requirement (FR-033). }
+        version_satisfies:
+          type: string
+          description: >-
+            Concrete version (e.g. "0.31") or semver range (e.g. ">=0.23"),
+            matched against the document's declared constraint. Unparseable
+            values are a 400.
 
     FacetsResponse:
       type: object
@@ -1439,6 +1458,10 @@ components:
                   vector_latency_ms: { type: integer }
             fts_zero_matches: { type: boolean }
             limit_capped: { type: boolean }
+            version_match:
+              type: string
+              enum: [strict, permissive]
+              description: The version-match regime applied to this search.
             rerank:
               type: object
               required: [applied]
@@ -1504,6 +1527,8 @@ components:
         language_target_query: { type: object, nullable: true }
         language_targets_chunk: { type: array, items: { type: object } }
         version_match_multiplier: { type: number }
+        version_match_class: { type: string, enum: [satisfies, near_miss, silent, unknown] }
+        version_distance: { type: integer }
         relevance_source: { type: string, enum: [rrf, rerank] }
         relevance_multiplier: { type: number }
 
