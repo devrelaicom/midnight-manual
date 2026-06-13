@@ -40,8 +40,29 @@ wrong toolchain, constrain to *their* version and to current material.
   ```
 
   (Confirm the real target/dependency names and the user's actual versions
-  before trusting these — `facets` lists the names present.)
+  before trusting these — `facets` lists the names present; `version_satisfies`
+  takes a concrete version like `"0.31"` or a range like `">=0.23"`.)
 
+- **Bias vs. pin.** By default (`version_match` `permissive`) the filter only
+  *biases* ranking — among content that declares the target, breaking
+  mismatches drop and near-misses are kept-but-penalized; version-silent prose
+  is untouched. Add `"version_match": "strict"` at the request level (usually
+  with `code_mode`) to hard-drop anything that doesn't satisfy the version:
+
+  ```jsonc
+  {
+    "queries": ["how do I deploy a contract"],
+    "version_match": "strict",
+    "code_mode": "exclusive",
+    "filters": {
+      "language_target": { "any_of": [{ "name": "compact", "version_satisfies": "0.31" }] }
+    }
+  }
+  ```
+
+- **Recovery rung.** Zero results under `strict` → retry `permissive` (keeps
+  penalized near-misses) → only then drop the version filter entirely. Relax
+  the version constraint *last* on the filter ladder, not first.
 - **Drop superseded guidance**: add `"deprecated": false`.
 - **Prefer current docs**: add a recency floor, e.g.
   `"source_modified_at": { "after": "2026-01-01" }` (or `ingested_at`).

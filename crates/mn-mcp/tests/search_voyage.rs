@@ -361,6 +361,7 @@ fn single_query_args_with(
         mode: "hybrid",
         code_mode,
         rerank_instructions: None,
+        version_match: None,
     }
 }
 

@@ -72,3 +72,15 @@ MIDNIGHT_MANUAL_SHOW_ADMIN_CMDS=1 mnm sources create \
     --display-name "Their Project" \
     --retention-count 10
 ```
+
+## Authoring guideline — state your toolchain versions
+
+Version provenance is extracted from code (Compact `language_version` pragmas,
+package manifests) — prose carries no machine-extractable version metadata. So
+when you write a tutorial, **state your toolchain versions in the first
+paragraph**, e.g. "This tutorial targets Compact 0.31 and midnight-js 2.x".
+
+Contextualized embeddings spread that opening statement across every chunk of
+the document, so a version-qualified query ("... in compact 0.31") can still find
+the relevant passage even though the version never appears as a structured facet
+on the prose. Stating it once, up front, is what makes that work.

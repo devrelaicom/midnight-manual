@@ -194,7 +194,32 @@ the server searches* and *what it searches over*:
 The highest-value use is matching the reader's toolchain: pin `language_target`
 / `sdk_dependency` with `version_satisfies`, add `"deprecated": false`, and a
 recency floor on `ingested_at` — so you retrieve current, version-matched
-material instead of stale advice.
+material instead of stale advice. `version_satisfies` accepts a concrete version
+(`"0.31"`) or a semver range (`">=0.23"`); unparseable values are a `400`.
+
+The `version_match` field then chooses the regime. `permissive` (the default)
+biases ranking toward satisfying content and drops only breaking mismatches among
+version-declaring documents — use it for an everyday query that should still
+surface near-by versions:
+
+```json
+{
+  "query": "declare a ledger in compact",
+  "version_match": "permissive",
+  "filters": { "language_target": { "any_of": [{ "name": "compact", "version_satisfies": "0.31" }] } }
+}
+```
+
+`strict` hard-filters the result set down to satisfying content — use it when you
+must not show anything outside a supported range:
+
+```json
+{
+  "query": "declare a ledger in compact",
+  "version_match": "strict",
+  "filters": { "language_target": { "any_of": [{ "name": "compact", "version_satisfies": ">=0.23" }] } }
+}
+```
 
 Discover the corpus's real facet values (languages, tags, sources, packages)
 with the `facets` MCP tool, or from the shell:

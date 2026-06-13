@@ -45,6 +45,7 @@ fn make_args(query: &str) -> Args {
         rerank_model: None,
         rerank_instructions: None,
         mode: "hybrid".to_owned(),
+        version_match: None,
         code_mode: None,
         kind: vec![],
         language: vec![],

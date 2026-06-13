@@ -79,6 +79,9 @@ pub struct SearchRequest {
     /// `None` (and omitted) on `Local` / `Off`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rerank_instructions: Option<String>,
+    /// Version-matching mode (`strict` | `permissive`); omitted = server default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version_match: Option<String>,
 }
 
 /// The corpus's active embedding models, decoded from `GET /v1/models/active`.

@@ -1835,7 +1835,7 @@ git commit -m "feat(mn-cli): wire version extraction into ingest with report cou
 **Files:**
 - Modify: `crates/mn-mcp/src/tools.rs` (advanced_search input schema :271-289, parse fn ~:1114, facets tool schema ~:133-155), `crates/mn-mcp/src/cloud_client.rs:42-82` (SearchRequest), `crates/mn-cli/src/commands/search.rs` (flag + request field), `specs/001-rag-platform/contracts/mcp-tools.json` (regenerated)
 
-- [ ] **Step 1: Failing test.** In mn-mcp, find the existing advanced_search arg-parsing tests (`grep -n "parse_advanced_search_args" crates/mn-mcp/src/tools.rs | head`) and add:
+- [x] **Step 1: Failing test.** In mn-mcp, find the existing advanced_search arg-parsing tests (`grep -n "parse_advanced_search_args" crates/mn-mcp/src/tools.rs | head`) and add:
 
 ```rust
 #[test]
@@ -1851,7 +1851,7 @@ fn version_match_parsed_and_forwarded() {
 }
 ```
 
-- [ ] **Step 2: Run to verify failure**, then implement:
+- [x] **Step 2: Run to verify failure**, then implement:
 
 1. `advanced_search_input_schema()` gains (next to `rerank`):
 
@@ -1882,14 +1882,14 @@ fn version_match_parsed_and_forwarded() {
 
 The CLI `SearchRequest` (:1235-1273) gains the same `Option<String>` field with `skip_serializing_if`; request assembly copies the flag through.
 
-- [ ] **Step 3: Regenerate the MCP contract**
+- [x] **Step 3: Regenerate the MCP contract**
 
 Run: `REGENERATE_CONTRACT=1 cargo test -p mn-mcp mcp_tools_json_mirrors_tools_list && cargo test -p mn-mcp`
 Expected: contract file rewritten; all tests pass. `git diff specs/001-rag-platform/contracts/mcp-tools.json` shows only the new fields.
 
-- [ ] **Step 4: Run full client tests** — `VOYAGE_API_KEY= cargo test -p mn-mcp -p mn-cli` → PASS.
+- [x] **Step 4: Run full client tests** — `VOYAGE_API_KEY= cargo test -p mn-mcp -p mn-cli` → PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/mn-mcp crates/mn-cli specs/001-rag-platform/contracts/mcp-tools.json
@@ -1905,7 +1905,7 @@ git commit -m "feat(clients): version_match on advanced_search/mnm search; facet
 - Create: `crates/mn-skills/tests/version_examples_validate.rs`
 - Modify: `crates/mn-skills/Cargo.toml` (dev-deps: `mn-retrieval`, `mn-core`, `regex` if not present — check `grep -n regex Cargo.toml`)
 
-- [ ] **Step 1: Write the drift-guard test first**
+- [x] **Step 1: Write the drift-guard test first**
 
 ```rust
 //! Every `version_satisfies` example value shipped in the skill must be
@@ -1940,9 +1940,9 @@ fn skill_version_satisfies_examples_parse() {
 
 (`walkdir` is already used elsewhere in the workspace — `grep -n walkdir Cargo.toml`; add `regex`/`walkdir` to mn-skills dev-deps as needed.)
 
-- [ ] **Step 2: Run** — passes already (the existing range examples now parse!). It pins the contract for future edits. If `regex` adds dependency weight concerns, hand-roll the scan with `split("version_satisfies")` — keep the assertion the same.
+- [x] **Step 2: Run** — passes already (the existing range examples now parse!). It pins the contract for future edits. If `regex` adds dependency weight concerns, hand-roll the scan with `split("version_satisfies")` — keep the assertion the same.
 
-- [ ] **Step 3: Rewrite the skill content.** Required edits (keep each file's existing heading style and the facet-key backticks the `catalog_documents_every_facet_key` test scans for):
+- [x] **Step 3: Rewrite the skill content.** Required edits (keep each file's existing heading style and the facet-key backticks the `catalog_documents_every_facet_key` test scans for):
 
 1. **filters-and-modes.md catalog rows** — `version_satisfies` column text becomes: `a concrete version (e.g. "0.31") or a semver range (e.g. ">=0.23"); matched against the target's declared constraint`. Sharp-edges section replaces the "cannot be negated"-adjacent semver sentence with the **two modes**: permissive default (bias; breaking drops; version-silent content unaffected), `version_match: "strict"` for hard pinning. Document the new `within` drill levels under the facets section.
 2. **SKILL.md "Match the user's version & freshness"** — rewrite around the two-regime model:
@@ -1955,9 +1955,9 @@ fn skill_version_satisfies_examples_parse() {
 3. **advanced-techniques.md technique B** — keep the worked example (its range syntax is now valid); add a strict-mode variant line and the new recovery rung.
 4. **rerank-instructions.md** — note the derived default now comes from the first version-bearing `language_target` element; the "re-state the version preference when overriding" guidance stands.
 
-- [ ] **Step 4: Run the skill drift guards** — `cargo test -p mn-skills` → PASS (catalog coverage + the new example guard).
+- [x] **Step 4: Run the skill drift guards** — `cargo test -p mn-skills` → PASS (catalog coverage + the new example guard).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/mn-skills
@@ -1971,14 +1971,14 @@ git commit -m "docs(mn-skills): two-regime version guidance + matrix playbook + 
 **Files:**
 - Modify: `specs/001-rag-platform/contracts/openapi.yaml` (:1108-1120 region for `version_match`; :1330/:1340 `version_satisfies` descriptions; ConfidenceFactors :1492-1508), `README.md` (:733 ranking bullet), `docs/cookbook/query-enhancement.md` (:193-197), `docs/cookbook/ingesting-content.md`, `CLAUDE.md` (Recent Changes)
 
-- [ ] **Step 1: openapi.yaml** (best-effort, unenforced — note that in the commit message):
+- [x] **Step 1: openapi.yaml** (best-effort, unenforced — note that in the commit message):
   - `SearchRequest` gains `version_match: { type: string, enum: [strict, permissive], default: permissive }` with the two-sentence semantics description.
   - Both `version_satisfies` descriptions (:1330, :1340) become: `Concrete version (e.g. "0.31") or semver range (e.g. ">=0.23"), matched against the document's declared constraint. Unparseable values are a 400.`
   - `ConfidenceFactors` gains `version_match_class: { type: string, enum: [satisfies, near_miss, silent, unknown] }` and `version_distance: { type: integer }` (both optional).
   - `search_metadata` gains `version_match`.
-- [ ] **Step 2: README.md** — the version-match ranking bullet (:733) updates to the boost/penalty/drop triple: satisfying content boosted, near-miss penalized by distance, breaking mismatches excluded; strict mode hard-filters. One sentence on extraction ("version targets are extracted from Compact pragmas and package manifests at ingest").
-- [ ] **Step 3: Cookbooks** — query-enhancement.md's version paragraph (:193-197) gains a worked permissive + strict example pair (concrete `"0.31"` and range `">=0.23"`); ingesting-content.md gains an **authoring guideline** subsection: "State your toolchain versions in the first paragraph of tutorials (e.g. 'This tutorial targets Compact 0.31 and midnight-js 2.x') — contextualized embeddings spread that statement across all chunks, and prose carries no machine-extractable version metadata."
-- [ ] **Step 4: CLAUDE.md** Recent Changes (top of list):
+- [x] **Step 2: README.md** — the version-match ranking bullet (:733) updates to the boost/penalty/drop triple: satisfying content boosted, near-miss penalized by distance, breaking mismatches excluded; strict mode hard-filters. One sentence on extraction ("version targets are extracted from Compact pragmas and package manifests at ingest").
+- [x] **Step 3: Cookbooks** — query-enhancement.md's version paragraph (:193-197) gains a worked permissive + strict example pair (concrete `"0.31"` and range `">=0.23"`); ingesting-content.md gains an **authoring guideline** subsection: "State your toolchain versions in the first paragraph of tutorials (e.g. 'This tutorial targets Compact 0.31 and midnight-js 2.x') — contextualized embeddings spread that statement across all chunks, and prose carries no machine-extractable version metadata."
+- [x] **Step 4: CLAUDE.md** Recent Changes (top of list):
 
 ```markdown
 - 2026-06-XX — Version provenance & matching: per-document extraction at ingest
@@ -1992,7 +1992,7 @@ git commit -m "docs(mn-skills): two-regime version guidance + matrix playbook + 
 ```
 
 (use the actual date)
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add specs/001-rag-platform/contracts/openapi.yaml README.md docs CLAUDE.md
@@ -2006,7 +2006,7 @@ git commit -m "docs: version-provenance contract + README/cookbook/CLAUDE.md upd
 **Files:**
 - Create: `docs/cookbook/version-recall-probe.md`
 
-- [ ] **Step 1: Write the probe doc** — a manual experiment (real embeddings; not CI):
+- [x] **Step 1: Write the probe doc** — a manual experiment (real embeddings; not CI):
 
 ```markdown
 # Version-recall probe (manual)
@@ -2034,7 +2034,7 @@ docs (`mnm search --json | jq '.results[].source_path'`).
 Record the outcome here with the date and corpus model.
 ```
 
-- [ ] **Step 2: Full CI-surface check** (per the project rule — package builds miss test targets and feature-gated files):
+- [x] **Step 2: Full CI-surface check** (per the project rule — package builds miss test targets and feature-gated files):
 
 ```bash
 cargo fmt --check
@@ -2045,9 +2045,9 @@ cargo test -p mn-server --no-run --features integration
 
 Expected: all green (integration executes in CI). Fix anything flagged.
 
-- [ ] **Step 3: Spec coverage re-read** — open `docs/superpowers/specs/2026-06-12-version-provenance-design.md` and confirm: §1 → Tasks 7-10, §2 → Task 1+4, §3 → Tasks 2+3+5, §4 → Task 6, §5 → Tasks 12-13, §6 → Tasks 4+5+8 error paths, §7 → tests throughout + Task 14, §9 → CLAUDE.md note. Fix anything missed before declaring done.
+- [x] **Step 3: Spec coverage re-read** — open `docs/superpowers/specs/2026-06-12-version-provenance-design.md` and confirm: §1 → Tasks 7-10, §2 → Task 1+4, §3 → Tasks 2+3+5, §4 → Task 6, §5 → Tasks 12-13, §6 → Tasks 4+5+8 error paths, §7 → tests throughout + Task 14, §9 → CLAUDE.md note. Fix anything missed before declaring done.
 
-- [ ] **Step 4: Commit stragglers; do NOT push** — integration tests run in CI on the PR.
+- [x] **Step 4: Commit stragglers; do NOT push** — integration tests run in CI on the PR.
 
 ```bash
 git add -A && git commit -m "docs: version-recall probe + final checks"
