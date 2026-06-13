@@ -1971,14 +1971,14 @@ git commit -m "docs(mn-skills): two-regime version guidance + matrix playbook + 
 **Files:**
 - Modify: `specs/001-rag-platform/contracts/openapi.yaml` (:1108-1120 region for `version_match`; :1330/:1340 `version_satisfies` descriptions; ConfidenceFactors :1492-1508), `README.md` (:733 ranking bullet), `docs/cookbook/query-enhancement.md` (:193-197), `docs/cookbook/ingesting-content.md`, `CLAUDE.md` (Recent Changes)
 
-- [ ] **Step 1: openapi.yaml** (best-effort, unenforced — note that in the commit message):
+- [x] **Step 1: openapi.yaml** (best-effort, unenforced — note that in the commit message):
   - `SearchRequest` gains `version_match: { type: string, enum: [strict, permissive], default: permissive }` with the two-sentence semantics description.
   - Both `version_satisfies` descriptions (:1330, :1340) become: `Concrete version (e.g. "0.31") or semver range (e.g. ">=0.23"), matched against the document's declared constraint. Unparseable values are a 400.`
   - `ConfidenceFactors` gains `version_match_class: { type: string, enum: [satisfies, near_miss, silent, unknown] }` and `version_distance: { type: integer }` (both optional).
   - `search_metadata` gains `version_match`.
-- [ ] **Step 2: README.md** — the version-match ranking bullet (:733) updates to the boost/penalty/drop triple: satisfying content boosted, near-miss penalized by distance, breaking mismatches excluded; strict mode hard-filters. One sentence on extraction ("version targets are extracted from Compact pragmas and package manifests at ingest").
-- [ ] **Step 3: Cookbooks** — query-enhancement.md's version paragraph (:193-197) gains a worked permissive + strict example pair (concrete `"0.31"` and range `">=0.23"`); ingesting-content.md gains an **authoring guideline** subsection: "State your toolchain versions in the first paragraph of tutorials (e.g. 'This tutorial targets Compact 0.31 and midnight-js 2.x') — contextualized embeddings spread that statement across all chunks, and prose carries no machine-extractable version metadata."
-- [ ] **Step 4: CLAUDE.md** Recent Changes (top of list):
+- [x] **Step 2: README.md** — the version-match ranking bullet (:733) updates to the boost/penalty/drop triple: satisfying content boosted, near-miss penalized by distance, breaking mismatches excluded; strict mode hard-filters. One sentence on extraction ("version targets are extracted from Compact pragmas and package manifests at ingest").
+- [x] **Step 3: Cookbooks** — query-enhancement.md's version paragraph (:193-197) gains a worked permissive + strict example pair (concrete `"0.31"` and range `">=0.23"`); ingesting-content.md gains an **authoring guideline** subsection: "State your toolchain versions in the first paragraph of tutorials (e.g. 'This tutorial targets Compact 0.31 and midnight-js 2.x') — contextualized embeddings spread that statement across all chunks, and prose carries no machine-extractable version metadata."
+- [x] **Step 4: CLAUDE.md** Recent Changes (top of list):
 
 ```markdown
 - 2026-06-XX — Version provenance & matching: per-document extraction at ingest
@@ -1992,7 +1992,7 @@ git commit -m "docs(mn-skills): two-regime version guidance + matrix playbook + 
 ```
 
 (use the actual date)
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add specs/001-rag-platform/contracts/openapi.yaml README.md docs CLAUDE.md
