@@ -1835,7 +1835,7 @@ git commit -m "feat(mn-cli): wire version extraction into ingest with report cou
 **Files:**
 - Modify: `crates/mn-mcp/src/tools.rs` (advanced_search input schema :271-289, parse fn ~:1114, facets tool schema ~:133-155), `crates/mn-mcp/src/cloud_client.rs:42-82` (SearchRequest), `crates/mn-cli/src/commands/search.rs` (flag + request field), `specs/001-rag-platform/contracts/mcp-tools.json` (regenerated)
 
-- [ ] **Step 1: Failing test.** In mn-mcp, find the existing advanced_search arg-parsing tests (`grep -n "parse_advanced_search_args" crates/mn-mcp/src/tools.rs | head`) and add:
+- [x] **Step 1: Failing test.** In mn-mcp, find the existing advanced_search arg-parsing tests (`grep -n "parse_advanced_search_args" crates/mn-mcp/src/tools.rs | head`) and add:
 
 ```rust
 #[test]
@@ -1851,7 +1851,7 @@ fn version_match_parsed_and_forwarded() {
 }
 ```
 
-- [ ] **Step 2: Run to verify failure**, then implement:
+- [x] **Step 2: Run to verify failure**, then implement:
 
 1. `advanced_search_input_schema()` gains (next to `rerank`):
 
@@ -1882,14 +1882,14 @@ fn version_match_parsed_and_forwarded() {
 
 The CLI `SearchRequest` (:1235-1273) gains the same `Option<String>` field with `skip_serializing_if`; request assembly copies the flag through.
 
-- [ ] **Step 3: Regenerate the MCP contract**
+- [x] **Step 3: Regenerate the MCP contract**
 
 Run: `REGENERATE_CONTRACT=1 cargo test -p mn-mcp mcp_tools_json_mirrors_tools_list && cargo test -p mn-mcp`
 Expected: contract file rewritten; all tests pass. `git diff specs/001-rag-platform/contracts/mcp-tools.json` shows only the new fields.
 
-- [ ] **Step 4: Run full client tests** — `VOYAGE_API_KEY= cargo test -p mn-mcp -p mn-cli` → PASS.
+- [x] **Step 4: Run full client tests** — `VOYAGE_API_KEY= cargo test -p mn-mcp -p mn-cli` → PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/mn-mcp crates/mn-cli specs/001-rag-platform/contracts/mcp-tools.json
