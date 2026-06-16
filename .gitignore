@@ -33,9 +33,26 @@ postgres-data/
 # Local models (downloaded by `mnm models pull`)
 ~/.local/share/midnight-manual/
 
-# spec-writer + sdd intermediate files (specs/ is committed; tasks.md will be added by /sdd:tasks)
+# ---------------------------------------------------------------------------
+# Planning / process artifacts — LOCAL ONLY, never published.
+#
+# These directories and files are kept on every maintainer's disk but are
+# deliberately NOT tracked in git. They are the SDD / spec-writer / superpowers
+# scaffolding (specs, designs, plans, discovery notes, the constitution, and the
+# AI-assistant guide). They are private working material, not part of the
+# shipped product, and must never appear in the published repository.
+#
+# NOTE: some skills (notably `/sdd:*`) will try to `git add` these. For THIS
+# repository that instruction is overridden — see CLAUDE.md. Do not commit them,
+# and never `git add --force` them.
+# ---------------------------------------------------------------------------
+.sdd/
+discovery/
+specs/
+docs/superpowers/
+CONSTITUTION.md
+CLAUDE.md
 **/*.backup
-discovery/.claude/
 
 # Per-user / per-machine plugin state (don't commit; users have their own)
 .claude/

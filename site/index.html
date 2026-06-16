@@ -61,7 +61,7 @@
     <div class="container" data-reveal>
       <p class="marker">Quick start</p>
       <h2 class="h-section">Up and running<br>in three steps</h2>
-      <p class="subhead">No database, no API key, no account. You need a Rust toolchain (1.91+); the corpus is hosted and the reranker is fetched on demand.</p>
+      <p class="subhead">No database, no API key, no account. You need a Rust toolchain (1.91+); the corpus is hosted and reranking is handled remotely via VoyageAI.</p>
 
       <div class="qs-steps">
         <div class="qs-step"><p class="qs-step__n">01</p><h3>Build the CLI</h3>
@@ -122,15 +122,16 @@ args = ["mcp", "serve"]'>Copy</button></div>
       <p class="marker">The retrieval engine</p>
       <h2 class="h-section">Confidence = trust × relevance</h2>
       <p class="subhead">Lexical (PostgreSQL full-text) and semantic (pgvector) candidates are fused with
-      Reciprocal Rank Fusion (k=60). An optional <code>bge-reranker-base</code> cross-encoder sharpens the top
-      results. Then every hit's relevance is multiplied by a <strong>trust score</strong> — and the per-factor
-      breakdown comes back with it, so your assistant can explain <em>why</em> a passage is trustworthy.</p>
+      Reciprocal Rank Fusion (k=60). VoyageAI reranking (<code>rerank-2.5</code> by default,
+      <code>rerank-2.5-lite</code> for lower latency) sharpens the top results. Then every hit's relevance is
+      multiplied by a <strong>trust score</strong> — and the per-factor breakdown comes back with it, so your
+      assistant can explain <em>why</em> a passage is trustworthy.</p>
       <div class="factors">
         <div class="factor"><b>Attribution</b><span>Foundation › Partner › Third-party › Community.</span></div>
         <div class="factor"><b>Verification</b><span>Verified by the Foundation, a partner, or unverified.</span></div>
         <div class="factor"><b>Freshness</b><span>Exponential decay by age.</span></div>
         <div class="factor"><b>Deprecation</b><span>Flagged content is down-weighted.</span></div>
-        <div class="factor"><b>Version match</b><span>Boosted when it targets your version.</span></div>
+        <div class="factor"><b>Version match</b><span>Permissive (default) boosts matching versions and penalises near-misses; strict hard-filters to satisfying content only.</span></div>
       </div>
     </div>
   </section>
@@ -143,7 +144,7 @@ args = ["mcp", "serve"]'>Copy</button></div>
         <div class="card"><p class="card__meta">// MCP SERVER</p><p class="card__title">In your AI client</p>
           <p>Drop <code>mnm mcp serve</code> into Claude Code, Codex, or Cursor — your assistant gains hybrid search, reranking, and document navigation.</p></div>
         <div class="card"><p class="card__meta">// CLI · mnm</p><p class="card__title">In your terminal</p>
-          <p>Search the corpus, inspect chunks and documents, and manage the local reranker. Add <code>--json</code> to anything for scripting.</p></div>
+          <p>Search the corpus, inspect chunks and documents, and manage configuration. Add <code>--json</code> to anything for scripting.</p></div>
         <div class="card"><p class="card__meta">// CLOUD CORPUS</p><p class="card__title">Hosted by default</p>
           <p>An <code>axum</code> + Postgres&nbsp;+&nbsp;pgvector service hosts the indexed corpus. It's the compiled-in default — most users never run a server.</p></div>
       </div>
@@ -154,16 +155,17 @@ args = ["mcp", "serve"]'>Copy</button></div>
     <div class="container" data-reveal>
       <p class="marker">In your AI client</p>
       <h2 class="h-section">13 tools, lazy-loaded</h2>
-      <p class="subhead">A hand-rolled MCP server (JSON-RPC over stdio) that starts in under half a second and
-      only loads the reranker the first time a query needs it (query embedding is remote, via VoyageAI). When the corpus rolls its embedding model forward,
-      <code>search</code> returns a structured <code>embedding_model_mismatch</code> envelope that tells the client to <code>pull_models</code> — no cryptic failures.</p>
+      <p class="subhead">A hand-rolled MCP server (JSON-RPC over stdio) that starts in under half a second.
+      Query embedding and reranking are both remote VoyageAI calls — nothing downloads or runs locally.
+      <code>advanced_search</code> supports HyDE and multi-query fusion (1–10 queries, RRF k=60) in a single
+      round-trip.</p>
       <div class="cards grid-3" style="margin-top:24px">
         <div class="card"><p class="card__meta">// SEARCH</p><p class="card__title">Find</p>
-          <p><code>search</code> — hybrid full-text + vector retrieval, optional rerank, filters by source / tier / language / package. Every hit carries a confidence score.</p></div>
+          <p><code>search</code> and <code>advanced_search</code> — hybrid full-text + vector retrieval (plus an optional <code>code_mode</code> for code-shaped queries), VoyageAI rerank, per-facet filters, and <code>version_match</code>. Every hit carries a confidence score.</p></div>
         <div class="card"><p class="card__meta">// READ IN CONTEXT</p><p class="card__title">Navigate</p>
-          <p><code>get_chunk</code>, <code>get_chunk_next/prev</code>, <code>get_chunk_neighbors</code>, <code>get_chunk_parents</code>, <code>get_document</code>, <code>get_document_full</code>, <code>get_document_chunks</code> — pull exactly as much surrounding context as needed.</p></div>
-        <div class="card"><p class="card__meta">// CORPUS &amp; MODELS</p><p class="card__title">Operate</p>
-          <p><code>list_sources</code>, <code>pull_models</code>, <code>status</code>, <code>install_search_skill</code> — enumerate sources, fetch the reranker on demand, report health, and install the Advanced Search Skill.</p></div>
+          <p><code>get_chunks</code>, <code>get_chunk_next/prev</code>, <code>get_chunk_neighbors</code>, <code>get_chunk_parents</code>, <code>get_document</code>, <code>get_document_chunks</code> — pull exactly as much surrounding context as needed.</p></div>
+        <div class="card"><p class="card__meta">// CORPUS &amp; DIAGNOSTICS</p><p class="card__title">Operate</p>
+          <p><code>list_sources</code>, <code>facets</code>, <code>status</code>, <code>install_search_skill</code> — enumerate sources, discover filter values, report health, and install the Advanced Search Skill.</p></div>
       </div>
     </div>
   </section>
@@ -218,8 +220,8 @@ args = ["mcp", "serve"]'>Copy</button></div>
       <p class="marker">Privacy</p>
       <h2 class="h-section">Where your<br>text goes</h2>
       <div class="cards grid-3" style="margin-top:24px">
-        <div class="card"><p class="card__title">Embed remote, rerank local</p>
-          <p>Query embedding uses VoyageAI's <code>voyage-code-3</code> — bring your own key, or let the hosted server proxy it (no account needed; it logs only token counts, never your query text). Reranking runs locally via <code>bge-reranker-base</code> (fastembed/ONNX) — no Python, no GPU.</p></div>
+        <div class="card"><p class="card__title">All-remote embeddings and reranking</p>
+          <p>General chunks use <code>voyage-context-3</code> (contextualized); code chunks also get a <code>voyage-code-3</code> vector. Reranking uses VoyageAI <code>rerank-2.5</code>. Bring your own key, or let the hosted server proxy it — it logs only token counts, never your query text. No Python, no ONNX, no local model downloads.</p></div>
         <div class="card"><p class="card__title">Opt-out telemetry</p>
           <p>Carries no query or chunk content, no tokens, no paths. Opt out three ways: an env var, a config flag, or <code>mnm telemetry disable</code>.</p></div>
         <div class="card"><p class="card__title">Enforced by a canary</p>
@@ -237,9 +239,9 @@ args = ["mcp", "serve"]'>Copy</button></div>
       <p>Pre-production software for the Midnight Network. The hosted corpus resets without notice and interfaces move. <strong>Build something anyway.</strong></p>
       <nav class="footer__links">
         <a href="https://github.com/devrelaicom/midnight-manual" target="_blank" rel="noopener noreferrer">GitHub <span aria-hidden="true">↗</span></a>
-        <a href="https://github.com/devrelaicom/midnight-manual/blob/main/specs/001-rag-platform/spec.md" target="_blank" rel="noopener noreferrer">Spec</a>
-        <a href="https://github.com/devrelaicom/midnight-manual/blob/main/CONSTITUTION.md" target="_blank" rel="noopener noreferrer">Constitution</a>
-        <a href="https://github.com/devrelaicom/midnight-manual/blob/main/docs/cookbook/query-enhancement.md" target="_blank" rel="noopener noreferrer">Cookbook</a>
+        <a href="https://github.com/devrelaicom/midnight-manual/blob/main/README.md" target="_blank" rel="noopener noreferrer">README</a>
+        <a href="https://github.com/devrelaicom/midnight-manual/blob/main/crates/mn-skills/assets/midnight-advanced-search/SKILL.md" target="_blank" rel="noopener noreferrer">Search skill</a>
+        <a href="https://github.com/devrelaicom/midnight-manual/blob/main/LICENSE" target="_blank" rel="noopener noreferrer">License</a>
       </nav>
     </div>
   </footer>

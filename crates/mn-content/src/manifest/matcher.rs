@@ -1,7 +1,6 @@
 //! Match files to sitemap URLs.
 //!
-//! Order: frontmatter slug → leaf basename → tail-relaxation tie-break.
-//! See §1.2 of docs/superpowers/specs/2026-05-25-ingest-ux-design.md
+//! Order: frontmatter slug → leaf basename → tail-relaxation tie-break (§1.2 of the ingest UX design).
 
 use std::path::Path;
 use url::Url;

@@ -11,9 +11,8 @@
 //! the `tokenizers` crate (a direct workspace dependency) so ingest planning can
 //! encode text offline, without loading any model runtime.
 //!
-//! Design note: `docs/superpowers/specs/2026-05-27-bpe-token-counts-design.md`
-//! Original requirement: `docs/superpowers/specs/2026-05-25-ingest-ux-design.md`
-//! §3.4 (`token_count` row).
+//! Implements the BPE token-counting design; the original requirement for the
+//! `token_count` row is §3.4 of the ingest UX design.
 
 use std::sync::OnceLock;
 

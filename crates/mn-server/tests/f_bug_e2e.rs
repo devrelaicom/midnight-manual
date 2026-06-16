@@ -1,7 +1,7 @@
 //! End-to-end Postgres-backed regression for the F-bug fix from PR #50.
 //!
-//! The F-bug (spec §3.4 of `docs/superpowers/specs/2026-05-25-ingest-ux-design.md`)
-//! was that `mn_cli`'s `DocumentUpload` hardcoded five document fields to
+//! The F-bug (§3.4 of the ingest UX design) was that `mn_cli`'s `DocumentUpload`
+//! hardcoded five document fields to
 //! `None`/`0` regardless of what the manifest declared:
 //!
 //! - `published_url`

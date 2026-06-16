@@ -5,8 +5,7 @@
 //! [`pool`]. Errors are mapped through [`error::StoreError`] so callers don't
 //! depend on sqlx internals.
 //!
-//! See [`specs/001-rag-platform/data-model.md`](../../../specs/001-rag-platform/data-model.md)
-//! for schema details.
+//! See the data-model schema reference for schema details.
 
 #![doc(html_root_url = "https://docs.rs/mn-store/0.1.0")]
 

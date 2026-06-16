@@ -4,7 +4,7 @@
 //! - `Tty` — multi-progress bars + spinner (indicatif), for terminals.
 //! - `Json` — one JSONL event per phase, for piped stdout / --json.
 //!
-//! Spec: §2.3 of docs/superpowers/specs/2026-05-25-ingest-ux-design.md
+//! Designed to cover terminal and piped-output use cases for the ingest UX (§2.3).
 
 use serde_json::json;
 

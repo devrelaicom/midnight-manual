@@ -202,6 +202,15 @@ target.** A version filter can't bind to what isn't declared, so instead:
 - Add freshness floors: `ingested_at` / `source_modified_at`
   `{ "after": "…" }`, plus `"deprecated": false` to drop superseded guidance.
 
+Lexical anchoring of the version string is the reliable lever for prose today:
+the full-text half matches the literal version characters that appear in the
+text, so `fts`/`hybrid` discriminate version-qualified queries best. Do NOT
+assume the contextualized embeddings semantically discriminate versions on their
+own — that is an empirical question, not an assumed capability. If you need to
+gate whether a corpus reliably distinguishes version-qualified prose, run the
+manual probe in `references/advanced-techniques.md` (technique C) before relying
+on semantic version discrimination.
+
 **Support-matrix playbook (compatibility questions).** For "what SDK works with
 node X?"-style questions, don't guess version pairings — retrieve the matrix
 first: query `"support matrix"` scoped to `{ "source_slug": { "any_of":
@@ -214,7 +223,7 @@ it: `facets` with `{"facet": "language_target"}` lists the target names, then
 version constraints inside that name. Pin only to versions the corpus declares.
 
 This version+freshness stack is the structural antidote to stale answers. See
-technique B in `references/advanced-techniques.md` for the staleness-diff move
+technique C in `references/advanced-techniques.md` for the staleness-diff move
 and the strict-mode variant.
 
 ## Filter for precision, and self-correct
@@ -239,7 +248,9 @@ exclude `none_of`.
 
 All multi-query patterns go through `advanced_search` (`queries` is an array
 even for one query). The reranker anchors on the FIRST query, so put the most
-user-facing formulation first.
+user-facing formulation first. The thumbnails below are the quick reference; for
+the exact LLM prompts that generate each pattern and worked `queries` arrays,
+see technique B in `references/advanced-techniques.md`.
 
 ### HyDE — when the question is short or jargon-light
 Draft a 1–2 sentence hypothetical answer and send it as an extra query beside
@@ -279,7 +290,7 @@ stale, or version-mismatched for the user's toolchain.
 The server does NOT detect contradictions. When multiple sources answer the same
 question, pull from each, compare, and surface disagreement (noting which is
 more authoritative / version-matched) rather than silently picking one. See
-technique D (differential search) for the filtered version of this.
+technique E (differential search) for the filtered version of this.
 
 ## Reading results
 
@@ -302,8 +313,10 @@ technique D (differential search) for the filtered version of this.
 - `references/filters-and-modes.md` — exact filter shapes, the full 17-facet
   catalog, mode semantics, `facets` / `list_sources` pagination, the
   validation/error catalog, and the `mnm` CLI flags.
-- `references/advanced-techniques.md` — mode-tiered cost escalation,
-  version+freshness precision, the discovery/self-correction loop and filter
+- `references/advanced-techniques.md` — mode-tiered cost escalation, the
+  query-enhancement patterns with the LLM prompts that generate them (HyDE,
+  multi-query expansion, step-back), version+freshness precision and the
+  version-discrimination probe, the discovery/self-correction loop and filter
   ladder, trust-stratified / differential / symbol-anchored recipes, and
   efficient deep reading.
 - `references/rerank-instructions.md` — worked `rerank_instructions` examples

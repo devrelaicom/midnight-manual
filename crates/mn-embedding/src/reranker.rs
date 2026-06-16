@@ -1,7 +1,7 @@
 //! Rerank result type shared by the Voyage reranker client and its callers.
 //!
-//! (The local fastembed/ONNX cross-encoder subsystem was removed — see
-//! docs/superpowers/specs/2026-06-11-voyage-reranking-design.md §5.)
+//! (The local fastembed/ONNX cross-encoder subsystem was removed in favour
+//! of the VoyageAI reranking design — §5 of that design covers the removal.)
 
 /// One reranked document: `index` points into the input `documents` slice;
 /// `score` is Voyage's `relevance_score` in `[0, 1]`.

@@ -11,7 +11,7 @@
 //! started WITHOUT a code model rejects `code_embedding` uploads with 400 and
 //! its chunks never join the code-vector candidate list) and the migration
 //! 0011 trigger (a direct chunk insert carrying `code_embedding` under a
-//! code-model-less source_version raises).
+//! code-model-less `source_version` raises).
 //!
 //! `fts` + explicit `code_mode` → 400 is covered by
 //! `search_route.rs::fts_mode_rejects_explicit_code_mode_400`.

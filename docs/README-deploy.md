@@ -32,9 +32,8 @@ You will also need:
 - Write access to the GitHub repo (for OAuth-App and Secrets configuration).
 - A Fly.io org with billing attached (Fly Postgres + Machines have a small
   cost on `shared-cpu-1x`/1 GB).
-- A Hugging Face account (anonymous downloads are fine for `bge-base-en-v1.5`
-  and `bge-reranker-base`; an HF token only helps if you hit anonymous rate
-  limits during the initial model pull).
+- A VoyageAI account with an API key for server-side embedding and reranking
+  (both are remote API calls; no local model weights are downloaded).
 
 ## 1. Create the Fly app
 
@@ -133,7 +132,7 @@ flyctl mpg connect <cluster-id>
 ```
 
 The server runs migrations at boot (`MIDNIGHT_MANUAL_AUTO_MIGRATE=true` in
-`fly.toml`), so the 6 numbered migrations under
+`fly.toml`), so the 12 numbered migrations under
 `crates/mn-store/migrations/` apply on first deploy.
 
 ## 4. Generate the JWT signing secret
@@ -243,12 +242,16 @@ If any one of these four is missing the `/v1/auth/github/*` endpoints return
 
 ## 7. Configure Voyage embedding + token limits
 
-The corpus is embedded with VoyageAI's `voyage-code-3`. Clients that hold their
-own Voyage key (BYOK) embed directly against their own account and never touch
-this server's key. Clients that don't POST raw query text to `POST
-/v1/embeddings`, which the server embeds under **this server's** Voyage platform
-account. So **non-BYOK user query text is processed under the key you set
-here** — treat it accordingly.
+The corpus uses dual VoyageAI embeddings: `voyage-context-3` (general contextualized
+embeddings for all chunks) and `voyage-code-3` (a second vector for code chunks). Both
+embedding and reranking are remote VoyageAI API calls — no model weights are downloaded
+or loaded locally.
+
+Clients that hold their own Voyage key (BYOK) call VoyageAI directly and never touch
+this server's key. Clients that don't POST raw query text to `POST /v1/embeddings`,
+which the server embeds under **this server's** Voyage account. So
+**non-BYOK user query text is processed under the key you set here** — treat it
+accordingly.
 
 ### Enable Voyage zero-retention
 
@@ -261,10 +264,10 @@ server setting.
 
 ### Set the Voyage key (secret)
 
-`VOYAGE_API_KEY` is what enables server-side embedding. Without it, `POST
-/v1/embeddings` returns **503** (`server embedding is not configured`) — the
-rest of the server still boots and serves reads, so a deploy without it is safe,
-just unable to embed for non-BYOK clients.
+`VOYAGE_API_KEY` enables server-side embedding and inline reranking. Without it,
+`POST /v1/embeddings` returns **503** (`server embedding is not configured`) and
+reranking degrades to RRF order with reason `provider_error`. The rest of the
+server still boots and serves reads, so a deploy without it is safe but limited.
 
 ```bash
 flyctl secrets set VOYAGE_API_KEY=<voyage-platform-key> \
@@ -279,10 +282,12 @@ These are tuning knobs with safe defaults — set them only to override. They ar
 
 | Variable | Purpose | Default |
 | --- | --- | --- |
-| `VOYAGE_API_KEY` | **Secret.** Voyage platform key for server-side embedding. Unset → `/v1/embeddings` 503s. | _(unset)_ |
-| `MIDNIGHT_MANUAL_VOYAGE_MODEL` | Voyage embedding model name. | `voyage-code-3` |
+| `VOYAGE_API_KEY` | **Secret.** Voyage platform key for server-side embedding and reranking. Unset → `/v1/embeddings` 503s; rerank degrades to RRF order. | _(unset)_ |
+| `MIDNIGHT_MANUAL_VOYAGE_CONTEXT_MODEL` | VoyageAI contextualized embedding model (general corpus chunks). | `voyage-context-3` |
+| `MIDNIGHT_MANUAL_VOYAGE_MODEL` | VoyageAI flat embedding model (code chunks; also used for `/v1/embeddings` proxy). | `voyage-code-3` |
 | `MIDNIGHT_MANUAL_VOYAGE_DIM` | Output dimension. | `1024` |
 | `MIDNIGHT_MANUAL_VOYAGE_DTYPE` | Output dtype. | `float` |
+| `MIDNIGHT_MANUAL_SERVER_RERANK` | Inline rerank kill switch. Set to `off` to disable server-side reranking (searches fall back to RRF order). | _(enabled)_ |
 | `MIDNIGHT_MANUAL_TOKEN_LIMIT_ANON_HOURLY` | Hourly token budget, anonymous tier. | `2000` |
 | `MIDNIGHT_MANUAL_TOKEN_LIMIT_ANON_DAILY` | Daily token budget, anonymous tier. | `20000` |
 | `MIDNIGHT_MANUAL_TOKEN_LIMIT_UPLIFT_HOURLY` | Hourly token budget, read-uplift (GitHub SSO) tier. | `4000` |
@@ -292,7 +297,6 @@ These are tuning knobs with safe defaults — set them only to override. They ar
 | `MIDNIGHT_MANUAL_TOKEN_LIMIT_GLOBAL` | Site-wide token ceiling over the global window (anti-Sybil backstop on non-admin tiers). `u64::MAX` disables it. | `10000000` |
 | `MIDNIGHT_MANUAL_TOKEN_LIMIT_GLOBAL_WINDOW_SECS` | Rolling window for the global ceiling. | `10800` (3 h) |
 | `MIDNIGHT_MANUAL_TOKEN_SNAPSHOT_SECS` | Interval at which token-usage counters flush to the store. | `300` (5 min) |
-| `MIDNIGHT_MANUAL_RERANKER` | Default reranker id (clients usually override per request). | `bge-reranker-base` |
 
 `POST /v1/embeddings` logs only token counts and the caller's anonymised subject
 key (hashed IP / SSO user id) — never the submitted query text. A 429
@@ -314,8 +318,8 @@ flyctl secrets set MIDNIGHT_MANUAL_SCORING_POLICY="$(cat scoring-policy.toml)" \
     --stage --app midnight-manual
 ```
 
-The server fails startup on a malformed policy (Constitution VIII fail-fast),
-so test it locally first with `cargo test -p mn-core scoring_policy`.
+The server fails startup on a malformed policy, so test it locally first with
+`cargo test -p mn-core scoring_policy`.
 
 ## 9. First deploy
 
@@ -367,12 +371,14 @@ curl -fs "$HOST/readyz"       # → 200 once DB pool + model registry are loaded
 
 # Active embedding model (FR-039).
 curl -fs "$HOST/v1/models/active" | jq .
-# → {"name":"bge-base-en-v1.5","revision":1,"dim":768,"provider":"baai"}
+# → {"name":"voyage-context-3","revision":1,"dim":1024,"provider":"voyageai",
+#    "code":{"name":"voyage-code-3","revision":1,"dim":1024,"provider":"voyageai"}}
 
 # Search against an empty corpus — should 200 with no results.
+# (The server embeds the query via VoyageAI; no client-side vector needed.)
 curl -fs -X POST "$HOST/v1/search" \
     -H 'content-type: application/json' \
-    -d '{"query":"hello","vector":'"$(jq -n '[range(0;768)|0]')"',"client_embedding_model":"bge-base-en-v1.5@1","limit":5}' \
+    -d '{"query":"hello","limit":5}' \
     | jq '.results | length'
 # → 0
 ```
@@ -389,16 +395,12 @@ top-level command groups:
 - `mnm ingest {plan,run}` — talks to the server. `plan` is a
   dry-run; `run` does the real ingest.
 
-> **Migration note — the `voyage-code-3` cutover requires a fresh re-ingest.**
-> The `0008` migration switches `chunk.embedding` to `vector(1024)` and NULLs
-> any existing vectors (the old 768-dim `bge` embeddings are not convertible).
-> On a **first deploy** the corpus is empty, so this is a no-op. But do **not**
-> run `0008` against a live, populated *old-model* corpus and expect search to
-> keep working — every source must be re-ingested on `voyage-code-3` before it
-> returns hits. Use `mnm models status` to list sources still on the old model
-> and `mnm models migrate --to voyage-code-3@1` to re-ingest them (search
-> filters out chunks whose model id ≠ the active corpus model, so partially
-> migrated corpora stay correct, just smaller, during the rollover).
+> **Model-migration note.** If you ever update the active embedding model,
+> every source must be re-ingested before it returns hits under the new model
+> (search filters out chunks whose stored model id differs from the active corpus
+> model, so a partially-migrated corpus stays correct — just smaller — during the
+> rollover). Use `mnm models status` to list sources still on the old model and
+> `mnm models migrate --to <new-model-wire-id>` to re-ingest them in batch.
 
 ### 11a. Smoke-test with the sample corpus
 
@@ -457,8 +459,8 @@ operational gaps in the project's production-readiness audit.
 
 | Symptom | Likely cause |
 | --- | --- |
-| `503 service_unavailable` on `/v1/auth/admin/*` | `MIDNIGHT_MANUAL_USER_STORE` or `MIDNIGHT_MANUAL_JWT_SECRET` unset. |
-| `503` on `/v1/auth/github/*` | Any of the four `MIDNIGHT_MANUAL_GITHUB_*` secrets missing. |
+| `503 service_unavailable` on `/v1/auth/challenge` or `/v1/auth/verify` | `MIDNIGHT_MANUAL_USER_STORE` or `MIDNIGHT_MANUAL_JWT_SECRET` unset. |
+| `503` on `/v1/auth/github/*` | Any of the four `MIDNIGHT_MANUAL_GITHUB_*` secrets missing (client ID, client secret, redirect URL, org). |
 | `409 embedding_model_mismatch` from a CLI | Client embedding-model id doesn't match the active corpus model. Run `mnm models pull` and retry. |
 | `relation "chunk" does not exist` in server logs | pgvector extension missing (step 2 not run) or migrations disabled (`MIDNIGHT_MANUAL_AUTO_MIGRATE=false`). |
 | `failed to resolve active embedding model` at boot | The `embedding_model` table is empty. Migration `0006_seed_embedding_model.sql` should have populated it — confirm the migration ran. |

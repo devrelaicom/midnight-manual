@@ -20,7 +20,7 @@ edition       = "2021"
 rust-version  = "1.91"
 license       = "Apache-2.0"
 authors       = ["Midnight Network Contributors"]
-repository    = "https://github.com/midnight-network/midnight-manual"
+repository    = "https://github.com/devrelaicom/midnight-manual"
 homepage      = "https://midnight.network"
 description   = "RAG platform for the Midnight Network: CLI, local MCP server, and cloud read API."
 

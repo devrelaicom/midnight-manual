@@ -22,7 +22,111 @@ Pick the cheapest mode that can answer, escalate only if it can't.
 
 Rule of thumb: literal → `fts`; fuzzy/conceptual → `vector`; unsure → `hybrid`.
 
-## B. Version & freshness precision (anti-staleness)
+## B. Query enhancement (HyDE, expansion, step-back)
+
+Multi-query fusion trades a little LLM work for a measurable recall lift: pass
+several queries in one `advanced_search` call and the server runs hybrid
+retrieval for each, then fuses every ranked list — across both retrieval halves
+and across all your queries — with RRF (k=60) in a single pass. The three
+generation patterns below each give the LLM prompt the agent emits and the
+resulting `queries` array. Start with a single query; reach for these only when
+recall on the bare question is weak, and use `scores.matched_queries` (the
+0-based indices of the queries that pulled a result in) to confirm the extra
+queries actually contributed before keeping them.
+
+The `search` tool takes **text** — you never embed anything yourself. The server
+embeds each query remotely (VoyageAI) and fuses the results.
+
+- **HyDE (Hypothetical Document Embeddings)** — when the question is short,
+  jargon-light, or phrased very differently from how the corpus phrases its
+  answer. A hypothetical answer lands in the same embedding neighbourhood as the
+  real docs, so adding it as a second query pulls in chunks the bare question
+  misses. The answer does **not** need to be correct — it is embedded and
+  discarded; only its position in vector space matters.
+
+  Prompt the agent emits:
+
+  ```text
+  Write a short (1–2 sentence) hypothetical answer to the following question,
+  as if it were an excerpt from the documentation. Do not hedge; state it
+  plainly even if you are unsure — this text is used only to find similar real
+  passages.
+
+  Question: {user_question}
+  ```
+
+  Resulting call (original question + the hypothetical answer, cost 2 tokens):
+
+  ```jsonc
+  {
+    "queries": [
+      "how do I pay transaction fees on Midnight?",
+      "Transaction fees are paid in the network's fee resource, which is derived from the staking token and consumed when a transaction is submitted."
+    ]
+  }
+  ```
+
+- **Multi-query expansion** — when synonyms or differing specificity matter (the
+  user says "compile", the docs say "build"; the question is narrow but the
+  answer lives on a broader page). Paraphrase 2–3 ways, varying vocabulary and
+  breadth, and include the original.
+
+  Prompt the agent emits:
+
+  ```text
+  Rewrite the following question as 2–3 alternative search queries. Vary the
+  vocabulary (use synonyms) and the breadth (one narrower, one broader). Return
+  one query per line, no numbering.
+
+  Question: {user_question}
+  ```
+
+  Resulting call (cost = distinct count; an emitted paraphrase identical to the
+  original is de-duplicated and not billed):
+
+  ```jsonc
+  {
+    "queries": [
+      "how do I compile a Compact contract?",
+      "build source into a deployable artifact",
+      "compactc command-line usage"
+    ]
+  }
+  ```
+
+- **Step-back prompting** — when the question is over-specific (a raw error, a
+  "why did *this* fail?") whose real answer is a more general concept. Pair the
+  specific question with a "stepped-back" abstract version to retrieve both the
+  precise hit and the explanatory background.
+
+  Prompt the agent emits:
+
+  ```text
+  Given the following specific question, write one more general "step-back"
+  question whose answer would provide the background needed to answer it. Return
+  only the step-back question.
+
+  Question: {user_question}
+  ```
+
+  Resulting call (cost 2 tokens):
+
+  ```jsonc
+  {
+    "queries": [
+      "why did my contract call revert with a witness mismatch?",
+      "how does Midnight validate contract calls and witnesses?"
+    ]
+  }
+  ```
+
+The patterns compose: a HyDE answer plus two expansion paraphrases is a 4-query
+request costing 4 tokens (hard ceiling 10 queries / request, configurable lower
+via `MIDNIGHT_MANUAL_MAX_QUERIES_PER_REQUEST`). `code_mode` composes with all of
+them — each query is embedded with both models when code search runs, and the
+per-query record gains `code_vector_candidates` / `code_vector_latency_ms`.
+
+## C. Version & freshness precision (anti-staleness)
 
 The corpus mixes versions and eras. To avoid handing the user advice for the
 wrong toolchain, constrain to *their* version and to current material.
@@ -71,7 +175,35 @@ wrong toolchain, constrain to *their* version and to current material.
   ones, the answer likely changed — surface that to the user instead of trusting
   the older chunk.
 
-## C. Discovery & self-correction
+### Probe: does this corpus discriminate version-qualified prose?
+
+For content that *declares* a target (Regime 1 in `SKILL.md`), the
+`version_satisfies` / `version_match` machinery does the work. For prose that
+states a version only in its text (Regime 2), whether retrieval actually
+separates "Compact 0.31" from "Compact 0.23" is an empirical property of the
+corpus and its embedding model — verify it before claiming semantic version
+discrimination. A quick manual probe:
+
+1. **Setup.** Ingest a probe source of paired docs: identical tutorial bodies
+   whose first paragraph states a different target ("This tutorial targets
+   Compact 0.23" vs "… Compact 0.31"), plus one no-statement control.
+2. **Queries.** Run the version-qualified queries ("how to declare a ledger in
+   compact 0.31", "… in compact 0.23") and the unqualified version.
+3. **Measure.** For each query × mode (`hybrid`, `vector`, `fts`), note the rank
+   order of the three docs —
+   `mnm search --json | jq '.results[].source_path'`.
+4. **Interpret.** If the version-stated docs out-rank the control for matching
+   queries in `fts` but **not** in `vector`, keep the conservative "put the
+   version in your query text" (lexical-anchoring) guidance and do NOT claim
+   semantic version matching. If `vector` mode also discriminates, the corpus's
+   contextualized embeddings carry version context and the skill may say so.
+
+Record the outcome with the date and the corpus embedding model — the answer can
+shift when either changes. The durable takeaway: **lexical anchoring of version
+strings is the reliable lever today; semantic version discrimination is a
+measured property, not an assumed one.**
+
+## D. Discovery & self-correction
 
 - **Discover before you filter.** Call `facets` first to learn the corpus's real
   languages, tags, sources, and package names. The overview samples open-set
@@ -88,7 +220,7 @@ wrong toolchain, constrain to *their* version and to current material.
   re-searching after each drop until results appear. This finds the most
   precise answer the corpus can actually support.
 
-## D. Trust-stratified, differential & symbol-anchored
+## E. Trust-stratified, differential & symbol-anchored
 
 Heavier patterns that spend several searches — use when correctness matters more
 than latency. Each stratum is one `advanced_search` call.
@@ -117,7 +249,7 @@ than latency. Each stratum is one `advanced_search` call.
   (e.g. a "Troubleshooting" or "API" heading) when you know where the answer
   lives.
 
-## E. Efficient deep reading
+## F. Efficient deep reading
 
 Once a search has found the right neighbourhood, read it without burning calls:
 
@@ -137,5 +269,5 @@ Once a search has found the right neighbourhood, read it without burning calls:
 
 These stack. A precision query is a funnel — version + `verified` + recency +
 `language` + `content_type` — AND-ed together in one `advanced_search`. When a
-funnel returns nothing, switch to the filter ladder (technique C) and relax it
+funnel returns nothing, switch to the filter ladder (technique D) and relax it
 one facet at a time.

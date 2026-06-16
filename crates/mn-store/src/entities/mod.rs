@@ -1,4 +1,4 @@
-//! Entity modules — one per table in `data-model.md` §0002 + §0004.
+//! Entity modules — one per table group in the data-model schema (corpus tables §0002, admin tables §0004).
 //!
 //! Doc-markdown lint allowed crate-wide for these modules because their docs
 //! describe SQL schema concepts using snake_case identifiers in prose; wrapping

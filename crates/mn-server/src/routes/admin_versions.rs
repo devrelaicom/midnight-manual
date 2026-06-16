@@ -31,8 +31,8 @@ pub fn router() -> Router<AppState> {
         .route("/v1/admin/sources/:slug/versions/:revision/retire", post(retire_version))
 }
 
-/// Response shape for `POST .../promote`. Mirrors the spec's
-/// `PromoteResult` schema (openapi.yaml §components/PromoteResult).
+/// Response shape for `POST .../promote`. Contains the promoted revision
+/// and the revision that was demoted from active to inactive, if any.
 #[derive(Debug, Serialize)]
 pub struct PromoteResult {
     /// Revision that was just promoted to `active`.
