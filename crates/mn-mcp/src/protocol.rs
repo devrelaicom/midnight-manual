@@ -190,6 +190,10 @@ pub struct ServerInfo {
 /// MCP tool annotations (behavior hints for clients).
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct ToolAnnotations {
+    /// Human-friendly display name for the tool (the MCP `title` annotation),
+    /// shown by clients in place of the raw tool name. Omitted when unset.
+    #[serde(rename = "title", skip_serializing_if = "Option::is_none")]
+    pub title: Option<&'static str>,
     /// Tool does not modify its environment.
     #[serde(rename = "readOnlyHint")]
     pub read_only_hint: bool,
@@ -209,6 +213,7 @@ impl ToolAnnotations {
     #[must_use]
     pub const fn read_only() -> Self {
         Self {
+            title: None,
             read_only_hint: true,
             destructive_hint: None,
             idempotent_hint: None,
@@ -220,11 +225,19 @@ impl ToolAnnotations {
     #[must_use]
     pub const fn idempotent_writer() -> Self {
         Self {
+            title: None,
             read_only_hint: false,
             destructive_hint: Some(false),
             idempotent_hint: Some(true),
             open_world_hint: false,
         }
+    }
+
+    /// Attach the human-friendly `title` display annotation.
+    #[must_use]
+    pub const fn with_title(mut self, title: &'static str) -> Self {
+        self.title = Some(title);
+        self
     }
 }
 
@@ -432,5 +445,17 @@ mod tests {
         assert_eq!(v["destructiveHint"], false);
         assert_eq!(v["idempotentHint"], true);
         assert_eq!(v["openWorldHint"], false);
+    }
+
+    #[test]
+    fn with_title_sets_title_annotation_else_omitted() {
+        // Default constructors omit `title` entirely (skip_serializing_if).
+        let bare = serde_json::to_value(ToolAnnotations::read_only()).unwrap();
+        assert!(bare.get("title").is_none());
+        // `with_title` adds the human-friendly display name.
+        let titled =
+            serde_json::to_value(ToolAnnotations::read_only().with_title("Search corpus")).unwrap();
+        assert_eq!(titled["title"], "Search corpus");
+        assert_eq!(titled["readOnlyHint"], true);
     }
 }

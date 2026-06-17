@@ -363,12 +363,47 @@ pub fn project_search(envelope: Value, opts: &SearchRenderOpts) -> ToolOutcome {
         result_count,
     };
 
+    // Promote rank/confidence/attribution to the top level of each structured
+    // result so structuredContent, the trimmed text fence, and the advertised
+    // outputSchema all expose the same fields at the same path (issue #88).
+    promote_result_scores(&mut envelope);
+
     ToolOutcome {
         summary,
         structured: envelope,
         trimmed: json!({ "results": trimmed_results, "match_count": result_count }),
         suggested_next_actions,
         telemetry: Some(telemetry),
+    }
+}
+
+/// Copy `confidence`, `attribution`, and the 1-based `rank` to the top level of
+/// each `results[]` entry, leaving the nested `scores` block in place (additive).
+/// The trimmed text fence already foregrounds these (`project_search` above);
+/// this brings `structuredContent` into agreement so the two channels and the
+/// `search_output_schema` no longer disagree on where the fields live (#88).
+fn promote_result_scores(env: &mut Value) {
+    let Some(results) = env.get_mut("results").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for (i, r) in results.iter_mut().enumerate() {
+        let Some(obj) = r.as_object_mut() else {
+            continue;
+        };
+        let scores = obj.get("scores");
+        let confidence = scores
+            .and_then(|s| s.get("confidence"))
+            .cloned()
+            .unwrap_or(Value::Null);
+        let attribution = scores
+            .and_then(|s| s.get("confidence_factors"))
+            .and_then(|f| f.get("attribution"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        obj.insert("rank".to_owned(), json!(i + 1));
+        obj.insert("confidence".to_owned(), confidence);
+        obj.insert("attribution".to_owned(), Value::String(attribution));
     }
 }
 
@@ -996,7 +1031,20 @@ pub enum ErrorKind {
 }
 
 impl ErrorKind {
-    const fn code(self) -> &'static str {
+    /// Every error kind, in canonical (code-set) order. The single source of
+    /// truth for the closed `code` set the `errorSchema` enumerates and the
+    /// contract's `error_envelope` documents.
+    pub const ALL: [Self; 5] = [
+        Self::InvalidInput,
+        Self::NotFound,
+        Self::EmbeddingModelMismatch,
+        Self::CloudError,
+        Self::InstallFailed,
+    ];
+
+    /// The closed-set wire `code` string for this kind.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
         match self {
             Self::InvalidInput => "INVALID_INPUT",
             Self::NotFound => "NOT_FOUND",
@@ -1122,6 +1170,21 @@ mod tests {
         assert_eq!(t.top_attribution.as_deref(), Some("foundation"));
         assert_eq!(t.top_source.as_deref(), Some("Compact Docs"));
         assert_eq!(t.reranker_used.as_deref(), Some("rerank-2.5"));
+    }
+
+    #[test]
+    fn project_search_promotes_confidence_attribution_rank_to_result_top_level() {
+        // #88: structuredContent must expose confidence/attribution/rank at the
+        // same top-level path the trimmed text fence uses, while keeping the
+        // nested scores block for full fidelity.
+        let o = super::project_search(sample_search_envelope(), &basic_opts());
+        let result = &o.structured["results"][0];
+        assert_eq!(result["rank"], json!(1));
+        assert_eq!(result["confidence"], json!(0.81));
+        assert_eq!(result["attribution"], json!("foundation"));
+        // The nested cloud shape is untouched (additive promotion).
+        assert_eq!(result["scores"]["confidence"], json!(0.81));
+        assert_eq!(result["scores"]["confidence_factors"]["attribution"], json!("foundation"));
     }
 
     #[test]
