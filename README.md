@@ -13,7 +13,7 @@
   <img src="https://img.shields.io/badge/interface-MCP_+_CLI_+_HTTP-4C6FFF" alt="MCP + CLI + HTTP">
   <img src="https://img.shields.io/badge/models-VoyageAI_embed_%2B_rerank-2DBfA5" alt="models: VoyageAI embed + rerank">
   <img src="https://img.shields.io/badge/telemetry-opt--out_%E2%80%A2_canary--enforced-6E56CF" alt="privacy">
-  <img src="https://img.shields.io/badge/license-Apache--2.0-3DA639" alt="Apache-2.0">
+  <img src="https://img.shields.io/badge/license-Apache--2.0_OR_MIT-3DA639" alt="Apache-2.0 OR MIT">
   <img src="https://img.shields.io/badge/status-v0.1.0_pre--production-E5A000" alt="v0.1.0 pre-production">
 </p>
 
@@ -54,10 +54,10 @@
 
 The corpus is hosted, and both embedding and reranking run through VoyageAI (proxied by the hosted server) — **no model is fetched to your machine**. There is **no database, no API key, and no account** required to search.
 
-> **Prebuilt binaries & Homebrew.** Each tagged release ships `cargo-dist` shell/PowerShell installers (SHA256-verified) for macOS, Linux (gnu + musl), and Windows across [the Releases page](https://github.com/devrelaicom/midnight-manual/releases), plus a Homebrew tap:
+> **Prebuilt binaries & Homebrew.** Each tagged release ships a `cargo-dist` SHA256-verified shell installer for macOS (Apple silicon) and Linux (x86-64 + aarch64, gnu) on [the Releases page](https://github.com/devrelaicom/midnight-manual/releases), plus a Homebrew tap. Windows is served via WSL (it runs the Linux build); Intel macOS and musl are out of scope.
 >
 > ```bash
-> brew install midnight-network/tap/midnight-manual   # installs both `midnight-manual` and `mnm`
+> brew install aaronbassett/tap/midnight-manual   # installs both `midnight-manual` and `mnm`
 > ```
 >
 > Building from source (below) needs only a [Rust toolchain](https://rustup.rs) (1.91+).
@@ -140,8 +140,6 @@ Add to `~/.cursor/mcp.json` (global) or `.cursor/mcp.json` (per-project):
 }
 ```
 </details>
-
-> Prefer it scripted? `mnm mcp install --agent claude-code` (also `--agent cursor`, `--agent continue`) writes the config for you.
 
 Restart your client and ask it something Midnight-specific. It will reach for the `search` tool, pull back grounded passages, and cite the source it used.
 
@@ -308,16 +306,18 @@ Overrides are time-boxed (they expire on their `--ttl`) and the server refreshes
 
 ```text
 mnm search   "<query>"                 ad-hoc hybrid search
+mnm facets                             list the corpus's filterable facets
 mnm sources  list | show               browse corpus sources
 mnm versions list | show | promote …   inspect source versions
 mnm chunks   show | next | prev | neighbors  walk the chunk graph by id
 mnm documents show | chunks            read documents, windowed
 mnm models   pull | active             model-cache dir / active embed model
-mnm config   show | edit | defaults    resolved configuration
+mnm config   show                      show the resolved configuration
 mnm telemetry disable | enable | status opt out (or back in)
-mnm auth     github | status           GitHub OAuth for rate-limit uplift
+mnm auth     github | status | logout  GitHub OAuth for rate-limit uplift
 mnm manifest init | check | generate   author ingestion manifests
-mnm mcp      serve | install            run / wire up the MCP server
+mnm skills   add | status | remove     install the advanced-search skill
+mnm mcp      serve                      run the MCP server (stdio JSON-RPC)
 mnm doctor                             environment & connectivity report
 mnm status                             connectivity, auth & model readiness
 mnm version                            build metadata
@@ -348,11 +348,11 @@ mnm models active        # the corpus's active embedding model
 | `--server <url>` | Point at a different corpus (env: `MIDNIGHT_MANUAL_SERVER`). Defaults to the hosted instance. |
 | `--json` | JSON output instead of human-formatted text. |
 | `--config <path>` | Use a specific config file. |
-| `--token <jwt>` | Supply an auth token (admins / rate-limit uplift). |
+| `--voyage-api-key <key>` | Voyage key for BYOK embedding + reranking (env: `VOYAGE_API_KEY`). |
 | `--log-level <lvl>` | `error` … `trace` (env: `RUST_LOG`). |
 | `--no-telemetry` | Disable telemetry for this one invocation. |
 
-> Maintainer commands (`keys`, `users`, `ingest`, `ratelimits`, `login`) are hidden from `--help` by default to keep the surface clean for everyday users. Set `MIDNIGHT_MANUAL_SHOW_ADMIN_CMDS=1` (or `cli.show_admin_cmds = true`) to reveal them — they're always invocable by name regardless. See [Admin & operations](#admin--operations).
+> Maintainer commands (`keys`, `users`, `ingest`, `ratelimits`, `tokenlimits`, `login`) are hidden from `--help` by default to keep the surface clean for everyday users. Set `MIDNIGHT_MANUAL_SHOW_ADMIN_CMDS=1` (or `cli.show_admin_cmds = true`) to reveal them — they're always invocable by name regardless. See [Admin & operations](#admin--operations).
 
 ---
 
@@ -394,21 +394,21 @@ Source files are parsed with [`tree-sitter`](https://tree-sitter.github.io/) and
 | | | |
 | --- | --- | --- |
 | **Compact** `.compact` | Rust `.rs` | TypeScript `.ts` `.tsx` |
-| JavaScript `.js` `.jsx` `.mjs` `.cjs` | Python `.py` | Go `.go` |
+| JavaScript `.js` `.jsx` `.mjs` `.cjs` | Python `.py` `.pyi` | Go `.go` |
 | Solidity `.sol` | Java `.java` | C# `.cs` |
 | Kotlin `.kt` `.kts` | Swift `.swift` | Ruby `.rb` |
-| Haskell `.hs` | Bash `.sh` `.bash` | Scheme `.scm` `.ss` |
+| Haskell `.hs` | Bash `.sh` `.bash` | Scheme `.scm` `.ss` `.sld` |
 | TOML `.toml` | YAML `.yaml` `.yml` | HTML / XML |
 
 > **Compact is a first-class citizen.** Midnight's smart-contract language is chunked with full symbol awareness — circuits, ledger declarations, witnesses, and contracts all become their own semantically-bounded, attributable chunks.
 
-Grammars are **Cargo-feature-gated** into tiers (`core-grammars` → `markup-grammars` → `extended-grammars` → `all-grammars`) so a lean build stays small. Crucially, **an absent grammar degrades gracefully**: an unknown or unbuilt language falls back to a line-window chunker (60-line windows, 20-line overlap) so it's still ingestible — just without symbol paths.
+Grammars are **Cargo-feature-gated** into tiers (`core-grammars` → `markup-grammars` → `extended-grammars` → `all-grammars`) so a lean build stays small. Crucially, **an absent grammar degrades gracefully**: an unknown or unbuilt language falls back to a token-budgeted, non-overlapping line-window chunker (windows grow line-by-line to ~90% of the token budget) so it's still ingestible — just without symbol paths.
 
 Compact chunking is its own default-on feature (`compact`, backed by the [`compactp`](https://crates.io/crates/compactp_parser) parser); build the CLI without the experimental Compact chunker via `cargo build -p midnight-manual --no-default-features` (the tree-sitter grammars stay on).
 
 ### The details that matter
 
-- **Token-budgeted.** Chunks target a real BPE token budget (default **400 tokens**) so they fit the embedder cleanly — measured with the same tokenizer the model uses, not a character heuristic.
+- **Token-budgeted.** Chunks target a real token budget (default **1024 tokens**) so they fit the embedder comfortably — measured with a real subword tokenizer (a vendored BGE tokenizer), not a character heuristic.
 - **`.gitignore`-aware file discovery.** File lists are built with the [`ignore`](https://docs.rs/ignore) crate. A precedence ladder governs what's included: `.git/` is always excluded → built-in skips (`node_modules`, `target`, `vendor`, `dist`, `*.min.js`, …) → `.gitignore`/`.ignore` → your `--exclude` globs → your `--include` whitelist.
 - **Package detection.** Walking up from each file, the chunker attaches **package membership** — Rust crates (`Cargo.toml` `[package]`, workspace roots skipped) and npm packages (`package.json` `.name`) — so results can be filtered and attributed by package.
 - **Never fails the run for one bad file.** A catastrophically malformed file falls back to line-window chunking and is flagged, rather than aborting the whole ingest.
@@ -431,7 +431,7 @@ What makes it nice:
 - **Versioned, atomic promotion.** Every ingest builds a new `source_version` in a `building` state, invisible to search. A single `finalize` step flips it `active` and demotes the previous one in one transaction — readers never see a half-built corpus, and rollback is one command.
 - **Carry-forward.** If a document's content hash is unchanged from the active version, its chunks (and their embeddings) are re-linked instead of re-embedded. Re-ingesting a docs site where two pages changed costs you two pages of work, not the whole site.
 - **Per-file dispatch.** A `README.md` next to a `lib.rs` next to a `Cargo.toml` each routes to the right chunker automatically, by extension (and shebang).
-- **Resilient.** Binary files are sniffed and skipped, oversize files (>10 MiB) are skipped with a warning, and any chunk that fails to embed lands in an `embed_failed` state and is simply skipped by readers (so navigation has clean gaps, never broken links).
+- **Resilient.** A catastrophically malformed source file falls back to line-window chunking rather than aborting the run, and any chunk that fails to embed lands in an `embed_failed` state and is simply skipped by readers (so navigation has clean gaps, never broken links).
 - **Observable.** Each run emits an `ingest_complete` event with documents added / updated / skipped and duration — counts only, never content (see [privacy](#telemetry--privacy)).
 
 ---
@@ -497,8 +497,7 @@ root:
 ```
 
 ```bash
-mnm ingest run \
-  --manifest hierarchy.yaml \
+mnm ingest run hierarchy.yaml \
   --source-slug midnight-docs \
   --source-root ./midnight-docs
 ```
@@ -515,7 +514,7 @@ git clone https://github.com/OpenZeppelin/compact-contracts.git
 mnm manifest generate --base ./compact-contracts \
     --include '**/*.compact' --include '**/*.ts' --include '**/*.md' \
     --output compact-contracts.yaml
-mnm ingest run --manifest compact-contracts.yaml \
+mnm ingest run compact-contracts.yaml \
                --source-slug openzeppelin-compact \
                --source-root ./compact-contracts
 
@@ -524,7 +523,7 @@ git clone https://github.com/midnightntwrk/example-kitties.git
 mnm manifest generate --base ./example-kitties \
     --include '**/*.compact' --include '**/*.ts' --include '**/*.tsx' --include '**/*.md' \
     --output kitties.yaml
-mnm ingest run --manifest kitties.yaml \
+mnm ingest run kitties.yaml \
                --source-slug example-kitties \
                --source-root ./example-kitties
 ```
@@ -634,7 +633,7 @@ Query embedding uses VoyageAI's contextualized **`voyage-context-3`** model (102
 
 Either way the query text reaches Voyage; the only question is *whose* Voyage account processes it. There is no path that embeds entirely on your machine — the embedder is remote by design.
 
-The server records only **token counts** and an anonymised **subject key** (a hashed IP, or your SSO user id) for budget accounting — it **never** logs or persists the submitted query text. That invariant is enforced by a CI canary alongside the telemetry one.
+The server records only **token counts** against a **subject key** (the client IP, or your SSO user id) for budget accounting — it **never** logs or persists the submitted query text. That invariant is enforced by a CI canary alongside the telemetry one.
 
 When server-side reranking is enabled (the default), the search query — plus any
 `rerank_instructions` — and the text of candidate result chunks are sent to
@@ -702,12 +701,10 @@ enabled = true
 show_admin_cmds = false
 ```
 
-Inspect or edit the resolved config any time:
+Inspect the resolved config any time:
 
 ```bash
 mnm config show       # the effective, merged config
-mnm config defaults   # the compiled-in baseline
-mnm config edit       # open it in $EDITOR
 ```
 
 **Key environment variables:**
@@ -751,7 +748,18 @@ Lexical and semantic candidate lists are merged with **Reciprocal Rank Fusion** 
 
 ### Built for speed and many platforms
 
-Cold-start to MCP handshake is sub-500 ms; p95 retrieval is under a second against the hosted corpus. Prebuilt binaries target macOS (x86-64 + Apple silicon), Linux (gnu + musl, x86-64 + aarch64), and Windows x86-64.
+Cold-start to MCP handshake is sub-500 ms; p95 retrieval is under a second against the hosted corpus. Prebuilt binaries target macOS (Apple silicon) and Linux (x86-64 + aarch64, gnu); Windows is served via WSL (it runs the Linux build), and Intel macOS and musl are intentionally out of scope.
+
+---
+
+## License
+
+`midnight-manual` is dual-licensed under either of:
+
+- Apache License, Version 2.0 — [LICENSE-APACHE](LICENSE-APACHE)
+- MIT license — [LICENSE-MIT](LICENSE-MIT)
+
+at your option. Unless you explicitly state otherwise, any contribution you intentionally submit for inclusion in the work, as defined in the Apache-2.0 license, shall be dual-licensed as above, without any additional terms or conditions.
 
 ---
 
@@ -763,7 +771,7 @@ Cold-start to MCP handshake is sub-500 ms; p95 retrieval is under a second again
 - **Advanced-search skill:** [`crates/mnm-skills/assets/midnight-advanced-search/SKILL.md`](crates/mnm-skills/assets/midnight-advanced-search/SKILL.md)
 - **Deploy runbook (operators):** [`docs/README-deploy.md`](docs/README-deploy.md)
 - **Ingesting content (operators):** [`docs/cookbook/ingesting-content.md`](docs/cookbook/ingesting-content.md)
-- **License:** [Apache-2.0](LICENSE)
+- **License:** Apache-2.0 OR MIT — see [LICENSE-APACHE](LICENSE-APACHE) and [LICENSE-MIT](LICENSE-MIT)
 
 ---
 
