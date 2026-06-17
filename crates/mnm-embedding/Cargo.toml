@@ -21,7 +21,7 @@ integration = []
 models = []
 
 [dependencies]
-mnm-core      = { path = "../mnm-core" }
+mnm-core      = { workspace = true }
 once_cell    = { workspace = true }
 sha2         = { workspace = true }
 serde        = { workspace = true }

@@ -34,33 +34,8 @@ unsafe_code     = "deny"
 missing_docs    = "warn"
 unused_imports  = "warn"
 
-# cargo-dist (a.k.a. `dist`) — release-artifact build matrix wired into
-# `.github/workflows/release.yml`. The runtime cargo-dist version is whatever
-# the installer script pulls; this `cargo-dist-version` field is a reminder of
-# which tool version generated this config. Re-run `cargo dist init` to refresh
-# the schema if a newer cargo-dist warns about it.
-[workspace.metadata.dist]
-cargo-dist-version = "0.27.1"
-ci                 = ["github"]
-installers         = ["shell", "powershell"]
-# Seven targets per FR-099 (CLI binary distribution). The server is Docker-only
-# (see crates/midnight-manual-server/Cargo.toml `[package.metadata.dist] dist = false`), so
-# this matrix only builds the `midnight-manual` + `mnm` CLI binaries.
-targets            = [
-    "aarch64-apple-darwin",
-    "x86_64-apple-darwin",
-    "x86_64-unknown-linux-gnu",
-    "aarch64-unknown-linux-gnu",
-    "x86_64-unknown-linux-musl",
-    "aarch64-unknown-linux-musl",
-    "x86_64-pc-windows-msvc",
-]
-# The release.yml workflow opens a PR-style draft on tag pushes, so cargo-dist
-# should plan rather than build on PRs.
-pr-run-mode        = "plan"
-# Release tag fires under release-please; allow uncommitted changes the action
-# creates in CI checkouts.
-allow-dirty        = ["ci"]
+# cargo-dist config lives in dist-workspace.toml (cargo-dist 0.32.0). The
+# back-end workflow `.github/workflows/release.yml` is hand-authored.
 
 [workspace.lints.clippy]
 all              = { level = "warn", priority = -1 }
@@ -74,6 +49,19 @@ must_use_candidate      = "allow"
 
 # Shared dependency versions. Crates declare deps with `version.workspace = true`.
 [workspace.dependencies]
+# Internal crates — path for local builds, version so `cargo publish` accepts the
+# dependency on crates.io. release-plz keeps these versions in sync on each bump.
+mnm-core        = { path = "crates/mnm-core", version = "0.1.0" }
+mnm-store       = { path = "crates/mnm-store", version = "0.1.0" }
+mnm-retrieval   = { path = "crates/mnm-retrieval", version = "0.1.0" }
+mnm-content     = { path = "crates/mnm-content", version = "0.1.0" }
+mnm-embedding   = { path = "crates/mnm-embedding", version = "0.1.0" }
+mnm-auth        = { path = "crates/mnm-auth", version = "0.1.0" }
+mnm-telemetry   = { path = "crates/mnm-telemetry", version = "0.1.0" }
+mnm-skills      = { path = "crates/mnm-skills", version = "0.1.0" }
+mnm-mcp         = { path = "crates/mnm-mcp", version = "0.1.0" }
+midnight-manual = { path = "crates/midnight-manual", version = "0.1.0" }
+
 # Async runtime + HTTP
 tokio            = { version = "1", features = ["rt-multi-thread", "macros", "signal", "fs", "io-std"] }
 axum             = "0.7"

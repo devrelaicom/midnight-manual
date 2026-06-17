@@ -34,16 +34,16 @@ serde_json     = { workspace = true }
 toml           = { workspace = true }
 # Used only by tests/f_bug_e2e.rs to drive the real CLI ingest path against
 # a live midnight-manual-server backed by testcontainers Postgres.
-midnight-manual         = { path = "../midnight-manual" }
+midnight-manual         = { workspace = true }
 tempfile       = { workspace = true }
 
 [dependencies]
-mnm-core        = { path = "../mnm-core" }
-mnm-auth        = { path = "../mnm-auth" }
-mnm-store       = { path = "../mnm-store" }
-mnm-retrieval   = { path = "../mnm-retrieval" }
-mnm-telemetry   = { path = "../mnm-telemetry" }
-mnm-embedding   = { path = "../mnm-embedding" }
+mnm-core        = { workspace = true }
+mnm-auth        = { workspace = true }
+mnm-store       = { workspace = true }
+mnm-retrieval   = { workspace = true }
+mnm-telemetry   = { workspace = true }
+mnm-embedding   = { workspace = true }
 axum           = { workspace = true }
 tokio          = { workspace = true }
 tower          = { workspace = true }

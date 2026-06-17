@@ -40,7 +40,7 @@ all-grammars = [
 compact = ["dep:compactp_parser", "dep:compactp_ast", "dep:compactp_syntax"]
 
 [dependencies]
-mnm-core               = { path = "../mnm-core" }
+mnm-core               = { workspace = true }
 anyhow                = { workspace = true }
 globset               = { workspace = true }
 pulldown-cmark        = { workspace = true }

@@ -17,7 +17,7 @@ workspace = true
 integration = []
 
 [dependencies]
-mnm-core         = { path = "../mnm-core" }
+mnm-core         = { workspace = true }
 ed25519-dalek   = { workspace = true }
 jsonwebtoken    = { workspace = true }
 oauth2          = { workspace = true }

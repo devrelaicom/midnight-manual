@@ -1,10 +1,12 @@
 # Deploy runbook: midnight-manual-server on Fly.io
 
 This is the first-time deploy runbook for the cloud server (`midnight-manual-server` →
-`midnight-manual-server`). Once the infrastructure is provisioned, ongoing
-releases are automatic: merging a `release-please` PR cuts a tag, the release
-workflow builds a multi-arch Docker image, pushes to GHCR, and `flyctl deploy`s
-it.
+`midnight-manual-server`). Once the infrastructure is provisioned, **server
+deploys are run by the operator** with `flyctl deploy` — they are intentionally
+not wired into CI. Crate + CLI releases are separate and automatic: merging the
+release-plz "Release vX.Y.Z" PR publishes the workspace crates to crates.io and
+builds the prebuilt CLI binaries + Homebrew formula (it does not touch the
+server image or Fly).
 
 Everything in this runbook is **operator-executed**. The repo can't provision
 real infrastructure for you; this document just enumerates every command in the
@@ -321,18 +323,16 @@ flyctl secrets set MIDNIGHT_MANUAL_SCORING_POLICY="$(cat scoring-policy.toml)" \
 The server fails startup on a malformed policy, so test it locally first with
 `cargo test -p mnm-core scoring_policy`.
 
-## 9. First deploy
+## 9. Deploying the server
 
-Two paths:
-
-### 9a. Direct (skip release-please for the first cut)
+Server deploys are **always operator-run** — they are intentionally not wired
+into CI. Build and roll out from `Dockerfile.server` on Fly's remote builder:
 
 ```bash
 flyctl deploy --app midnight-manual
 ```
 
-This builds the Docker image from `Dockerfile.server` on Fly's remote builder
-and rolls out the machine. Watch the logs:
+Watch the logs:
 
 ```bash
 flyctl logs --app midnight-manual
@@ -341,20 +341,14 @@ flyctl logs --app midnight-manual
 Expected sequence: "resolved active embedding model" → "starting
 midnight-manual-server" → migrations applied → listener bound on `:8080`.
 
-### 9b. Via the release pipeline (recommended for repeatable deploys)
+Because deploys run from your machine, you only need to be authenticated locally
+(`flyctl auth login`) — there is **no** `FLY_API_TOKEN` GitHub Actions secret and
+no CI deploy step.
 
-Push to `main` triggers `release-please` to open a release PR. Merge it; the
-release workflow tags the commit, builds the multi-arch image, pushes to GHCR
-(`ghcr.io/<owner>/midnight-manual:vX.Y.Z`), and runs `flyctl deploy --image
-<that tag>`.
-
-Either way, the very first run needs `FLY_API_TOKEN` as a GitHub Actions
-secret on the repo:
-
-```bash
-flyctl tokens create deploy --app midnight-manual | \
-    gh secret set FLY_API_TOKEN --repo <owner>/midnight-manual
-```
+> The release pipeline (`release-plz`) is independent of server deploys: merging
+> the "Release vX.Y.Z" PR publishes the workspace crates to crates.io and builds
+> the prebuilt CLI binaries + Homebrew formula. It does **not** build the server
+> image or deploy to Fly.
 
 ## 10. Smoke test
 

@@ -56,8 +56,6 @@ tests/
 
 # Dev / deploy config not consumed by the Rust build inside the image.
 fly.toml
-release-please-config.json
-.release-please-manifest.json
 justfile
 Justfile
 .envrc
