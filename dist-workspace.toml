@@ -1,0 +1,44 @@
+# cargo-dist ("dist") configuration — the release BACK-END's artifact builder.
+# Drives `dist build` (per-target archives + checksums + shell installer + the
+# Homebrew formula). The CI workflow that calls it (.github/workflows/release.yml)
+# is HAND-AUTHORED, so `allow-dirty = ["ci"]` stops dist from regenerating it.
+#
+# Only the CLI crate `midnight-manual` is distributed as prebuilt binaries; it
+# produces TWO binaries (`midnight-manual` and `mnm`), both shipped in one archive
+# and installed by one Homebrew formula (`midnight-manual.rb`). The libraries have
+# no binaries (auto-skipped); `midnight-manual-server` opts out via
+# `[package.metadata.dist] dist = false` in its Cargo.toml.
+
+[workspace]
+members = ["cargo:."]
+
+[dist]
+# Pin the exact dist version the workflow installs (reproducibility); must match
+# DIST_VERSION in release.yml.
+cargo-dist-version = "0.32.0"
+
+ci = "github"
+allow-dirty = ["ci"]
+
+# Only the CLI app is built as prebuilt binaries.
+packages = ["midnight-manual"]
+
+# Apple-silicon macOS + Linux (x86_64 + aarch64, gnu). Windows is served via WSL
+# (it runs the Linux build); Intel macOS and musl are intentionally out of scope.
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+]
+
+# Shell installer for everyone; Homebrew formula for the CLI.
+installers = ["shell", "homebrew"]
+
+hosting = "github"
+precise-builds = true
+cargo-build-args = ["--locked"]
+
+# Linux builds target the Ubuntu 22.04 glibc baseline so binaries run broadly.
+[dist.github-custom-runners]
+x86_64-unknown-linux-gnu = "ubuntu-22.04"
+aarch64-unknown-linux-gnu = "ubuntu-22.04-arm"

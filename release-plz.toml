@@ -1,0 +1,105 @@
+# release-plz configuration — automatic release FRONT-END for midnight-manual.
+#
+# On every push to `main`, release-plz maintains a single "Release vX.Y.Z" PR
+# (shared version bump across all crates + one workspace CHANGELOG, regenerated
+# from Conventional Commits). Merging that PR is the single approval gate. On
+# merge, release-plz:
+#   1. publishes every workspace crate to crates.io, in dependency order, and
+#   2. pushes ONE `vX.Y.Z` git tag.
+# That tag fires the tag-triggered `.github/workflows/release.yml` BACK-END,
+# which builds the prebuilt CLI binaries, creates the GitHub Release, and pushes
+# the Homebrew formula. release-plz does NOT create the GitHub Release
+# (`git_release_enable = false`); release.yml owns that.
+#
+# release-plz publishes to crates.io itself so crates.io stays authoritative for
+# "what's released" — deferring publish to a dormant job would make release-plz
+# re-open a duplicate "Release" PR every merge (an endless loop).
+
+[workspace]
+# Single-tag idiom for a workspace: disable per-crate tags/releases by default...
+git_tag_enable = false
+# ...and never let release-plz create the GitHub Release — release.yml does that
+# (with the binary artifacts attached).
+git_release_enable = false
+
+# One workspace changelog (git-cliff). Conventional-Commit types map to grouped
+# sections; pure-noise types (ci/build/test/style/chore + merges) are skipped.
+[changelog]
+protect_breaking_commits = true
+commit_parsers = [
+    { message = "^feat", group = "Added" },
+    { message = "^fix", group = "Fixed" },
+    { message = "^perf", group = "Performance" },
+    { message = "^refactor", group = "Changed" },
+    { message = "^docs", group = "Documentation" },
+    { message = "^revert", group = "Reverted" },
+    { message = "^chore\\(deps\\)", group = "Dependencies" },
+    { message = "^(chore|ci|build|test|style)", skip = true },
+    { message = "^Merge", skip = true },
+    { message = ".*", group = "Other" },
+]
+
+# `midnight-manual` (the CLI) is the PRIMARY package: it owns the single workspace
+# tag (`vX.Y.Z`, matching release.yml's trigger) and the single workspace
+# changelog aggregating every crate. All crates share one version via the group.
+[[package]]
+name = "midnight-manual"
+version_group = "midnight-manual"
+git_tag_enable = true
+git_tag_name = "v{{ version }}"
+git_release_enable = false
+changelog_path = "CHANGELOG.md"
+changelog_include = [
+    "mnm-core", "mnm-store", "mnm-retrieval", "mnm-content", "mnm-embedding",
+    "mnm-auth", "mnm-telemetry", "mnm-skills", "mnm-mcp", "midnight-manual-server",
+]
+
+[[package]]
+name = "mnm-core"
+version_group = "midnight-manual"
+changelog_update = false
+
+[[package]]
+name = "mnm-store"
+version_group = "midnight-manual"
+changelog_update = false
+
+[[package]]
+name = "mnm-retrieval"
+version_group = "midnight-manual"
+changelog_update = false
+
+[[package]]
+name = "mnm-content"
+version_group = "midnight-manual"
+changelog_update = false
+
+[[package]]
+name = "mnm-embedding"
+version_group = "midnight-manual"
+changelog_update = false
+
+[[package]]
+name = "mnm-auth"
+version_group = "midnight-manual"
+changelog_update = false
+
+[[package]]
+name = "mnm-telemetry"
+version_group = "midnight-manual"
+changelog_update = false
+
+[[package]]
+name = "mnm-skills"
+version_group = "midnight-manual"
+changelog_update = false
+
+[[package]]
+name = "mnm-mcp"
+version_group = "midnight-manual"
+changelog_update = false
+
+[[package]]
+name = "midnight-manual-server"
+version_group = "midnight-manual"
+changelog_update = false
