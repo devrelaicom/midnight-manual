@@ -188,7 +188,7 @@ jobs:
           fi
 
   # DORMANT until HOMEBREW_TAP_TOKEN is set — push midnight-manual.rb to the
-  # cross-owner tap midnight-network/homebrew-tap.
+  # cross-owner tap aaronbassett/homebrew-tap.
   publish-homebrew-tap:
     name: Push formula to Homebrew tap (dormant until PAT set)
     needs: [global, release, secret-preflight]
@@ -203,7 +203,7 @@ jobs:
       - name: Checkout the tap repo (cross-owner, PAT-authenticated)
         uses: actions/checkout@v5
         with:
-          repository: midnight-network/homebrew-tap
+          repository: aaronbassett/homebrew-tap
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           path: homebrew-tap
           persist-credentials: true
