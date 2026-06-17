@@ -300,8 +300,8 @@ These are tuning knobs with safe defaults — set them only to override. They ar
 | `MIDNIGHT_MANUAL_TOKEN_LIMIT_GLOBAL_WINDOW_SECS` | Rolling window for the global ceiling. | `10800` (3 h) |
 | `MIDNIGHT_MANUAL_TOKEN_SNAPSHOT_SECS` | Interval at which token-usage counters flush to the store. | `300` (5 min) |
 
-`POST /v1/embeddings` logs only token counts and the caller's anonymised subject
-key (hashed IP / SSO user id) — never the submitted query text. A 429
+`POST /v1/embeddings` logs only token counts and the caller's subject
+key (the client IP / SSO user id) — never the submitted query text. A 429
 over-budget response carries only window/limit/reset metadata. That invariant is
 enforced by a CI privacy canary.
 
