@@ -32,14 +32,14 @@ name = "mnm"
 path = "src/bin/mnm.rs"
 
 [dependencies]
-mnm-core       = { path = "../mnm-core" }
-mnm-auth       = { path = "../mnm-auth" }
-mnm-content    = { path = "../mnm-content", default-features = false, features = ["core-grammars"] }
-mnm-embedding  = { path = "../mnm-embedding" }
-mnm-mcp        = { path = "../mnm-mcp" }
-mnm-retrieval  = { path = "../mnm-retrieval" }
-mnm-skills     = { path = "../mnm-skills" }
-mnm-telemetry  = { path = "../mnm-telemetry" }
+mnm-core       = { workspace = true }
+mnm-auth       = { workspace = true }
+mnm-content    = { workspace = true, default-features = false, features = ["core-grammars"] }
+mnm-embedding  = { workspace = true }
+mnm-mcp        = { workspace = true }
+mnm-retrieval  = { workspace = true }
+mnm-skills     = { workspace = true }
+mnm-telemetry  = { workspace = true }
 clap          = { workspace = true }
 serde         = { workspace = true }
 serde_json    = { workspace = true }
@@ -60,4 +60,4 @@ tempfile      = { workspace = true }
 [dev-dependencies]
 wiremock      = { workspace = true }
 ed25519-dalek = { workspace = true }
-mnm-telemetry  = { path = "../mnm-telemetry" }
+mnm-telemetry  = { workspace = true }
