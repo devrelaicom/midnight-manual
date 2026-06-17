@@ -186,6 +186,11 @@ lto           = "thin"
 codegen-units = 1
 strip         = "symbols"
 
+# cargo-dist builds release artifacts with `--profile dist`. Inherit our tuned
+# release profile so prebuilt binaries match a normal release build.
+[profile.dist]
+inherits = "release"
+
 [profile.dev]
 opt-level = 0
 debug     = true
