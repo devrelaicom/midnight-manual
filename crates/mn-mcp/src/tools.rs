@@ -1793,6 +1793,25 @@ mod tests {
     }
 
     #[test]
+    fn every_advertised_output_schema_has_object_root_type() {
+        // structuredContent is always a JSON object, and strict MCP clients
+        // require each advertised outputSchema to carry a root `type: "object"`.
+        // A root-level combinator (e.g. `oneOf`) without `type` makes those
+        // clients reject the whole `tools/list` response — guard against it.
+        for t in list().tools {
+            let schema = t
+                .output_schema
+                .expect("every tool advertises an outputSchema");
+            assert_eq!(
+                schema.get("type").and_then(serde_json::Value::as_str),
+                Some("object"),
+                "tool `{}` outputSchema must have a root `type: object`",
+                t.name
+            );
+        }
+    }
+
+    #[test]
     fn new_navigation_tools_have_object_schemas() {
         let m = list();
         for name in [

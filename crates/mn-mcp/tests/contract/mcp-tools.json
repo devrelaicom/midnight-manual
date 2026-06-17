@@ -1977,131 +1977,94 @@
       },
       "name": "facets",
       "outputSchema": {
-        "oneOf": [
-          {
-            "additionalProperties": true,
-            "properties": {
-              "filters": {
-                "items": {
-                  "additionalProperties": true,
-                  "properties": {
-                    "key": {
-                      "description": "Filter dimension name for advanced_search.",
-                      "type": "string"
-                    },
-                    "negatable": {
-                      "type": "boolean"
-                    },
-                    "total": {
-                      "type": "integer"
-                    },
-                    "truncated": {
-                      "type": "boolean"
-                    },
-                    "type": {
-                      "type": "string"
-                    },
-                    "values": {
-                      "type": "array"
-                    }
-                  },
-                  "required": [
-                    "key"
-                  ],
-                  "type": "object"
-                },
-                "type": "array"
-              },
-              "modes": {
-                "items": {
-                  "type": "string"
-                },
-                "type": "array"
-              },
-              "suggested_next_actions": {
-                "items": {
-                  "properties": {
-                    "arguments": {
-                      "type": "object"
-                    },
-                    "description": {
-                      "description": "What this suggested action achieves. Actions are suggestions, not required next steps.",
-                      "type": "string"
-                    },
-                    "tool": {
-                      "description": "Tool to call. Absent for actions the user (not the agent) must take.",
-                      "type": "string"
-                    }
-                  },
-                  "required": [
-                    "description"
-                  ],
-                  "type": "object"
-                },
-                "type": "array"
-              }
-            },
-            "required": [
-              "filters",
-              "suggested_next_actions"
-            ],
-            "type": "object"
+        "additionalProperties": true,
+        "properties": {
+          "facet": {
+            "description": "The drilled-into dimension (drill-down responses only).",
+            "type": "string"
           },
-          {
-            "additionalProperties": true,
-            "properties": {
-              "facet": {
-                "description": "The drilled-into dimension.",
-                "type": "string"
-              },
-              "next_cursor": {
-                "description": "Opaque drill-down token; null on the last page.",
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "suggested_next_actions": {
-                "items": {
-                  "properties": {
-                    "arguments": {
-                      "type": "object"
-                    },
-                    "description": {
-                      "description": "What this suggested action achieves. Actions are suggestions, not required next steps.",
-                      "type": "string"
-                    },
-                    "tool": {
-                      "description": "Tool to call. Absent for actions the user (not the agent) must take.",
-                      "type": "string"
-                    }
-                  },
-                  "required": [
-                    "description"
-                  ],
-                  "type": "object"
-                },
-                "type": "array"
-              },
-              "total": {
-                "minimum": 0,
-                "type": "integer"
-              },
-              "values": {
-                "items": {
+          "filters": {
+            "items": {
+              "additionalProperties": true,
+              "properties": {
+                "key": {
+                  "description": "Filter dimension name for advanced_search.",
                   "type": "string"
                 },
-                "type": "array"
-              }
+                "negatable": {
+                  "type": "boolean"
+                },
+                "total": {
+                  "type": "integer"
+                },
+                "truncated": {
+                  "type": "boolean"
+                },
+                "type": {
+                  "type": "string"
+                },
+                "values": {
+                  "type": "array"
+                }
+              },
+              "required": [
+                "key"
+              ],
+              "type": "object"
             },
-            "required": [
-              "facet",
-              "values",
-              "suggested_next_actions"
-            ],
-            "type": "object"
+            "type": "array"
+          },
+          "modes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "next_cursor": {
+            "description": "Opaque drill-down pagination token; null on the last page.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "suggested_next_actions": {
+            "items": {
+              "properties": {
+                "arguments": {
+                  "type": "object"
+                },
+                "description": {
+                  "description": "What this suggested action achieves. Actions are suggestions, not required next steps.",
+                  "type": "string"
+                },
+                "tool": {
+                  "description": "Tool to call. Absent for actions the user (not the agent) must take.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "description"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "total": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "values": {
+            "description": "Values of the drilled-into facet (drill-down responses only).",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           }
-        ]
+        },
+        "required": [
+          "suggested_next_actions"
+        ],
+        "type": "object"
       }
     },
     {

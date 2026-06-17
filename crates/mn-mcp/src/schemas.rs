@@ -289,13 +289,18 @@ pub fn sources_output_schema() -> Value {
     })
 }
 
-/// Output schema for `facets`. Two shapes from `GET /v1/facets`, distinguished
-/// by which keys are present: the overview (carries `filters`) and a single
-/// facet's drill-down page (carries `facet` + `values`).
+/// Output schema for `facets`. `GET /v1/facets` returns one of two shapes
+/// depending on the request: the overview (carries `modes` + `filters`) and a
+/// single facet's drill-down page (carries `facet` + `values`). Both are
+/// described in one root **object** schema — required only by what they share
+/// (`suggested_next_actions`) — rather than a root `oneOf`, because strict MCP
+/// clients require every advertised `outputSchema` to carry a root
+/// `type: "object"` and reject a bare combinator.
 pub fn facets_output_schema() -> Value {
-    let overview = json!({
+    json!({
         "type": "object",
         "properties": {
+            // Overview shape.
             "modes": { "type": "array", "items": { "type": "string" } },
             "filters": { "type": "array", "items": {
                 "type": "object",
@@ -310,25 +315,18 @@ pub fn facets_output_schema() -> Value {
                 "required": ["key"],
                 "additionalProperties": true
             } },
-            "suggested_next_actions": suggested_next_actions_fragment()
-        },
-        "required": ["filters", "suggested_next_actions"],
-        "additionalProperties": true
-    });
-    let drilldown = json!({
-        "type": "object",
-        "properties": {
-            "facet": { "type": "string", "description": "The drilled-into dimension." },
-            "values": { "type": "array", "items": { "type": "string" } },
+            // Drill-down shape.
+            "facet": { "type": "string", "description": "The drilled-into dimension (drill-down responses only)." },
+            "values": { "type": "array", "items": { "type": "string" },
+                "description": "Values of the drilled-into facet (drill-down responses only)." },
             "total": { "type": "integer", "minimum": 0 },
             "next_cursor": { "type": ["string", "null"],
-                "description": "Opaque drill-down token; null on the last page." },
+                "description": "Opaque drill-down pagination token; null on the last page." },
             "suggested_next_actions": suggested_next_actions_fragment()
         },
-        "required": ["facet", "values", "suggested_next_actions"],
+        "required": ["suggested_next_actions"],
         "additionalProperties": true
-    });
-    json!({ "oneOf": [overview, drilldown] })
+    })
 }
 
 /// Output schema for `status` (StatusReport — see `crate::status`).
