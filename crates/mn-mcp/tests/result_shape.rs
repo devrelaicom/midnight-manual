@@ -188,7 +188,7 @@ fn all_passthrough_projectors_conform_to_their_output_schema() {
                     { "chunk_id": "c2", "chunk_index": 1, "content": "body two" }
                 ]
             })),
-            mn_mcp::schemas::document_output_schema(),
+            mn_mcp::schemas::document_window_output_schema(),
         ),
         (
             "list_sources (paged)",
@@ -217,6 +217,33 @@ fn all_passthrough_projectors_conform_to_their_output_schema() {
             "facets (drill-down)",
             mn_mcp::render::project_facets(serde_json::json!({
                 "facet": "tags", "values": ["zk"], "total": 312, "next_cursor": "tok=="
+            })),
+            mn_mcp::schemas::facets_output_schema(),
+        ),
+        // Terminal / null-state fixtures: the cloud emits these fields as JSON
+        // null (present, not absent), so the schemas must admit null.
+        (
+            "get_document (no language → null)",
+            mn_mcp::render::project_document(serde_json::json!({
+                "id": "d1", "source_path": "docs/x.md", "language": null,
+                "source": { "slug": "s", "display_name": "S" },
+                "chunks": [{ "id": "c1", "chunk_index": 0, "token_count": 120 }]
+            })),
+            mn_mcp::schemas::document_output_schema(),
+        ),
+        (
+            "list_sources (last page, next_cursor null)",
+            mn_mcp::render::project_sources(serde_json::json!({
+                "sources": [{ "id": "s1", "slug": "s", "display_name": "S", "kind": "docs_site" }],
+                "total": 1,
+                "next_cursor": null
+            })),
+            mn_mcp::schemas::sources_output_schema(),
+        ),
+        (
+            "facets (drill-down last page, next_cursor null)",
+            mn_mcp::render::project_facets(serde_json::json!({
+                "facet": "tags", "values": ["zk"], "total": 1, "next_cursor": null
             })),
             mn_mcp::schemas::facets_output_schema(),
         ),
@@ -256,4 +283,37 @@ fn failure_is_iserror_with_error_code() {
     assert!(result.is_error);
     let sc = result.structured_content.unwrap();
     assert_eq!(sc["error"]["code"], "NOT_FOUND");
+}
+
+#[test]
+fn failure_structured_conforms_to_error_schema() {
+    // A minimal failure and a mismatch failure with extra details both conform
+    // to the discoverable errorSchema (issue #89 C2).
+    let simple = mn_mcp::render::ToolFailure::simple(
+        mn_mcp::render::ErrorKind::NotFound,
+        "no chunk x",
+        "Verify the id from a recent search.",
+    );
+    let sc = simple
+        .into_result()
+        .structured_content
+        .expect("structuredContent present");
+    assert_conforms("error (simple)", &sc, &mn_mcp::schemas::error_output_schema());
+
+    let mismatch = mn_mcp::render::ToolFailure {
+        kind: mn_mcp::render::ErrorKind::EmbeddingModelMismatch,
+        message: "model mismatch".to_owned(),
+        guidance: "Re-embed with the corpus's active model.".to_owned(),
+        details: serde_json::json!({
+            "client_model": "voyage-code-3@2",
+            "corpus_model": "voyage-code-3@1",
+            "remediation": "switch to revision 1"
+        }),
+        suggested_next_actions: vec![],
+    };
+    let sc = mismatch
+        .into_result()
+        .structured_content
+        .expect("structuredContent present");
+    assert_conforms("error (mismatch)", &sc, &mn_mcp::schemas::error_output_schema());
 }

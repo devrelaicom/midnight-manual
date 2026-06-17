@@ -52,7 +52,7 @@ pub fn list() -> ToolsListResult {
                     "Search the Midnight Network documentation and code corpus (docs, SDK references, Compact language material, code examples). Returns ranked excerpts with confidence scores and source attribution. Use it whenever you need facts about Midnight, Compact, or the Midnight SDK. Code-heavy queries (function names, API signatures, error strings from code) benefit from code_mode=exclusive; conceptual queries should keep the default. For multi-query strategies, facet filters, or rerank control, use advanced_search.",
                 input_schema: search_input_schema(),
                 output_schema: Some(crate::schemas::search_output_schema()),
-                annotations: ToolAnnotations::read_only(),
+                annotations: ToolAnnotations::read_only().with_title("Search corpus"),
             },
             ToolDescription {
                 name: "advanced_search",
@@ -60,7 +60,7 @@ pub fn list() -> ToolsListResult {
                     "Full-control search over the Midnight corpus: fuse multiple queries (HyDE, expansion, step-back), restrict by facet filters, switch retrieval mode, and toggle reranking. Use when basic search comes up short or when the midnight-advanced-search skill prescribes a pattern. Call facets first to discover valid filter values.",
                 input_schema: advanced_search_input_schema(),
                 output_schema: Some(crate::schemas::search_output_schema()),
-                annotations: ToolAnnotations::read_only(),
+                annotations: ToolAnnotations::read_only().with_title("Advanced search"),
             },
             ToolDescription {
                 name: "get_chunks",
@@ -77,7 +77,7 @@ pub fn list() -> ToolsListResult {
                     "additionalProperties": false
                 }),
                 output_schema: Some(crate::schemas::chunks_output_schema()),
-                annotations: ToolAnnotations::read_only(),
+                annotations: ToolAnnotations::read_only().with_title("Fetch chunks"),
             },
             ToolDescription {
                 name: "get_chunk_next",
@@ -85,7 +85,7 @@ pub fn list() -> ToolsListResult {
                     "Fetch chunks that immediately follow a given chunk in its document's reading order. Use to continue reading past the end of a chunk you already have.",
                 input_schema: chunk_nav_schema(),
                 output_schema: Some(crate::schemas::chunk_list_output_schema()),
-                annotations: ToolAnnotations::read_only(),
+                annotations: ToolAnnotations::read_only().with_title("Next chunks"),
             },
             ToolDescription {
                 name: "get_chunk_prev",
@@ -93,7 +93,7 @@ pub fn list() -> ToolsListResult {
                     "Fetch chunks that immediately precede a given chunk in its document's reading order. Use to read the context leading up to a chunk you already have.",
                 input_schema: chunk_nav_schema(),
                 output_schema: Some(crate::schemas::chunk_list_output_schema()),
-                annotations: ToolAnnotations::read_only(),
+                annotations: ToolAnnotations::read_only().with_title("Previous chunks"),
             },
             ToolDescription {
                 name: "get_chunk_neighbors",
@@ -101,7 +101,7 @@ pub fn list() -> ToolsListResult {
                     "Fetch the chunks immediately before and after a given chunk in one call. Use when a search hit needs surrounding context to be understood.",
                 input_schema: chunk_neighbors_schema(),
                 output_schema: Some(crate::schemas::neighbors_output_schema()),
-                annotations: ToolAnnotations::read_only(),
+                annotations: ToolAnnotations::read_only().with_title("Surrounding chunks"),
             },
             ToolDescription {
                 name: "get_chunk_parents",
@@ -109,7 +109,7 @@ pub fn list() -> ToolsListResult {
                     "Show where a chunk sits in its source's structure: the chain of containing nodes (document, folders) up to the source root. Use to orient a chunk within its source and find its containing document.",
                 input_schema: id_only_schema(),
                 output_schema: Some(crate::schemas::parents_output_schema()),
-                annotations: ToolAnnotations::read_only(),
+                annotations: ToolAnnotations::read_only().with_title("Chunk ancestry"),
             },
             ToolDescription {
                 name: "get_document",
@@ -117,15 +117,15 @@ pub fn list() -> ToolsListResult {
                     "Fetch a document's metadata plus an ordered skeleton of its chunks (ids, positions, token counts — no bodies). Use to size up a document before reading it with get_document_chunks.",
                 input_schema: id_only_schema(),
                 output_schema: Some(crate::schemas::document_output_schema()),
-                annotations: ToolAnnotations::read_only(),
+                annotations: ToolAnnotations::read_only().with_title("Document overview"),
             },
             ToolDescription {
                 name: "get_document_chunks",
                 description:
                     "Read a window of a document's chunk bodies by position. Use after get_document to read a document section by section.",
                 input_schema: document_chunks_schema(),
-                output_schema: Some(crate::schemas::document_output_schema()),
-                annotations: ToolAnnotations::read_only(),
+                output_schema: Some(crate::schemas::document_window_output_schema()),
+                annotations: ToolAnnotations::read_only().with_title("Read document"),
             },
             ToolDescription {
                 name: "list_sources",
@@ -144,7 +144,7 @@ pub fn list() -> ToolsListResult {
                     "additionalProperties": false,
                 }),
                 output_schema: Some(crate::schemas::sources_output_schema()),
-                annotations: ToolAnnotations::read_only(),
+                annotations: ToolAnnotations::read_only().with_title("List sources"),
             },
             ToolDescription {
                 name: "facets",
@@ -162,7 +162,7 @@ pub fn list() -> ToolsListResult {
                     "additionalProperties": false,
                 }),
                 output_schema: Some(crate::schemas::facets_output_schema()),
-                annotations: ToolAnnotations::read_only(),
+                annotations: ToolAnnotations::read_only().with_title("Discover facets"),
             },
             ToolDescription {
                 name: "status",
@@ -174,7 +174,7 @@ pub fn list() -> ToolsListResult {
                     "additionalProperties": false,
                 }),
                 output_schema: Some(crate::schemas::status_output_schema()),
-                annotations: ToolAnnotations::read_only(),
+                annotations: ToolAnnotations::read_only().with_title("Diagnostics"),
             },
             ToolDescription {
                 name: "install_search_skill",
@@ -182,7 +182,7 @@ pub fn list() -> ToolsListResult {
                     "Install (or update) the midnight-advanced-search skill — a retrieval playbook teaching effective corpus search patterns — into the user's AI harness(es). Use when search results are poor or the user asks for better search guidance.",
                 input_schema: install_search_skill_schema(),
                 output_schema: Some(crate::schemas::install_output_schema()),
-                annotations: ToolAnnotations::idempotent_writer(),
+                annotations: ToolAnnotations::idempotent_writer().with_title("Install search skill"),
             },
         ],
     }

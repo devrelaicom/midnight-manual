@@ -1,6 +1,80 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "description": "MCP `tools/list` manifest for the 13 tools exposed by `mnm mcp serve`, in canonical registration order (search pair, chunk reads, document reads, corpus discovery, diagnostics, local install). Each tool's name, description, inputSchema, outputSchema, and annotations are part of the public contract per Constitution I and FR-037. The runtime manifest at `crates/mn-mcp/src/tools.rs::list()` is the single source of truth: the `tools` key below is generated from it verbatim (MCP wire format) and enforced by `crates/mn-mcp/tests/contract_sync.rs`. Regenerate with `REGENERATE_CONTRACT=1 cargo test -p mn-mcp --test contract_sync`. Embedded schemas use JSON Schema draft 2020-12. A success result carries one text content block (summary plus a fenced trimmed-JSON view) and full-fidelity `structuredContent` conforming to the tool's outputSchema, including `suggested_next_actions`; failures use the shared envelope described under `error_envelope`.",
+  "errorSchema": {
+    "additionalProperties": false,
+    "properties": {
+      "error": {
+        "additionalProperties": true,
+        "properties": {
+          "client_model": {
+            "description": "EMBEDDING_MODEL_MISMATCH only: the {name}@{revision} the client embedded with.",
+            "type": "string"
+          },
+          "code": {
+            "description": "Closed set of tool-execution error codes.",
+            "enum": [
+              "INVALID_INPUT",
+              "NOT_FOUND",
+              "EMBEDDING_MODEL_MISMATCH",
+              "CLOUD_ERROR",
+              "INSTALL_FAILED"
+            ],
+            "type": "string"
+          },
+          "corpus_model": {
+            "description": "EMBEDDING_MODEL_MISMATCH only: the corpus's active {name}@{revision}.",
+            "type": "string"
+          },
+          "message": {
+            "description": "Human-readable error detail.",
+            "type": "string"
+          },
+          "remediation": {
+            "description": "EMBEDDING_MODEL_MISMATCH only: concrete next step (cloud-provided).",
+            "type": "string"
+          },
+          "retryable": {
+            "description": "false means an identical retry cannot succeed — recovery needs a different call (follow suggested_next_actions).",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "code",
+          "retryable",
+          "message"
+        ],
+        "type": "object"
+      },
+      "suggested_next_actions": {
+        "items": {
+          "properties": {
+            "arguments": {
+              "type": "object"
+            },
+            "description": {
+              "description": "What this suggested action achieves. Actions are suggestions, not required next steps.",
+              "type": "string"
+            },
+            "tool": {
+              "description": "Tool to call. Absent for actions the user (not the agent) must take.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "description"
+          ],
+          "type": "object"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "error",
+      "suggested_next_actions"
+    ],
+    "type": "object"
+  },
   "error_envelope": {
     "codes": {
       "CLOUD_ERROR": {
@@ -36,14 +110,15 @@
         "retryable": false
       }
     },
-    "description": "Tool failures are MCP tool results with `isError: true` — not JSON-RPC errors. `structuredContent` carries `{ error: { code, retryable, message, ...details }, suggested_next_actions: [..] }`; the text content block carries agent-facing recovery guidance plus a trimmed `{\"error\":{\"code\",\"retryable\"}}` JSON fence. `code` is a closed set (below). `retryable: false` means an identical retry cannot succeed — recovery requires a different call; follow `suggested_next_actions` or the guidance text. Defined in `crates/mn-mcp/src/render.rs` (`ErrorKind`, `ToolFailure`)."
+    "description": "Tool failures are MCP tool results with `isError: true` — not JSON-RPC errors. `structuredContent` carries `{ error: { code, retryable, message, ...details }, suggested_next_actions: [..] }`; the text content block carries agent-facing recovery guidance plus a trimmed `{\"error\":{\"code\",\"retryable\"}}` JSON fence. `code` is a closed set (below). `retryable: false` means an identical retry cannot succeed — recovery requires a different call; follow `suggested_next_actions` or the guidance text. The machine-readable JSON Schema for this envelope is published as the top-level `errorSchema` key in this document (generated from `crates/mn-mcp/src/render.rs` `ErrorKind` / `ToolFailure`, so its `code` enum, this prose, and the code never drift)."
   },
   "title": "midnight-manual MCP tools",
   "tools": [
     {
       "annotations": {
         "openWorldHint": false,
-        "readOnlyHint": true
+        "readOnlyHint": true,
+        "title": "Search corpus"
       },
       "description": "Search the Midnight Network documentation and code corpus (docs, SDK references, Compact language material, code examples). Returns ranked excerpts with confidence scores and source attribution. Use it whenever you need facts about Midnight, Compact, or the Midnight SDK. Code-heavy queries (function names, API signatures, error strings from code) benefit from code_mode=exclusive; conceptual queries should keep the default. For multi-query strategies, facet filters, or rerank control, use advanced_search.",
       "inputSchema": {
@@ -101,8 +176,19 @@
             "items": {
               "additionalProperties": true,
               "properties": {
+                "attribution": {
+                  "description": "Promoted copy of scores.confidence_factors.attribution.",
+                  "type": "string"
+                },
                 "chunk_id": {
                   "type": "string"
+                },
+                "confidence": {
+                  "description": "Promoted copy of scores.confidence (top-level for direct reads).",
+                  "type": [
+                    "number",
+                    "null"
+                  ]
                 },
                 "content": {
                   "type": "string"
@@ -115,6 +201,71 @@
                     "type": "string"
                   },
                   "type": "array"
+                },
+                "rank": {
+                  "description": "1-based position in the returned result list.",
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "rerank_score": {
+                  "description": "Voyage relevance score; present only when a local (BYOK) rerank ran.",
+                  "type": "number"
+                },
+                "scores": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "confidence": {
+                      "description": "Blended confidence in [0,1].",
+                      "type": "number"
+                    },
+                    "confidence_factors": {
+                      "additionalProperties": true,
+                      "properties": {
+                        "attribution": {
+                          "description": "Source attribution that drove the dominant trust multiplier.",
+                          "enum": [
+                            "foundation",
+                            "partner",
+                            "third_party",
+                            "community",
+                            "unknown"
+                          ],
+                          "type": "string"
+                        },
+                        "relevance_source": {
+                          "description": "Which relevance term fed the confidence blend.",
+                          "enum": [
+                            "rrf",
+                            "rerank"
+                          ],
+                          "type": "string"
+                        },
+                        "verified": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "attribution"
+                      ],
+                      "type": "object"
+                    },
+                    "matched_queries": {
+                      "description": "Indices of the fused queries that matched (advanced_search only; basic search strips this).",
+                      "items": {
+                        "type": "integer"
+                      },
+                      "type": "array"
+                    },
+                    "trust_score": {
+                      "description": "Content trust in [0,1].",
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "confidence",
+                    "confidence_factors"
+                  ],
+                  "type": "object"
                 },
                 "source_display_name": {
                   "type": "string"
@@ -132,6 +283,13 @@
                   "type": "array"
                 }
               },
+              "required": [
+                "chunk_id",
+                "content",
+                "rank",
+                "confidence",
+                "attribution"
+              ],
               "type": "object"
             },
             "type": "array"
@@ -164,7 +322,8 @@
           }
         },
         "required": [
-          "results"
+          "results",
+          "suggested_next_actions"
         ],
         "type": "object"
       }
@@ -172,7 +331,8 @@
     {
       "annotations": {
         "openWorldHint": false,
-        "readOnlyHint": true
+        "readOnlyHint": true,
+        "title": "Advanced search"
       },
       "description": "Full-control search over the Midnight corpus: fuse multiple queries (HyDE, expansion, step-back), restrict by facet filters, switch retrieval mode, and toggle reranking. Use when basic search comes up short or when the midnight-advanced-search skill prescribes a pattern. Call facets first to discover valid filter values.",
       "inputSchema": {
@@ -653,8 +813,19 @@
             "items": {
               "additionalProperties": true,
               "properties": {
+                "attribution": {
+                  "description": "Promoted copy of scores.confidence_factors.attribution.",
+                  "type": "string"
+                },
                 "chunk_id": {
                   "type": "string"
+                },
+                "confidence": {
+                  "description": "Promoted copy of scores.confidence (top-level for direct reads).",
+                  "type": [
+                    "number",
+                    "null"
+                  ]
                 },
                 "content": {
                   "type": "string"
@@ -667,6 +838,71 @@
                     "type": "string"
                   },
                   "type": "array"
+                },
+                "rank": {
+                  "description": "1-based position in the returned result list.",
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "rerank_score": {
+                  "description": "Voyage relevance score; present only when a local (BYOK) rerank ran.",
+                  "type": "number"
+                },
+                "scores": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "confidence": {
+                      "description": "Blended confidence in [0,1].",
+                      "type": "number"
+                    },
+                    "confidence_factors": {
+                      "additionalProperties": true,
+                      "properties": {
+                        "attribution": {
+                          "description": "Source attribution that drove the dominant trust multiplier.",
+                          "enum": [
+                            "foundation",
+                            "partner",
+                            "third_party",
+                            "community",
+                            "unknown"
+                          ],
+                          "type": "string"
+                        },
+                        "relevance_source": {
+                          "description": "Which relevance term fed the confidence blend.",
+                          "enum": [
+                            "rrf",
+                            "rerank"
+                          ],
+                          "type": "string"
+                        },
+                        "verified": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "attribution"
+                      ],
+                      "type": "object"
+                    },
+                    "matched_queries": {
+                      "description": "Indices of the fused queries that matched (advanced_search only; basic search strips this).",
+                      "items": {
+                        "type": "integer"
+                      },
+                      "type": "array"
+                    },
+                    "trust_score": {
+                      "description": "Content trust in [0,1].",
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "confidence",
+                    "confidence_factors"
+                  ],
+                  "type": "object"
                 },
                 "source_display_name": {
                   "type": "string"
@@ -684,6 +920,13 @@
                   "type": "array"
                 }
               },
+              "required": [
+                "chunk_id",
+                "content",
+                "rank",
+                "confidence",
+                "attribution"
+              ],
               "type": "object"
             },
             "type": "array"
@@ -716,7 +959,8 @@
           }
         },
         "required": [
-          "results"
+          "results",
+          "suggested_next_actions"
         ],
         "type": "object"
       }
@@ -724,7 +968,8 @@
     {
       "annotations": {
         "openWorldHint": false,
-        "readOnlyHint": true
+        "readOnlyHint": true,
+        "title": "Fetch chunks"
       },
       "description": "Fetch the full content of one or more chunks by id, typically ids returned by search. Use this to read the actual text behind search results.",
       "inputSchema": {
@@ -750,6 +995,61 @@
       "outputSchema": {
         "additionalProperties": true,
         "properties": {
+          "chunks": {
+            "items": {
+              "additionalProperties": true,
+              "properties": {
+                "chunk_index": {
+                  "type": "integer"
+                },
+                "content": {
+                  "type": "string"
+                },
+                "document": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "document_id": {
+                  "type": "string"
+                },
+                "heading_path": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "source": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "symbol_path": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "total_chunks": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "id",
+                "content"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "missing": {
+            "description": "Ids that did not resolve to a chunk.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "suggested_next_actions": {
             "items": {
               "properties": {
@@ -773,13 +1073,18 @@
             "type": "array"
           }
         },
+        "required": [
+          "chunks",
+          "suggested_next_actions"
+        ],
         "type": "object"
       }
     },
     {
       "annotations": {
         "openWorldHint": false,
-        "readOnlyHint": true
+        "readOnlyHint": true,
+        "title": "Next chunks"
       },
       "description": "Fetch chunks that immediately follow a given chunk in its document's reading order. Use to continue reading past the end of a chunk you already have.",
       "inputSchema": {
@@ -807,6 +1112,54 @@
       "outputSchema": {
         "additionalProperties": true,
         "properties": {
+          "chunks": {
+            "items": {
+              "additionalProperties": true,
+              "properties": {
+                "chunk_index": {
+                  "type": "integer"
+                },
+                "content": {
+                  "type": "string"
+                },
+                "document": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "document_id": {
+                  "type": "string"
+                },
+                "heading_path": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "source": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "symbol_path": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "total_chunks": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "id",
+                "content"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
           "suggested_next_actions": {
             "items": {
               "properties": {
@@ -830,13 +1183,18 @@
             "type": "array"
           }
         },
+        "required": [
+          "chunks",
+          "suggested_next_actions"
+        ],
         "type": "object"
       }
     },
     {
       "annotations": {
         "openWorldHint": false,
-        "readOnlyHint": true
+        "readOnlyHint": true,
+        "title": "Previous chunks"
       },
       "description": "Fetch chunks that immediately precede a given chunk in its document's reading order. Use to read the context leading up to a chunk you already have.",
       "inputSchema": {
@@ -864,6 +1222,54 @@
       "outputSchema": {
         "additionalProperties": true,
         "properties": {
+          "chunks": {
+            "items": {
+              "additionalProperties": true,
+              "properties": {
+                "chunk_index": {
+                  "type": "integer"
+                },
+                "content": {
+                  "type": "string"
+                },
+                "document": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "document_id": {
+                  "type": "string"
+                },
+                "heading_path": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "source": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "symbol_path": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "total_chunks": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "id",
+                "content"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
           "suggested_next_actions": {
             "items": {
               "properties": {
@@ -887,13 +1293,18 @@
             "type": "array"
           }
         },
+        "required": [
+          "chunks",
+          "suggested_next_actions"
+        ],
         "type": "object"
       }
     },
     {
       "annotations": {
         "openWorldHint": false,
-        "readOnlyHint": true
+        "readOnlyHint": true,
+        "title": "Surrounding chunks"
       },
       "description": "Fetch the chunks immediately before and after a given chunk in one call. Use when a search hit needs surrounding context to be understood.",
       "inputSchema": {
@@ -921,6 +1332,165 @@
       "outputSchema": {
         "additionalProperties": true,
         "properties": {
+          "chunk": {
+            "additionalProperties": true,
+            "properties": {
+              "chunk_index": {
+                "type": "integer"
+              },
+              "content": {
+                "type": "string"
+              },
+              "document": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "document_id": {
+                "type": "string"
+              },
+              "heading_path": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "id": {
+                "type": "string"
+              },
+              "source": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "symbol_path": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "total_chunks": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "id",
+              "content"
+            ],
+            "type": "object"
+          },
+          "next": {
+            "additionalProperties": true,
+            "properties": {
+              "chunks": {
+                "items": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "chunk_index": {
+                      "type": "integer"
+                    },
+                    "content": {
+                      "type": "string"
+                    },
+                    "document": {
+                      "additionalProperties": true,
+                      "type": "object"
+                    },
+                    "document_id": {
+                      "type": "string"
+                    },
+                    "heading_path": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "id": {
+                      "type": "string"
+                    },
+                    "source": {
+                      "additionalProperties": true,
+                      "type": "object"
+                    },
+                    "symbol_path": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "total_chunks": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "content"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "chunks"
+            ],
+            "type": "object"
+          },
+          "prev": {
+            "additionalProperties": true,
+            "properties": {
+              "chunks": {
+                "items": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "chunk_index": {
+                      "type": "integer"
+                    },
+                    "content": {
+                      "type": "string"
+                    },
+                    "document": {
+                      "additionalProperties": true,
+                      "type": "object"
+                    },
+                    "document_id": {
+                      "type": "string"
+                    },
+                    "heading_path": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "id": {
+                      "type": "string"
+                    },
+                    "source": {
+                      "additionalProperties": true,
+                      "type": "object"
+                    },
+                    "symbol_path": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "total_chunks": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "content"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "chunks"
+            ],
+            "type": "object"
+          },
           "suggested_next_actions": {
             "items": {
               "properties": {
@@ -944,13 +1514,20 @@
             "type": "array"
           }
         },
+        "required": [
+          "prev",
+          "next",
+          "chunk",
+          "suggested_next_actions"
+        ],
         "type": "object"
       }
     },
     {
       "annotations": {
         "openWorldHint": false,
-        "readOnlyHint": true
+        "readOnlyHint": true,
+        "title": "Chunk ancestry"
       },
       "description": "Show where a chunk sits in its source's structure: the chain of containing nodes (document, folders) up to the source root. Use to orient a chunk within its source and find its containing document.",
       "inputSchema": {
@@ -970,6 +1547,41 @@
       "outputSchema": {
         "additionalProperties": true,
         "properties": {
+          "parents": {
+            "items": {
+              "additionalProperties": true,
+              "properties": {
+                "document_id": {
+                  "description": "Set on the document-kind node; null otherwise.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "id": {
+                  "type": "string"
+                },
+                "kind": {
+                  "description": "Node kind (e.g. document, folder, root).",
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "kind"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "source": {
+            "additionalProperties": true,
+            "type": "object"
+          },
           "suggested_next_actions": {
             "items": {
               "properties": {
@@ -993,13 +1605,19 @@
             "type": "array"
           }
         },
+        "required": [
+          "parents",
+          "source",
+          "suggested_next_actions"
+        ],
         "type": "object"
       }
     },
     {
       "annotations": {
         "openWorldHint": false,
-        "readOnlyHint": true
+        "readOnlyHint": true,
+        "title": "Document overview"
       },
       "description": "Fetch a document's metadata plus an ordered skeleton of its chunks (ids, positions, token counts — no bodies). Use to size up a document before reading it with get_document_chunks.",
       "inputSchema": {
@@ -1019,6 +1637,45 @@
       "outputSchema": {
         "additionalProperties": true,
         "properties": {
+          "chunks": {
+            "items": {
+              "additionalProperties": true,
+              "properties": {
+                "chunk_index": {
+                  "type": "integer"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "token_count": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "id",
+                "chunk_index"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "id": {
+            "type": "string"
+          },
+          "language": {
+            "description": "ISO language tag or extension fallback; null when undetected.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "source_path": {
+            "type": "string"
+          },
           "suggested_next_actions": {
             "items": {
               "properties": {
@@ -1042,13 +1699,20 @@
             "type": "array"
           }
         },
+        "required": [
+          "id",
+          "source_path",
+          "chunks",
+          "suggested_next_actions"
+        ],
         "type": "object"
       }
     },
     {
       "annotations": {
         "openWorldHint": false,
-        "readOnlyHint": true
+        "readOnlyHint": true,
+        "title": "Read document"
       },
       "description": "Read a window of a document's chunk bodies by position. Use after get_document to read a document section by section.",
       "inputSchema": {
@@ -1082,6 +1746,41 @@
       "outputSchema": {
         "additionalProperties": true,
         "properties": {
+          "chunks": {
+            "items": {
+              "additionalProperties": true,
+              "properties": {
+                "chunk_id": {
+                  "type": "string"
+                },
+                "chunk_index": {
+                  "type": "integer"
+                },
+                "content": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "chunk_id"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "from": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "id": {
+            "type": "string"
+          },
+          "source": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "source_path": {
+            "type": "string"
+          },
           "suggested_next_actions": {
             "items": {
               "properties": {
@@ -1103,15 +1802,27 @@
               "type": "object"
             },
             "type": "array"
+          },
+          "total_chunks": {
+            "minimum": 0,
+            "type": "integer"
           }
         },
+        "required": [
+          "id",
+          "source_path",
+          "total_chunks",
+          "chunks",
+          "suggested_next_actions"
+        ],
         "type": "object"
       }
     },
     {
       "annotations": {
         "openWorldHint": false,
-        "readOnlyHint": true
+        "readOnlyHint": true,
+        "title": "List sources"
       },
       "description": "List the sources that make up the corpus (paginated). Use to discover what material exists and to get source slugs for advanced_search filters.",
       "inputSchema": {
@@ -1158,6 +1869,38 @@
       "outputSchema": {
         "additionalProperties": true,
         "properties": {
+          "next_cursor": {
+            "description": "Opaque pagination token; null on the last page.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sources": {
+            "items": {
+              "additionalProperties": true,
+              "properties": {
+                "display_name": {
+                  "type": "string"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string"
+                },
+                "slug": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "slug"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
           "suggested_next_actions": {
             "items": {
               "properties": {
@@ -1179,15 +1922,25 @@
               "type": "object"
             },
             "type": "array"
+          },
+          "total": {
+            "minimum": 0,
+            "type": "integer"
           }
         },
+        "required": [
+          "sources",
+          "total",
+          "suggested_next_actions"
+        ],
         "type": "object"
       }
     },
     {
       "annotations": {
         "openWorldHint": false,
-        "readOnlyHint": true
+        "readOnlyHint": true,
+        "title": "Discover facets"
       },
       "description": "Discover the filter dimensions available to advanced_search and the values present in the corpus. Call without arguments for an overview; pass a facet name to page through all values of one dimension.",
       "inputSchema": {
@@ -1224,38 +1977,138 @@
       },
       "name": "facets",
       "outputSchema": {
-        "additionalProperties": true,
-        "properties": {
-          "suggested_next_actions": {
-            "items": {
-              "properties": {
-                "arguments": {
+        "oneOf": [
+          {
+            "additionalProperties": true,
+            "properties": {
+              "filters": {
+                "items": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "key": {
+                      "description": "Filter dimension name for advanced_search.",
+                      "type": "string"
+                    },
+                    "negatable": {
+                      "type": "boolean"
+                    },
+                    "total": {
+                      "type": "integer"
+                    },
+                    "truncated": {
+                      "type": "boolean"
+                    },
+                    "type": {
+                      "type": "string"
+                    },
+                    "values": {
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "key"
+                  ],
                   "type": "object"
                 },
-                "description": {
-                  "description": "What this suggested action achieves. Actions are suggestions, not required next steps.",
+                "type": "array"
+              },
+              "modes": {
+                "items": {
                   "type": "string"
                 },
-                "tool": {
-                  "description": "Tool to call. Absent for actions the user (not the agent) must take.",
-                  "type": "string"
-                }
+                "type": "array"
               },
-              "required": [
-                "description"
-              ],
-              "type": "object"
+              "suggested_next_actions": {
+                "items": {
+                  "properties": {
+                    "arguments": {
+                      "type": "object"
+                    },
+                    "description": {
+                      "description": "What this suggested action achieves. Actions are suggestions, not required next steps.",
+                      "type": "string"
+                    },
+                    "tool": {
+                      "description": "Tool to call. Absent for actions the user (not the agent) must take.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "description"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              }
             },
-            "type": "array"
+            "required": [
+              "filters",
+              "suggested_next_actions"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": true,
+            "properties": {
+              "facet": {
+                "description": "The drilled-into dimension.",
+                "type": "string"
+              },
+              "next_cursor": {
+                "description": "Opaque drill-down token; null on the last page.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "suggested_next_actions": {
+                "items": {
+                  "properties": {
+                    "arguments": {
+                      "type": "object"
+                    },
+                    "description": {
+                      "description": "What this suggested action achieves. Actions are suggestions, not required next steps.",
+                      "type": "string"
+                    },
+                    "tool": {
+                      "description": "Tool to call. Absent for actions the user (not the agent) must take.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "description"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "total": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "values": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "facet",
+              "values",
+              "suggested_next_actions"
+            ],
+            "type": "object"
           }
-        },
-        "type": "object"
+        ]
       }
     },
     {
       "annotations": {
         "openWorldHint": false,
-        "readOnlyHint": true
+        "readOnlyHint": true,
+        "title": "Diagnostics"
       },
       "description": "Diagnose the retrieval setup: cloud reachability, authentication and rate-limit state, VoyageAI key validity, and rerank configuration. Call when searches fail, return errors, or before starting a long session.",
       "inputSchema": {
@@ -1267,6 +2120,53 @@
       "outputSchema": {
         "additionalProperties": true,
         "properties": {
+          "auth_type": {
+            "description": "anonymous / github_oauth / admin.",
+            "type": "string"
+          },
+          "authenticated": {
+            "type": "boolean"
+          },
+          "cloud": {
+            "enum": [
+              "reachable",
+              "degraded",
+              "unreachable"
+            ],
+            "type": "string"
+          },
+          "cloud_version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "identity": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "mcp_version": {
+            "type": "string"
+          },
+          "permission_level": {
+            "description": "read / write / admin.",
+            "type": "string"
+          },
+          "rate_limit": {
+            "additionalProperties": true,
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "reranker": {
+            "type": "string"
+          },
+          "reranker_loaded": {
+            "type": "boolean"
+          },
           "suggested_next_actions": {
             "items": {
               "properties": {
@@ -1288,8 +2188,35 @@
               "type": "object"
             },
             "type": "array"
+          },
+          "token_limits": {
+            "additionalProperties": true,
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "voyage": {
+            "enum": [
+              "valid",
+              "invalid_key",
+              "unreachable",
+              "not_configured"
+            ],
+            "type": "string"
           }
         },
+        "required": [
+          "mcp_version",
+          "cloud",
+          "authenticated",
+          "auth_type",
+          "permission_level",
+          "voyage",
+          "reranker",
+          "reranker_loaded",
+          "suggested_next_actions"
+        ],
         "type": "object"
       }
     },
@@ -1298,7 +2225,8 @@
         "destructiveHint": false,
         "idempotentHint": true,
         "openWorldHint": false,
-        "readOnlyHint": false
+        "readOnlyHint": false,
+        "title": "Install search skill"
       },
       "description": "Install (or update) the midnight-advanced-search skill — a retrieval playbook teaching effective corpus search patterns — into the user's AI harness(es). Use when search results are poor or the user asks for better search guidance.",
       "inputSchema": {
@@ -1333,6 +2261,57 @@
       "outputSchema": {
         "additionalProperties": true,
         "properties": {
+          "detected": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "installed": {
+            "items": {
+              "additionalProperties": true,
+              "properties": {
+                "action": {
+                  "description": "What happened (e.g. created / updated).",
+                  "type": "string"
+                },
+                "harness": {
+                  "type": "string"
+                },
+                "path": {
+                  "type": "string"
+                },
+                "reload_step": {
+                  "type": "string"
+                },
+                "scope": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "harness",
+                "action"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "not_detected": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "scope": {
+            "enum": [
+              "user",
+              "project"
+            ],
+            "type": "string"
+          },
+          "skill_name": {
+            "type": "string"
+          },
           "suggested_next_actions": {
             "items": {
               "properties": {
@@ -1356,6 +2335,12 @@
             "type": "array"
           }
         },
+        "required": [
+          "skill_name",
+          "scope",
+          "installed",
+          "suggested_next_actions"
+        ],
         "type": "object"
       }
     }
