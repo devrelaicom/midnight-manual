@@ -15,7 +15,7 @@ fi
 
 # 2. Each file: schema + path-safety via the real loader, plus required provenance.
 for f in "${files[@]}"; do
-  if ! cargo run -q -p mn-cli --bin mnm -- manifest check "$f" >/dev/null 2>&1; then
+  if ! cargo run -q -p midnight-manual --bin mnm -- manifest check "$f" >/dev/null 2>&1; then
     echo "FAIL: 'manifest check' rejected $f"; fail=1
   fi
   grep -q 'attribution:' "$f" || { echo "FAIL: no attribution in $f"; fail=1; }

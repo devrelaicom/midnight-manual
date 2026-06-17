@@ -1,16 +1,16 @@
 [workspace]
 members = [
-    "crates/mn-core",
-    "crates/mn-store",
-    "crates/mn-retrieval",
-    "crates/mn-content",
-    "crates/mn-embedding",
-    "crates/mn-auth",
-    "crates/mn-telemetry",
-    "crates/mn-skills",
-    "crates/mn-mcp",
-    "crates/mn-cli",
-    "crates/mn-server",
+    "crates/mnm-core",
+    "crates/mnm-store",
+    "crates/mnm-retrieval",
+    "crates/mnm-content",
+    "crates/mnm-embedding",
+    "crates/mnm-auth",
+    "crates/mnm-telemetry",
+    "crates/mnm-skills",
+    "crates/mnm-mcp",
+    "crates/midnight-manual",
+    "crates/midnight-manual-server",
 ]
 resolver = "2"
 
@@ -26,7 +26,7 @@ description   = "RAG platform for the Midnight Network: CLI, local MCP server, a
 
 [workspace.lints.rust]
 # `deny` (not `forbid`) so the single FFI binding to the vendored tree-sitter
-# Scheme grammar in mn-content can opt in with a narrowly-scoped
+# Scheme grammar in mnm-content can opt in with a narrowly-scoped
 # `#[allow(unsafe_code)]`. Unsafe remains denied everywhere by default; only that
 # one documented FFI declaration is permitted. `forbid` would make even that
 # scoped allow a hard error.
@@ -44,7 +44,7 @@ cargo-dist-version = "0.27.1"
 ci                 = ["github"]
 installers         = ["shell", "powershell"]
 # Seven targets per FR-099 (CLI binary distribution). The server is Docker-only
-# (see crates/mn-server/Cargo.toml `[package.metadata.dist] dist = false`), so
+# (see crates/midnight-manual-server/Cargo.toml `[package.metadata.dist] dist = false`), so
 # this matrix only builds the `midnight-manual` + `mnm` CLI binaries.
 targets            = [
     "aarch64-apple-darwin",
@@ -112,7 +112,7 @@ base64           = "0.22"
 pulldown-cmark   = "0.12"
 quick-xml        = "0.31"
 # Compact parser frontend (rowan-based, pure Rust — no native build step).
-# Optional + feature-gated in mn-content. Exact pin: pre-release (beta) API.
+# Optional + feature-gated in mnm-content. Exact pin: pre-release (beta) API.
 compactp_parser = "=0.1.0-beta.1"
 compactp_ast    = "=0.1.0-beta.1"
 compactp_syntax = "=0.1.0-beta.1"
@@ -133,7 +133,7 @@ tree-sitter-language = "0.1"  # selects 0.1.7
 text-splitter    = { version = "0.27", features = ["code", "tokenizers"] }
 # Directory walker honoring .gitignore (used by the code ingest walker).
 ignore           = "0.4"
-# tree-sitter grammars. All are optional + feature-gated in mn-content. Each
+# tree-sitter grammars. All are optional + feature-gated in mnm-content. Each
 # depends on tree-sitter-language ^0.1 for ABI, unifying against runtime 0.25.
 tree-sitter-rust       = "0.24"   # selects 0.24.2
 tree-sitter-typescript = "0.23"   # selects 0.23.2
@@ -154,7 +154,7 @@ tree-sitter-haskell    = "0.23"   # selects 0.23.1
 tree-sitter-java       = "0.23"   # selects 0.23.5
 
 # ML
-# A direct workspace dep so mn-content can compute real BPE token counts that
+# A direct workspace dep so mnm-content can compute real BPE token counts that
 # match the production embedder, without dragging in any model runtime.
 # default-features disabled to drop the `progressbar` (indicatif) and `onig`
 # (Oniguruma C lib) baggage we do not need for offline encode-only usage.

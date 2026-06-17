@@ -18,7 +18,7 @@ COPY crates/ ./crates/
 RUN cargo chef prepare --recipe-path recipe.json
 
 # Cook: build deps from the plan
-RUN cargo chef cook --release --recipe-path recipe.json -p mn-server
+RUN cargo chef cook --release --recipe-path recipe.json -p midnight-manual-server
 
 # Build: actual server binary
 COPY . .
@@ -31,7 +31,7 @@ FROM gcr.io/distroless/cc-debian12 AS runtime
 COPY --from=builder /app/target/release/midnight-manual-server /usr/local/bin/midnight-manual-server
 
 # Migrations baked in
-COPY --from=builder /app/crates/mn-store/migrations /migrations
+COPY --from=builder /app/crates/mnm-store/migrations /migrations
 
 EXPOSE 8080
 

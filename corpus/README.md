@@ -14,7 +14,7 @@ than committed here so they can be versioned independently.
 
 ## Manifest schema
 
-See [`crates/mn-content/src/manifest.rs`](../crates/mn-content/src/manifest.rs)
+See [`crates/mnm-content/src/manifest.rs`](../crates/mnm-content/src/manifest.rs)
 for the canonical Rust types. The top-level shape:
 
 ```yaml

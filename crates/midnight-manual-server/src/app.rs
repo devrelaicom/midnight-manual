@@ -1,0 +1,341 @@
+//! axum app builder — wires routes, middleware, and shared state.
+
+use std::sync::Arc;
+
+use axum::extract::DefaultBodyLimit;
+use axum::Router;
+use mnm_auth::{ChallengeStore, OAuthStateStore, SigningSecret, UserStore};
+use sqlx::PgPool;
+use tower_http::limit::RequestBodyLimitLayer;
+use tower_http::trace::TraceLayer;
+
+use crate::config::ServerConfig;
+use crate::middleware::request_id;
+
+/// Cap for inbound request bodies. The largest legitimate body today is the
+/// admin ingest `PUT .../documents` upload, which carries documents + chunk
+/// text + embedding vectors for one batch — comfortably bounded by the CLI's
+/// size-aware batching logic but can reach many MiB on a dense repo. 25 MiB
+/// gives the CLI headroom while staying well below a memory-exhaustion
+/// threshold. Sourced from [`mnm_core::limits::MAX_INGEST_BODY_BYTES`] so the
+/// server cap and the CLI's batch-size target stay in lockstep.
+pub const MAX_BODY_BYTES: usize = mnm_core::limits::MAX_INGEST_BODY_BYTES;
+
+/// Per-handler shared state — clonable cheaply.
+#[derive(Clone)]
+pub struct AppState {
+    /// Database pool.
+    pub pool: PgPool,
+    /// Server-side config snapshot.
+    pub cfg: Arc<ServerConfig>,
+    /// Auth subsystem — `None` when `MIDNIGHT_MANUAL_USER_STORE` and
+    /// `MIDNIGHT_MANUAL_JWT_SECRET` are not both configured. Auth-bearing
+    /// routes return 503 in that case rather than letting boot fail (so
+    /// read-only deployments without an admin user-store still serve search).
+    pub auth: Option<Arc<AuthState>>,
+    /// In-process rate limiter, or `None` when rate limiting is disabled
+    /// (Phase 17). When `None` the rate-limit middleware is a pass-through.
+    pub rate_limiter: Option<Arc<crate::ratelimit::RateLimiter>>,
+    /// Confidence-scoring policy resolved at boot (US6, D24). Shared read-only
+    /// across requests.
+    pub scoring_policy: Arc<mnm_core::scoring_policy::ScoringPolicy>,
+    /// The corpus's active embedding model, re-resolvable without a restart.
+    /// `None` until resolved — production resolves at boot; some tests leave it
+    /// unresolved and search's existing `None`-handling covers that.
+    pub corpus_model: crate::corpus_model::Shared,
+    /// Server-side Voyage embedder for `POST /v1/embeddings`. `None` when
+    /// `VOYAGE_API_KEY` is unset — the endpoint then 503s rather than failing
+    /// boot, so a deployment that only proxies client-side vectors still serves.
+    pub voyage: Option<std::sync::Arc<mnm_embedding::voyage::VoyageEmbedder>>,
+    /// Server-side contextualized (general) Voyage embedder for
+    /// `POST /v1/embeddings` with `type=general`. `None` when
+    /// `VOYAGE_API_KEY` is unset (endpoint 503s).
+    pub voyage_ctx:
+        Option<std::sync::Arc<mnm_embedding::contextualized::ContextualizedVoyageEmbedder>>,
+    /// The corpus's code-embedding model, resolved at boot from config.
+    /// `None` when unresolved — code_mode searches then 503.
+    pub code_model: crate::code_model::Shared,
+    /// In-process embedding-token accounting (tiered hourly/daily ceilings).
+    /// Always present — token accounting has no disable switch.
+    pub token_limiter: std::sync::Arc<crate::tokenlimit::TokenUsageLimiter>,
+    /// On-disk model-cache directory, used by the embeddings handler's
+    /// best-effort token pre-count (to locate a tokenizer when one is present).
+    pub cache_dir: std::path::PathBuf,
+    /// Shared TTL cache for the `/v1/facets` response (see `routes::facets`).
+    /// Held per-app (not a module-global static) so each constructed app —
+    /// including each integration test's app — gets an isolated cache.
+    pub facets_cache: crate::routes::facets::FacetsCache,
+}
+
+/// Resolved auth subsystem state — set once at boot when both the user
+/// store and the JWT secret are present.
+#[derive(Debug)]
+pub struct AuthState {
+    /// Parsed user store loaded from `MIDNIGHT_MANUAL_USER_STORE`.
+    pub user_store: UserStore,
+    /// HS256 signing secret from `MIDNIGHT_MANUAL_JWT_SECRET`.
+    pub jwt_secret: SigningSecret,
+    /// In-memory challenge nonce store (FR-056). One per process.
+    pub challenges: ChallengeStore,
+    /// GitHub OAuth subsystem (FR-062, FR-115, FR-117). `None` when the
+    /// GitHub-OAuth env vars are not all present — `/v1/auth/github/*`
+    /// returns 503 in that case.
+    pub github_oauth: Option<GithubOAuthState>,
+}
+
+/// Configured GitHub OAuth subsystem. Held inside [`AuthState`] so it
+/// inherits the JWT-secret + user-store boot gate.
+#[derive(Debug)]
+pub struct GithubOAuthState {
+    /// GitHub OAuth App client id.
+    pub client_id: String,
+    /// GitHub OAuth App client secret.
+    pub client_secret: String,
+    /// Public callback URL registered with the GitHub OAuth App.
+    pub redirect_url: String,
+    /// Required GitHub org. Only `active` members of this org receive a
+    /// read-uplift bearer (FR-062).
+    pub org: String,
+    /// Read-uplift JWT TTL.
+    pub read_token_ttl: time::Duration,
+    /// Authorize URL base (production: `https://github.com/login/oauth/authorize`).
+    pub authorize_url: String,
+    /// Token-exchange URL (production: `https://github.com/login/oauth/access_token`).
+    pub token_url: String,
+    /// GitHub REST API base URL (production: `https://api.github.com`).
+    pub api_base_url: String,
+    /// CSRF / cli-port state store.
+    pub states: OAuthStateStore,
+}
+
+/// All the ways `AuthState` construction can fail at boot.
+#[derive(Debug, thiserror::Error)]
+pub enum AuthStateError {
+    /// `MIDNIGHT_MANUAL_USER_STORE` parse failure.
+    #[error("user store parse failed: {0}")]
+    UserStore(#[from] mnm_auth::UserStoreError),
+    /// `MIDNIGHT_MANUAL_JWT_SECRET` was shorter than the 32-byte floor.
+    #[error("jwt secret invalid: {0}")]
+    JwtSecret(#[from] mnm_auth::JwtError),
+}
+
+impl AuthState {
+    /// Build the auth subsystem from a `ServerConfig`. Returns `None` when
+    /// the user-store body or JWT secret env is absent — auth endpoints then
+    /// 503 cleanly. The GitHub OAuth subsystem is layered on top: it's only
+    /// populated when all four GitHub env vars (client id, secret, redirect
+    /// URL, org) are present alongside the JWT secret + user store.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthStateError`] when one input is present but malformed.
+    /// "Missing" is allowed (read-only deployments); "garbage" is not.
+    pub fn from_config(cfg: &ServerConfig) -> Result<Option<Self>, AuthStateError> {
+        let (Some(body), Some(bytes)) = (cfg.user_store_body.as_deref(), cfg.jwt_secret.as_deref())
+        else {
+            return Ok(None);
+        };
+        let user_store = UserStore::parse(body)?;
+        let jwt_secret = SigningSecret::from_bytes(bytes.to_vec())?;
+        let github_oauth = build_github_oauth(cfg);
+        Ok(Some(Self {
+            user_store,
+            jwt_secret,
+            challenges: ChallengeStore::new(),
+            github_oauth,
+        }))
+    }
+}
+
+fn build_github_oauth(cfg: &ServerConfig) -> Option<GithubOAuthState> {
+    let client_id = cfg.github_oauth_client_id.as_ref()?.clone();
+    let client_secret = cfg.github_oauth_client_secret.as_ref()?.clone();
+    let redirect_url = cfg.github_oauth_redirect_url.as_ref()?.clone();
+    let org = cfg.github_org.as_ref()?.clone();
+    let read_token_ttl = time::Duration::days(cfg.read_token_ttl_days);
+    Some(GithubOAuthState {
+        client_id,
+        client_secret,
+        redirect_url,
+        org,
+        read_token_ttl,
+        authorize_url: cfg.github_authorize_url.clone(),
+        token_url: cfg.github_token_url.clone(),
+        api_base_url: cfg.github_api_base_url.clone(),
+        states: OAuthStateStore::new(),
+    })
+}
+
+/// Build the full axum app: routes + middleware + state.
+///
+/// Constructs an unresolved (`None`) corpus model handle — callers that need a
+/// resolved model (production boot) use [`build_with_limiter`] directly. Search
+/// tolerates the unresolved state via its existing `None`-handling.
+///
+/// # Errors
+///
+/// Returns [`AuthStateError`] if the auth env values are present but malformed
+/// (`MIDNIGHT_MANUAL_USER_STORE` fails to parse, or
+/// `MIDNIGHT_MANUAL_JWT_SECRET` is shorter than 32 bytes). When BOTH are
+/// absent the server boots with `auth = None`.
+pub fn build(pool: PgPool, cfg: ServerConfig) -> Result<Router, AuthStateError> {
+    let limiter = crate::ratelimit::RateLimiter::from_config(&cfg);
+    let corpus_model = std::sync::Arc::new(std::sync::RwLock::new(None));
+    let token_limiter = crate::tokenlimit::TokenUsageLimiter::from_config(&cfg);
+    let voyage = voyage_from_config(&cfg);
+    let voyage_ctx = voyage_ctx_from_config(&cfg);
+    let code_model = std::sync::Arc::new(std::sync::RwLock::new(None));
+    build_with_limiter(
+        pool,
+        cfg,
+        limiter,
+        corpus_model,
+        token_limiter,
+        voyage,
+        voyage_ctx,
+        code_model,
+    )
+}
+
+/// Construct the server-side Voyage embedder from config, or `None` when
+/// `VOYAGE_API_KEY` is unset (BYOK / server-side embedding not configured).
+fn voyage_from_config(
+    cfg: &ServerConfig,
+) -> Option<std::sync::Arc<mnm_embedding::voyage::VoyageEmbedder>> {
+    cfg.voyage_api_key.as_ref().map(|k| {
+        std::sync::Arc::new(mnm_embedding::voyage::VoyageEmbedder::new(
+            k,
+            &cfg.voyage_model,
+            cfg.voyage_output_dimension,
+            &cfg.voyage_output_dtype,
+        ))
+    })
+}
+
+/// Construct the server-side contextualized (general) Voyage embedder from
+/// config, or `None` when `VOYAGE_API_KEY` is unset.
+fn voyage_ctx_from_config(
+    cfg: &ServerConfig,
+) -> Option<std::sync::Arc<mnm_embedding::contextualized::ContextualizedVoyageEmbedder>> {
+    cfg.voyage_api_key.as_ref().map(|k| {
+        std::sync::Arc::new(mnm_embedding::contextualized::ContextualizedVoyageEmbedder::new(
+            k,
+            &cfg.voyage_context_model,
+            cfg.voyage_output_dimension,
+            &cfg.voyage_output_dtype,
+        ))
+    })
+}
+
+/// Build the app with the corpus model (and the config-pinned code model)
+/// auto-resolved from the DB. Convenience for integration tests (and any
+/// caller that wants boot-time resolution without threading the handles
+/// manually). Resolution failure yields an unresolved (`None`) model —
+/// search then 503s, matching prod's "no model" path.
+///
+/// # Errors
+/// Returns [`AuthStateError`] if the auth env values are present but malformed.
+pub async fn build_resolved(pool: PgPool, cfg: ServerConfig) -> Result<Router, AuthStateError> {
+    let cm = crate::corpus_model::resolve(&pool).await.ok();
+    let corpus_model = std::sync::Arc::new(std::sync::RwLock::new(cm));
+    let km = crate::code_model::resolve(&pool, &cfg.code_model_wire)
+        .await
+        .ok();
+    let code_model = std::sync::Arc::new(std::sync::RwLock::new(km));
+    let limiter = crate::ratelimit::RateLimiter::from_config(&cfg);
+    let token_limiter = crate::tokenlimit::TokenUsageLimiter::from_config(&cfg);
+    let voyage = voyage_from_config(&cfg);
+    let voyage_ctx = voyage_ctx_from_config(&cfg);
+    build_with_limiter(
+        pool,
+        cfg,
+        limiter,
+        corpus_model,
+        token_limiter,
+        voyage,
+        voyage_ctx,
+        code_model,
+    )
+}
+
+/// Build the app with an explicit rate limiter and corpus-model handle, so
+/// `main` can share the limiter with its background tasks, pass a corpus model
+/// resolved at boot, and integration tests can pre-seed overrides. [`build`]
+/// delegates here after constructing the limiter from config and an unresolved
+/// (`None`) corpus model.
+///
+/// # Errors
+///
+/// Returns [`AuthStateError`] if the auth env values are present but malformed.
+// Boot wiring threads each shared handle explicitly (so `main` and tests can
+// share/seed them); a params struct would only add ceremony.
+#[allow(clippy::too_many_arguments)]
+pub fn build_with_limiter(
+    pool: PgPool,
+    cfg: ServerConfig,
+    rate_limiter: Option<Arc<crate::ratelimit::RateLimiter>>,
+    corpus_model: crate::corpus_model::Shared,
+    token_limiter: Arc<crate::tokenlimit::TokenUsageLimiter>,
+    voyage: Option<Arc<mnm_embedding::voyage::VoyageEmbedder>>,
+    voyage_ctx: Option<Arc<mnm_embedding::contextualized::ContextualizedVoyageEmbedder>>,
+    code_model: crate::code_model::Shared,
+) -> Result<Router, AuthStateError> {
+    let auth = AuthState::from_config(&cfg)?.map(Arc::new);
+    let scoring_policy = Arc::new(cfg.scoring_policy.clone());
+    // Resolve the model-cache dir (used for the optional token pre-count
+    // tokenizer); fall back to a tempdir in a sandbox with no HOME/XDG so boot
+    // never fails on it.
+    let cache_dir = mnm_embedding::cache::resolve(&mnm_embedding::cache::StdEnv)
+        .unwrap_or_else(std::env::temp_dir);
+    let state = AppState {
+        pool,
+        cfg: Arc::new(cfg),
+        auth,
+        rate_limiter,
+        scoring_policy,
+        corpus_model,
+        voyage,
+        voyage_ctx,
+        code_model,
+        token_limiter,
+        cache_dir,
+        facets_cache: crate::routes::facets::new_cache(),
+    };
+
+    Ok(Router::new()
+        .merge(crate::routes::health::router())
+        .merge(crate::routes::me::router())
+        .merge(crate::routes::sources::router())
+        .merge(crate::routes::models::router())
+        .merge(crate::routes::search::router())
+        .merge(crate::routes::facets::router())
+        .merge(crate::routes::embeddings::router())
+        .merge(crate::routes::chunks::router())
+        .merge(crate::routes::documents::router())
+        .merge(crate::routes::auth::router())
+        .merge(crate::routes::admin_ingest::router())
+        .merge(crate::routes::admin_ratelimits::router())
+        .merge(crate::routes::admin_sources::router())
+        .merge(crate::routes::admin_status::router())
+        .merge(crate::routes::admin_tokenlimits::router())
+        .merge(crate::routes::admin_versions::router())
+        .merge(crate::routes::versions::router())
+        .merge(crate::routes::github::router())
+        .merge(crate::routes::telemetry::router())
+        .merge(crate::routes::metrics::router())
+        // Bound the body size at the boundary — refuses oversize payloads
+        // before any handler-side validation runs.
+        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
+        .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::middleware::rate_limit::layer,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::middleware::bearer::layer,
+        ))
+        .layer(axum::middleware::from_fn(request_id::layer))
+        .layer(TraceLayer::new_for_http())
+        .with_state(state))
+}

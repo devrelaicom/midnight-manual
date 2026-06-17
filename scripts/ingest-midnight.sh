@@ -248,8 +248,8 @@ if [ -n "$MNM_BIN" ]; then
   [ -x "$MNM" ] || { echo "error: --mnm-binary '$MNM' is not an executable" >&2; exit 1; }
   built_line="using: $MNM"
 else
-  printf '%sbuilding mnm (cargo build --release -p mn-cli --bin mnm)…%s\n' "$DIM" "$NC"
-  if ! cargo build --release -p mn-cli --bin mnm; then
+  printf '%sbuilding mnm (cargo build --release -p midnight-manual --bin mnm)…%s\n' "$DIM" "$NC"
+  if ! cargo build --release -p midnight-manual --bin mnm; then
     echo "error: cargo build failed" >&2; exit 1
   fi
   MNM="./target/release/mnm"

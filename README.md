@@ -67,7 +67,7 @@ The corpus is hosted, and both embedding and reranking run through VoyageAI (pro
 ```bash
 git clone https://github.com/devrelaicom/midnight-manual.git
 cd midnight-manual
-cargo build --release -p mn-cli
+cargo build --release -p midnight-manual
 ```
 
 This produces two identical binaries, `midnight-manual` and its short alias `mnm`, in `target/release/`. Put one on your `PATH`:
@@ -197,7 +197,7 @@ A search result is a chunk. These tools let your assistant pull exactly as much 
 
 ## Advanced search skills
 
-The MCP server gives your assistant the *power tools* — hybrid retrieval, reranking, trust scoring, chunk navigation. The **`midnight-advanced-search` skill** teaches it the *technique*: how to combine those tools like a seasoned researcher instead of firing one naive query and hoping. It's a persistent, auto-loaded [Agent Skill](https://agentskills.io) (`SKILL.md`) — once installed, your agent reaches for the right retrieval pattern on its own, no prompting required. The skill ships in the repo at [`crates/mn-skills/assets/midnight-advanced-search/`](crates/mn-skills/assets/midnight-advanced-search/).
+The MCP server gives your assistant the *power tools* — hybrid retrieval, reranking, trust scoring, chunk navigation. The **`midnight-advanced-search` skill** teaches it the *technique*: how to combine those tools like a seasoned researcher instead of firing one naive query and hoping. It's a persistent, auto-loaded [Agent Skill](https://agentskills.io) (`SKILL.md`) — once installed, your agent reaches for the right retrieval pattern on its own, no prompting required. The skill ships in the repo at [`crates/mnm-skills/assets/midnight-advanced-search/`](crates/mnm-skills/assets/midnight-advanced-search/).
 
 ### Install it in one step
 
@@ -217,7 +217,7 @@ Ask your assistant to install it — the MCP server exposes an **`install_search
 | **Trust-weighted selection** | Ranks and prunes on each result's `trust_score` and `confidence_factors` (attribution, verification, freshness, version-match). | Authoritative, version-matched sources rise; stale or deprecated ones sink. |
 | **Cross-source comparison** | Pulls from multiple sources and surfaces disagreement instead of silently picking one. | Compensates for the deliberate absence of automatic contradiction detection. |
 
-Worked examples for every pattern — the exact prompt the agent emits, the resulting `queries` array, and the token cost — are folded into the bundled skill at [`crates/mn-skills/assets/midnight-advanced-search/`](crates/mn-skills/assets/midnight-advanced-search/).
+Worked examples for every pattern — the exact prompt the agent emits, the resulting `queries` array, and the token cost — are folded into the bundled skill at [`crates/mnm-skills/assets/midnight-advanced-search/`](crates/mnm-skills/assets/midnight-advanced-search/).
 
 ### Manual & scripted install
 
@@ -404,7 +404,7 @@ Source files are parsed with [`tree-sitter`](https://tree-sitter.github.io/) and
 
 Grammars are **Cargo-feature-gated** into tiers (`core-grammars` → `markup-grammars` → `extended-grammars` → `all-grammars`) so a lean build stays small. Crucially, **an absent grammar degrades gracefully**: an unknown or unbuilt language falls back to a line-window chunker (60-line windows, 20-line overlap) so it's still ingestible — just without symbol paths.
 
-Compact chunking is its own default-on feature (`compact`, backed by the [`compactp`](https://crates.io/crates/compactp_parser) parser); build the CLI without the experimental Compact chunker via `cargo build -p mn-cli --no-default-features` (the tree-sitter grammars stay on).
+Compact chunking is its own default-on feature (`compact`, backed by the [`compactp`](https://crates.io/crates/compactp_parser) parser); build the CLI without the experimental Compact chunker via `cargo build -p midnight-manual --no-default-features` (the tree-sitter grammars stay on).
 
 ### The details that matter
 
@@ -566,7 +566,7 @@ Run your own against a local Postgres:
 export DATABASE_URL=postgres://localhost/midnight_manual
 export MIDNIGHT_MANUAL_USER_STORE=./users.toml
 export MIDNIGHT_MANUAL_JWT_SECRET=…           # HS256 signing secret
-cargo run --release -p mn-server
+cargo run --release -p midnight-manual-server
 ```
 
 ---
@@ -611,7 +611,7 @@ When disabled, no connection is ever opened to the telemetry endpoint and any qu
 
 ### The canary
 
-A CI test feeds query stand-ins, fake tokens, fake paths, and fake env values through every code path that touches user content, then greps every captured log and telemetry row for the canary set. **Any match fails the build.** The infrastructure lives in [`crates/mn-telemetry/src/canary.rs`](crates/mn-telemetry/src/canary.rs).
+A CI test feeds query stand-ins, fake tokens, fake paths, and fake env values through every code path that touches user content, then greps every captured log and telemetry row for the canary set. **Any match fails the build.** The infrastructure lives in [`crates/mnm-telemetry/src/canary.rs`](crates/mnm-telemetry/src/canary.rs).
 
 ---
 
@@ -747,7 +747,7 @@ Lexical and semantic candidate lists are merged with **Reciprocal Rank Fusion** 
 
 ### Multi-query / HyDE
 
-`advanced_search` accepts an array of `queries` (1–10 distinct, de-duped, fused with RRF `k=60` across both retrieval modes in a single pass; rate-limit cost is `max(1, N)` distinct queries). Pair a literal query with a hypothetical-answer (HyDE) or step-back rephrase and let RRF fuse the results — a simple, powerful recall boost. The per-result `scores.matched_queries` indices and the `search_metadata.per_query` diagnostics tell you which formulations actually contributed. Worked examples live in the bundled skill at [`crates/mn-skills/assets/midnight-advanced-search/`](crates/mn-skills/assets/midnight-advanced-search/).
+`advanced_search` accepts an array of `queries` (1–10 distinct, de-duped, fused with RRF `k=60` across both retrieval modes in a single pass; rate-limit cost is `max(1, N)` distinct queries). Pair a literal query with a hypothetical-answer (HyDE) or step-back rephrase and let RRF fuse the results — a simple, powerful recall boost. The per-result `scores.matched_queries` indices and the `search_metadata.per_query` diagnostics tell you which formulations actually contributed. Worked examples live in the bundled skill at [`crates/mnm-skills/assets/midnight-advanced-search/`](crates/mnm-skills/assets/midnight-advanced-search/).
 
 ### Built for speed and many platforms
 
@@ -760,7 +760,7 @@ Cold-start to MCP handshake is sub-500 ms; p95 retrieval is under a second again
 - **Source & issues:** [github.com/devrelaicom/midnight-manual](https://github.com/devrelaicom/midnight-manual)
 - **Landing page:** [manual.midnightntwrk.expert](https://manual.midnightntwrk.expert)
 - **Hosted search API:** [midnight-manual.midnightntwrk.expert](https://midnight-manual.midnightntwrk.expert)
-- **Advanced-search skill:** [`crates/mn-skills/assets/midnight-advanced-search/SKILL.md`](crates/mn-skills/assets/midnight-advanced-search/SKILL.md)
+- **Advanced-search skill:** [`crates/mnm-skills/assets/midnight-advanced-search/SKILL.md`](crates/mnm-skills/assets/midnight-advanced-search/SKILL.md)
 - **Deploy runbook (operators):** [`docs/README-deploy.md`](docs/README-deploy.md)
 - **Ingesting content (operators):** [`docs/cookbook/ingesting-content.md`](docs/cookbook/ingesting-content.md)
 - **License:** [Apache-2.0](LICENSE)

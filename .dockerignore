@@ -8,7 +8,7 @@
 # rust-toolchain.toml, and not much else.
 #
 # Anything `cargo build --release --bin midnight-manual-server` does not
-# consume can be excluded. The Dockerfile bakes `crates/mn-store/migrations`
+# consume can be excluded. The Dockerfile bakes `crates/mnm-store/migrations`
 # into the runtime stage explicitly, so don't exclude that subtree.
 
 # Cargo build artifacts — by far the biggest contributor on a dev machine.

@@ -28,7 +28,7 @@ For real content:
 
 1. Add a `corpus/<your-source>/` directory.
 2. Author a `hierarchy.yaml` listing your Markdown files (or pin the manifest
-   to inherit directory structure — see `crates/mn-content/src/manifest.rs`
+   to inherit directory structure — see `crates/mnm-content/src/manifest.rs`
    for the full schema).
 3. `mnm sources create --slug <your-source> --kind docs-site ...`.
 4. `mnm ingest corpus/<your-source>/hierarchy.yaml --source-slug <your-source>`.

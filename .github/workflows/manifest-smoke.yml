@@ -93,7 +93,7 @@ jobs:
           cache-bin: false
 
       - name: Build mnm
-        run: cargo build -p mn-cli --bin mnm
+        run: cargo build -p midnight-manual --bin mnm
 
       - name: Validate a random sample of manifests
         env:

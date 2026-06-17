@@ -1,0 +1,38 @@
+[package]
+name = "mnm-mcp"
+description = "MCP JSON-RPC server over stdio: thirteen tools plus the add_advanced_search_skill prompt."
+
+version       = { workspace = true }
+edition       = { workspace = true }
+rust-version  = { workspace = true }
+license       = { workspace = true }
+authors       = { workspace = true }
+repository    = { workspace = true }
+homepage      = { workspace = true }
+
+[lints]
+workspace = true
+
+[features]
+integration = []
+
+[dependencies]
+mnm-core       = { path = "../mnm-core" }
+mnm-embedding  = { path = "../mnm-embedding" }
+mnm-retrieval  = { path = "../mnm-retrieval" }
+mnm-skills     = { path = "../mnm-skills" }
+mnm-telemetry  = { path = "../mnm-telemetry" }
+serde         = { workspace = true }
+serde_json    = { workspace = true }
+thiserror     = { workspace = true }
+tracing       = { workspace = true }
+tokio         = { workspace = true }
+once_cell     = { workspace = true }
+reqwest       = { workspace = true }
+url           = { workspace = true }
+uuid          = { workspace = true }
+
+[dev-dependencies]
+jsonschema    = { workspace = true }
+wiremock      = { workspace = true }
+tempfile      = { workspace = true }
