@@ -32,4 +32,4 @@ pub use plan::{
     CarriedDocument, DeletedDocument, IngestError, IngestPlan, IngestStats, PlanBuilder,
     PlannedChunk, PlannedDocument, PriorDocument, PriorState, WalkContext,
 };
-pub use walker::{WalkError, WalkedDocument, Walker};
+pub use walker::{SkipReason, SkippedFile, WalkError, WalkOutcome, WalkedDocument, Walker};

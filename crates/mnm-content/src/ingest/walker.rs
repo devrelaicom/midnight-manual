@@ -6,6 +6,12 @@
 //! keeps an ingest deterministic with respect to what the maintainer signed
 //! off on.
 //!
+//! Resilient ingestion (EC-52): a referenced file that is oversized, binary,
+//! not valid UTF-8, or not a regular file (e.g. a directory) is *skipped with a
+//! recorded reason* rather than aborting the whole walk. The skips are returned
+//! alongside the documents in [`WalkOutcome`] so callers can warn the operator
+//! and surface a count.
+//!
 //! [`PlanBuilder`]: super::plan::PlanBuilder
 
 use std::path::{Path, PathBuf};
@@ -13,8 +19,13 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 use time::OffsetDateTime;
 
+use crate::chunk::DEFAULT_MAX_FILE_BYTES;
 use crate::frontmatter::{split as split_frontmatter, FrontmatterSplit};
 use crate::manifest::Manifest;
+
+/// How many leading bytes the binary sniffer inspects for a NUL byte. Mirrors
+/// git's heuristic: a NUL in the first 8 KiB marks the file as binary.
+const BINARY_SNIFF_LEN: usize = 8192;
 
 /// One file pulled off disk and pre-processed for the orchestrator.
 #[derive(Debug, Clone, PartialEq)]
@@ -33,7 +44,8 @@ pub struct WalkedDocument {
     pub source_modified_at: Option<OffsetDateTime>,
 }
 
-/// Errors the walker can surface.
+/// Errors the walker can surface. Per-file content problems (oversize, binary,
+/// non-UTF-8) are *not* errors — they are recorded as [`SkippedFile`] entries.
 #[derive(Debug, Error)]
 pub enum WalkError {
     /// A `file:` reference in the manifest points to something that doesn't
@@ -49,16 +61,79 @@ pub enum WalkError {
         #[source]
         source: std::io::Error,
     },
-    /// A file's bytes were not valid UTF-8.
-    #[error("file {path} is not valid UTF-8")]
-    NotUtf8 {
-        /// Path that failed to decode.
-        path: PathBuf,
+}
+
+/// Why the walker skipped a referenced file (EC-52). Skips never abort a walk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkipReason {
+    /// The path resolved to something other than a regular file (e.g. a
+    /// directory mistakenly listed under a `file:` node, or a special file).
+    NotRegularFile,
+    /// File size exceeded the configured `max_file_bytes` ceiling.
+    TooLarge {
+        /// Actual file size in bytes.
+        size: u64,
+        /// The ceiling the file exceeded.
+        limit: u64,
     },
+    /// A NUL byte was found in the leading bytes (binary sniff over the first 8 KiB).
+    Binary,
+    /// The bytes could not be decoded as UTF-8.
+    NotUtf8,
+}
+
+impl std::fmt::Display for SkipReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotRegularFile => write!(f, "not a regular file (e.g. a directory)"),
+            Self::TooLarge { size, limit } => {
+                write!(f, "exceeds max file size ({size} > {limit} bytes)")
+            }
+            Self::Binary => write!(f, "looks binary (NUL byte in first {BINARY_SNIFF_LEN} bytes)"),
+            Self::NotUtf8 => write!(f, "not valid UTF-8"),
+        }
+    }
+}
+
+/// One file the walker chose to skip, with the reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkippedFile {
+    /// Repo-relative path of the skipped file.
+    pub rel_path: PathBuf,
+    /// Why it was skipped.
+    pub reason: SkipReason,
+}
+
+/// The result of a walk: documents that were ingested plus the files skipped
+/// (EC-52). `skipped` is empty on the happy path.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct WalkOutcome {
+    /// Files successfully read and pre-processed.
+    pub documents: Vec<WalkedDocument>,
+    /// Files skipped (non-regular / oversize / binary / non-UTF-8), in walk order.
+    pub skipped: Vec<SkippedFile>,
+}
+
+/// True iff the first [`BINARY_SNIFF_LEN`] bytes contain a NUL byte. A NUL is
+/// itself valid UTF-8 (`U+0000`), so this sniff catches binaries that would
+/// otherwise decode into a string of control characters.
+///
+/// This is only the fast/typical path (matching git's first-8-KiB heuristic):
+/// the real backstop is the full-buffer `String::from_utf8` check below, which
+/// rejects any non-UTF-8 file regardless of where the offending byte sits. So a
+/// binary whose first NUL is past 8 KiB is still skipped — just classified as
+/// `NotUtf8` rather than `Binary`. Don't "fix" the `.take()` thinking it's a bug.
+fn looks_binary(bytes: &[u8]) -> bool {
+    bytes.iter().take(BINARY_SNIFF_LEN).any(|&b| b == 0)
 }
 
 /// Walk every `file:` referenced by `manifest`, rooted at `base`. Files not
 /// referenced by the manifest are skipped.
+///
+/// Paths that are not regular files (e.g. a directory), files larger than
+/// `max_file_bytes`, files that sniff as binary, and files that are not valid
+/// UTF-8 are recorded in [`WalkOutcome::skipped`] rather than aborting the
+/// walk (EC-52).
 ///
 /// The walk is performed eagerly into a `Vec` so callers can use it
 /// repeatedly (e.g. once for a dry-run, once for the real run). For very
@@ -67,29 +142,70 @@ pub enum WalkError {
 ///
 /// # Errors
 ///
-/// Returns [`WalkError::MissingFile`] if any manifest file is absent,
-/// [`WalkError::Io`] on read failure, or [`WalkError::NotUtf8`] on decode
-/// failure. The walk stops at the first error.
-pub fn walk(manifest: &Manifest, base: &Path) -> Result<Vec<WalkedDocument>, WalkError> {
+/// Returns [`WalkError::MissingFile`] if any manifest file is absent, or
+/// [`WalkError::Io`] on read/metadata failure. The walk stops at the first
+/// such error.
+pub fn walk(
+    manifest: &Manifest,
+    base: &Path,
+    max_file_bytes: u64,
+) -> Result<WalkOutcome, WalkError> {
     let leaves = crate::manifest::resolve::resolve(manifest, base);
-    let mut out: Vec<WalkedDocument> = Vec::with_capacity(leaves.len());
+    let mut documents: Vec<WalkedDocument> = Vec::with_capacity(leaves.len());
+    let mut skipped: Vec<SkippedFile> = Vec::new();
     for leaf in leaves {
         let abs = base.join(&leaf.rel_path);
-        if !abs.exists() {
-            return Err(WalkError::MissingFile(leaf.rel_path));
+        let meta = match std::fs::metadata(&abs) {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(WalkError::MissingFile(leaf.rel_path));
+            }
+            Err(source) => {
+                return Err(WalkError::Io { path: leaf.rel_path, source });
+            }
+        };
+        // `metadata` follows symlinks, so this also accepts a symlink to a
+        // regular file. A directory (or socket/FIFO) listed under `file:` is
+        // skipped rather than read — reading it would otherwise blow up the
+        // whole walk with an EISDIR-style `Io` error.
+        if !meta.is_file() {
+            skipped.push(SkippedFile {
+                rel_path: leaf.rel_path,
+                reason: SkipReason::NotRegularFile,
+            });
+            continue;
+        }
+        if meta.len() > max_file_bytes {
+            skipped.push(SkippedFile {
+                rel_path: leaf.rel_path,
+                reason: SkipReason::TooLarge {
+                    size: meta.len(),
+                    limit: max_file_bytes,
+                },
+            });
+            continue;
         }
         let bytes = std::fs::read(&abs).map_err(|e| WalkError::Io {
             path: leaf.rel_path.clone(),
             source: e,
         })?;
-        let content = String::from_utf8(bytes)
-            .map_err(|_| WalkError::NotUtf8 { path: leaf.rel_path.clone() })?;
+        if looks_binary(&bytes) {
+            skipped.push(SkippedFile {
+                rel_path: leaf.rel_path,
+                reason: SkipReason::Binary,
+            });
+            continue;
+        }
+        let Ok(content) = String::from_utf8(bytes) else {
+            skipped.push(SkippedFile {
+                rel_path: leaf.rel_path,
+                reason: SkipReason::NotUtf8,
+            });
+            continue;
+        };
         let split = split_frontmatter(&content);
-        let modified = std::fs::metadata(&abs)
-            .ok()
-            .and_then(|m| m.modified().ok())
-            .map(OffsetDateTime::from);
-        out.push(WalkedDocument {
+        let modified = meta.modified().ok().map(OffsetDateTime::from);
+        documents.push(WalkedDocument {
             rel_path: leaf.rel_path.clone(),
             content,
             split,
@@ -97,32 +213,45 @@ pub fn walk(manifest: &Manifest, base: &Path) -> Result<Vec<WalkedDocument>, Wal
             source_modified_at: modified,
         });
     }
-    Ok(out)
+    Ok(WalkOutcome { documents, skipped })
 }
 
-/// Manifest-walker convenience wrapper. Holds the parsed manifest and a
-/// resolved base directory; calling [`Walker::walk`] returns the list of
-/// every walked document.
+/// Manifest-walker convenience wrapper. Holds the parsed manifest, a resolved
+/// base directory, and the per-file size ceiling; calling [`Walker::walk`]
+/// returns the [`WalkOutcome`].
 #[derive(Debug, Clone)]
 pub struct Walker {
     manifest: Manifest,
     base: PathBuf,
+    max_file_bytes: u64,
 }
 
 impl Walker {
-    /// Construct a walker.
+    /// Construct a walker with the default size ceiling
+    /// ([`DEFAULT_MAX_FILE_BYTES`]).
     #[must_use]
     pub const fn new(manifest: Manifest, base: PathBuf) -> Self {
-        Self { manifest, base }
+        Self {
+            manifest,
+            base,
+            max_file_bytes: DEFAULT_MAX_FILE_BYTES,
+        }
     }
 
-    /// Perform the walk and return every reachable [`WalkedDocument`].
+    /// Override the per-file size ceiling. Files larger than this are skipped.
+    #[must_use]
+    pub const fn with_max_file_bytes(mut self, max_file_bytes: u64) -> Self {
+        self.max_file_bytes = max_file_bytes;
+        self
+    }
+
+    /// Perform the walk and return the [`WalkOutcome`].
     ///
     /// # Errors
     ///
     /// See [`walk`].
-    pub fn walk(&self) -> Result<Vec<WalkedDocument>, WalkError> {
-        walk(&self.manifest, &self.base)
+    pub fn walk(&self) -> Result<WalkOutcome, WalkError> {
+        walk(&self.manifest, &self.base, self.max_file_bytes)
     }
 }
 
@@ -161,7 +290,7 @@ mod tests {
         write_file(dir.path(), "a.md", "# A");
         let manifest = Manifest::parse(&manifest_yaml(&["z.md", "a.md"])).unwrap();
         let walker = Walker::new(manifest, dir.path().to_path_buf());
-        let docs = walker.walk().unwrap();
+        let docs = walker.walk().unwrap().documents;
         let paths: Vec<_> = docs.iter().map(|d| d.rel_path.clone()).collect();
         assert_eq!(paths, vec![PathBuf::from("a.md"), PathBuf::from("z.md")]);
     }
@@ -172,7 +301,7 @@ mod tests {
         write_file(dir.path(), "with-fm.md", "---\nverified: true\n---\n# Title\n\nBody.\n");
         let manifest = Manifest::parse(&manifest_yaml(&["with-fm.md"])).unwrap();
         let walker = Walker::new(manifest, dir.path().to_path_buf());
-        let docs = walker.walk().unwrap();
+        let docs = walker.walk().unwrap().documents;
         assert!(docs[0].split.provenance.verified);
         assert!(docs[0].split.frontmatter.is_some());
         assert_eq!(docs[0].split.body, "# Title\n\nBody.\n");
@@ -185,7 +314,7 @@ mod tests {
         write_file(dir.path(), "unlisted.md", "# Unlisted");
         let manifest = Manifest::parse(&manifest_yaml(&["listed.md"])).unwrap();
         let walker = Walker::new(manifest, dir.path().to_path_buf());
-        let docs = walker.walk().unwrap();
+        let docs = walker.walk().unwrap().documents;
         assert_eq!(docs.len(), 1);
         assert_eq!(docs[0].rel_path, PathBuf::from("listed.md"));
     }
@@ -209,19 +338,91 @@ mod tests {
         // Manifest::validate would reject; we bypass and feed directly.
         let manifest = Manifest::parse(&yaml).unwrap();
         let walker = Walker::new(manifest, dir.path().to_path_buf());
-        let docs = walker.walk().unwrap();
+        let docs = walker.walk().unwrap().documents;
         assert_eq!(docs.len(), 1);
     }
 
     #[test]
-    fn non_utf8_file_is_reported() {
+    fn non_utf8_file_is_skipped_not_fatal() {
         let dir = tempdir();
+        // 0xFF 0xFE 0xFD is not a valid UTF-8 sequence and contains no NUL,
+        // so it trips the UTF-8 decode rather than the binary sniffer.
         let abs = dir.path().join("bad.md");
         std::fs::write(&abs, [0xFF, 0xFE, 0xFD]).expect("write bad");
         let manifest = Manifest::parse(&manifest_yaml(&["bad.md"])).unwrap();
         let walker = Walker::new(manifest, dir.path().to_path_buf());
-        let err = walker.walk().unwrap_err();
-        assert!(matches!(err, WalkError::NotUtf8 { .. }));
+        let outcome = walker.walk().unwrap();
+        assert!(outcome.documents.is_empty());
+        assert_eq!(outcome.skipped.len(), 1);
+        assert_eq!(outcome.skipped[0].rel_path, PathBuf::from("bad.md"));
+        assert_eq!(outcome.skipped[0].reason, SkipReason::NotUtf8);
+    }
+
+    #[test]
+    fn directory_referenced_as_file_is_skipped_not_fatal() {
+        let dir = tempdir();
+        // A directory listed under a `file:` node: reading it would otherwise
+        // abort the walk with an EISDIR-style Io error. It must be skipped.
+        std::fs::create_dir(dir.path().join("a-dir")).expect("create dir");
+        write_file(dir.path(), "real.md", "# Real");
+        let manifest = Manifest::parse(&manifest_yaml(&["a-dir", "real.md"])).unwrap();
+        let walker = Walker::new(manifest, dir.path().to_path_buf());
+        let outcome = walker.walk().unwrap();
+        let kept: Vec<_> = outcome
+            .documents
+            .iter()
+            .map(|d| d.rel_path.clone())
+            .collect();
+        assert_eq!(kept, vec![PathBuf::from("real.md")]);
+        assert_eq!(outcome.skipped.len(), 1);
+        assert_eq!(outcome.skipped[0].rel_path, PathBuf::from("a-dir"));
+        assert_eq!(outcome.skipped[0].reason, SkipReason::NotRegularFile);
+    }
+
+    #[test]
+    fn binary_file_is_skipped() {
+        let dir = tempdir();
+        // Embedded NUL byte → binary sniffer skips it (even though the rest
+        // decodes as UTF-8).
+        std::fs::write(dir.path().join("logo.md"), b"PNG\x00\x01\x02binary").expect("write bin");
+        let manifest = Manifest::parse(&manifest_yaml(&["logo.md"])).unwrap();
+        let walker = Walker::new(manifest, dir.path().to_path_buf());
+        let outcome = walker.walk().unwrap();
+        assert!(outcome.documents.is_empty());
+        assert_eq!(outcome.skipped.len(), 1);
+        assert_eq!(outcome.skipped[0].reason, SkipReason::Binary);
+    }
+
+    #[test]
+    fn oversize_file_is_skipped_and_smaller_ones_kept() {
+        let dir = tempdir();
+        write_file(dir.path(), "big.md", "# Big\n\nthis body is comfortably over the tiny limit\n");
+        write_file(dir.path(), "small.md", "# S");
+        let manifest = Manifest::parse(&manifest_yaml(&["big.md", "small.md"])).unwrap();
+        // Limit small enough that big.md exceeds it but small.md fits.
+        let walker = Walker::new(manifest, dir.path().to_path_buf()).with_max_file_bytes(8);
+        let outcome = walker.walk().unwrap();
+        let kept: Vec<_> = outcome
+            .documents
+            .iter()
+            .map(|d| d.rel_path.clone())
+            .collect();
+        assert_eq!(kept, vec![PathBuf::from("small.md")]);
+        assert_eq!(outcome.skipped.len(), 1);
+        assert_eq!(outcome.skipped[0].rel_path, PathBuf::from("big.md"));
+        assert!(matches!(outcome.skipped[0].reason, SkipReason::TooLarge { limit: 8, .. }));
+    }
+
+    #[test]
+    fn default_walk_keeps_normal_files_with_no_skips() {
+        let dir = tempdir();
+        write_file(dir.path(), "a.md", "# A\n\nbody");
+        let manifest = Manifest::parse(&manifest_yaml(&["a.md"])).unwrap();
+        let outcome = Walker::new(manifest, dir.path().to_path_buf())
+            .walk()
+            .unwrap();
+        assert_eq!(outcome.documents.len(), 1);
+        assert!(outcome.skipped.is_empty());
     }
 
     #[test]
@@ -231,7 +432,7 @@ mod tests {
         let body = "manifest_version: 1\nroot:\n  children:\n    - file: a.md\n";
         let manifest = Manifest::parse(body).unwrap();
         let walker = Walker::new(manifest, dir.path().to_path_buf());
-        let docs = walker.walk().unwrap();
+        let docs = walker.walk().unwrap().documents;
         assert!(docs[0].source_modified_at.is_some());
     }
 
@@ -249,7 +450,7 @@ root:
 ";
         let manifest = Manifest::parse(body).unwrap();
         let walker = Walker::new(manifest, dir.path().to_path_buf());
-        let docs = walker.walk().unwrap();
+        let docs = walker.walk().unwrap().documents;
         let paths: Vec<_> = docs.iter().map(|d| d.rel_path.clone()).collect();
         assert_eq!(paths, vec![PathBuf::from("docs/a.md"), PathBuf::from("docs/sub/b.md")]);
     }

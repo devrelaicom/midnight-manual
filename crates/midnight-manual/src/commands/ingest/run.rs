@@ -171,7 +171,7 @@ pub struct Args {
     pub disable_default_ignore_list: bool,
 
     /// Skip files larger than this many bytes.
-    #[arg(long, default_value_t = 10 * 1024 * 1024)]
+    #[arg(long, default_value_t = mnm_content::chunk::DEFAULT_MAX_FILE_BYTES)]
     pub max_file_size: u64,
 
     /// Admin-only: exempt THIS ingest's server-side embedding from the
@@ -364,6 +364,13 @@ async fn run_inner(
             .map_or_else(|| PathBuf::from("."), Path::to_path_buf)
     });
 
+    // Ingest tuning knobs. `max_file_bytes` is enforced by the walker below
+    // (EC-52, "skipped by callers"); `max_tokens` drives the chunkers.
+    let chunker_config = mnm_content::chunk::ChunkerConfig {
+        max_tokens: args.chunk_tokens,
+        max_file_bytes: args.max_file_size,
+    };
+
     // ── Phase: walk source tree ──────────────────────────────────────────────
     reporter.phase("walk", serde_json::json!({"source_root": source_root.display().to_string()}));
 
@@ -377,10 +384,22 @@ async fn run_inner(
         return Err(anyhow!("manifest references {} missing file(s):\n{list}", missing.len()));
     }
 
-    let walker = Walker::new(manifest, source_root.clone());
-    let walked_docs = walker.walk().context("walk source tree")?;
+    let walker = Walker::new(manifest, source_root.clone())
+        .with_max_file_bytes(chunker_config.max_file_bytes);
+    let outcome = walker.walk().context("walk source tree")?;
+    for skip in &outcome.skipped {
+        tracing::warn!(
+            path = %skip.rel_path.display(),
+            reason = %skip.reason,
+            "skipping file during ingest walk",
+        );
+    }
+    let walked_docs = outcome.documents;
 
-    reporter.phase_done("walk", serde_json::json!({"files": walked_docs.len()}));
+    reporter.phase_done(
+        "walk",
+        serde_json::json!({"files": walked_docs.len(), "skipped": outcome.skipped.len()}),
+    );
 
     // ── Phase: chunk ─────────────────────────────────────────────────────────
     reporter.phase("chunk", serde_json::json!({}));
@@ -390,10 +409,6 @@ async fn run_inner(
         .clone()
         .unwrap_or_else(|| super::infer_revision(&source_root));
 
-    let chunker_config = mnm_content::chunk::ChunkerConfig {
-        max_tokens: args.chunk_tokens,
-        max_file_bytes: args.max_file_size,
-    };
     let mut builder =
         PlanBuilder::new(&args.source_slug, SourceKind::DocsSite, &revision, PriorState::default())
             .with_chunker_config(chunker_config);
