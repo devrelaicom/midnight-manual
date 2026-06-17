@@ -55,8 +55,19 @@ pub async fn run(args: Args, server: Option<&str>, _json: bool) -> Result<()> {
             .map_or_else(|| PathBuf::from("."), Path::to_path_buf)
     });
 
+    // `ingest plan` has no --max-file-size flag, so the walker uses its default
+    // ceiling (DEFAULT_MAX_FILE_BYTES); skipped files are warned, mirroring the
+    // resilient behavior of `ingest run`.
     let w = Walker::new(manifest.clone(), base.clone());
-    let walked = w.walk().context("walk source tree")?;
+    let outcome = w.walk().context("walk source tree")?;
+    for skip in &outcome.skipped {
+        tracing::warn!(
+            path = %skip.rel_path.display(),
+            reason = %skip.reason,
+            "skipping file during ingest plan walk",
+        );
+    }
+    let walked = outcome.documents;
 
     // TODO(Task 26): replace the stub with GET /v1/sources/:slug/active-version/documents
     // once that endpoint exists. For now we always start from an empty prior state.

@@ -24,13 +24,23 @@ pub struct Chunk {
     pub fallback_used: bool,
 }
 
+/// Canonical default per-file size ceiling (10 MiB).
+///
+/// Single source of truth for the value shared by [`ChunkerConfig::default`],
+/// the walker ([`crate::ingest::walker::Walker`]), and the CLI
+/// `--max-file-size` default.
+pub const DEFAULT_MAX_FILE_BYTES: u64 = 10 * 1024 * 1024;
+
 /// Configuration shared by all chunkers. Token-budgeted.
 #[derive(Debug, Clone, Copy)]
 pub struct ChunkerConfig {
     /// Max chunk size in BPE tokens before splitting. Greedy coalescing in
     /// every chunker packs units up to [`coalesce_target`] (90% of this).
     pub max_tokens: u32,
-    /// Files larger than this are skipped by callers (EC-52).
+    /// Per-file size ceiling. Enforced by the *walker* (the caller), which
+    /// skips files larger than this before they ever reach a chunker (EC-52) —
+    /// see [`crate::ingest::walker::Walker::with_max_file_bytes`]. Chunkers
+    /// themselves never read this field.
     pub max_file_bytes: u64,
 }
 
@@ -38,7 +48,7 @@ impl Default for ChunkerConfig {
     fn default() -> Self {
         Self {
             max_tokens: 1024,
-            max_file_bytes: 10 * 1024 * 1024,
+            max_file_bytes: DEFAULT_MAX_FILE_BYTES,
         }
     }
 }

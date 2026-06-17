@@ -85,7 +85,7 @@ pub enum Command {
     Sources(commands::sources::Args),
     /// Source-version inspection.
     Versions(commands::versions::Args),
-    /// Show or edit the resolved config.
+    /// Show the resolved config.
     Config(commands::config::Args),
     /// MCP server (stdio JSON-RPC) and related tooling.
     Mcp(commands::mcp::Args),
@@ -195,7 +195,17 @@ pub async fn run() -> Result<()> {
         Command::Versions(args) => {
             commands::versions::run(args, cli.server.as_deref(), cli.json).await
         }
-        Command::Config(args) => commands::config::run(args, cli.config.as_deref(), cli.json).await,
+        Command::Config(args) => {
+            commands::config::run(
+                args,
+                cli.config.as_deref(),
+                cli.server.as_deref(),
+                cli.voyage_api_key.as_deref(),
+                cli.no_telemetry,
+                cli.json,
+            )
+            .await
+        }
         Command::Mcp(args) => commands::mcp::run(args).await,
         Command::Models(args) => {
             commands::models::run(
