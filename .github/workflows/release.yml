@@ -1,112 +1,230 @@
 name: Release
 
+# Tag-triggered BACK-END. Runs only when a vMAJOR.MINOR.PATCH tag is pushed —
+# which release-plz does after the "Release" PR is merged (release-plz also does
+# the crates.io publish; this workflow does NOT publish to crates.io).
+#
+# Responsibilities: build the prebuilt CLI (`midnight-manual` + `mnm`) binaries
+# for all targets, create the GitHub Release with those artifacts + a
+# THIRD-PARTY-LICENSES bundle, and push the Homebrew formula to the tap.
 on:
   push:
-    branches: [main]
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+*"
 
 permissions:
   contents: write
-  pull-requests: write
-  packages: write
-  id-token: write
+
+env:
+  CARGO_TERM_COLOR: always
+  # Must match cargo-dist-version in dist-workspace.toml (reproducibility).
+  DIST_VERSION: "0.32.0"
 
 jobs:
-  release-please:
-    name: release-please (version bump + CHANGELOG PR)
+  # Same quality bar as ci.yml; mirrors its toolchain + lint commands.
+  gate:
+    name: Gate (fmt / clippy / cargo-deny)
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.91.0
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-gate
+          cache-bin: false
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: Install cargo-deny
+        run: cargo install --locked cargo-deny
+      - name: cargo deny check
+        run: cargo deny check
+
+  # Detect the tap PAT WITHOUT exposing its value, so the tap job stays dormant
+  # until the secret is set.
+  secret-preflight:
+    name: Detect operator secrets (dormant-job gating)
     runs-on: ubuntu-latest
     outputs:
-      release_created: ${{ steps.release.outputs.release_created }}
-      tag_name: ${{ steps.release.outputs.tag_name }}
+      has_tap_token: ${{ steps.detect.outputs.has_tap_token }}
     steps:
-      - uses: googleapis/release-please-action@v4
-        id: release
-        with:
-          # Workspace-shared version lives in [workspace.package].version of the
-          # root Cargo.toml; the config + manifest below tell release-please to
-          # bump that single source of truth (every crate inherits via
-          # version.workspace = true).
-          config-file: release-please-config.json
-          manifest-file: .release-please-manifest.json
+      - id: detect
+        env:
+          HAS_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN != '' }}
+        run: |
+          echo "has_tap_token=${HAS_TAP_TOKEN}" >> "$GITHUB_OUTPUT"
+          echo "Homebrew tap push enabled: ${HAS_TAP_TOKEN}"
 
+  # Per-target local artifacts (per-app archive + checksum) for the CLI app.
+  build:
+    name: Build ${{ matrix.target }}
+    needs: gate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-14
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.91.0
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-build-${{ matrix.target }}
+          cache-bin: false
+      - name: Install dist (pinned)
+        shell: bash
+        run: |
+          curl --proto '=https' --tlsv1.2 -LsSf \
+            "https://github.com/axodotdev/cargo-dist/releases/download/v${DIST_VERSION}/cargo-dist-installer.sh" | sh
+      - name: Build local artifacts
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          dist build --artifacts=local --target="${TARGET}" \
+            --tag="${GITHUB_REF_NAME}" --output-format=json > dist-manifest.json
+          cat dist-manifest.json
+      - name: Upload local artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: artifacts-local-${{ matrix.target }}
+          path: |
+            target/distrib/*.tar.xz
+            target/distrib/*.tar.xz.sha256
+          if-no-files-found: warn
+
+  # Global artifacts: shell installer + Homebrew formula + checksum, plus the
+  # regenerated THIRD-PARTY-LICENSES (cargo-about + the vendored Scheme licence).
+  global:
+    name: Global artifacts + licence bundle
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.91.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-global
+          cache-bin: false
+      - name: Install dist (pinned)
+        shell: bash
+        run: |
+          curl --proto '=https' --tlsv1.2 -LsSf \
+            "https://github.com/axodotdev/cargo-dist/releases/download/v${DIST_VERSION}/cargo-dist-installer.sh" | sh
+      - name: Build global artifacts (installer + formula + checksum)
+        shell: bash
+        run: |
+          dist build --artifacts=global \
+            --tag="${GITHUB_REF_NAME}" --output-format=json > global-manifest.json
+          cat global-manifest.json
+      - name: Install cargo-about
+        run: cargo install --locked --features cli cargo-about
+      - name: Regenerate THIRD-PARTY-LICENSES (+ vendored Scheme grammar)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo about generate about.hbs > THIRD-PARTY-LICENSES
+          {
+            echo
+            echo "================================================================================"
+            echo "Vendored: tree-sitter-scheme (compiled into mnm-content via build.rs)"
+            echo "================================================================================"
+            cat crates/mnm-content/vendor/tree-sitter-scheme/LICENSE
+          } >> THIRD-PARTY-LICENSES
+          echo "Regenerated THIRD-PARTY-LICENSES ($(wc -l < THIRD-PARTY-LICENSES) lines)"
+      - name: Upload global artifacts + licence bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: artifacts-global
+          path: |
+            target/distrib/*.sh
+            target/distrib/*.rb
+            target/distrib/sha256.sum
+            THIRD-PARTY-LICENSES
+          if-no-files-found: warn
+
+  # Create the GitHub Release and attach every archive, checksum, the installer,
+  # the formula, and the licence bundle.
   release:
-    name: Build and publish release artifacts
-    needs: release-please
-    if: needs.release-please.outputs.release_created == 'true'
+    name: Create GitHub Release
+    needs: [build, global]
     runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@1.91.0
-
-      # Build matrix per FR-099 — runs in cargo-dist's own matrix
-      - name: Install cargo-dist
-        run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/latest/download/cargo-dist-installer.sh | sh
-
-      - name: cargo dist plan
-        run: cargo dist plan
-
-      - name: cargo dist build (full matrix)
-        run: cargo dist build --target=all
-
-      - name: Verify SHA256SUMS
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: artifacts-*
+          path: dist-artifacts
+          merge-multiple: true
+      - name: Create release with artifacts
+        shell: bash
         run: |
-          cd target/distrib
-          sha256sum -c SHA256SUMS
+          set -euo pipefail
+          mapfile -t assets < <(find dist-artifacts -type f)
+          if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "Release ${GITHUB_REF_NAME} exists; refreshing assets."
+            gh release upload "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --clobber "${assets[@]}"
+          else
+            gh release create "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" \
+              --title "${GITHUB_REF_NAME}" --generate-notes "${assets[@]}"
+          fi
 
-      # Publish to crates.io (FR-101 immutability — happens exactly once per release tag)
-      - name: cargo publish
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+  # DORMANT until HOMEBREW_TAP_TOKEN is set — push midnight-manual.rb to the
+  # cross-owner tap midnight-network/homebrew-tap.
+  publish-homebrew-tap:
+    name: Push formula to Homebrew tap (dormant until PAT set)
+    needs: [global, release, secret-preflight]
+    if: needs.secret-preflight.outputs.has_tap_token == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download global artifacts (the generated formula)
+        uses: actions/download-artifact@v8
+        with:
+          name: artifacts-global
+          path: global-artifacts
+      - name: Checkout the tap repo (cross-owner, PAT-authenticated)
+        uses: actions/checkout@v5
+        with:
+          repository: midnight-network/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-tap
+          persist-credentials: true
+      - name: Stage + commit the formula
+        shell: bash
         run: |
-          cargo publish -p mnm-core
-          # Subsequent crates published as they land.
-
-      # Homebrew tap update (FR-095)
-      - name: Update Homebrew tap
-        uses: Justintime50/homebrew-releaser@v1
-        with:
-          homebrew_owner: midnight-network
-          homebrew_tap: homebrew-tap
-          formula_folder: Formula
-          github_token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          install: |
-            bin.install "midnight-manual", "mnm"
-
-  docker-server:
-    name: Build and push server Docker image
-    needs: release-please
-    if: needs.release-please.outputs.release_created == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
-
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile.server
-          platforms: linux/amd64,linux/arm64
-          tags: |
-            ghcr.io/midnight-network/midnight-manual:${{ needs.release-please.outputs.tag_name }}
-            ghcr.io/midnight-network/midnight-manual:latest
-          push: true
-
-  fly-deploy:
-    name: Deploy to Fly.io
-    needs: [release-please, docker-server]
-    if: needs.release-please.outputs.release_created == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: superfly/flyctl-actions/setup-flyctl@master
-      - run: flyctl deploy --image ghcr.io/midnight-network/midnight-manual:${{ needs.release-please.outputs.tag_name }}
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          set -euo pipefail
+          formula="$(find global-artifacts -type f -name midnight-manual.rb | head -1)"
+          if [ -z "$formula" ]; then
+            echo "::error::midnight-manual.rb not found in the global artifacts."
+            exit 1
+          fi
+          mkdir -p homebrew-tap/Formula
+          cp "$formula" homebrew-tap/Formula/midnight-manual.rb
+          cd homebrew-tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/midnight-manual.rb
+          if git diff --cached --quiet -- Formula/midnight-manual.rb; then
+            echo "Formula unchanged; nothing to push."
+            exit 0
+          fi
+          git commit -m "midnight-manual ${GITHUB_REF_NAME}"
+          git push origin HEAD

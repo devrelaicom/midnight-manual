@@ -1,0 +1,93 @@
+name: Release-plz
+
+# AUTOMATIC RELEASE FRONT-END (see release-plz.toml for the full rationale).
+# On push to `main`, release-plz maintains the "Release vX.Y.Z" PR; on merge it
+# publishes every crate to crates.io (dependency-ordered) AND pushes one vX.Y.Z
+# tag — that tag fires release.yml. release-plz publishes itself so crates.io
+# stays authoritative and no duplicate Release PR loop can form.
+#
+# TOKENS: jobs authenticate with RELEASE_PLZ_TOKEN (a fine-grained PAT with
+# Contents + Pull-requests, or a GitHub App token), NOT the default GITHUB_TOKEN —
+# a tag pushed with GITHUB_TOKEN cannot trigger release.yml's `on: push: tags`.
+# crates.io publishing uses CARGO_REGISTRY_TOKEN. The preflight requires BOTH
+# before activating.
+
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  preflight:
+    name: Detect operator secrets (dormant-job gating)
+    runs-on: ubuntu-latest
+    outputs:
+      enabled: ${{ steps.detect.outputs.enabled }}
+    steps:
+      - id: detect
+        env:
+          HAS_RELEASE_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN != '' }}
+          HAS_CARGO_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN != '' }}
+        run: |
+          if [ "$HAS_RELEASE_TOKEN" = "true" ] && [ "$HAS_CARGO_TOKEN" = "true" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "release-plz enabled: RELEASE_PLZ_TOKEN=${HAS_RELEASE_TOKEN}, CARGO_REGISTRY_TOKEN=${HAS_CARGO_TOKEN}"
+
+  # Publish unpublished crates (dependency-ordered, idempotent) and push the
+  # single vX.Y.Z tag. Runs FIRST so crates.io + the tag are current before the
+  # PR job re-evaluates. No-op on ordinary pushes.
+  release-plz-release:
+    name: Release-plz release (publish + tag)
+    needs: preflight
+    if: ${{ needs.preflight.outputs.enabled == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout (full history for the changelog)
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.91.0
+      - name: Run release-plz release
+        uses: release-plz/action@v0.5.130
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  # Maintain the "Release vX.Y.Z" PR. Sequenced AFTER the release job so it sees
+  # an up-to-date crates.io and never opens a duplicate PR.
+  release-plz-pr:
+    name: Release-plz PR
+    needs: [preflight, release-plz-release]
+    if: ${{ needs.preflight.outputs.enabled == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    concurrency:
+      group: release-plz-pr-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - name: Checkout (full history for the changelog)
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.91.0
+      - name: Run release-plz release-pr
+        uses: release-plz/action@v0.5.130
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

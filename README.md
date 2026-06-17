@@ -558,7 +558,7 @@ A background sweep job retires stale and aborted versions on a grace window, so 
 - **API surface:** anonymous **read** endpoints (`/v1/search` with inline rerank, `/v1/embeddings` proxy, `/v1/facets`, `/v1/chunks/{id}` + batch `/v1/chunks` + `/next`/`/prev`/`/parents`, `/v1/documents/{id}` + `/chunks`, `/v1/sources` + `/{slug}` + `/versions`, `/v1/models/active`, `/v1/me`) and authenticated **admin** endpoints (the ingest-run protocol, version promote/retire, rate-limit + token-limit management). Auth is Ed25519 challenge-response plus GitHub OAuth read-uplift.
 - **Tiered rate limiting.** Anonymous traffic is limited per-IP; signing in via **GitHub OAuth** (a 30-day read-uplift token) raises your limit; admins can add per-CIDR overrides. A tier guard runs before the role guard, so an uplift token can never gain write access.
 - **Operable by default.** `/healthz` (liveness) and `/readyz` (readiness), `/metrics` in Prometheus format, request-ID propagation on every request for traceability, and automatic migrations on startup.
-- **Ships small.** Multi-stage Docker build onto `gcr.io/distroless/cc` (no shell, no toolchain), built for `linux/amd64` + `linux/arm64`, published to `ghcr.io/midnight-network/midnight-manual`, and deployed on Fly.io. The server is Docker-only — it's not part of the prebuilt binary matrix.
+- **Ships small.** Multi-stage Docker build onto `gcr.io/distroless/cc` (no shell, no toolchain), built for `linux/amd64` + `linux/arm64` and deployed to Fly.io. The server is Docker-only — built and deployed by the operator (`flyctl deploy`), not via CI and not part of the prebuilt binary matrix.
 
 Run your own against a local Postgres:
 
