@@ -1,6 +1,6 @@
 # Deploy runbook: midnight-manual-server on Fly.io
 
-This is the first-time deploy runbook for the cloud server (`mn-server` →
+This is the first-time deploy runbook for the cloud server (`midnight-manual-server` →
 `midnight-manual-server`). Once the infrastructure is provisioned, ongoing
 releases are automatic: merging a `release-please` PR cuts a tag, the release
 workflow builds a multi-arch Docker image, pushes to GHCR, and `flyctl deploy`s
@@ -133,7 +133,7 @@ flyctl mpg connect <cluster-id>
 
 The server runs migrations at boot (`MIDNIGHT_MANUAL_AUTO_MIGRATE=true` in
 `fly.toml`), so the 12 numbered migrations under
-`crates/mn-store/migrations/` apply on first deploy.
+`crates/mnm-store/migrations/` apply on first deploy.
 
 ## 4. Generate the JWT signing secret
 
@@ -319,7 +319,7 @@ flyctl secrets set MIDNIGHT_MANUAL_SCORING_POLICY="$(cat scoring-policy.toml)" \
 ```
 
 The server fails startup on a malformed policy, so test it locally first with
-`cargo test -p mn-core scoring_policy`.
+`cargo test -p mnm-core scoring_policy`.
 
 ## 9. First deploy
 

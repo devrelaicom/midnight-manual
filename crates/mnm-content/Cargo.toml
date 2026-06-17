@@ -1,0 +1,93 @@
+[package]
+name = "mnm-content"
+description = "Markdown chunking, code chunking (tree-sitter), and package detection."
+
+version       = { workspace = true }
+edition       = { workspace = true }
+rust-version  = { workspace = true }
+license       = { workspace = true }
+authors       = { workspace = true }
+repository    = { workspace = true }
+homepage      = { workspace = true }
+
+[lints]
+workspace = true
+
+[features]
+integration = []
+default = ["core-grammars", "compact"]
+# Scheme is vendored (no crate); its build.rs + parser.c land in Task 16. The
+# `scheme` feature is an empty flag for now so default builds opt in early.
+core-grammars = [
+    "dep:tree-sitter-rust", "dep:tree-sitter-typescript",
+    "dep:tree-sitter-javascript", "dep:tree-sitter-bash", "scheme",
+]
+scheme = []
+markup-grammars = [
+    "dep:tree-sitter-toml-ng", "dep:tree-sitter-yaml",
+    "dep:tree-sitter-html", "dep:tree-sitter-xml",
+]
+extended-grammars = [
+    "dep:tree-sitter-go", "dep:tree-sitter-python", "dep:tree-sitter-solidity",
+]
+all-grammars = [
+    "markup-grammars", "extended-grammars",
+    "dep:tree-sitter-swift", "dep:tree-sitter-ruby", "dep:tree-sitter-kotlin-ng",
+    "dep:tree-sitter-c-sharp", "dep:tree-sitter-haskell", "dep:tree-sitter-java",
+]
+# Compact chunking via the compactp library (experimental; default-on).
+# Build without it: `cargo build -p midnight-manual --no-default-features`.
+compact = ["dep:compactp_parser", "dep:compactp_ast", "dep:compactp_syntax"]
+
+[dependencies]
+mnm-core               = { path = "../mnm-core" }
+anyhow                = { workspace = true }
+globset               = { workspace = true }
+pulldown-cmark        = { workspace = true }
+quick-xml             = { workspace = true }
+tree-sitter           = { workspace = true }
+tree-sitter-language  = { workspace = true }
+text-splitter         = { workspace = true }
+ignore                = { workspace = true }
+tree-sitter-rust       = { workspace = true, optional = true }
+tree-sitter-typescript = { workspace = true, optional = true }
+tree-sitter-javascript = { workspace = true, optional = true }
+tree-sitter-bash       = { workspace = true, optional = true }
+tree-sitter-go         = { workspace = true, optional = true }
+tree-sitter-python     = { workspace = true, optional = true }
+tree-sitter-solidity   = { workspace = true, optional = true }
+tree-sitter-toml-ng    = { workspace = true, optional = true }
+tree-sitter-yaml       = { workspace = true, optional = true }
+tree-sitter-html       = { workspace = true, optional = true }
+tree-sitter-xml        = { workspace = true, optional = true }
+tree-sitter-swift      = { workspace = true, optional = true }
+tree-sitter-ruby       = { workspace = true, optional = true }
+tree-sitter-kotlin-ng  = { workspace = true, optional = true }
+tree-sitter-c-sharp    = { workspace = true, optional = true }
+tree-sitter-haskell    = { workspace = true, optional = true }
+tree-sitter-java       = { workspace = true, optional = true }
+compactp_parser       = { workspace = true, optional = true }
+compactp_ast          = { workspace = true, optional = true }
+compactp_syntax       = { workspace = true, optional = true }
+tokenizers            = { workspace = true }
+semver                = { workspace = true }
+serde                 = { workspace = true }
+serde_json            = { workspace = true }
+toml                  = { workspace = true }
+serde_yaml            = { workspace = true }
+thiserror             = { workspace = true }
+sha2                  = { workspace = true }
+time                  = { workspace = true }
+tracing               = { workspace = true }
+regex                 = { workspace = true }
+url                   = { workspace = true }
+uuid                  = { workspace = true }
+walkdir               = { workspace = true }
+reqwest               = { workspace = true }
+
+[build-dependencies]
+cc = { workspace = true }
+
+[dev-dependencies]
+proptest              = { workspace = true }
+tempfile              = { workspace = true }

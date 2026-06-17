@@ -69,7 +69,7 @@ jobs:
           cache-bin: false
       - run: cargo test --workspace --no-fail-fast
 
-  # Slower leg: compiles all C grammar parse tables and runs mn-content tests
+  # Slower leg: compiles all C grammar parse tables and runs mnm-content tests
   # with every gated language chunker (Go, Python, Solidity, Swift, Ruby,
   # Kotlin, C#, Haskell, Java, markup + vendored Scheme). The sibling `clippy`
   # job already covers all-grammars via --all-features, so no separate
@@ -83,7 +83,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-bin: false
-      - run: cargo test -p mn-content --features all-grammars
+      - run: cargo test -p mnm-content --features all-grammars
 
   integration:
     name: integration tests (with Postgres + pgvector)

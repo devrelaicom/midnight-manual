@@ -42,10 +42,10 @@ bench:
 DATABASE_URL := env_var_or_default("DATABASE_URL", "postgresql://postgres:dev@localhost:5432/postgres")
 
 migrate-up:
-    sqlx migrate run --source crates/mn-store/migrations --database-url "{{DATABASE_URL}}"
+    sqlx migrate run --source crates/mnm-store/migrations --database-url "{{DATABASE_URL}}"
 
 migrate-status:
-    sqlx migrate info --source crates/mn-store/migrations --database-url "{{DATABASE_URL}}"
+    sqlx migrate info --source crates/mnm-store/migrations --database-url "{{DATABASE_URL}}"
 
 # Refresh sqlx offline query cache (commit the result)
 sqlx-prepare:
@@ -63,15 +63,15 @@ db-down:
 # === Builds ===
 
 build-cli:
-    cargo build --release -p mn-cli
+    cargo build --release -p midnight-manual
 
 build-server:
-    cargo build --release -p mn-server
+    cargo build --release -p midnight-manual-server
 
 # === Server (local) ===
 
 run-server:
-    cargo run --release -p mn-server
+    cargo run --release -p midnight-manual-server
 
 # === Release rehearsal ===
 

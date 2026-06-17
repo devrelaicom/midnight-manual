@@ -1,0 +1,34 @@
+[package]
+name = "mnm-store"
+description = "Postgres + pgvector storage layer for midnight-manual (sqlx-backed)."
+
+version       = { workspace = true }
+edition       = { workspace = true }
+rust-version  = { workspace = true }
+license       = { workspace = true }
+authors       = { workspace = true }
+repository    = { workspace = true }
+homepage      = { workspace = true }
+
+[lints]
+workspace = true
+
+[features]
+# Enabled in CI's integration job. Gates testcontainers-backed tests.
+integration = []
+
+[dependencies]
+mnm-core      = { path = "../mnm-core" }
+sqlx         = { workspace = true }
+pgvector     = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+thiserror    = { workspace = true }
+tracing      = { workspace = true }
+uuid         = { workspace = true }
+time         = { workspace = true }
+tokio        = { workspace = true }
+
+[dev-dependencies]
+proptest         = { workspace = true }
+testcontainers   = { workspace = true }

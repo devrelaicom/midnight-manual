@@ -11,7 +11,7 @@
 [advisories]
 ignore = [
   # RUSTSEC-2023-0071 — rsa: Marvin Attack timing sidechannel on private-key decryption.
-  # Path: rsa -> jsonwebtoken (latest 10.x) -> octocrab (latest 0.50.x) -> mn-auth.
+  # Path: rsa -> jsonwebtoken (latest 10.x) -> octocrab (latest 0.50.x) -> mnm-auth.
   # Justification: octocrab only uses rsa for GitHub App keypair authentication; we use
   # the user-OAuth web/device flow (per FR-115 / D11), which does not touch RSA decryption.
   # No fix is available upstream as of 2026-05. Revisit when `rsa` ships the timing-safe

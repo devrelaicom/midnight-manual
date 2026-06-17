@@ -58,7 +58,7 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
-          cargo publish -p mn-core
+          cargo publish -p mnm-core
           # Subsequent crates published as they land.
 
       # Homebrew tap update (FR-095)

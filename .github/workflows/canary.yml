@@ -4,8 +4,8 @@ name: Privacy canaries
 # file paths, env values, PII) MUST NEVER appear in any log file or telemetry row.
 #
 # This workflow is a release gate. It runs the canary test suite (the
-# `telemetry_canary` integration test in mn-server plus the unit canaries in
-# mn-telemetry), captures all stdout/stderr from every component, dumps
+# `telemetry_canary` integration test in midnight-manual-server plus the unit canaries in
+# mnm-telemetry), captures all stdout/stderr from every component, dumps
 # telemetry_event_raw via SQL, and greps for the canary set. Any match fails
 # the build.
 
@@ -47,22 +47,22 @@ jobs:
         with:
           cache-bin: false
 
-      # NOTE: mn-telemetry's own unit tests deliberately plant canary strings
+      # NOTE: mnm-telemetry's own unit tests deliberately plant canary strings
       # in test buffers to exercise the detector itself, so we do NOT include
       # their output here — they'd trip the grep step below. Those tests are
       # gated by the regular CI workflow. The canary CI gate runs only the
       # canary-free end-to-end pipeline tests.
-      - name: Run mn-server canary integration test
+      - name: Run midnight-manual-server canary integration test
         run: |
-          cargo test --package mn-server --features integration --test telemetry_canary -- --nocapture 2>&1 | tee canary-output.log
+          cargo test --package midnight-manual-server --features integration --test telemetry_canary -- --nocapture 2>&1 | tee canary-output.log
 
-      - name: Run mn-server telemetry endpoint integration tests
+      - name: Run midnight-manual-server telemetry endpoint integration tests
         run: |
-          cargo test --package mn-server --features integration --test telemetry_endpoint -- --nocapture 2>&1 | tee -a canary-output.log
+          cargo test --package midnight-manual-server --features integration --test telemetry_endpoint -- --nocapture 2>&1 | tee -a canary-output.log
 
       - name: Run /v1/embeddings privacy canary
         run: |
-          cargo test --package mn-server --features integration --test embeddings_no_query_text -- --nocapture 2>&1 | tee -a canary-output.log
+          cargo test --package midnight-manual-server --features integration --test embeddings_no_query_text -- --nocapture 2>&1 | tee -a canary-output.log
 
       - name: Dump telemetry_event_raw
         run: |
@@ -72,7 +72,7 @@ jobs:
       - name: Grep for canary strings (fails on any match)
         run: |
           # The canary prefix MUST NEVER appear in any captured output. The
-          # full set lives in crates/mn-telemetry/src/canary.rs; we grep on
+          # full set lives in crates/mnm-telemetry/src/canary.rs; we grep on
           # the common prefix so any partial leak still fails.
           if grep -F "CANARY_zzz_xyz_" all-captured.txt; then
             echo "❌ PRIVACY CANARY VIOLATION: forbidden string appeared in logs or telemetry"

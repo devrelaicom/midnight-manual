@@ -1,0 +1,36 @@
+[package]
+name = "mnm-embedding"
+description = "VoyageAI embedding and reranking client."
+
+version       = { workspace = true }
+edition       = { workspace = true }
+rust-version  = { workspace = true }
+license       = { workspace = true }
+authors       = { workspace = true }
+repository    = { workspace = true }
+homepage      = { workspace = true }
+
+[lints]
+workspace = true
+
+[features]
+integration = []
+# Reserved knob for future opt-in model-load tests. Nothing references it today
+# (embedding + reranking are both remote VoyageAI, so there are no model weights
+# to gate), but it is kept as a stable feature name.
+models = []
+
+[dependencies]
+mnm-core      = { path = "../mnm-core" }
+once_cell    = { workspace = true }
+sha2         = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+thiserror    = { workspace = true }
+tracing      = { workspace = true }
+tokio        = { workspace = true }
+reqwest      = { workspace = true }
+
+[dev-dependencies]
+wiremock     = { workspace = true }
+tempfile     = { workspace = true }
