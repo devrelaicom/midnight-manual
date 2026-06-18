@@ -226,6 +226,7 @@ async fn embeddings_charge_is_visible_in_me_token_budget() {
 
     let corpus_model = Arc::new(RwLock::new(Some(CorpusModel {
         wire: "voyage-code-3@1".to_owned(),
+        name: "voyage-code-3".to_owned(),
         id: Uuid::new_v4(),
         dim: 1024,
     })));
@@ -244,6 +245,7 @@ async fn embeddings_charge_is_visible_in_me_token_budget() {
     // synthetic entry suffices (the flat embedder above does the work).
     let code_model = Arc::new(RwLock::new(Some(midnight_manual_server::code_model::CodeModel {
         wire: "voyage-code-3@1".to_owned(),
+        name: "voyage-code-3".to_owned(),
         id: Uuid::new_v4(),
         dim: 1024,
     })));

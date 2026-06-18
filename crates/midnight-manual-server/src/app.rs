@@ -39,17 +39,30 @@ pub struct AppState {
     /// Confidence-scoring policy resolved at boot (US6, D24). Shared read-only
     /// across requests.
     pub scoring_policy: Arc<mnm_core::scoring_policy::ScoringPolicy>,
-    /// The corpus's active embedding model, re-resolvable without a restart.
-    /// `None` until resolved — production resolves at boot; some tests leave it
+    /// The corpus's active embedding model. Re-resolvable without a restart for
+    /// the wire-id LABEL search stamps and the `/v1/models/active` response — but
+    /// NOT for the proxy embedders below, which stay pinned to the boot model
+    /// (see [`AppState::voyage`] and [`crate::corpus_model::refresh`]). `None`
+    /// until resolved — production resolves at boot; some tests leave it
     /// unresolved and search's existing `None`-handling covers that.
     pub corpus_model: crate::corpus_model::Shared,
-    /// Server-side Voyage embedder for `POST /v1/embeddings`. `None` when
+    /// Server-side Voyage CODE embedder for `POST /v1/embeddings`. `None` when
     /// `VOYAGE_API_KEY` is unset — the endpoint then 503s rather than failing
     /// boot, so a deployment that only proxies client-side vectors still serves.
+    ///
+    /// PINNED AT BOOT: built from the boot-resolved code model (see
+    /// [`resolved_embedders`]) and never re-resolved. A runtime model swap
+    /// (`code_model` is not refreshed at all; `corpus_model` is) leaves this
+    /// computing with the boot model — a restart is required to re-align it with
+    /// the wire id `/v1/embeddings` stamps. See [`crate::corpus_model::refresh`].
     pub voyage: Option<std::sync::Arc<mnm_embedding::voyage::VoyageEmbedder>>,
     /// Server-side contextualized (general) Voyage embedder for
-    /// `POST /v1/embeddings` with `type=general`. `None` when
-    /// `VOYAGE_API_KEY` is unset (endpoint 503s).
+    /// `POST /v1/embeddings` with `type=general`. `None` when `VOYAGE_API_KEY`
+    /// is unset (endpoint 503s).
+    ///
+    /// PINNED AT BOOT, like [`AppState::voyage`]: built from the boot-resolved
+    /// corpus model and never re-resolved, so a runtime promotion onto a
+    /// different general model requires a restart for this to follow.
     pub voyage_ctx:
         Option<std::sync::Arc<mnm_embedding::contextualized::ContextualizedVoyageEmbedder>>,
     /// The corpus's code-embedding model, resolved at boot from config.
@@ -197,32 +210,170 @@ pub fn build(pool: PgPool, cfg: ServerConfig) -> Result<Router, AuthStateError> 
     )
 }
 
-/// Construct the server-side Voyage embedder from config, or `None` when
-/// `VOYAGE_API_KEY` is unset (BYOK / server-side embedding not configured).
+/// The two server-side Voyage embedders for `POST /v1/embeddings`: the flat
+/// code client (`type=code`) and the contextualized general client
+/// (`type=general`). Both are `None` when `VOYAGE_API_KEY` is unset.
+type ServerEmbedders = (
+    Option<std::sync::Arc<mnm_embedding::voyage::VoyageEmbedder>>,
+    Option<std::sync::Arc<mnm_embedding::contextualized::ContextualizedVoyageEmbedder>>,
+);
+
+/// Resolve the model NAME the server-side embedder should compute with.
+///
+/// The authority is `resolved_name` — the bare name of the corpus/code model
+/// resolved from the registry (the same model whose wire id the
+/// `/v1/embeddings` route stamps on the response). When the operator set an
+/// explicit `MIDNIGHT_MANUAL_VOYAGE_MODEL` / `_CONTEXT_MODEL` override
+/// (`override_name = Some`), that wins — but a `warn!` is emitted if it
+/// disagrees with the registry, because embedding with an overriding name while
+/// labelling vectors with the registry wire id re-introduces the very drift this
+/// fix prevents. `which` is `"general"` / `"code"` for the log line.
+fn resolve_embed_model_name<'a>(
+    which: &str,
+    override_name: Option<&'a str>,
+    resolved_name: &'a str,
+) -> &'a str {
+    let Some(name) = override_name else {
+        return resolved_name;
+    };
+    if name != resolved_name {
+        tracing::warn!(
+            which,
+            override_model = name,
+            registry_model = resolved_name,
+            "configured embedding-model override disagrees with the corpus's active model; the \
+             proxy will embed with the override but stamp vectors with the registry wire id — \
+             re-align them to avoid silently-mismatched vectors"
+        );
+    }
+    name
+}
+
+/// Build the server-side embedders from the RESOLVED corpus/code model (the
+/// fix for the cross-element drift bug). The general embedder uses the corpus
+/// active model's name/dim; the code embedder uses the resolved code model's
+/// name/dim, falling back to the config override / model wire name when no code
+/// model resolved (the code embedder is unreachable in that case — code
+/// searches 503 before embedding — so the fallback only keeps boot simple).
+///
+/// Dtype comes from the SAME [`crate::routes::models::CORPUS_DTYPE`] constant
+/// that `/v1/models/active` reports, so the dtype the proxy COMPUTES with cannot
+/// diverge from the dtype the server LABELS the corpus with. The config's
+/// `voyage_output_dtype` is only consulted to warn when an operator set it to
+/// something other than the corpus dtype (a misconfiguration). Returns
+/// `(code_embedder, general_embedder)`.
+///
+/// IMPORTANT: the returned embedders are PINNED at the corpus/code model passed
+/// here. They are built once at boot and never re-resolved, so a runtime model
+/// swap (an ingest finalize that promotes a different model — see
+/// [`crate::corpus_model::refresh`]) requires a server restart for the proxy to
+/// compute with the new model. The refresh path fails loud (warns) when the new
+/// model disagrees with what these embedders were built with.
+#[must_use]
+pub fn resolved_embedders(
+    cfg: &ServerConfig,
+    corpus: &crate::corpus_model::CorpusModel,
+    code: Option<&crate::code_model::CodeModel>,
+) -> ServerEmbedders {
+    let dtype = proxy_dtype(cfg);
+    let general_name =
+        resolve_embed_model_name("general", cfg.voyage_context_model.as_deref(), &corpus.name);
+    let general_dim = u32::try_from(corpus.dim).unwrap_or(cfg.voyage_output_dimension);
+    let voyage_ctx = cfg.voyage_api_key.as_ref().map(|k| {
+        std::sync::Arc::new(mnm_embedding::contextualized::ContextualizedVoyageEmbedder::new(
+            k,
+            general_name,
+            general_dim,
+            dtype,
+        ))
+    });
+
+    // Code: resolved code-model name (authority) when present; otherwise the
+    // explicit override, else the configured `code_model_wire`'s bare name.
+    let code_fallback = cfg
+        .voyage_model
+        .as_deref()
+        .unwrap_or_else(|| code_wire_name(&cfg.code_model_wire));
+    let code_name = code.map_or(code_fallback, |c| {
+        resolve_embed_model_name("code", cfg.voyage_model.as_deref(), &c.name)
+    });
+    let code_dim = code
+        .and_then(|c| u32::try_from(c.dim).ok())
+        .unwrap_or(cfg.voyage_output_dimension);
+    let voyage = cfg.voyage_api_key.as_ref().map(|k| {
+        std::sync::Arc::new(mnm_embedding::voyage::VoyageEmbedder::new(
+            k, code_name, code_dim, dtype,
+        ))
+    });
+
+    (voyage, voyage_ctx)
+}
+
+/// The dtype the server-side proxy embedders compute with: the SAME
+/// [`crate::routes::models::CORPUS_DTYPE`] the `/v1/models/active` route reports,
+/// so the server's two halves (the bytes it produces vs. the dtype it advertises)
+/// cannot drift. The config's `voyage_output_dtype` only earns a `warn!` when an
+/// operator set it to something other than the corpus dtype — the corpus is
+/// encoded at `CORPUS_DTYPE`, so honouring a divergent config dtype would
+/// produce vectors that mismatch the corpus.
+fn proxy_dtype(cfg: &ServerConfig) -> &'static str {
+    if cfg.voyage_output_dtype != crate::routes::models::CORPUS_DTYPE {
+        tracing::warn!(
+            config_dtype = %cfg.voyage_output_dtype,
+            corpus_dtype = crate::routes::models::CORPUS_DTYPE,
+            "MIDNIGHT_MANUAL_VOYAGE_DTYPE differs from the corpus dtype; the proxy embeds at the \
+             corpus dtype regardless (the corpus is encoded at that dtype) — remove the override \
+             to silence this"
+        );
+    }
+    crate::routes::models::CORPUS_DTYPE
+}
+
+/// Bare model name from a `name@revision` wire id, or the whole string when it
+/// has no `@` (defensive — the configured default is always well-formed).
+fn code_wire_name(wire: &str) -> &str {
+    wire.split_once('@').map_or(wire, |(name, _)| name)
+}
+
+/// Construct the server-side embedders from config alone, used by [`build`]
+/// (the unresolved/offline path — no DB round-trip). The model name falls back
+/// to the explicit override, else the configured `code_model_wire` / a
+/// `voyage-context-3` literal, because no resolved model is available here. This
+/// path is offline/test-only; the production boot path uses
+/// [`resolved_embedders`], which derives the name from the registry.
 fn voyage_from_config(
     cfg: &ServerConfig,
 ) -> Option<std::sync::Arc<mnm_embedding::voyage::VoyageEmbedder>> {
     cfg.voyage_api_key.as_ref().map(|k| {
+        let name = cfg
+            .voyage_model
+            .as_deref()
+            .unwrap_or_else(|| code_wire_name(&cfg.code_model_wire));
         std::sync::Arc::new(mnm_embedding::voyage::VoyageEmbedder::new(
             k,
-            &cfg.voyage_model,
+            name,
             cfg.voyage_output_dimension,
-            &cfg.voyage_output_dtype,
+            proxy_dtype(cfg),
         ))
     })
 }
 
-/// Construct the server-side contextualized (general) Voyage embedder from
-/// config, or `None` when `VOYAGE_API_KEY` is unset.
+/// Construct the server-side contextualized (general) embedder from config
+/// alone (the unresolved/offline path used by [`build`]). Falls back to the
+/// explicit override, else a `voyage-context-3` literal.
 fn voyage_ctx_from_config(
     cfg: &ServerConfig,
 ) -> Option<std::sync::Arc<mnm_embedding::contextualized::ContextualizedVoyageEmbedder>> {
     cfg.voyage_api_key.as_ref().map(|k| {
+        let name = cfg
+            .voyage_context_model
+            .as_deref()
+            .unwrap_or("voyage-context-3");
         std::sync::Arc::new(mnm_embedding::contextualized::ContextualizedVoyageEmbedder::new(
             k,
-            &cfg.voyage_context_model,
+            name,
             cfg.voyage_output_dimension,
-            &cfg.voyage_output_dtype,
+            proxy_dtype(cfg),
         ))
     })
 }
@@ -237,15 +388,21 @@ fn voyage_ctx_from_config(
 /// Returns [`AuthStateError`] if the auth env values are present but malformed.
 pub async fn build_resolved(pool: PgPool, cfg: ServerConfig) -> Result<Router, AuthStateError> {
     let cm = crate::corpus_model::resolve(&pool).await.ok();
-    let corpus_model = std::sync::Arc::new(std::sync::RwLock::new(cm));
     let km = crate::code_model::resolve(&pool, &cfg.code_model_wire)
         .await
         .ok();
-    let code_model = std::sync::Arc::new(std::sync::RwLock::new(km));
     let limiter = crate::ratelimit::RateLimiter::from_config(&cfg);
     let token_limiter = crate::tokenlimit::TokenUsageLimiter::from_config(&cfg);
-    let voyage = voyage_from_config(&cfg);
-    let voyage_ctx = voyage_ctx_from_config(&cfg);
+    // Derive embedders from the resolved models when available (the production
+    // path), so the proxy's embed model matches the stamped wire id AT BOOT (it
+    // stays pinned to this model thereafter — see `resolved_embedders`); fall
+    // back to config-only construction when the corpus model is unresolved.
+    let (voyage, voyage_ctx) = cm.as_ref().map_or_else(
+        || (voyage_from_config(&cfg), voyage_ctx_from_config(&cfg)),
+        |corpus| resolved_embedders(&cfg, corpus, km.as_ref()),
+    );
+    let corpus_model = std::sync::Arc::new(std::sync::RwLock::new(cm));
+    let code_model = std::sync::Arc::new(std::sync::RwLock::new(km));
     build_with_limiter(
         pool,
         cfg,
@@ -338,4 +495,72 @@ pub fn build_with_limiter(
         .layer(axum::middleware::from_fn(request_id::layer))
         .layer(TraceLayer::new_for_http())
         .with_state(state))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{code_wire_name, proxy_dtype, resolve_embed_model_name};
+    use crate::config::ServerConfig;
+    use crate::routes::models::CORPUS_DTYPE;
+
+    /// The proxy embedder dtype is sourced from the SAME `CORPUS_DTYPE` constant
+    /// the `/v1/models/active` route reports, so the bytes the proxy produces and
+    /// the dtype the server advertises cannot drift. The default config's
+    /// `voyage_output_dtype` agrees, so no warn is warranted.
+    #[test]
+    fn proxy_dtype_sources_from_corpus_constant() {
+        let cfg = ServerConfig::default();
+        assert_eq!(proxy_dtype(&cfg), CORPUS_DTYPE);
+    }
+
+    /// Even when the operator sets a divergent `voyage_output_dtype`, the proxy
+    /// still computes at the corpus dtype (the corpus is encoded at it) — the
+    /// config value only earns a warn, it never changes what the proxy produces.
+    #[test]
+    fn proxy_dtype_ignores_divergent_config_dtype() {
+        let cfg = ServerConfig {
+            voyage_output_dtype: "int8".to_owned(),
+            ..ServerConfig::default()
+        };
+        assert_eq!(proxy_dtype(&cfg), CORPUS_DTYPE);
+    }
+
+    /// No override → the resolved (registry) name is returned verbatim. This is
+    /// the production default: the proxy computes with the corpus's active model.
+    #[test]
+    fn resolve_embed_model_name_no_override_returns_resolved() {
+        let name = resolve_embed_model_name("general", None, "voyage-context-3");
+        assert_eq!(name, "voyage-context-3");
+    }
+
+    /// Override that AGREES with the registry → the override is returned and no
+    /// drift warning is warranted (the two names are identical).
+    #[test]
+    fn resolve_embed_model_name_agreeing_override_returns_override() {
+        let name = resolve_embed_model_name("code", Some("voyage-code-3"), "voyage-code-3");
+        assert_eq!(name, "voyage-code-3");
+    }
+
+    /// Override that DISAGREES with the registry → the override still wins (the
+    /// operator asked for it) and a drift `warn!` fires. We can't easily assert
+    /// on the log line here, but the return value is the override, which is the
+    /// behaviour the embeddings route binds the embedder to.
+    #[test]
+    fn resolve_embed_model_name_disagreeing_override_returns_override() {
+        let name = resolve_embed_model_name("general", Some("voyage-3"), "voyage-context-3");
+        assert_eq!(name, "voyage-3");
+        assert_ne!(name, "voyage-context-3");
+    }
+
+    /// A well-formed `name@revision` wire id yields the bare name.
+    #[test]
+    fn code_wire_name_strips_revision() {
+        assert_eq!(code_wire_name("voyage-code-3@1"), "voyage-code-3");
+    }
+
+    /// A wire id with no `@` is returned whole (defensive fallback).
+    #[test]
+    fn code_wire_name_without_at_returns_whole() {
+        assert_eq!(code_wire_name("voyage-code-3"), "voyage-code-3");
+    }
 }

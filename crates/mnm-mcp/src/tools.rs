@@ -854,23 +854,60 @@ async fn build_embedded_pairs(
     cfg: &ServerConfig,
     cloud: &Arc<CloudClient>,
 ) -> Result<(Vec<QueryPair>, String, Option<String>), SearchError> {
+    use mnm_core::embedder_identity::{derive, ActiveModelIdentity, FallbackIdentity};
+
     let embed_code_q = parsed.code_mode != Some("off");
     let embed_general_q = parsed.code_mode != Some("exclusive");
     let n = parsed.queries.len();
-    let general_vectors = if embed_general_q {
-        embed_general_queries(&parsed.queries, models, voyage_key, cfg, cloud).await?
-    } else {
-        vec![Vec::new(); n]
-    };
-    let code_vectors = if embed_code_q {
-        embed_code_queries(&parsed.queries, models, voyage_key, cfg, cloud).await?
-    } else {
-        vec![Vec::new(); n]
-    };
+
+    // Fetch the corpus's active model FIRST so the embedders are built from the
+    // SAME source that labels the resulting vectors (cross-element drift fix).
     let active = cloud
         .fetch_active_model()
         .await
         .map_err(|e| SearchError::Cloud(e.to_string()))?;
+
+    // Derive embedder identities from the active fetch (the authority); config
+    // is only the logged fallback. The active fetch always succeeds here (we
+    // `?`-returned above), so these always take the active path.
+    let general_id = derive(
+        "general",
+        Some(&ActiveModelIdentity {
+            name: active.general.name.clone(),
+            dim: active.general.dim,
+            dtype: active.general.dtype.clone(),
+        }),
+        &FallbackIdentity {
+            name: &models.embedding,
+            dim: models.voyage_output_dimension,
+            dtype: &models.voyage_output_dtype,
+        },
+    );
+    let code_active = active.code.as_ref().map(|c| ActiveModelIdentity {
+        name: c.name.clone(),
+        dim: c.dim,
+        dtype: c.dtype.clone(),
+    });
+    let code_id = derive(
+        "code",
+        code_active.as_ref(),
+        &FallbackIdentity {
+            name: &models.code_embedding,
+            dim: models.voyage_output_dimension,
+            dtype: &models.voyage_output_dtype,
+        },
+    );
+
+    let general_vectors = if embed_general_q {
+        embed_general_queries(&parsed.queries, &general_id, voyage_key, cfg, cloud).await?
+    } else {
+        vec![Vec::new(); n]
+    };
+    let code_vectors = if embed_code_q {
+        embed_code_queries(&parsed.queries, &code_id, voyage_key, cfg, cloud).await?
+    } else {
+        vec![Vec::new(); n]
+    };
     // The code wire id pins code_vectors to a model. Prefer the
     // corpus-reported id; fall back to the config-pinned model at revision 1
     // when the server didn't report one (the cloud then rejects the request
@@ -878,8 +915,8 @@ async fn build_embedded_pairs(
     let code_wire = embed_code_q.then(|| {
         active
             .code
-            .clone()
-            .unwrap_or_else(|| format!("{}@1", models.code_embedding))
+            .as_ref()
+            .map_or_else(|| format!("{}@1", models.code_embedding), |c| c.wire.clone())
     });
     let pairs = parsed
         .queries
@@ -892,7 +929,7 @@ async fn build_embedded_pairs(
             code_vector,
         })
         .collect();
-    Ok((pairs, active.general, code_wire))
+    Ok((pairs, active.general.wire, code_wire))
 }
 
 /// Embed `queries` with the GENERAL model (voyage-context-3), returning one
@@ -901,12 +938,16 @@ async fn build_embedded_pairs(
 /// server's `/v1/embeddings` proxy with `type=general`. There is no local
 /// embedder; the only local model is the reranker.
 ///
+/// The embedder `name`/`dim`/`dtype` come from `identity`, derived from the
+/// corpus's active model (see [`build_embedded_pairs`]) so the model computing
+/// these vectors matches the wire id labelling them.
+///
 /// # Errors
 ///
 /// Returns [`SearchError::Cloud`] on any embedding failure.
 async fn embed_general_queries(
     queries: &[String],
-    models: &mnm_core::config::ModelsConfig,
+    identity: &mnm_core::embedder_identity::EmbedderIdentity,
     voyage_key: Option<&str>,
     cfg: &ServerConfig,
     cloud: &Arc<CloudClient>,
@@ -914,9 +955,9 @@ async fn embed_general_queries(
     let embedded = if let Some(key) = voyage_key {
         let e = contextualized::ContextualizedVoyageEmbedder::new(
             key,
-            &models.embedding,
-            models.voyage_output_dimension,
-            &models.voyage_output_dtype,
+            &identity.name,
+            identity.dim,
+            &identity.dtype,
         );
         embed_client::embed_general(
             queries.to_vec(),
@@ -945,23 +986,22 @@ async fn embed_general_queries(
 /// returning one vector per query in order. BYOK hits Voyage's flat endpoint
 /// directly; otherwise the cloud's `/v1/embeddings` proxy with `type=code`.
 ///
+/// The embedder `name`/`dim`/`dtype` come from `identity`, derived from the
+/// active model's `code` half (see [`build_embedded_pairs`]) so the model
+/// computing these vectors matches the code wire id labelling them.
+///
 /// # Errors
 ///
 /// Returns [`SearchError::Cloud`] on any embedding failure.
 async fn embed_code_queries(
     queries: &[String],
-    models: &mnm_core::config::ModelsConfig,
+    identity: &mnm_core::embedder_identity::EmbedderIdentity,
     voyage_key: Option<&str>,
     cfg: &ServerConfig,
     cloud: &Arc<CloudClient>,
 ) -> Result<Vec<Vec<f32>>, SearchError> {
     let embedded = if let Some(key) = voyage_key {
-        let v = voyage::VoyageEmbedder::new(
-            key,
-            &models.code_embedding,
-            models.voyage_output_dimension,
-            &models.voyage_output_dtype,
-        );
+        let v = voyage::VoyageEmbedder::new(key, &identity.name, identity.dim, &identity.dtype);
         embed_client::embed_code(
             queries.to_vec(),
             voyage::InputType::Query,

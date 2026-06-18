@@ -128,14 +128,18 @@ pub struct ServerConfig {
     /// fallback (the old local corpus embedder was retired when the corpus
     /// moved to VoyageAI).
     pub voyage_api_key: Option<String>,
-    /// `MIDNIGHT_MANUAL_VOYAGE_MODEL` — VoyageAI embedding model name for the
-    /// flat `/v1/embeddings` API (the `type=code` embedder). Defaults to
-    /// `"voyage-code-3"`.
-    pub voyage_model: String,
-    /// `MIDNIGHT_MANUAL_VOYAGE_CONTEXT_MODEL` — VoyageAI contextualized
-    /// embedding model name (the `type=general` embedder, served via
-    /// `/v1/contextualizedembeddings`). Defaults to `"voyage-context-3"`.
-    pub voyage_context_model: String,
+    /// `MIDNIGHT_MANUAL_VOYAGE_MODEL` — explicit OVERRIDE of the VoyageAI model
+    /// name used for the flat `/v1/embeddings` API (the `type=code` embedder).
+    /// `None` (the default) means "use the resolved code model's name" so the
+    /// embed model and the stamped wire id cannot diverge; `Some` is an operator
+    /// override that boot logs a `warn!` for when it disagrees with the registry.
+    pub voyage_model: Option<String>,
+    /// `MIDNIGHT_MANUAL_VOYAGE_CONTEXT_MODEL` — explicit OVERRIDE of the VoyageAI
+    /// contextualized model name (the `type=general` embedder, served via
+    /// `/v1/contextualizedembeddings`). `None` (the default) means "use the
+    /// resolved corpus active model's name"; `Some` is an operator override that
+    /// boot logs a `warn!` for when it disagrees with the registry.
+    pub voyage_context_model: Option<String>,
     /// `MIDNIGHT_MANUAL_CODE_MODEL` — registry wire id (`name@revision`) of
     /// the corpus's code-embedding model, resolved at boot against the
     /// `embedding_model` registry. Defaults to `"voyage-code-3@1"`.
@@ -213,8 +217,8 @@ impl Default for ServerConfig {
             server_rerank_enabled: true,
             voyage_base_url: None,
             voyage_api_key: None,
-            voyage_model: "voyage-code-3".into(),
-            voyage_context_model: "voyage-context-3".into(),
+            voyage_model: None,
+            voyage_context_model: None,
             code_model_wire: "voyage-code-3@1".into(),
             voyage_output_dimension: 1024,
             voyage_output_dtype: "float".into(),
@@ -326,14 +330,16 @@ impl ServerConfig {
             .ok()
             .filter(|s| !s.is_empty());
         let voyage_api_key = env::var("VOYAGE_API_KEY").ok().filter(|s| !s.is_empty());
+        // `None` unless the operator explicitly set the env var — boot then uses
+        // the resolved corpus/code model name (the authority), so the embed
+        // model can't diverge from the stamped wire id. A `Some` value is an
+        // explicit override and is warn-logged when it disagrees with the registry.
         let voyage_model = env::var("MIDNIGHT_MANUAL_VOYAGE_MODEL")
             .ok()
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "voyage-code-3".into());
+            .filter(|s| !s.is_empty());
         let voyage_context_model = env::var("MIDNIGHT_MANUAL_VOYAGE_CONTEXT_MODEL")
             .ok()
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "voyage-context-3".into());
+            .filter(|s| !s.is_empty());
         let code_model_wire = env::var("MIDNIGHT_MANUAL_CODE_MODEL")
             .ok()
             .filter(|s| !s.is_empty())
@@ -494,7 +500,10 @@ mod tests {
         assert_eq!(c.token_snapshot_secs, 300);
         assert_eq!(c.token_limit_global, 10_000_000);
         assert_eq!(c.token_limit_global_window_secs, 10_800);
-        assert_eq!(c.voyage_model, "voyage-code-3");
+        // No explicit model override by default — boot derives the embed model
+        // name from the resolved corpus/code model so it can't diverge from the
+        // stamped wire id.
+        assert!(c.voyage_model.is_none());
         assert_eq!(c.voyage_output_dimension, 1024);
         assert_eq!(c.voyage_output_dtype, "float");
         assert!(c.voyage_api_key.is_none());
@@ -503,7 +512,8 @@ mod tests {
     #[test]
     fn dual_embedding_model_defaults() {
         let c = ServerConfig::default();
-        assert_eq!(c.voyage_context_model, "voyage-context-3");
+        // Default: no override; the active corpus model name is the authority.
+        assert!(c.voyage_context_model.is_none());
         assert_eq!(c.code_model_wire, "voyage-code-3@1");
     }
 

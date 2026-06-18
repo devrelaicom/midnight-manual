@@ -84,14 +84,62 @@ pub struct SearchRequest {
     pub version_match: Option<String>,
 }
 
+/// One embedding model's identity decoded from `GET /v1/models/active`: the
+/// `{name}@{revision}` wire id plus the `{name, dim, dtype}` an embedder is
+/// built from. Carrying the full identity (not just the wire id) lets the MCP
+/// search path build the embedder from the SAME source that labels the vectors
+/// (cross-element drift fix).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveModelEntry {
+    /// `{name}@{revision}` wire id (e.g. `voyage-context-3@1`).
+    pub wire: String,
+    /// Bare model name (e.g. `voyage-context-3`).
+    pub name: String,
+    /// Output dimension.
+    pub dim: u32,
+    /// Output dtype (e.g. `"float"`).
+    pub dtype: String,
+}
+
 /// The corpus's active embedding models, decoded from `GET /v1/models/active`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActiveModels {
-    /// General-model `{name}@{revision}` wire id (e.g. `voyage-context-3@1`).
-    pub general: String,
-    /// Code-model wire id, when the corpus has one. `None` means code search
+    /// General-model identity (wire id + name/dim/dtype).
+    pub general: ActiveModelEntry,
+    /// Code-model identity, when the corpus has one. `None` means code search
     /// is unavailable server-side.
-    pub code: Option<String>,
+    pub code: Option<ActiveModelEntry>,
+}
+
+/// Default embedding dim when a `/v1/models/active` entry omits `dim` (a server
+/// that predates the field). 1024 is the corpus's Matryoshka dimension.
+const DEFAULT_ACTIVE_DIM: u32 = 1024;
+/// Default dtype when an entry omits `dtype` (a server that predates the field).
+const DEFAULT_ACTIVE_DTYPE: &str = "float";
+
+/// Parse one model entry (the top-level object or its `code` sub-object) into an
+/// [`ActiveModelEntry`]. Requires `name` (string) + `revision` (integer);
+/// `dim`/`dtype` default leniently so older servers keep working. Returns `None`
+/// when the required fields are absent.
+fn parse_active_entry(v: &serde_json::Value) -> Option<ActiveModelEntry> {
+    let name = v.get("name")?.as_str()?;
+    let revision = v.get("revision")?.as_i64()?;
+    let dim = v
+        .get("dim")
+        .and_then(serde_json::Value::as_i64)
+        .and_then(|d| u32::try_from(d).ok())
+        .unwrap_or(DEFAULT_ACTIVE_DIM);
+    let dtype = v
+        .get("dtype")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(DEFAULT_ACTIVE_DTYPE)
+        .to_owned();
+    Some(ActiveModelEntry {
+        wire: format!("{name}@{revision}"),
+        name: name.to_owned(),
+        dim,
+        dtype,
+    })
 }
 
 /// Errors the cloud client can produce.
@@ -183,27 +231,15 @@ impl CloudClient {
     /// parse or is missing the top-level `name`/`revision` fields.
     pub async fn fetch_active_model(&self) -> Result<ActiveModels, CloudError> {
         let v = self.get_json("/v1/models/active").await?;
-        let name = v
-            .get("name")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| {
-                CloudError::Decode("/v1/models/active response missing `name` field".to_owned())
-            })?;
-        let revision = v
-            .get("revision")
-            .and_then(serde_json::Value::as_i64)
-            .ok_or_else(|| {
-                CloudError::Decode("/v1/models/active response missing `revision` field".to_owned())
-            })?;
-        let code = v.get("code").and_then(|c| {
-            let code_name = c.get("name")?.as_str()?;
-            let code_revision = c.get("revision")?.as_i64()?;
-            Some(format!("{code_name}@{code_revision}"))
-        });
-        Ok(ActiveModels {
-            general: format!("{name}@{revision}"),
-            code,
-        })
+        let general = parse_active_entry(&v).ok_or_else(|| {
+            CloudError::Decode(
+                "/v1/models/active response missing `name`/`revision` field".to_owned(),
+            )
+        })?;
+        // The optional `code` sub-object is decoded leniently — absent or
+        // malformed means "no code model", never a decode error.
+        let code = v.get("code").and_then(parse_active_entry);
+        Ok(ActiveModels { general, code })
     }
 
     /// `POST /v1/search`.

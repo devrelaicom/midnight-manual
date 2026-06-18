@@ -52,55 +52,54 @@ async fn main() -> anyhow::Result<()> {
 
     // Re-resolvable corpus-model handle for AppState (Task 3.2). Reuse the
     // already-resolved `active` row rather than issuing a second query.
-    let corpus_model = std::sync::Arc::new(std::sync::RwLock::new(Some(
-        midnight_manual_server::corpus_model::CorpusModel {
-            wire: resolved_corpus_model,
-            id: active.id,
-            dim: usize::try_from(active.dim)
-                .context("active embedding model dim out of range for usize")?,
-        },
-    )));
+    let corpus = midnight_manual_server::corpus_model::CorpusModel {
+        wire: resolved_corpus_model,
+        name: active.name.clone(),
+        id: active.id,
+        dim: usize::try_from(active.dim)
+            .context("active embedding model dim out of range for usize")?,
+    };
 
     let rate_limiter = midnight_manual_server::ratelimit::RateLimiter::from_config(&cfg);
     // Token-usage limiter (tiered embedding-token ceilings). Kept in a binding
     // so Task 4.8's snapshot/reaper job can share this exact instance.
     let token_limiter = midnight_manual_server::tokenlimit::TokenUsageLimiter::from_config(&cfg);
-    // Server-side Voyage embedders for POST /v1/embeddings (None when no key):
-    // the flat voyage-code-3 client (`type=code`) and the contextualized
-    // voyage-context-3 client (`type=general`).
-    let voyage = cfg.voyage_api_key.as_ref().map(|k| {
-        std::sync::Arc::new(mnm_embedding::voyage::VoyageEmbedder::new(
-            k,
-            &cfg.voyage_model,
-            cfg.voyage_output_dimension,
-            &cfg.voyage_output_dtype,
-        ))
-    });
-    let voyage_ctx = cfg.voyage_api_key.as_ref().map(|k| {
-        std::sync::Arc::new(mnm_embedding::contextualized::ContextualizedVoyageEmbedder::new(
-            k,
-            &cfg.voyage_context_model,
-            cfg.voyage_output_dimension,
-            &cfg.voyage_output_dtype,
-        ))
-    });
+
     // Config-pinned code-embedding model, resolved against the registry. An
     // unresolved model degrades (code_mode searches 503) rather than failing
     // boot — a corpus ingested without code embeddings is still serviceable.
-    let code_model: midnight_manual_server::code_model::Shared = std::sync::Arc::new(
-        std::sync::RwLock::new(
-            match midnight_manual_server::code_model::resolve(&pool, &cfg.code_model_wire).await {
-                Ok(cm) => {
-                    tracing::info!(code_model = %cm.wire, "resolved code embedding model");
-                    Some(cm)
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "code model unresolved; code_mode searches will 503");
-                    None
-                }
-            },
-        ),
-    );
+    let code = match midnight_manual_server::code_model::resolve(&pool, &cfg.code_model_wire).await
+    {
+        Ok(cm) => {
+            tracing::info!(code_model = %cm.wire, "resolved code embedding model");
+            Some(cm)
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "code model unresolved; code_mode searches will 503");
+            None
+        }
+    };
+
+    // Server-side Voyage embedders for POST /v1/embeddings (None when no key).
+    // Cross-element drift fix: each embedder's model NAME/dim comes from the SAME
+    // resolved corpus/code model whose wire id the route stamps on the response —
+    // NOT from `cfg.voyage_model` / `cfg.voyage_context_model`. The
+    // MIDNIGHT_MANUAL_VOYAGE_MODEL / _CONTEXT_MODEL env vars survive only as an
+    // explicit override, warn-logged when they disagree with the registry. See
+    // `app::resolved_embedders`.
+    //
+    // BINDING IS PINNED AT BOOT: these embedders are built once, here, from the
+    // corpus/code model resolved at boot. They are NOT re-resolved when an ingest
+    // finalize promotes a different model at runtime (`corpus_model::refresh`).
+    // After such a swap the proxy keeps computing with the boot model while the
+    // wire-id label moves to the new one — a RESTART re-aligns them.
+    // `corpus_model::refresh` fails loud (warns) when that happens.
+    let (voyage, voyage_ctx) =
+        midnight_manual_server::app::resolved_embedders(&cfg, &corpus, code.as_ref());
+
+    let corpus_model = std::sync::Arc::new(std::sync::RwLock::new(Some(corpus)));
+    let code_model: midnight_manual_server::code_model::Shared =
+        std::sync::Arc::new(std::sync::RwLock::new(code));
     let app = app::build_with_limiter(
         pool.clone(),
         cfg.clone(),

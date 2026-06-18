@@ -39,12 +39,6 @@ pub struct ServerConfig {
     /// on every cloud request. `None` means the MCP server is running in
     /// anonymous read mode.
     pub bearer_token: Option<String>,
-    /// `{name}@{revision}` model identifier the cloud expects clients to
-    /// declare on every search. NOTE: since the Voyage cutover, `run_search`
-    /// resolves the corpus wire id live via `CloudClient::fetch_active_model`
-    /// (`GET /v1/models/active`) and no longer reads this field; it is retained
-    /// for config back-compat and other potential consumers.
-    pub client_embedding_model: String,
     /// Resolved telemetry sink URL. Defaults to `{cloud_url}/v1/telemetry/events`.
     pub telemetry_url: String,
     /// Config-side master telemetry-enabled flag. The runtime opt-out
@@ -54,8 +48,10 @@ pub struct ServerConfig {
 
 impl ServerConfig {
     /// Build a config with the production defaults: production cloud URL,
-    /// no bearer, the `voyage-code-3@1` corpus model id, and telemetry
-    /// enabled (subject to the opt-out resolver).
+    /// no bearer, and telemetry enabled (subject to the opt-out resolver). The
+    /// corpus embedding-model id is no longer configured here — `run_search`
+    /// resolves it live via `CloudClient::fetch_active_model`
+    /// (`GET /v1/models/active`).
     #[must_use]
     pub fn with_defaults(cache_dir: PathBuf) -> Self {
         let cloud_url = mnm_core::config::DEFAULT_SERVER_URL.to_owned();
@@ -64,7 +60,6 @@ impl ServerConfig {
             cache_dir,
             cloud_url,
             bearer_token: None,
-            client_embedding_model: "voyage-code-3@1".to_owned(),
             telemetry_url,
             telemetry_enabled: true,
         }

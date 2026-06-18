@@ -42,6 +42,7 @@ fn unreachable_voyage() -> Arc<VoyageEmbedder> {
 fn pinned_corpus_model() -> Arc<RwLock<Option<CorpusModel>>> {
     Arc::new(RwLock::new(Some(CorpusModel {
         wire: "voyage-context-3@1".to_owned(),
+        name: "voyage-context-3".to_owned(),
         id: Uuid::new_v4(),
         dim: 1024,
     })))
@@ -50,6 +51,7 @@ fn pinned_corpus_model() -> Arc<RwLock<Option<CorpusModel>>> {
 fn pinned_code_model() -> Arc<RwLock<Option<CodeModel>>> {
     Arc::new(RwLock::new(Some(CodeModel {
         wire: "voyage-code-3@1".to_owned(),
+        name: "voyage-code-3".to_owned(),
         id: Uuid::new_v4(),
         dim: 1024,
     })))

@@ -665,11 +665,23 @@ pub struct ActiveModelResponse {
     pub dim: i32,
     /// Provider tag (e.g. `baai`).
     pub provider: String,
+    /// Output dtype the corpus is encoded with (e.g. `"float"`). The client
+    /// derives its embedder's `output_dtype` from this so the model that
+    /// COMPUTES a query vector matches the one whose wire id LABELS it. Defaults
+    /// to `"float"` for servers that predate the field.
+    #[serde(default = "default_active_dtype")]
+    pub dtype: String,
     /// The corpus's code-embedding model (dual embeddings). `None` when the
     /// server has no resolved code model (or predates dual embeddings) —
     /// code search is then unavailable server-side.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code: Option<ActiveCode>,
+}
+
+/// Default dtype for an active-model response that omits the field (a server
+/// that predates the dtype field). The corpus dtype is `"float"`.
+fn default_active_dtype() -> String {
+    "float".to_owned()
 }
 
 /// The code-embedding half of [`ActiveModelResponse`]. `name@revision` forms
@@ -686,6 +698,9 @@ pub struct ActiveCode {
     /// Provider tag (e.g. `voyageai`).
     #[serde(default)]
     pub provider: String,
+    /// Output dtype the code column is encoded with. Defaults to `"float"`.
+    #[serde(default = "default_active_dtype")]
+    pub dtype: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -755,6 +770,7 @@ mod tests {
             revision: 1,
             dim: 768,
             provider: "baai".to_owned(),
+            dtype: "float".to_owned(),
             code: None,
         }
     }

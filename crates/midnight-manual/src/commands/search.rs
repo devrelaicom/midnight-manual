@@ -296,11 +296,27 @@ pub async fn run_with_paths(
     let (embed_general_query, embed_code_query) =
         query_embed_needs(&args.mode, args.code_mode.as_deref());
 
+    // Fetch the corpus's active model FIRST so the embedders below are built
+    // from the SAME source that labels the resulting vectors (cross-element
+    // drift fix) — config is only a logged fallback when the fetch is
+    // unavailable. One round-trip covers both the embedder identities and the
+    // wire-id labels; it's skipped only when no embedding and no auto wire id
+    // is needed.
+    let (general_id, code_id, client_embedding_model, client_code_embedding_model) =
+        resolve_active_identities(
+            &args.embedding_model,
+            &cfg.models,
+            embed_general_query,
+            embed_code_query,
+            server_url,
+        )
+        .await?;
+
     let general_vectors = if embed_general_query {
         embed_general_queries(
             &texts,
             voyage_key.as_deref(),
-            &cfg.models,
+            &general_id,
             server_url,
             bearer.as_deref(),
         )
@@ -309,25 +325,11 @@ pub async fn run_with_paths(
         vec![Vec::new(); texts.len()]
     };
     let code_vectors = if embed_code_query {
-        embed_code_queries(
-            &texts,
-            voyage_key.as_deref(),
-            &cfg.models,
-            server_url,
-            bearer.as_deref(),
-        )
-        .await?
+        embed_code_queries(&texts, voyage_key.as_deref(), &code_id, server_url, bearer.as_deref())
+            .await?
     } else {
         vec![Vec::new(); texts.len()]
     };
-
-    let (client_embedding_model, client_code_embedding_model) = resolve_wire_models(
-        &args.embedding_model,
-        &cfg.models.code_embedding,
-        embed_code_query,
-        server_url,
-    )
-    .await?;
 
     let queries: Vec<QueryPair> = texts
         .into_iter()
@@ -529,6 +531,10 @@ fn query_embed_needs(mode: &str, code_mode: Option<&str>) -> (bool, bool) {
 /// Voyage key is present, otherwise proxied through the server's
 /// `/v1/embeddings` with `type=general`.
 ///
+/// The embedder `name`/`dim`/`dtype` come from `identity`, which is derived from
+/// the corpus's active model (see [`resolve_active_identities`]) so the model
+/// computing these vectors matches the wire id labelling them.
+///
 /// # Errors
 ///
 /// Returns `anyhow::Error` when the embedding call fails or the vector count
@@ -536,7 +542,7 @@ fn query_embed_needs(mode: &str, code_mode: Option<&str>) -> (bool, bool) {
 async fn embed_general_queries(
     texts: &[String],
     voyage_key: Option<&str>,
-    models: &mnm_core::config::ModelsConfig,
+    identity: &mnm_core::embedder_identity::EmbedderIdentity,
     server_url: &str,
     bearer: Option<&str>,
 ) -> Result<Vec<Vec<f32>>> {
@@ -544,9 +550,9 @@ async fn embed_general_queries(
     let embedded = if let Some(key) = voyage_key {
         let embedder = mnm_embedding::contextualized::ContextualizedVoyageEmbedder::new(
             key,
-            &models.embedding,
-            models.voyage_output_dimension,
-            &models.voyage_output_dtype,
+            &identity.name,
+            identity.dim,
+            &identity.dtype,
         );
         mnm_embedding::client::embed_general(
             texts.to_vec(),
@@ -576,6 +582,10 @@ async fn embed_general_queries(
 /// key is present, otherwise proxied through the server's `/v1/embeddings`
 /// with `type=code`.
 ///
+/// The embedder `name`/`dim`/`dtype` come from `identity`, derived from the
+/// active model's `code` half (see [`resolve_active_identities`]) so the model
+/// computing these vectors matches the code wire id labelling them.
+///
 /// # Errors
 ///
 /// Returns `anyhow::Error` when the embedding call fails or the vector count
@@ -583,7 +593,7 @@ async fn embed_general_queries(
 async fn embed_code_queries(
     texts: &[String],
     voyage_key: Option<&str>,
-    models: &mnm_core::config::ModelsConfig,
+    identity: &mnm_core::embedder_identity::EmbedderIdentity,
     server_url: &str,
     bearer: Option<&str>,
 ) -> Result<Vec<Vec<f32>>> {
@@ -591,9 +601,9 @@ async fn embed_code_queries(
     let embedded = if let Some(key) = voyage_key {
         let embedder = mnm_embedding::voyage::VoyageEmbedder::new(
             key,
-            &models.code_embedding,
-            models.voyage_output_dimension,
-            &models.voyage_output_dtype,
+            &identity.name,
+            identity.dim,
+            &identity.dtype,
         );
         mnm_embedding::client::embed_code(
             texts.to_vec(),
@@ -633,44 +643,142 @@ fn ensure_vector_count(
     }
 }
 
-/// Resolve the general + code embedding-model wire ids sent with the search
-/// request, with at most one `GET /v1/models/active` round-trip.
+/// Resolve, from at most ONE `GET /v1/models/active` round-trip, both the
+/// embedder identities used to COMPUTE the query vectors and the wire-id labels
+/// sent with them — so the two cannot diverge (cross-element drift fix).
 ///
-/// The general id honours an explicit `--embedding-model` override verbatim;
-/// the sentinel [`DEFAULT_EMBEDDING_MODEL`] (`"auto"`) resolves from the
-/// corpus's active model so the wire id always matches. The code id (resolved
-/// only when `need_code`) comes from the active response's `code` half,
-/// falling back to `<config code model>@1` when the server reports none. When
-/// neither id needs the active model, the round-trip is skipped entirely.
+/// Returns `(general_id, code_id, general_wire, code_wire)`:
+/// - `general_id` / `code_id` ([`EmbedderIdentity`]) drive embedder
+///   construction. `dim`/`dtype` come from the active response (the general half
+///   and the `code` half respectively); local config is only a logged fallback
+///   when the active fetch is unavailable. The general `name` mirrors the ingest
+///   path: under an explicit `--embedding-model` override its bare name (the wire
+///   id with `@revision` stripped) drives COMPUTE so it matches the `general_wire`
+///   LABEL; under `"auto"` the active name wins.
+/// - `general_wire` honours an explicit `--embedding-model` override verbatim;
+///   the sentinel [`DEFAULT_EMBEDDING_MODEL`] (`"auto"`) resolves from the active
+///   model so the wire id always matches the embedded vectors.
+/// - `code_wire` (resolved only when `need_code`) comes from the active `code`
+///   half, falling back to `<config code model>@1` when the server reports none.
 ///
-/// # Errors
-///
-/// Returns `anyhow::Error` when the active-model fetch fails.
-async fn resolve_wire_models(
+/// The round-trip is attempted whenever an embedding is needed or the general
+/// wire id is `"auto"`. A fetch failure is NOT fatal here: it degrades to the
+/// config-derived identities (logged by [`mnm_core::embedder_identity::derive`])
+/// so offline behavior is preserved; the explicit-override / no-embed paths skip
+/// the fetch entirely.
+async fn resolve_active_identities(
     embedding_model: &str,
-    code_model_name: &str,
+    models: &mnm_core::config::ModelsConfig,
+    need_general: bool,
     need_code: bool,
     server_url: &str,
-) -> Result<(String, Option<String>)> {
+) -> Result<(
+    mnm_core::embedder_identity::EmbedderIdentity,
+    mnm_core::embedder_identity::EmbedderIdentity,
+    String,
+    Option<String>,
+)> {
+    use mnm_core::embedder_identity::{
+        derive, derive_quiet, ActiveModelIdentity, FallbackIdentity,
+    };
+
     let need_general_fetch = embedding_model == DEFAULT_EMBEDDING_MODEL;
-    if !need_general_fetch && !need_code {
-        return Ok((embedding_model.to_owned(), None));
-    }
-    let active = crate::commands::models::fetch_active(server_url)
-        .await
-        .context("resolve active corpus model")?;
-    let general = if need_general_fetch {
-        format!("{}@{}", active.name, active.revision)
+    // Fetch the active model when any embed runs or the general wire id is auto.
+    // A transport/decoding failure degrades to config fallback rather than
+    // aborting the search (offline preservation), so this is best-effort. The
+    // failure is logged HERE (once), so the per-identity `derive` calls below use
+    // the quiet variant to avoid warning a second/third time for one event.
+    let fetch_attempted = need_general || need_code || need_general_fetch;
+    let active = if fetch_attempted {
+        match crate::commands::models::fetch_active(server_url).await {
+            Ok(a) => Some(a),
+            Err(e) => {
+                tracing::warn!(error = %format!("{e:#}"), "active-model fetch failed; falling back to local model config");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // General identity: active `{dim, dtype}` is the authority. The NAME mirrors
+    // the ingest path (`derive_general_ingest_identity`): under an explicit
+    // `--embedding-model` override the bare name (the wire id with `@revision`
+    // stripped) drives COMPUTE, so the model embedding the query matches the wire
+    // id LABEL `general_wire` stamps below; under "auto" the active name wins.
+    // Config is the (already-logged) fallback when the active fetch was
+    // unavailable.
+    let explicit_general_name = (!need_general_fetch).then(|| {
+        embedding_model
+            .split_once('@')
+            .map_or(embedding_model, |(n, _)| n)
+    });
+    let general_active = active.as_ref().map(|a| ActiveModelIdentity {
+        name: explicit_general_name.map_or_else(|| a.name.clone(), str::to_owned),
+        dim: u32::try_from(a.dim).unwrap_or(models.voyage_output_dimension),
+        dtype: a.dtype.clone(),
+    });
+    let general_fallback = FallbackIdentity {
+        name: explicit_general_name.unwrap_or(&models.embedding),
+        dim: models.voyage_output_dimension,
+        dtype: &models.voyage_output_dtype,
+    };
+    // Always quiet for general: a `None` `general_active` here means either the
+    // fetch failed (already logged above) or no fetch was attempted because no
+    // general embed is needed (fts / code_mode=exclusive) — in which case the
+    // general vector is never produced and the "vectors are NOT guaranteed to
+    // match" line would be misleading.
+    let general_id = derive_quiet("general", general_active.as_ref(), &general_fallback);
+
+    // Code identity: the active `code` half is the authority; config is the
+    // logged fallback. Warn only when a code embed is actually needed AND the
+    // fetch SUCCEEDED but reported no `code` half (a genuine, non-duplicate
+    // signal). A whole-fetch failure is already logged above, and fts mode
+    // (`!need_code`) never produces a code vector — both are quiet.
+    let code_active = active
+        .as_ref()
+        .and_then(|a| a.code.as_ref())
+        .map(|c| ActiveModelIdentity {
+            name: c.name.clone(),
+            dim: u32::try_from(c.dim).unwrap_or(models.voyage_output_dimension),
+            dtype: c.dtype.clone(),
+        });
+    let code_should_warn = need_code && active.is_some();
+    let code_derive = if code_should_warn {
+        derive
+    } else {
+        derive_quiet
+    };
+    let code_id = code_derive(
+        "code",
+        code_active.as_ref(),
+        &FallbackIdentity {
+            name: &models.code_embedding,
+            dim: models.voyage_output_dimension,
+            dtype: &models.voyage_output_dtype,
+        },
+    );
+
+    // Wire ids. The general wire honours an explicit override verbatim (the
+    // override's bare name already drives `general_id.name` above, so COMPUTE and
+    // LABEL agree); "auto" resolves from the active fetch (or the config name when
+    // the fetch was unavailable).
+    let general_wire = if need_general_fetch {
+        active.as_ref().map_or_else(
+            || format!("{}@1", models.embedding),
+            |a| format!("{}@{}", a.name, a.revision),
+        )
     } else {
         embedding_model.to_owned()
     };
-    let code = need_code.then(|| {
-        active.code.as_ref().map_or_else(
-            || format!("{code_model_name}@1"),
+    let code_wire = need_code.then(|| {
+        active.as_ref().and_then(|a| a.code.as_ref()).map_or_else(
+            || format!("{}@1", models.code_embedding),
             |c| format!("{}@{}", c.name, c.revision),
         )
     });
-    Ok((general, code))
+
+    Ok((general_id, code_id, general_wire, code_wire))
 }
 
 /// Map the granular filter flags (or `--filter-json`) into a [`SearchFilters`],

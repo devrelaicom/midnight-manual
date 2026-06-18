@@ -550,32 +550,14 @@ async fn run_inner(
     let voyage_key = mnm_core::config::resolve_voyage_api_key(voyage_api_key, &cfg.models, &env);
     let voyage_timeout_secs =
         mnm_core::config::resolve_voyage_timeout_secs(args.voyage_timeout_secs, &cfg.models, &env);
-    let byok = voyage_key.as_deref().map(|key| ByokEmbedders {
-        general: ContextualizedVoyageEmbedder::new(
-            key,
-            &cfg.models.embedding,
-            cfg.models.voyage_output_dimension,
-            &cfg.models.voyage_output_dtype,
-        )
-        .with_timeout_secs(voyage_timeout_secs),
-        code: VoyageEmbedder::new(
-            key,
-            &cfg.models.code_embedding,
-            cfg.models.voyage_output_dimension,
-            &cfg.models.voyage_output_dtype,
-        )
-        .with_timeout_secs(voyage_timeout_secs),
-    });
-    reporter.phase(
-        "embedder_resolved",
-        serde_json::json!({"mode": if byok.is_some() { "byok" } else { "server" }}),
-    );
 
-    // Resolve the corpus wire ids. One `GET /v1/models/active` round-trip covers
-    // both: the GENERAL wire id (when the sentinel "auto" is present — an
-    // explicit --embedding-model override is honoured directly) and the CODE
-    // wire id (when code embeddings are enabled). These label the start-run
-    // request and the per-batch upload bodies.
+    // Resolve the corpus wire ids FIRST (before building the embedders) so the
+    // embedder identities that COMPUTE the vectors are derived from the SAME
+    // active-model response that LABELS them (cross-element drift fix). One
+    // `GET /v1/models/active` round-trip covers the GENERAL wire id (when the
+    // sentinel "auto" is present — an explicit --embedding-model override is
+    // honoured directly), the CODE wire id (when code embeddings are enabled),
+    // and the {name, dim, dtype} the BYOK embedders are built from.
     let active = if args.embedding_model == DEFAULT_EMBEDDING_MODEL || code_embeddings_enabled {
         Some(
             crate::commands::models::fetch_active(server_url)
@@ -597,6 +579,30 @@ async fn run_inner(
             |c| format!("{}@{}", c.name, c.revision),
         )
     });
+
+    // Derive the BYOK embedder identities from the active fetch (the authority),
+    // with config as a logged fallback. The general identity follows the run's
+    // chosen embedding_model: when "auto" it's the active model; under an
+    // explicit --embedding-model override (e.g. `models migrate`) the bare name
+    // is parsed from that wire id so the embedder matches the targeted model.
+    let general_id =
+        derive_general_ingest_identity(&args.embedding_model, active.as_ref(), &cfg.models);
+    let code_id = derive_code_ingest_identity(active.as_ref(), &cfg.models);
+    let byok = voyage_key.as_deref().map(|key| ByokEmbedders {
+        general: ContextualizedVoyageEmbedder::new(
+            key,
+            &general_id.name,
+            general_id.dim,
+            &general_id.dtype,
+        )
+        .with_timeout_secs(voyage_timeout_secs),
+        code: VoyageEmbedder::new(key, &code_id.name, code_id.dim, &code_id.dtype)
+            .with_timeout_secs(voyage_timeout_secs),
+    });
+    reporter.phase(
+        "embedder_resolved",
+        serde_json::json!({"mode": if byok.is_some() { "byok" } else { "server" }}),
+    );
 
     // ── Phase: start ingest run ──────────────────────────────────────────────
     reporter.phase("start_run", serde_json::json!({"slug": args.source_slug}));
@@ -918,6 +924,71 @@ fn resolve_admin_bearer_str(token: &str) -> Option<String> {
 struct ByokEmbedders {
     general: ContextualizedVoyageEmbedder,
     code: VoyageEmbedder,
+}
+
+/// Derive the GENERAL embedder identity for an ingest run (cross-element drift
+/// fix): the `{name, dim, dtype}` the contextualized embedder is built from must
+/// match the wire id the run is labelled with.
+///
+/// Under an explicit `--embedding-model` override (e.g. `models migrate` pins a
+/// target wire id) the bare name is parsed from that wire id so the embedder
+/// targets exactly that model. Under the `"auto"` sentinel the active model's
+/// `{name, dim, dtype}` are the authority. Local config is only a logged
+/// fallback (via [`mnm_core::embedder_identity::derive`]) when the active fetch
+/// was unavailable.
+fn derive_general_ingest_identity(
+    embedding_model: &str,
+    active: Option<&crate::commands::models::ActiveModelResponse>,
+    models: &mnm_core::config::ModelsConfig,
+) -> mnm_core::embedder_identity::EmbedderIdentity {
+    use mnm_core::embedder_identity::{derive, ActiveModelIdentity, FallbackIdentity};
+    // For an explicit override the embedder must match the targeted model's
+    // bare name; dim/dtype still come from the active model (the corpus's
+    // encoding) when available, else config.
+    let explicit_name = (embedding_model != DEFAULT_EMBEDDING_MODEL).then(|| {
+        embedding_model
+            .split_once('@')
+            .map_or(embedding_model, |(n, _)| n)
+    });
+    let active_id = active.map(|a| ActiveModelIdentity {
+        name: explicit_name.map_or_else(|| a.name.clone(), str::to_owned),
+        dim: u32::try_from(a.dim).unwrap_or(models.voyage_output_dimension),
+        dtype: a.dtype.clone(),
+    });
+    derive(
+        "general",
+        active_id.as_ref(),
+        &FallbackIdentity {
+            name: explicit_name.unwrap_or(&models.embedding),
+            dim: models.voyage_output_dimension,
+            dtype: &models.voyage_output_dtype,
+        },
+    )
+}
+
+/// Derive the CODE embedder identity for an ingest run from the active model's
+/// `code` half (the authority), with local config as a logged fallback.
+fn derive_code_ingest_identity(
+    active: Option<&crate::commands::models::ActiveModelResponse>,
+    models: &mnm_core::config::ModelsConfig,
+) -> mnm_core::embedder_identity::EmbedderIdentity {
+    use mnm_core::embedder_identity::{derive, ActiveModelIdentity, FallbackIdentity};
+    let active_id = active
+        .and_then(|a| a.code.as_ref())
+        .map(|c| ActiveModelIdentity {
+            name: c.name.clone(),
+            dim: u32::try_from(c.dim).unwrap_or(models.voyage_output_dimension),
+            dtype: c.dtype.clone(),
+        });
+    derive(
+        "code",
+        active_id.as_ref(),
+        &FallbackIdentity {
+            name: &models.code_embedding,
+            dim: models.voyage_output_dimension,
+            dtype: &models.voyage_output_dtype,
+        },
+    )
 }
 
 /// Embed every chunk of `docs` in place: general contextualized vectors for
@@ -1596,6 +1667,79 @@ fn format_success(out: &SuccessOutput<'_>, json: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::models::{ActiveCode, ActiveModelResponse};
+
+    /// An active-model response whose `{name, dim, dtype}` deliberately differ
+    /// from `ModelsConfig`'s defaults, so a test can prove the embedder identity
+    /// is taken from the active response and NOT from config.
+    fn divergent_active() -> ActiveModelResponse {
+        ActiveModelResponse {
+            name: "voyage-context-3".to_owned(),
+            revision: 1,
+            dim: 512,
+            provider: "voyageai".to_owned(),
+            dtype: "int8".to_owned(),
+            code: Some(ActiveCode {
+                name: "voyage-code-3".to_owned(),
+                revision: 2,
+                dim: 256,
+                provider: "voyageai".to_owned(),
+                dtype: "uint8".to_owned(),
+            }),
+        }
+    }
+
+    /// THE cross-element drift property (ingest side): when the active model is
+    /// available, the GENERAL and CODE embedders are built from the active
+    /// response's `{name, dim, dtype}`, NOT from the (divergent) local config.
+    /// `auto` means "follow the corpus", so the general name is the active name.
+    #[test]
+    fn ingest_identities_come_from_active_not_config() {
+        let active = divergent_active();
+        // Config defaults are voyage-context-3 / voyage-code-3 / 1024 / "float".
+        let models = mnm_core::config::ModelsConfig::default();
+
+        let general =
+            derive_general_ingest_identity(DEFAULT_EMBEDDING_MODEL, Some(&active), &models);
+        assert_eq!(general.name, "voyage-context-3");
+        assert_eq!(general.dim, 512, "dim must come from the active response, not config 1024");
+        assert_eq!(general.dtype, "int8", "dtype must come from the active response, not config");
+
+        let code = derive_code_ingest_identity(Some(&active), &models);
+        assert_eq!(code.name, "voyage-code-3");
+        assert_eq!(code.dim, 256, "code dim must come from the active `code` half");
+        assert_eq!(code.dtype, "uint8", "code dtype must come from the active `code` half");
+    }
+
+    /// An explicit `--embedding-model` override (e.g. `models migrate`) drives
+    /// the GENERAL embedder's name to the targeted model's bare name, so the
+    /// embedder matches the wire id the run is labelled with.
+    #[test]
+    fn ingest_general_identity_honours_explicit_override() {
+        let active = divergent_active();
+        let models = mnm_core::config::ModelsConfig::default();
+        let general = derive_general_ingest_identity("voyage-context-4@3", Some(&active), &models);
+        // Name parsed from the override wire id; dim/dtype still from the corpus.
+        assert_eq!(general.name, "voyage-context-4");
+        assert_eq!(general.dim, 512);
+        assert_eq!(general.dtype, "int8");
+    }
+
+    /// Offline path: with no active-model response, the identities fall back to
+    /// local config (logged). This preserves offline behavior.
+    #[test]
+    fn ingest_identities_fall_back_to_config_when_active_absent() {
+        let models = mnm_core::config::ModelsConfig::default();
+        let general = derive_general_ingest_identity(DEFAULT_EMBEDDING_MODEL, None, &models);
+        assert_eq!(general.name, models.embedding);
+        assert_eq!(general.dim, models.voyage_output_dimension);
+        assert_eq!(general.dtype, models.voyage_output_dtype);
+
+        let code = derive_code_ingest_identity(None, &models);
+        assert_eq!(code.name, models.code_embedding);
+        assert_eq!(code.dim, models.voyage_output_dimension);
+        assert_eq!(code.dtype, models.voyage_output_dtype);
+    }
 
     #[test]
     fn parses_chunk_and_filter_flags() {
