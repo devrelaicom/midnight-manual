@@ -14,9 +14,37 @@
 use anyhow::{anyhow, Context as _, Result};
 use clap::{Args as ClapArgs, Subcommand};
 use mnm_core::auth_file::AuthFile;
+use serde::Deserialize;
 use serde_json::json;
 use time::format_description::well_known::Rfc3339;
 use time::{Duration, OffsetDateTime};
+use uuid::Uuid;
+
+/// Deserialize-only mirror of the server's `rate_limit_override` row
+/// (`mnm_core::types::RateLimitOverride`, serialized verbatim by
+/// [`crate::routes::admin_ratelimits`]'s `Json(row)` on every CRUD response).
+///
+/// The human-output path deserializes into this instead of reading hard-coded
+/// `serde_json::Value` string keys, so a server-side field rename fails the
+/// deserialize test at build time instead of silently degrading the printed
+/// row to placeholders. The `--json` path still emits the verbatim server
+/// envelope and never touches this struct.
+///
+/// Field names and types track the server struct exactly; only the fields the
+/// human row actually prints are modelled (`expires_at` / `created_*` are
+/// elided — `serde` ignores unknown fields by default).
+#[derive(Debug, Deserialize)]
+pub(crate) struct RateLimitOverrideRow {
+    /// Database UUID.
+    pub id: Uuid,
+    /// Network block the override applies to, in `addr/prefix` form.
+    pub cidr: String,
+    /// Requests-per-second ceiling for the block.
+    pub limit_rps: i32,
+    /// Free-form operator note; `None` when the column is null.
+    #[serde(default)]
+    pub note: Option<String>,
+}
 
 /// `mnm ratelimits <subcommand>`.
 #[derive(Debug, ClapArgs)]
@@ -399,11 +427,12 @@ fn emit_list(v: &serde_json::Value, json: bool) {
 }
 
 fn print_row(v: &serde_json::Value) {
-    let id = v["id"].as_str().unwrap_or("?");
-    let cidr = v["cidr"].as_str().unwrap_or("?");
-    let limit = v["limit_rps"].as_i64().unwrap_or(0);
-    let note = v["note"].as_str().unwrap_or("");
-    println!("  {id}  {cidr:<20} {limit:>6}/s  {note}");
+    let Ok(row) = serde_json::from_value::<RateLimitOverrideRow>(v.clone()) else {
+        println!("  (unexpected override row shape)");
+        return;
+    };
+    let note = row.note.as_deref().unwrap_or("");
+    println!("  {}  {:<20} {:>6}/s  {note}", row.id, row.cidr, row.limit_rps);
 }
 
 #[cfg(test)]
@@ -440,5 +469,46 @@ mod tests {
         assert!(parse_ttl("10y").is_err());
         assert!(parse_ttl("abch").is_err());
         assert!(parse_ttl("0h").is_err());
+    }
+
+    /// A representative server `Json(RateLimitOverride)` row decodes into the
+    /// human-output mirror with the expected typed fields. This is the
+    /// build-time guard: renaming `limit_rps`/`cidr`/`id` server-side (or
+    /// changing their types) fails this test instead of silently degrading the
+    /// printed row to placeholders.
+    #[test]
+    fn override_row_deserializes_from_server_shape() {
+        // Mirrors `mnm_core::types::RateLimitOverride`'s wire shape, including
+        // the `expires_at` / `created_*` fields the human row ignores.
+        let row: RateLimitOverrideRow = serde_json::from_value(serde_json::json!({
+            "id": "00000000-0000-0000-0000-0000000000aa",
+            "cidr": "203.0.113.0/24",
+            "limit_rps": 200,
+            "expires_at": "2099-01-01T00:00:00Z",
+            "note": "launch event",
+            "created_by": "admin-1",
+            "created_at": "2026-01-01T00:00:00Z"
+        }))
+        .expect("server override row must decode into RateLimitOverrideRow");
+        assert_eq!(row.id, Uuid::from_u128(0xaa));
+        assert_eq!(row.cidr, "203.0.113.0/24");
+        assert_eq!(row.limit_rps, 200);
+        assert_eq!(row.note.as_deref(), Some("launch event"));
+    }
+
+    /// A null `note` (the column is nullable) decodes to `None`, not a panic.
+    #[test]
+    fn override_row_allows_null_note() {
+        let row: RateLimitOverrideRow = serde_json::from_value(serde_json::json!({
+            "id": "00000000-0000-0000-0000-0000000000bb",
+            "cidr": "10.0.0.0/8",
+            "limit_rps": 50,
+            "expires_at": "2099-01-01T00:00:00Z",
+            "note": null,
+            "created_by": "admin-1",
+            "created_at": "2026-01-01T00:00:00Z"
+        }))
+        .expect("null note must decode to None");
+        assert!(row.note.is_none());
     }
 }

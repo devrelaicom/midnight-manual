@@ -1151,6 +1151,16 @@ pub async fn fetch_search(
     let status = resp.status();
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
+        // Decode the typed error envelope and, on a 409 embedding-model
+        // mismatch, surface the server's `message` + `remediation` instead of
+        // dumping the raw JSON body — parity with the MCP cloud client
+        // (`mnm_mcp::cloud_client::parse_mismatch`). Any other decoded code, or
+        // an undecodable body, falls back to the redacted raw form below.
+        if let Some(err) = crate::shared::decode_error_envelope(&body) {
+            if err.code == mnm_core::error::ErrorCode::EmbeddingModelMismatch {
+                return Err(anyhow!("{}\n  remediation: {}", err.message, err.remediation));
+            }
+        }
         return Err(anyhow!("{status} from /v1/search: {}", redact_token_like(&body)));
     }
     resp.json().await.context("parse /v1/search response body")

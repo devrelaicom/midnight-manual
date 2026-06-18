@@ -179,8 +179,12 @@ async fn bearer_omitted_when_none() {
     assert!(!*saw_auth.lock().unwrap(), "no Authorization header expected");
 }
 
+/// A 409 `embedding_model_mismatch` envelope is decoded and the surfaced error
+/// carries the server's `message` + `remediation` (parity with the MCP client)
+/// rather than dumping the raw JSON body. The raw `{...}` JSON and the bare
+/// status no longer leak into the message.
 #[tokio::test]
-async fn model_mismatch_409_surfaces_clear_error() {
+async fn model_mismatch_409_surfaces_message_and_remediation() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/search"))
@@ -200,8 +204,44 @@ async fn model_mismatch_409_surfaces_clear_error() {
         .await
         .unwrap_err();
     let msg = format!("{err:#}");
-    assert!(msg.contains("409"), "expected 409 in error: {msg}");
-    assert!(msg.contains("embedding_model_mismatch"), "expected code in error: {msg}",);
+    // The decoded message + remediation are surfaced verbatim.
+    assert!(
+        msg.contains("does not match corpus bge-base-en-v1.5@2"),
+        "expected server message in error: {msg}"
+    );
+    assert!(
+        msg.contains("run `mnm models pull` to refresh the local model"),
+        "expected server remediation in error: {msg}"
+    );
+    // The raw JSON envelope / machine code is NOT dumped into the human message.
+    assert!(!msg.contains("\"error\""), "raw JSON body must not leak: {msg}");
+    assert!(!msg.contains("embedding_model_mismatch"), "machine code must not leak: {msg}");
+}
+
+/// A 409 whose envelope is undecodable (not the `{ error: {...} }` shape) falls
+/// back to the existing status + redacted-raw-body form rather than the typed
+/// mismatch path.
+#[tokio::test]
+async fn undecodable_409_body_falls_back_to_redacted_raw() {
+    let server = MockServer::start().await;
+    let leak = "eyJhbGciOiJIUzI1NiJ9.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    Mock::given(method("POST"))
+        .and(path("/v1/search"))
+        // Plain string body — not the typed envelope. `set_body_string` so the
+        // body is not the `{ error: {...} }` shape `decode_error_envelope` looks for.
+        .respond_with(ResponseTemplate::new(409).set_body_string(format!("gateway said: {leak}")))
+        .mount(&server)
+        .await;
+
+    let request = make_request("q", 10);
+    let err = search_via_http(&server.uri(), None, &request, false)
+        .await
+        .unwrap_err();
+    let msg = format!("{err:#}");
+    // Fallback path: status is echoed and the long blob is redacted.
+    assert!(msg.contains("409"), "expected status in fallback error: {msg}");
+    assert!(msg.contains("[redacted]"), "expected redaction in fallback error: {msg}");
+    assert!(!msg.contains(leak), "long blob must be redacted: {msg}");
 }
 
 #[tokio::test]

@@ -13,9 +13,40 @@
 
 use anyhow::{anyhow, Context as _, Result};
 use clap::{Args as ClapArgs, Subcommand};
+use serde::Deserialize;
 use serde_json::json;
+use uuid::Uuid;
 
 use crate::commands::ratelimits::{decode_response, expiry_from_ttl, require_admin_token_from};
+
+/// Deserialize-only mirror of the server's `token_limit_override` row
+/// (`mnm_core::types::TokenLimitOverride`, serialized verbatim by
+/// [`crate::routes::admin_tokenlimits`]'s `Json(row)` on every CRUD response).
+///
+/// The human-output path deserializes into this instead of reading hard-coded
+/// `serde_json::Value` string keys with `0` fallbacks, so a server-side field
+/// rename (e.g. `hourly`/`daily`/`subject_kind`) fails the deserialize test at
+/// build time instead of silently degrading the printed row. The `--json` path
+/// still emits the verbatim server envelope and never touches this struct.
+///
+/// Only the fields the human row prints are modelled; `serde` ignores the
+/// `expires_at` / `created_*` fields the row does not show.
+#[derive(Debug, Deserialize)]
+pub(crate) struct TokenLimitOverrideRow {
+    /// Database UUID.
+    pub id: Uuid,
+    /// Discriminator: `"cidr"` or `"user"`.
+    pub subject_kind: String,
+    /// The CIDR block or user id the limit applies to.
+    pub subject: String,
+    /// Per-hour embedding token ceiling.
+    pub hourly: i64,
+    /// Per-day embedding token ceiling.
+    pub daily: i64,
+    /// Free-form operator note; `None` when the column is null.
+    #[serde(default)]
+    pub note: Option<String>,
+}
 
 /// `mnm tokenlimits <subcommand>`.
 #[derive(Debug, ClapArgs)]
@@ -313,13 +344,15 @@ fn emit_list(v: &serde_json::Value, json: bool) {
 }
 
 fn print_row(v: &serde_json::Value) {
-    let id = v["id"].as_str().unwrap_or("?");
-    let subject_kind = v["subject_kind"].as_str().unwrap_or("?");
-    let subject = v["subject"].as_str().unwrap_or("?");
-    let hourly = v["hourly"].as_i64().unwrap_or(0);
-    let daily = v["daily"].as_i64().unwrap_or(0);
-    let note = v["note"].as_str().unwrap_or("");
-    println!("  {id}  {subject_kind}:{subject:<24} {hourly:>9}/h {daily:>11}/d  {note}");
+    let Ok(row) = serde_json::from_value::<TokenLimitOverrideRow>(v.clone()) else {
+        println!("  (unexpected override row shape)");
+        return;
+    };
+    let note = row.note.as_deref().unwrap_or("");
+    println!(
+        "  {}  {}:{:<24} {:>9}/h {:>11}/d  {note}",
+        row.id, row.subject_kind, row.subject, row.hourly, row.daily
+    );
 }
 
 #[cfg(test)]
@@ -352,5 +385,49 @@ mod tests {
     #[test]
     fn resolve_subject_rejects_neither() {
         assert!(resolve_subject(&add_args(None, None)).is_err());
+    }
+
+    /// A representative server `Json(TokenLimitOverride)` row decodes into the
+    /// human-output mirror with the expected typed fields. Renaming
+    /// `hourly`/`daily`/`subject_kind`/`subject` server-side (or changing their
+    /// types) fails this test instead of silently printing `0`/`?` placeholders.
+    #[test]
+    fn override_row_deserializes_from_server_shape() {
+        let row: TokenLimitOverrideRow = serde_json::from_value(serde_json::json!({
+            "id": "00000000-0000-0000-0000-0000000000cc",
+            "subject_kind": "user",
+            "subject": "alice",
+            "hourly": 100_000,
+            "daily": 2_000_000,
+            "expires_at": "2099-01-01T00:00:00Z",
+            "note": "vip",
+            "created_by": "admin-1",
+            "created_at": "2026-01-01T00:00:00Z"
+        }))
+        .expect("server override row must decode into TokenLimitOverrideRow");
+        assert_eq!(row.id, Uuid::from_u128(0xcc));
+        assert_eq!(row.subject_kind, "user");
+        assert_eq!(row.subject, "alice");
+        assert_eq!(row.hourly, 100_000);
+        assert_eq!(row.daily, 2_000_000);
+        assert_eq!(row.note.as_deref(), Some("vip"));
+    }
+
+    /// A null `note` (the column is nullable) decodes to `None`, not a panic.
+    #[test]
+    fn override_row_allows_null_note() {
+        let row: TokenLimitOverrideRow = serde_json::from_value(serde_json::json!({
+            "id": "00000000-0000-0000-0000-0000000000dd",
+            "subject_kind": "cidr",
+            "subject": "203.0.113.0/24",
+            "hourly": 0,
+            "daily": 0,
+            "expires_at": "2099-01-01T00:00:00Z",
+            "note": null,
+            "created_by": "admin-1",
+            "created_at": "2026-01-01T00:00:00Z"
+        }))
+        .expect("null note must decode to None");
+        assert!(row.note.is_none());
     }
 }
