@@ -6,6 +6,7 @@
 //! (unreachable cloud → `Err`).
 
 use midnight_manual::commands::status::{print_human, run, Args};
+use mnm_core::introspect::{MeRateLimit, MeTokenLimits, MeTokenWindow};
 use mnm_mcp::cloud_client::CloudClient;
 use mnm_mcp::status::{assemble, CloudState, StatusReport, VoyageState};
 use serde_json::json;
@@ -17,13 +18,13 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 fn full_me_body() -> serde_json::Value {
     json!({
         "authenticated": true,
-        "auth_type": "github_oauth",
+        "auth_type": "read_uplift",
         "identity": "octocat",
         "permission_level": "write",
-        "rate_limit": { "tier": "authenticated", "limit": 120, "remaining": 87,
+        "rate_limit": { "tier": "read_uplift", "limit": 120, "remaining": 87,
                         "reset_secs": 31 },
         "token_limits": {
-            "tier": "authenticated",
+            "tier": "read_uplift",
             "hourly": { "limit": 200_000, "remaining": 150_000, "reset_at_secs": 1_200 },
             "daily": { "limit": 2_000_000, "remaining": 1_900_000, "reset_at_secs": 50_000 }
         },
@@ -61,8 +62,8 @@ async fn assemble_from_cli_crate_populates_report() {
     assert!(r.authenticated);
     assert_eq!(r.identity.as_deref(), Some("octocat"));
     let tl = r.token_limits.expect("token_limits populated");
-    assert_eq!(tl["hourly"]["remaining"], 150_000);
-    assert_eq!(tl["daily"]["limit"], 2_000_000);
+    assert_eq!(tl.hourly.remaining, 150_000);
+    assert_eq!(tl.daily.limit, 2_000_000);
     assert_eq!(r.voyage, VoyageState::NotConfigured);
 }
 
@@ -73,17 +74,28 @@ fn print_human_with_fully_populated_report_does_not_panic() {
         cloud: CloudState::Reachable,
         cloud_version: Some("0.4.2".to_owned()),
         authenticated: true,
-        auth_type: "github_oauth".to_owned(),
+        auth_type: "read_uplift".to_owned(),
         identity: Some("octocat".to_owned()),
         permission_level: "write".to_owned(),
-        rate_limit: Some(json!({
-            "tier": "authenticated", "limit": 120, "remaining": 87, "reset_secs": 31
-        })),
-        token_limits: Some(json!({
-            "tier": "authenticated",
-            "hourly": { "limit": 200_000, "remaining": 150_000, "reset_at_secs": 1_200 },
-            "daily": { "limit": 2_000_000, "remaining": 1_900_000, "reset_at_secs": 50_000 }
-        })),
+        rate_limit: Some(MeRateLimit {
+            tier: "read_uplift".to_owned(),
+            limit: 120,
+            remaining: 87,
+            reset_secs: 31,
+        }),
+        token_limits: Some(MeTokenLimits {
+            tier: "read_uplift".to_owned(),
+            hourly: MeTokenWindow {
+                limit: 200_000,
+                remaining: 150_000,
+                reset_at_secs: 1_200,
+            },
+            daily: MeTokenWindow {
+                limit: 2_000_000,
+                remaining: 1_900_000,
+                reset_at_secs: 50_000,
+            },
+        }),
         voyage: VoyageState::Valid,
         reranker: "test-reranker",
         reranker_loaded: true,

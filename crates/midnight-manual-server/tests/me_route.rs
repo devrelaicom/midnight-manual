@@ -20,7 +20,7 @@ use midnight_manual_server::config::ServerConfig;
 use midnight_manual_server::corpus_model::CorpusModel;
 use midnight_manual_server::tokenlimit::{Limits, TokenUsageLimiter};
 use midnight_manual_server::{app, ratelimit::RateLimiter};
-use mnm_auth::Keypair;
+use mnm_auth::{mint_jwt, Claims, Keypair, SigningSecret, DEFAULT_READ_UPLIFT_TTL};
 use mnm_embedding::voyage::VoyageEmbedder;
 use serde_json::{json, Value};
 use tower::ServiceExt;
@@ -153,6 +153,47 @@ async fn admin_me_reports_identity_and_admin_tier() {
     assert_eq!(v["permission_level"], "admin", "{v}");
     assert_eq!(v["token_limits"]["tier"], "admin", "{v}");
     // Rate limiting stays disabled in this config.
+    assert!(v["rate_limit"].is_null(), "{v}");
+}
+
+#[tokio::test]
+async fn read_uplift_me_reports_identity_and_read_uplift_tier() {
+    let h = common::boot().await;
+    // The admin test mints its token through the Ed25519 challenge/verify HTTP
+    // flow, but that path only ever yields an `admin`-tier JWT — read-uplift
+    // tokens are minted exclusively by the GitHub OAuth callback. Forge one
+    // directly with the same signing secret the app is configured with so the
+    // bearer middleware verifies it into a `Tier::ReadUplift` AuthContext, which
+    // is the exact identity shape `GET /v1/me` translates into the wire fields
+    // this commit changed.
+    let jwt_secret = vec![7u8; 32];
+    // An empty user store still boots AuthState (the JWT secret is what gates
+    // bearer verification); we don't need an admin entry for a read-uplift JWT.
+    let cfg = cfg_with_auth("schema_version = 1\n".to_owned(), jwt_secret.clone());
+    let app = app::build(h.pool.clone(), cfg).expect("build app");
+
+    let secret = SigningSecret::from_bytes(jwt_secret).expect("32-byte secret");
+    let claims = Claims::read_uplift(
+        "octocat",
+        time::OffsetDateTime::now_utc(),
+        DEFAULT_READ_UPLIFT_TTL,
+    );
+    let token = mint_jwt(&secret, &claims).expect("mint read-uplift jwt");
+
+    let (status, v) = call(app, "GET", "/v1/me", Some(&token), None).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["authenticated"], true, "{v}");
+    // The precise field this commit flipped (github_oauth -> read_uplift).
+    assert_eq!(v["auth_type"], "read_uplift", "{v}");
+    assert_eq!(v["identity"], "octocat", "{v}");
+    // Read-uplift is read-only: the tier guard refuses writes regardless of the
+    // (writer) role baked into the JWT.
+    assert_eq!(v["permission_level"], "read", "{v}");
+    assert_eq!(v["token_limits"]["tier"], "read_uplift", "{v}");
+    // Uplift budget is configured and non-zero (defaults 4000/40000).
+    assert!(v["token_limits"]["hourly"]["limit"].as_u64().unwrap() > 0, "{v}");
+    assert!(v["token_limits"]["daily"]["limit"].as_u64().unwrap() > 0, "{v}");
+    // Rate limiting is disabled in this config — no bucket exists.
     assert!(v["rate_limit"].is_null(), "{v}");
 }
 

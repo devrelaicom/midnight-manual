@@ -4,6 +4,7 @@
 
 use std::time::Duration;
 
+use mnm_core::introspect::{MeRateLimit, MeResponse, MeTokenLimits};
 use serde::Serialize;
 
 use crate::cloud_client::CloudClient;
@@ -54,16 +55,17 @@ pub struct StatusReport {
     pub cloud_version: Option<String>,
     /// `true` when a bearer was presented and accepted.
     pub authenticated: bool,
-    /// `anonymous` / `github_oauth` / `admin` (from `/v1/me`).
+    /// `anonymous` / `read_uplift` / `admin` (from `/v1/me`).
     pub auth_type: String,
     /// Identity string (GitHub login or admin user id), when authenticated.
     pub identity: Option<String>,
     /// `read` / `write` / `admin`.
     pub permission_level: String,
-    /// Request rate-limit bucket state (from `/v1/me`), when reachable.
-    pub rate_limit: Option<serde_json::Value>,
+    /// Request rate-limit bucket state (from `/v1/me`), when reachable and the
+    /// limiter is enabled.
+    pub rate_limit: Option<MeRateLimit>,
     /// Embedding token-budget windows (from `/v1/me`): `{tier, hourly, daily}`.
-    pub token_limits: Option<serde_json::Value>,
+    pub token_limits: Option<MeTokenLimits>,
     /// Voyage key state.
     pub voyage: VoyageState,
     /// Reranker model name (VoyageAI — server inline or client BYOK).
@@ -118,37 +120,28 @@ pub async fn assemble(cloud: &CloudClient, voyage_key: Option<&str>) -> StatusRe
         Ok(Ok(_)) => CloudState::Degraded,
         _ => CloudState::Unreachable,
     };
-    let me = me.ok().and_then(Result::ok);
-    let str_of = |v: &serde_json::Value, k: &str| {
-        v.get(k)
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned)
-    };
+    // Deserialize the `/v1/me` body once into the shared typed contract. A
+    // malformed/partial body (or unreachable cloud) collapses to `None` and the
+    // report falls back to anonymous defaults — the same degradation the
+    // stringly-typed reader produced, but now pinned to one shape.
+    let me: Option<MeResponse> = me
+        .ok()
+        .and_then(Result::ok)
+        .and_then(|v| serde_json::from_value(v).ok());
     StatusReport {
         mcp_version: crate::VERSION,
         cloud: cloud_state,
-        cloud_version: me.as_ref().and_then(|m| str_of(m, "server_version")),
-        authenticated: me
-            .as_ref()
-            .and_then(|m| m.get("authenticated").and_then(serde_json::Value::as_bool))
-            .unwrap_or(false),
+        cloud_version: me.as_ref().map(|m| m.server_version.clone()),
+        authenticated: me.as_ref().is_some_and(|m| m.authenticated),
         auth_type: me
             .as_ref()
-            .and_then(|m| str_of(m, "auth_type"))
-            .unwrap_or_else(|| "anonymous".to_owned()),
-        identity: me.as_ref().and_then(|m| str_of(m, "identity")),
+            .map_or_else(|| "anonymous".to_owned(), |m| m.auth_type.clone()),
+        identity: me.as_ref().and_then(|m| m.identity.clone()),
         permission_level: me
             .as_ref()
-            .and_then(|m| str_of(m, "permission_level"))
-            .unwrap_or_else(|| "read".to_owned()),
-        rate_limit: me
-            .as_ref()
-            .and_then(|m| m.get("rate_limit").cloned())
-            .filter(|v| !v.is_null()),
-        token_limits: me
-            .as_ref()
-            .and_then(|m| m.get("token_limits").cloned())
-            .filter(|v| !v.is_null()),
+            .map_or_else(|| "read".to_owned(), |m| m.permission_level.clone()),
+        rate_limit: me.as_ref().and_then(|m| m.rate_limit.clone()),
+        token_limits: me.as_ref().map(|m| m.token_limits.clone()),
         voyage,
         reranker: RERANKER_MODEL_NAME,
         reranker_loaded: crate::tools::reranker_loaded(),
@@ -169,13 +162,13 @@ mod tests {
     fn full_me_body() -> serde_json::Value {
         json!({
             "authenticated": true,
-            "auth_type": "github_oauth",
+            "auth_type": "read_uplift",
             "identity": "octocat",
             "permission_level": "write",
-            "rate_limit": { "tier": "authenticated", "limit": 120, "remaining": 87,
+            "rate_limit": { "tier": "read_uplift", "limit": 120, "remaining": 87,
                             "reset_secs": 31 },
             "token_limits": {
-                "tier": "authenticated",
+                "tier": "read_uplift",
                 "hourly": { "limit": 200_000, "remaining": 150_000, "reset_at_secs": 1_200 },
                 "daily": { "limit": 2_000_000, "remaining": 1_900_000, "reset_at_secs": 50_000 }
             },
@@ -211,13 +204,14 @@ mod tests {
         assert_eq!(r.cloud, CloudState::Reachable);
         assert_eq!(r.cloud_version.as_deref(), Some("0.4.2"));
         assert!(r.authenticated);
-        assert_eq!(r.auth_type, "github_oauth");
+        assert_eq!(r.auth_type, "read_uplift");
         assert_eq!(r.identity.as_deref(), Some("octocat"));
         assert_eq!(r.permission_level, "write");
         let rl = r.rate_limit.expect("rate_limit populated");
-        assert_eq!(rl["remaining"], 87);
+        assert_eq!(rl.remaining, 87);
+        assert_eq!(rl.tier, "read_uplift");
         let tl = r.token_limits.expect("token_limits populated");
-        assert_eq!(tl["hourly"]["limit"], 200_000);
+        assert_eq!(tl.hourly.limit, 200_000);
         assert_eq!(r.voyage, VoyageState::NotConfigured);
         assert_eq!(r.reranker, super::RERANKER_MODEL_NAME);
     }
@@ -252,21 +246,54 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn assemble_me_missing_or_null_limits_yield_none() {
+    async fn assemble_me_null_rate_limit_collapses_to_none() {
+        // Anonymous body the server actually emits when the limiter is
+        // disabled: `rate_limit: null`, but `token_limits` always present.
         let body = json!({
             "authenticated": false,
             "auth_type": "anonymous",
             "permission_level": "read",
             "rate_limit": null,
+            "token_limits": {
+                "tier": "anonymous",
+                "hourly": { "limit": 50_000, "remaining": 50_000, "reset_at_secs": 1_200 },
+                "daily": { "limit": 500_000, "remaining": 500_000, "reset_at_secs": 50_000 }
+            },
             "server_version": "0.4.2"
-            // no token_limits key at all
         });
         let server = mock_cloud(200, body).await;
         let cloud = CloudClient::new(&server.uri(), None).unwrap();
 
         let r = assemble(&cloud, None).await;
-        assert!(r.rate_limit.is_none(), "explicit null must collapse to None");
-        assert!(r.token_limits.is_none(), "absent key must collapse to None");
+        assert!(r.rate_limit.is_none(), "explicit null rate_limit must collapse to None");
+        let tl = r
+            .token_limits
+            .expect("token_limits always present when reachable");
+        assert_eq!(tl.tier, "anonymous");
+    }
+
+    #[tokio::test]
+    async fn assemble_me_malformed_body_degrades_to_anonymous_defaults() {
+        // A body missing a required field (here `token_limits`) no longer
+        // deserializes into the shared contract, so the whole report falls back
+        // to anonymous defaults rather than silently reading partial fields.
+        let body = json!({
+            "authenticated": true,
+            "auth_type": "read_uplift",
+            "permission_level": "write",
+            "rate_limit": null,
+            "server_version": "0.4.2"
+            // no token_limits key — invalid against MeResponse
+        });
+        let server = mock_cloud(200, body).await;
+        let cloud = CloudClient::new(&server.uri(), None).unwrap();
+
+        let r = assemble(&cloud, None).await;
+        assert!(!r.authenticated, "malformed body cannot report authenticated");
+        assert_eq!(r.auth_type, "anonymous");
+        assert_eq!(r.permission_level, "read");
+        assert!(r.rate_limit.is_none());
+        assert!(r.token_limits.is_none());
     }
 
     #[tokio::test]

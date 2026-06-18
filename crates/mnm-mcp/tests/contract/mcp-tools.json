@@ -2084,7 +2084,7 @@
         "additionalProperties": true,
         "properties": {
           "auth_type": {
-            "description": "anonymous / github_oauth / admin.",
+            "description": "anonymous / read_uplift / admin.",
             "type": "string"
           },
           "authenticated": {

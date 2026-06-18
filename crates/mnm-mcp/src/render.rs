@@ -5,6 +5,7 @@
 //! `suggested_next_actions`). Failure → an `isError: true` result carrying a
 //! shared error envelope.
 
+use mnm_core::introspect::{MeRateLimit, MeTokenLimits};
 use serde_json::{json, Value};
 
 use crate::protocol::{ContentBlock, ToolCallResult};
@@ -902,33 +903,24 @@ pub fn project_status(env: Value) -> ToolOutcome {
     } else {
         "anonymous (read)".to_owned()
     };
+    // Read the two limit systems through the shared typed contract rather than
+    // stringly-typed pointers, so a server-side field rename is a compile-time
+    // break in `mnm_core::introspect` instead of a silent blank section.
     let rl = env
         .get("rate_limit")
         .filter(|v| !v.is_null())
-        .map(|r| {
-            format!(
-                "; requests {}/{}",
-                r.get("remaining").and_then(Value::as_u64).unwrap_or(0),
-                r.get("limit").and_then(Value::as_u64).unwrap_or(0),
-            )
-        })
+        .and_then(|r| serde_json::from_value::<MeRateLimit>(r.clone()).ok())
+        .map(|r| format!("; requests {}/{}", r.remaining, r.limit))
         .unwrap_or_default();
     let tl = env
         .get("token_limits")
         .filter(|v| !v.is_null())
+        .and_then(|t| serde_json::from_value::<MeTokenLimits>(t.clone()).ok())
         .map(|t| {
-            let w = |k: &str, unit: &str| {
-                format!(
-                    "{}/{} {unit}",
-                    t.pointer(&format!("/{k}/remaining"))
-                        .and_then(Value::as_u64)
-                        .unwrap_or(0),
-                    t.pointer(&format!("/{k}/limit"))
-                        .and_then(Value::as_u64)
-                        .unwrap_or(0),
-                )
-            };
-            format!("; embed tokens {} · {}", w("hourly", "hr"), w("daily", "day"))
+            format!(
+                "; embed tokens {}/{} hr · {}/{} day",
+                t.hourly.remaining, t.hourly.limit, t.daily.remaining, t.daily.limit,
+            )
         })
         .unwrap_or_default();
     let reranker = format!(
@@ -1864,13 +1856,13 @@ mod tests {
             "cloud": "reachable",
             "cloud_version": "0.4.2",
             "authenticated": true,
-            "auth_type": "github_oauth",
+            "auth_type": "read_uplift",
             "identity": "octocat",
             "permission_level": "write",
-            "rate_limit": { "tier": "authenticated", "limit": 120, "remaining": 87,
+            "rate_limit": { "tier": "read_uplift", "limit": 120, "remaining": 87,
                             "reset_secs": 31 },
             "token_limits": {
-                "tier": "authenticated",
+                "tier": "read_uplift",
                 "hourly": { "limit": 200_000, "remaining": 150_000, "reset_at_secs": 1_200 },
                 "daily": { "limit": 2_000_000, "remaining": 1_900_000, "reset_at_secs": 50_000 }
             },
@@ -1885,7 +1877,7 @@ mod tests {
         let o = super::project_status(full_status_env());
         assert!(o.summary.contains("Cloud reachable"), "cloud state: {}", o.summary);
         assert!(o.summary.contains("(v0.4.2)"), "cloud version: {}", o.summary);
-        assert!(o.summary.contains("github_oauth octocat (write)"), "identity: {}", o.summary);
+        assert!(o.summary.contains("read_uplift octocat (write)"), "identity: {}", o.summary);
         assert!(o.summary.contains("requests 87/120"), "rate limit: {}", o.summary);
         assert!(
             o.summary
