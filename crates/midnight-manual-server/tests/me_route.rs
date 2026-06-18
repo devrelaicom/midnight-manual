@@ -173,11 +173,8 @@ async fn read_uplift_me_reports_identity_and_read_uplift_tier() {
     let app = app::build(h.pool.clone(), cfg).expect("build app");
 
     let secret = SigningSecret::from_bytes(jwt_secret).expect("32-byte secret");
-    let claims = Claims::read_uplift(
-        "octocat",
-        time::OffsetDateTime::now_utc(),
-        DEFAULT_READ_UPLIFT_TTL,
-    );
+    let claims =
+        Claims::read_uplift("octocat", time::OffsetDateTime::now_utc(), DEFAULT_READ_UPLIFT_TTL);
     let token = mint_jwt(&secret, &claims).expect("mint read-uplift jwt");
 
     let (status, v) = call(app, "GET", "/v1/me", Some(&token), None).await;

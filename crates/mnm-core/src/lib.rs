@@ -13,6 +13,7 @@ pub mod auth_file;
 pub mod config;
 pub mod embedder_identity;
 pub mod error;
+pub mod ingest;
 pub mod introspect;
 pub mod limits;
 pub mod model_id;

@@ -198,6 +198,10 @@ pub struct SourceOutcome {
     pub docs: u64,
     /// VoyageAI tokens consumed by this source's ingest.
     pub tokens: u64,
+    /// Per-document conflicts the server reported for this source's ingest
+    /// (documents NOT inserted). Surfaced so the migrate path's machine output
+    /// is as observable as the single-source `ingest` path.
+    pub conflicts: u64,
 }
 
 /// Outcome of a whole migration run.
@@ -209,6 +213,10 @@ pub struct MigrateSummary {
     pub docs: u64,
     /// Total VoyageAI tokens consumed across migrated sources.
     pub tokens: u64,
+    /// Total per-document conflicts (documents NOT inserted) across migrated
+    /// sources. The per-source warn-logs already fire in the ingest pipeline;
+    /// this surfaces the aggregate in the migrate `--json` output.
+    pub conflicts: u64,
     /// Slugs not attempted — either budget/max-docs stopped before them, or a
     /// mid-source error halted the run (the failed source plus its untried
     /// tail). Empty when the whole list completed.
@@ -265,6 +273,7 @@ where
             Ok(outcome) => {
                 summary.docs = summary.docs.saturating_add(outcome.docs);
                 summary.tokens = summary.tokens.saturating_add(outcome.tokens);
+                summary.conflicts = summary.conflicts.saturating_add(outcome.conflicts);
                 summary.migrated.push(src.slug.clone());
             }
             Err(e) => {
@@ -516,6 +525,7 @@ async fn ingest_source(
     Ok(SourceOutcome {
         docs: stats.added as u64,
         tokens: stats.total_tokens,
+        conflicts: stats.conflicts.len() as u64,
     })
 }
 
@@ -526,6 +536,10 @@ struct MigrateOutput<'a> {
     migrated: &'a [String],
     documents: u64,
     spent_tokens: u64,
+    /// Aggregate per-document conflicts (documents NOT inserted) across migrated
+    /// sources. Always present so machine consumers can detect partial-failure
+    /// migrations — parity with the single-source `ingest` path's `conflict_count`.
+    conflicts: u64,
     remaining: &'a [String],
 }
 
@@ -537,14 +551,20 @@ fn format_migrate_output(summary: &MigrateSummary, target_wire: &str, json: bool
             migrated: &summary.migrated,
             documents: summary.docs,
             spent_tokens: summary.tokens,
+            conflicts: summary.conflicts,
             remaining: &summary.remaining,
         };
         return serde_json::to_string(&body).unwrap_or_default();
     }
     let mut out = String::new();
+    let conflict_clause = if summary.conflicts > 0 {
+        format!(" / {} conflicts", summary.conflicts)
+    } else {
+        String::new()
+    };
     writeln!(
         out,
-        "migrated {} source(s) / {} docs / {} tokens onto {target_wire}",
+        "migrated {} source(s) / {} docs / {} tokens{conflict_clause} onto {target_wire}",
         summary.migrated.len(),
         summary.docs,
         summary.tokens,
@@ -919,6 +939,7 @@ mod tests {
             migrated: vec!["src-1".to_owned()],
             docs: 10,
             tokens: 100,
+            conflicts: 0,
             remaining: vec!["src-2".to_owned()],
         };
         let s = format_migrate_output(&summary, "voyage-code-4@1", false);
@@ -927,6 +948,20 @@ mod tests {
         assert!(s.contains("100 tokens"));
         assert!(s.contains("+ src-1"));
         assert!(s.contains("- src-2"));
+        assert!(!s.contains("conflict"), "no conflict clause when the total is zero: {s}");
+    }
+
+    #[test]
+    fn migrate_output_human_surfaces_conflicts() {
+        let summary = MigrateSummary {
+            migrated: vec!["src-1".to_owned()],
+            docs: 10,
+            tokens: 100,
+            conflicts: 3,
+            remaining: Vec::new(),
+        };
+        let s = format_migrate_output(&summary, "voyage-code-4@1", false);
+        assert!(s.contains("3 conflicts"), "human summary surfaces the conflict total: {s}");
     }
 
     #[test]
@@ -935,6 +970,7 @@ mod tests {
             migrated: vec!["src-1".to_owned()],
             docs: 10,
             tokens: 100,
+            conflicts: 0,
             remaining: vec!["src-2".to_owned()],
         };
         let s = format_migrate_output(&summary, "voyage-code-4@1", true);
@@ -943,7 +979,27 @@ mod tests {
         assert_eq!(v["target_model"], "voyage-code-4@1");
         assert_eq!(v["documents"], 10);
         assert_eq!(v["spent_tokens"], 100);
+        // `conflicts` is always present (parity with single-source `ingest`'s
+        // `conflict_count`), even when zero, so machine consumers can rely on it.
+        assert_eq!(v["conflicts"], 0);
         assert_eq!(v["migrated"][0], "src-1");
         assert_eq!(v["remaining"][0], "src-2");
+    }
+
+    /// The migrate `--json` output carries a non-zero aggregate `conflicts`
+    /// total so machine consumers can detect partial-failure migrations — the
+    /// observability gap this thread closed.
+    #[test]
+    fn migrate_output_json_surfaces_conflicts() {
+        let summary = MigrateSummary {
+            migrated: vec!["src-1".to_owned(), "src-2".to_owned()],
+            docs: 20,
+            tokens: 200,
+            conflicts: 5,
+            remaining: Vec::new(),
+        };
+        let s = format_migrate_output(&summary, "voyage-code-4@1", true);
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v["conflicts"], 5);
     }
 }

@@ -38,7 +38,11 @@ async fn token_budget_stops_at_source_boundary() {
             let slug = s.slug.clone();
             async move {
                 calls.lock().unwrap().push(slug);
-                Ok(SourceOutcome { docs: 10, tokens: 100 })
+                Ok(SourceOutcome {
+                    docs: 10,
+                    tokens: 100,
+                    conflicts: 2,
+                })
             }
         })
         .await;
@@ -49,6 +53,8 @@ async fn token_budget_stops_at_source_boundary() {
     assert_eq!(summary.remaining, vec!["src-2".to_owned()]);
     assert_eq!(summary.docs, 10);
     assert_eq!(summary.tokens, 100);
+    // The source that ran contributed its conflicts to the aggregate.
+    assert_eq!(summary.conflicts, 2);
 }
 
 /// Pins the `>=` (not `>`) boundary: source 1 spends EXACTLY the budget
@@ -67,7 +73,11 @@ async fn token_budget_exact_boundary_stops_next_source() {
             async move {
                 calls.lock().unwrap().push(slug);
                 // Source 1 lands EXACTLY on the budget (no overshoot).
-                Ok(SourceOutcome { docs: 0, tokens: 100 })
+                Ok(SourceOutcome {
+                    docs: 0,
+                    tokens: 100,
+                    conflicts: 0,
+                })
             }
         })
         .await;
@@ -93,7 +103,11 @@ async fn max_docs_exact_boundary_stops_next_source() {
             let slug = s.slug.clone();
             async move {
                 calls.lock().unwrap().push(slug);
-                Ok(SourceOutcome { docs: 10, tokens: 0 })
+                Ok(SourceOutcome {
+                    docs: 10,
+                    tokens: 0,
+                    conflicts: 0,
+                })
             }
         })
         .await;
@@ -117,7 +131,11 @@ async fn max_docs_stops_at_source_boundary() {
             let slug = s.slug.clone();
             async move {
                 calls.lock().unwrap().push(slug);
-                Ok(SourceOutcome { docs: 10, tokens: 100 })
+                Ok(SourceOutcome {
+                    docs: 10,
+                    tokens: 100,
+                    conflicts: 0,
+                })
             }
         })
         .await;
@@ -140,7 +158,11 @@ async fn no_budget_migrates_all_sources() {
             let slug = s.slug.clone();
             async move {
                 calls.lock().unwrap().push(slug);
-                Ok(SourceOutcome { docs: 10, tokens: 100 })
+                Ok(SourceOutcome {
+                    docs: 10,
+                    tokens: 100,
+                    conflicts: 3,
+                })
             }
         })
         .await;
@@ -150,6 +172,8 @@ async fn no_budget_migrates_all_sources() {
     assert!(summary.remaining.is_empty());
     assert_eq!(summary.docs, 20);
     assert_eq!(summary.tokens, 200);
+    // Conflicts accumulate across every migrated source (3 + 3).
+    assert_eq!(summary.conflicts, 6);
 }
 
 /// A mid-source `Err` (the 429/limit case; the pipeline already aborted rather
@@ -172,7 +196,11 @@ async fn mid_source_error_stops_and_records_remaining() {
                 if slug == "src-2" {
                     return Err(anyhow::anyhow!("429 Too Many Requests (token limit)"));
                 }
-                Ok(SourceOutcome { docs: 10, tokens: 100 })
+                Ok(SourceOutcome {
+                    docs: 10,
+                    tokens: 100,
+                    conflicts: 4,
+                })
             }
         },
     )
@@ -186,19 +214,25 @@ async fn mid_source_error_stops_and_records_remaining() {
     // Only src-1's counts accrued (the failed source's work was aborted).
     assert_eq!(summary.docs, 10);
     assert_eq!(summary.tokens, 100);
+    assert_eq!(summary.conflicts, 4);
 }
 
 /// Empty source list → empty summary, closure never called.
 #[tokio::test]
 async fn empty_sources_yields_empty_summary() {
     let summary = drive_migration(&[], None, None, |_s: &SourceRef| async move {
-        Ok(SourceOutcome { docs: 0, tokens: 0 })
+        Ok(SourceOutcome {
+            docs: 0,
+            tokens: 0,
+            conflicts: 0,
+        })
     })
     .await;
     assert!(summary.migrated.is_empty());
     assert!(summary.remaining.is_empty());
     assert_eq!(summary.docs, 0);
     assert_eq!(summary.tokens, 0);
+    assert_eq!(summary.conflicts, 0);
 }
 
 // ── clap parse test for MigrateArgs ──────────────────────────────────────────

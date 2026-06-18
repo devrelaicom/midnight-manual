@@ -326,6 +326,11 @@ pub struct RunStats {
     /// Total VoyageAI tokens consumed embedding this run's chunks, summed across
     /// every embed call (BYOK and server-proxy alike report usage).
     pub total_tokens: u64,
+    /// Per-document conflicts the server reported across every upload batch:
+    /// documents that were NOT inserted into the finalized version. A non-empty
+    /// list means documents were silently dropped, so it is warn-logged and
+    /// surfaced in both the human summary and `--json` output.
+    pub conflicts: Vec<mnm_core::ingest::UploadConflict>,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -472,6 +477,7 @@ async fn run_inner(
             batch_count: 0,
             failed_batch_index: None,
             total_tokens: 0,
+            conflicts: Vec::new(),
         });
     }
 
@@ -687,6 +693,11 @@ async fn run_inner(
 
     let mut accepted = 0usize;
     let mut carried = 0usize;
+    // Per-document conflicts accumulated across every upload batch (including the
+    // 413 split-retry path, which concatenates its halves' conflicts). A
+    // conflicted document was NOT inserted, so this is the only signal the
+    // operator gets that documents were silently dropped.
+    let mut conflicts: Vec<mnm_core::ingest::UploadConflict> = Vec::new();
     // Sum of VoyageAI tokens consumed across every embed call this run. Surfaced
     // on RunStats so the model-migration driver can budget at source boundaries.
     let mut total_tokens = 0u64;
@@ -747,6 +758,7 @@ async fn run_inner(
             Ok(r) => {
                 accepted += r.accepted;
                 carried += r.carried;
+                conflicts.extend(r.conflicts);
             }
             Err(e) => {
                 abort_run(&client, server_url, &args.source_slug, start.ingest_run_id, &token)
@@ -780,6 +792,21 @@ async fn run_inner(
 
     reporter.phase_done("finalize", serde_json::json!({"revision": finalize.revision}));
 
+    // A conflicted document was NOT inserted into the finalized version: log each
+    // one so the silent data loss is observable. The count is also surfaced in the
+    // summary / `--json` output below.
+    if !conflicts.is_empty() {
+        tracing::warn!(
+            count = conflicts.len(),
+            source_slug = %args.source_slug,
+            "ingest finalized with document conflicts — these documents were NOT inserted",
+        );
+        for c in &conflicts {
+            tracing::warn!(path = %c.path, reason = %c.reason, "ingest document conflict");
+        }
+    }
+
+    let conflict_count = conflicts.len();
     let stats = RunStats {
         added: accepted.saturating_sub(carried),
         carried,
@@ -787,6 +814,7 @@ async fn run_inner(
         batch_count: u32::try_from(batch_count).unwrap_or(u32::MAX),
         failed_batch_index: None,
         total_tokens,
+        conflicts,
     };
     println!(
         "{}",
@@ -798,6 +826,7 @@ async fn run_inner(
                 demoted_revision: finalize.demoted_revision,
                 documents_added: stats.added,
                 documents_carried: stats.carried,
+                conflict_count,
                 docs_with_language_targets,
                 docs_with_sdk_dependencies,
             },
@@ -1353,17 +1382,27 @@ async fn upload_documents_with_split(
                 batch_count,
             )
             .await?;
-            Ok(UploadDocumentsResponse {
-                accepted: r1.accepted + r2.accepted,
-                carried: r1.carried + r2.carried,
-                conflicts: {
-                    let mut c = r1.conflicts;
-                    c.extend(r2.conflicts);
-                    c
-                },
-            })
+            Ok(merge_split_responses(r1, r2))
         }
         Err(e) => Err(e),
+    }
+}
+
+/// Merge the two half-batch responses produced by the 413 split-retry path:
+/// sum `accepted`/`carried` and concatenate `conflicts` from both halves
+/// exactly once (first half then second). Pure so the merge — the one spot a
+/// future refactor could double-count or drop conflicts — is unit-testable
+/// without an HTTP round-trip.
+fn merge_split_responses(
+    first: UploadDocumentsResponse,
+    second: UploadDocumentsResponse,
+) -> UploadDocumentsResponse {
+    let mut conflicts = first.conflicts;
+    conflicts.extend(second.conflicts);
+    UploadDocumentsResponse {
+        accepted: first.accepted + second.accepted,
+        carried: first.carried + second.carried,
+        conflicts,
     }
 }
 
@@ -1544,9 +1583,11 @@ struct ChunkUpload {
 struct UploadDocumentsResponse {
     accepted: usize,
     carried: usize,
-    #[allow(dead_code)]
+    /// Per-document conflicts — documents the server did NOT insert. Surfaced
+    /// (warn-logged + counted) at run end so partial-failure uploads aren't
+    /// reported as fully successful.
     #[serde(default)]
-    conflicts: Vec<serde_json::Value>,
+    conflicts: Vec<mnm_core::ingest::UploadConflict>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1630,6 +1671,9 @@ struct SuccessOutput<'a> {
     demoted_revision: Option<i32>,
     documents_added: usize,
     documents_carried: usize,
+    /// Documents the server reported as conflicts (NOT inserted). Always present
+    /// in `--json` output so consumers can detect partial-failure uploads.
+    conflict_count: usize,
     docs_with_language_targets: usize,
     docs_with_sdk_dependencies: usize,
 }
@@ -1657,10 +1701,19 @@ fn format_success(out: &SuccessOutput<'_>, json: bool) -> String {
     }
     let (slug, rev, added, carried) =
         (out.source_slug, out.revision, out.documents_added, out.documents_carried);
-    if let Some(prev) = out.demoted_revision {
-        format!("ingested `{slug}` rev {rev} (was {prev}); +{added} new, {carried} carried")
+    // Conflicts are silent data loss; only render the clause when there are any,
+    // so the clean path stays terse, but a non-zero count is always visible.
+    let conflicts = if out.conflict_count > 0 {
+        format!(", {} conflicts", out.conflict_count)
     } else {
-        format!("ingested `{slug}` rev {rev} (first version); +{added} new")
+        String::new()
+    };
+    if let Some(prev) = out.demoted_revision {
+        format!(
+            "ingested `{slug}` rev {rev} (was {prev}); +{added} new, {carried} carried{conflicts}"
+        )
+    } else {
+        format!("ingested `{slug}` rev {rev} (first version); +{added} new{conflicts}")
     }
 }
 
@@ -1805,6 +1858,7 @@ mod tests {
                 demoted_revision: None,
                 documents_added: 5,
                 documents_carried: 0,
+                conflict_count: 0,
                 docs_with_language_targets: 0,
                 docs_with_sdk_dependencies: 0,
             },
@@ -1812,6 +1866,7 @@ mod tests {
         );
         assert!(s.contains("first version"));
         assert!(s.contains("+5 new"));
+        assert!(!s.contains("conflict"), "no conflict clause when count is zero");
     }
 
     #[test]
@@ -1824,6 +1879,7 @@ mod tests {
                 demoted_revision: Some(1),
                 documents_added: 3,
                 documents_carried: 4,
+                conflict_count: 0,
                 docs_with_language_targets: 0,
                 docs_with_sdk_dependencies: 0,
             },
@@ -1833,6 +1889,181 @@ mod tests {
         assert!(s.contains("was 1"));
         assert!(s.contains("+3 new"));
         assert!(s.contains("4 carried"));
+    }
+
+    /// A server response carrying conflicts deserializes into the shared
+    /// `UploadConflict` type with a non-zero count — the CLI must not decode it
+    /// as opaque-and-ignored, or the operator loses documents silently.
+    #[test]
+    fn upload_response_decodes_conflicts() {
+        let body = serde_json::json!({
+            "accepted": 2,
+            "carried": 1,
+            "conflicts": [
+                { "path": "a/dup.md", "reason": "duplicate path in this batch" },
+                { "path": "b/bad.md", "reason": "insert failed: boom" },
+            ],
+        });
+        let resp: UploadDocumentsResponse = serde_json::from_value(body).unwrap();
+        assert_eq!(resp.accepted, 2);
+        assert_eq!(resp.carried, 1);
+        assert_eq!(resp.conflicts.len(), 2, "conflicts must be a non-zero count, not dropped");
+        assert_eq!(resp.conflicts[0].path, "a/dup.md");
+        assert_eq!(resp.conflicts[0].reason, "duplicate path in this batch");
+    }
+
+    /// A response with no `conflicts` field (or an empty list) yields an empty
+    /// vec — the clean path stays terse.
+    #[test]
+    fn upload_response_defaults_conflicts_to_empty() {
+        let resp: UploadDocumentsResponse =
+            serde_json::from_value(serde_json::json!({ "accepted": 5, "carried": 0 })).unwrap();
+        assert!(resp.conflicts.is_empty());
+    }
+
+    /// The 413 split-retry merge (`merge_split_responses`) sums `accepted` /
+    /// `carried` and concatenates each half's `conflicts` exactly once, in
+    /// order. This is the one spot a future refactor could double-count or drop
+    /// conflicts, so it is exercised directly (not via the hand-mirrored loop).
+    #[test]
+    fn merge_split_responses_sums_and_concatenates_conflicts_once() {
+        let first: UploadDocumentsResponse = serde_json::from_value(serde_json::json!({
+            "accepted": 3,
+            "carried": 1,
+            "conflicts": [{ "path": "a/dup.md", "reason": "duplicate path in this batch" }],
+        }))
+        .unwrap();
+        let second: UploadDocumentsResponse = serde_json::from_value(serde_json::json!({
+            "accepted": 2,
+            "carried": 4,
+            "conflicts": [
+                { "path": "b/bad.md", "reason": "insert failed: boom" },
+                { "path": "c/dupe.md", "reason": "duplicate path in this batch" },
+            ],
+        }))
+        .unwrap();
+
+        let merged = merge_split_responses(first, second);
+
+        assert_eq!(merged.accepted, 5, "accepted is the sum of both halves");
+        assert_eq!(merged.carried, 5, "carried is the sum of both halves");
+        assert_eq!(
+            merged.conflicts.len(),
+            3,
+            "conflicts concatenated exactly once — not dropped, not doubled"
+        );
+        // Order is preserved: first half's conflicts precede the second half's.
+        assert_eq!(merged.conflicts[0].path, "a/dup.md");
+        assert_eq!(merged.conflicts[1].path, "b/bad.md");
+        assert_eq!(merged.conflicts[2].path, "c/dupe.md");
+    }
+
+    /// A 413 split where one half reports no conflicts must carry the other
+    /// half's conflicts through unchanged (the clean half does not mask the
+    /// dirty half, and the empty list adds nothing).
+    #[test]
+    fn merge_split_responses_one_clean_half() {
+        let clean: UploadDocumentsResponse = serde_json::from_value(serde_json::json!({
+            "accepted": 4,
+            "carried": 0,
+        }))
+        .unwrap();
+        let dirty: UploadDocumentsResponse = serde_json::from_value(serde_json::json!({
+            "accepted": 1,
+            "carried": 0,
+            "conflicts": [{ "path": "b/bad.md", "reason": "insert failed: boom" }],
+        }))
+        .unwrap();
+
+        let merged = merge_split_responses(clean, dirty);
+        assert_eq!(merged.accepted, 5);
+        assert_eq!(merged.carried, 0);
+        assert_eq!(merged.conflicts.len(), 1);
+        assert_eq!(merged.conflicts[0].path, "b/bad.md");
+    }
+
+    /// Conflicts accumulated across batches (as `run_inner` does, and as the 413
+    /// split-retry path concatenates its halves) surface a non-zero count in
+    /// `RunStats` and in the rendered success summary.
+    #[test]
+    fn conflicts_surface_in_stats_and_summary() {
+        let batch_a: UploadDocumentsResponse = serde_json::from_value(serde_json::json!({
+            "accepted": 1,
+            "carried": 0,
+            "conflicts": [{ "path": "a/dup.md", "reason": "duplicate path in this batch" }],
+        }))
+        .unwrap();
+        let batch_b: UploadDocumentsResponse = serde_json::from_value(serde_json::json!({
+            "accepted": 1,
+            "carried": 1,
+            "conflicts": [{ "path": "b/bad.md", "reason": "insert failed: boom" }],
+        }))
+        .unwrap();
+
+        // Accumulate via the real merge helper (same code the 413 split-retry
+        // path uses) rather than hand-mirroring the `extend` loop.
+        let merged = merge_split_responses(batch_a, batch_b);
+
+        let stats = RunStats {
+            added: 1,
+            carried: 1,
+            deleted: 0,
+            batch_count: 2,
+            failed_batch_index: None,
+            total_tokens: 0,
+            conflicts: merged.conflicts,
+        };
+        assert_eq!(stats.conflicts.len(), 2, "RunStats carries a non-zero conflict count");
+
+        let s = format_success(
+            &SuccessOutput {
+                action: "ingest",
+                source_slug: "docs",
+                revision: 2,
+                demoted_revision: Some(1),
+                documents_added: stats.added,
+                documents_carried: stats.carried,
+                conflict_count: stats.conflicts.len(),
+                docs_with_language_targets: 0,
+                docs_with_sdk_dependencies: 0,
+            },
+            false,
+        );
+        assert!(s.contains("2 conflicts"), "human summary surfaces the conflict count: {s}");
+    }
+
+    /// `--json` output always carries `conflict_count` so machine consumers can
+    /// detect partial-failure uploads.
+    #[test]
+    fn success_json_output_includes_conflict_count() {
+        let s = format_success(
+            &SuccessOutput {
+                action: "ingest",
+                source_slug: "docs",
+                revision: 2,
+                demoted_revision: Some(1),
+                documents_added: 3,
+                documents_carried: 4,
+                conflict_count: 2,
+                docs_with_language_targets: 0,
+                docs_with_sdk_dependencies: 0,
+            },
+            true,
+        );
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v["conflict_count"], 2);
+    }
+
+    /// The shared `UploadConflict` serializes to exactly `{path, reason}` — the
+    /// server's wire shape must be byte-identical to what the CLI decodes.
+    #[test]
+    fn upload_conflict_wire_shape_is_path_reason() {
+        let c = mnm_core::ingest::UploadConflict {
+            path: "a/dup.md".to_owned(),
+            reason: "duplicate path in this batch".to_owned(),
+        };
+        let s = serde_json::to_string(&c).unwrap();
+        assert_eq!(s, r#"{"path":"a/dup.md","reason":"duplicate path in this batch"}"#);
     }
 
     #[test]
