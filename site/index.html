@@ -4,18 +4,18 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <script>document.documentElement.classList.add('js')</script>
-  <title>midnight-manual — a retrieval engine for the Midnight Network</title>
-  <meta name="description" content="A privacy-respecting retrieval engine for the Midnight Network — so your AI assistant answers from the real docs and source, not a stale training set.">
+  <title>midnight-manual — ask your docs, not your model</title>
+  <meta name="description" content="Private, current search over the real Midnight docs and source — right inside your AI assistant. Cited answers, not confident guesses.">
   <link rel="canonical" href="https://manual.midnightntwrk.expert/">
   <link rel="icon" type="image/svg+xml" href="img/favicon.svg">
   <meta property="og:type" content="website">
   <meta property="og:title" content="midnight-manual — ask your docs, not your model">
-  <meta property="og:description" content="Privacy-respecting hybrid search over the real Midnight docs and source, right inside your AI client.">
+  <meta property="og:description" content="Private, current search over the real Midnight docs and source, right inside your AI client.">
   <meta property="og:url" content="https://manual.midnightntwrk.expert/">
   <meta property="og:image" content="https://manual.midnightntwrk.expert/img/og.png">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="midnight-manual — ask your docs, not your model">
-  <meta name="twitter:description" content="Privacy-respecting hybrid search over the real Midnight docs and source.">
+  <meta name="twitter:description" content="Private, current search over the real Midnight docs and source.">
   <meta name="twitter:image" content="https://manual.midnightntwrk.expert/img/og.png">
   <link rel="preload" href="fonts/anton-400.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="preload" href="fonts/space-grotesk-400.woff2" as="font" type="font/woff2" crossorigin>
@@ -23,217 +23,242 @@
   <link rel="stylesheet" href="css/styles.css">
 </head>
 <body>
+  <a class="skip-link" href="#start">Skip to install</a>
   <main id="top">
+
+  <!-- ============ Hero ============ -->
   <section class="hero section" id="hero">
     <div class="container">
       <div class="hero__top">
-        <span>MCP · CLI · HTTP</span>
-        <span>PRE-PRODUCTION · RUST 1.91</span>
+        <span>MCP · CLI</span>
+        <span>Open source · Pre-production</span>
       </div>
-      <div class="hero__grid">
-        <div>
-          <p class="eyebrow" style="margin-bottom:14px">A retrieval engine for the Midnight Network</p>
-          <h1 class="display hero__title">Ask your docs,<br>not your model</h1>
-          <p class="hero__sub">Privacy-respecting hybrid search over the real Midnight docs and source — right inside your AI client.</p>
+      <div class="hero__head">
+        <p class="eyebrow">Retrieval engine · Midnight Network</p>
+        <h1 class="display hero__title">Ask your docs,<br><span class="disclose" data-disclose><span class="disclose__bar" aria-hidden="true"></span>not your model</span></h1>
+      </div>
+      <div class="hero__row">
+        <div class="hero__copy">
+          <p class="hero__sub">Private, current search over the real Midnight docs and source — right inside your AI assistant. <strong>Cited answers, not confident guesses.</strong></p>
           <div class="cmd hero__cmd">
-            <code>claude mcp add midnight-manual -- mnm mcp serve</code>
-            <button class="cmd__copy" data-copy="claude mcp add midnight-manual -- mnm mcp serve">Copy</button>
+            <code>brew install aaronbassett/tap/midnight-manual</code>
+            <button class="cmd__copy" data-copy="brew install aaronbassett/tap/midnight-manual">Copy</button>
           </div>
           <div class="hero__cta">
-            <a class="btn-pill btn-pill--solid" href="#quickstart">Install</a>
-            <a class="btn-pill" href="https://github.com/devrelaicom/midnight-manual" rel="noopener">View on GitHub ↗</a>
+            <a class="btn-pill btn-pill--solid" href="#start">Get started <span class="btn-pill__arrow" aria-hidden="true">→</span></a>
+            <a class="btn-pill" href="https://github.com/devrelaicom/midnight-manual" rel="noopener">View on GitHub <span aria-hidden="true">↗</span></a>
           </div>
         </div>
-        <div class="engine" aria-hidden="true">
-          <!-- Hero illustration: static placeholder for the looping "Midnight Manual Server"
-               rotation video. To swap the video in later, replace the <img> below with:
-               <video class="engine__img" src="img/hero-server.mp4" poster="img/hero-server.jpg"
-                      width="1024" height="1024" autoplay loop muted playsinline></video>
-               (gate autoplay on prefers-reduced-motion in main.js if you want the still for those users). -->
-          <img class="engine__img" src="img/hero-server.jpg" width="1024" height="1024"
-               alt="" loading="eager" decoding="async">
+
+        <!-- Signature: live retrieval demo. The thesis, shown not told. -->
+        <div class="demo" data-demo aria-label="Example: a question and its cited, ranked results">
+          <div class="demo__bar" aria-hidden="true"><i></i><i></i><i></i><span class="demo__tag">midnight-manual</span></div>
+          <div class="demo__body">
+            <p class="demo__prompt"><span class="demo__sigil" aria-hidden="true">$</span> <span class="demo__query" data-type="how do I write a Compact contract with a sealed ledger?">how do I write a Compact contract with a sealed ledger?</span><span class="demo__cursor" aria-hidden="true"></span></p>
+            <ul class="demo__results">
+              <li class="demo__result" style="--conf:.94">
+                <div class="demo__rhead"><span class="demo__path">midnight-docs › compact-ledger.md</span><span class="demo__score">0.94</span></div>
+                <div class="demo__track" aria-hidden="true"><span class="demo__fill"></span></div>
+                <div class="demo__chips"><span class="chip chip--accent">recent</span><span class="chip">verified</span><span class="chip">foundation</span></div>
+              </li>
+              <li class="demo__result" style="--conf:.88">
+                <div class="demo__rhead"><span class="demo__path">openzeppelin-compact › access/Ownable.compact</span><span class="demo__score">0.88</span></div>
+                <div class="demo__track" aria-hidden="true"><span class="demo__fill"></span></div>
+                <div class="demo__chips"><span class="chip">version match</span><span class="chip">partner</span></div>
+              </li>
+              <li class="demo__result" style="--conf:.81">
+                <div class="demo__rhead"><span class="demo__path">example-kitties › src/contract.compact</span><span class="demo__score">0.81</span></div>
+                <div class="demo__track" aria-hidden="true"><span class="demo__fill"></span></div>
+                <div class="demo__chips"><span class="chip">community</span></div>
+              </li>
+            </ul>
+          </div>
         </div>
       </div>
     </div>
   </section>
 
-  <section class="section section--band" id="quickstart">
+  <!-- ============ Why ============ -->
+  <section class="section section--band" id="why">
     <div class="container" data-reveal>
-      <p class="marker">Quick start</p>
+      <p class="lead">Your AI assistant's training data went stale the day it shipped.
+      <strong>midnight-manual</strong> gives it live search over the real Midnight docs and source —
+      ranked, cited, and current — so its answers trace back to something you can check.</p>
+    </div>
+  </section>
+
+  <!-- ============ Trust trio ============ -->
+  <section class="section" id="trust">
+    <div class="container" data-reveal>
+      <p class="marker">Answers you can check</p>
+      <h2 class="h-section">Grounded, ranked,<br>and current</h2>
+      <div class="cards grid-3" style="margin-top:26px">
+        <div class="card">
+          <p class="card__meta">// CITED</p>
+          <p class="card__title">Real sources</p>
+          <p>Every result points back to the exact doc or source file it came from — so your assistant can show its work instead of guessing.</p>
+        </div>
+        <div class="card">
+          <p class="card__meta">// TRUSTED</p>
+          <p class="card__title">Ranked by trust</p>
+          <p>Results are weighted by where they come from and whether they're verified and up to date, so the most trustworthy source rises to the top.</p>
+        </div>
+        <div class="card">
+          <p class="card__meta">// CURRENT</p>
+          <p class="card__title">Always live</p>
+          <p>Searches the live Midnight corpus — not a frozen snapshot from whenever the model was trained.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ Get started (onboarding) ============ -->
+  <section class="section section--band" id="start">
+    <div class="container" data-reveal>
+      <p class="marker">Get started</p>
       <h2 class="h-section">Up and running<br>in three steps</h2>
-      <p class="subhead">No database, no API key, no account. You need a Rust toolchain (1.91+); the corpus is hosted and reranking is handled remotely via VoyageAI.</p>
+      <p class="subhead">No database, no API key, no account. Install the <code>mnm</code> command, point your AI client at it, and ask.</p>
 
-      <div class="qs-steps">
-        <div class="qs-step"><p class="qs-step__n">01</p><h3>Build the CLI</h3>
-          <p>Clone, build the <code>mnm</code> binary, and put it on your PATH.</p></div>
-        <div class="qs-step"><p class="qs-step__n">02</p><h3>Add to your client</h3>
-          <p>One command wires the MCP server into your AI assistant.</p></div>
-        <div class="qs-step"><p class="qs-step__n">03</p><h3>Search</h3>
-          <p>Ask something Midnight-specific and get cited, ranked answers.</p></div>
-      </div>
+      <ol class="steps">
+        <li class="step" data-step>
+          <div class="step__head"><span class="step__n">01</span><h3 class="step__title">Install <code>mnm</code></h3></div>
+          <p class="step__lead">Prebuilt binaries for macOS &amp; Linux — no Rust toolchain required. (Windows runs the Linux build via WSL.)</p>
+          <div class="tabs" role="tablist" aria-label="Install method">
+            <button class="tab" role="tab" aria-selected="true"  id="tab-btn-brew"   aria-controls="tab-brew">Homebrew</button>
+            <button class="tab" role="tab" aria-selected="false" id="tab-btn-shell"  aria-controls="tab-shell">Shell</button>
+            <button class="tab" role="tab" aria-selected="false" id="tab-btn-source" aria-controls="tab-source">From source</button>
+          </div>
+          <div id="tab-brew" class="tabpanel" role="tabpanel" aria-labelledby="tab-btn-brew" tabindex="0">
+            <div class="cmd"><code>brew install aaronbassett/tap/midnight-manual</code>
+              <button class="cmd__copy" data-copy="brew install aaronbassett/tap/midnight-manual">Copy</button></div>
+          </div>
+          <div id="tab-shell" class="tabpanel" role="tabpanel" aria-labelledby="tab-btn-shell" tabindex="0" hidden>
+            <div class="cmd"><code>curl --proto '=https' --tlsv1.2 -LsSf https://github.com/devrelaicom/midnight-manual/releases/latest/download/midnight-manual-installer.sh | sh</code>
+              <button class="cmd__copy" data-copy="curl --proto '=https' --tlsv1.2 -LsSf https://github.com/devrelaicom/midnight-manual/releases/latest/download/midnight-manual-installer.sh | sh">Copy</button></div>
+          </div>
+          <div id="tab-source" class="tabpanel" role="tabpanel" aria-labelledby="tab-btn-source" tabindex="0" hidden>
+            <div class="cmd cmd--block"><code>git clone https://github.com/devrelaicom/midnight-manual.git
+cd midnight-manual
+cargo build --release -p midnight-manual
+install -m 0755 target/release/mnm ~/.local/bin/mnm</code>
+              <button class="cmd__copy" data-copy="git clone https://github.com/devrelaicom/midnight-manual.git
+cd midnight-manual
+cargo build --release -p midnight-manual
+install -m 0755 target/release/mnm ~/.local/bin/mnm">Copy</button></div>
+            <p class="step__note">Building from source needs a <a href="https://rustup.rs" rel="noopener">Rust toolchain</a> (1.91+).</p>
+          </div>
+        </li>
 
-      <div class="cmd" style="margin-bottom:14px">
-        <code>cargo build --release -p midnight-manual &amp;&amp; install -m 0755 target/release/mnm ~/.local/bin/mnm</code>
-        <button class="cmd__copy" data-copy="cargo build --release -p midnight-manual && install -m 0755 target/release/mnm ~/.local/bin/mnm">Copy</button>
-      </div>
-
-      <div class="tabs" role="tablist" aria-label="Add to your client" style="margin-bottom:14px">
-        <button class="tab" role="tab" aria-selected="true"  id="tab-btn-claude" aria-controls="tab-claude">Claude Code</button>
-        <button class="tab" role="tab" aria-selected="false" id="tab-btn-codex"  aria-controls="tab-codex">Codex</button>
-        <button class="tab" role="tab" aria-selected="false" id="tab-btn-cursor" aria-controls="tab-cursor">Cursor</button>
-      </div>
-      <div id="tab-claude" class="tabpanel" role="tabpanel" aria-labelledby="tab-btn-claude" tabindex="0">
-        <div class="cmd"><code>claude mcp add midnight-manual -- mnm mcp serve</code>
-          <button class="cmd__copy" data-copy="claude mcp add midnight-manual -- mnm mcp serve">Copy</button></div>
-      </div>
-      <div id="tab-codex" class="tabpanel" role="tabpanel" aria-labelledby="tab-btn-codex" tabindex="0" hidden>
-        <div class="cmd"><code># ~/.codex/config.toml — [mcp_servers.midnight-manual] command="mnm" args=["mcp","serve"]</code>
-          <button class="cmd__copy" data-copy='[mcp_servers.midnight-manual]
+        <li class="step" data-step>
+          <div class="step__head"><span class="step__n">02</span><h3 class="step__title">Add it to your AI client</h3></div>
+          <p class="step__lead">One line wires <code>mnm</code> into your assistant as an MCP tool.</p>
+          <div class="tabs" role="tablist" aria-label="AI client">
+            <button class="tab" role="tab" aria-selected="true"  id="tab-btn-claude" aria-controls="tab-claude">Claude Code</button>
+            <button class="tab" role="tab" aria-selected="false" id="tab-btn-codex"  aria-controls="tab-codex">Codex</button>
+            <button class="tab" role="tab" aria-selected="false" id="tab-btn-cursor" aria-controls="tab-cursor">Cursor</button>
+          </div>
+          <div id="tab-claude" class="tabpanel" role="tabpanel" aria-labelledby="tab-btn-claude" tabindex="0">
+            <div class="cmd"><code>claude mcp add midnight-manual -- mnm mcp serve</code>
+              <button class="cmd__copy" data-copy="claude mcp add midnight-manual -- mnm mcp serve">Copy</button></div>
+          </div>
+          <div id="tab-codex" class="tabpanel" role="tabpanel" aria-labelledby="tab-btn-codex" tabindex="0" hidden>
+            <div class="cmd cmd--block"><code># ~/.codex/config.toml
+[mcp_servers.midnight-manual]
+command = "mnm"
+args = ["mcp", "serve"]</code>
+              <button class="cmd__copy" data-copy='[mcp_servers.midnight-manual]
 command = "mnm"
 args = ["mcp", "serve"]'>Copy</button></div>
-      </div>
-      <div id="tab-cursor" class="tabpanel" role="tabpanel" aria-labelledby="tab-btn-cursor" tabindex="0" hidden>
-        <div class="cmd"><code># ~/.cursor/mcp.json — { "mcpServers": { "midnight-manual": { "command": "mnm", "args": ["mcp","serve"] } } }</code>
-          <button class="cmd__copy" data-copy='{ "mcpServers": { "midnight-manual": { "command": "mnm", "args": ["mcp", "serve"] } } }'>Copy</button></div>
-      </div>
+          </div>
+          <div id="tab-cursor" class="tabpanel" role="tabpanel" aria-labelledby="tab-btn-cursor" tabindex="0" hidden>
+            <div class="cmd cmd--block"><code>// ~/.cursor/mcp.json
+{ "mcpServers": { "midnight-manual": { "command": "mnm", "args": ["mcp", "serve"] } } }</code>
+              <button class="cmd__copy" data-copy='{ "mcpServers": { "midnight-manual": { "command": "mnm", "args": ["mcp", "serve"] } } }'>Copy</button></div>
+          </div>
+        </li>
 
-      <div class="terminal" style="margin-top:22px" data-reveal aria-hidden="true">
-        <div class="terminal__bar"><i></i><i></i><i></i></div>
-        <div class="terminal__body">
-          <span class="ok">$</span> mnm search "how do I write a Compact contract with a sealed ledger?"<br>
-          <span class="file">▸ midnight-docs › compact-ledger.md</span> &nbsp; <span class="conf">confidence 0.94</span> &nbsp; foundation · verified · recent<br>
-          <span class="file">▸ openzeppelin-compact › access/Ownable.compact</span> &nbsp; <span class="conf">confidence 0.88</span> &nbsp; partner · version-match<br>
-          <span class="file">▸ example-kitties › src/contract.compact</span> &nbsp; <span class="conf">confidence 0.81</span>
+        <li class="step" data-step>
+          <div class="step__head"><span class="step__n">03</span><h3 class="step__title">Ask anything Midnight</h3></div>
+          <p class="step__lead">Restart your client and ask a Midnight question — it reaches for search and answers with cited sources. Prefer the terminal?</p>
+          <div class="cmd"><code>mnm search "how do I mint a shielded token?"</code>
+            <button class="cmd__copy" data-copy='mnm search "how do I mint a shielded token?"'>Copy</button></div>
+        </li>
+      </ol>
+    </div>
+  </section>
+
+  <!-- ============ Three ways to use it ============ -->
+  <section class="section" id="ways">
+    <div class="container" data-reveal>
+      <p class="marker">One install, three ways in</p>
+      <h2 class="h-section">However you<br>like to work</h2>
+      <div class="cards grid-3" style="margin-top:26px">
+        <div class="card">
+          <p class="card__meta">// IN YOUR AI CLIENT</p>
+          <p class="card__title">As an MCP tool</p>
+          <p>Drop one command into Claude Code, Codex, or Cursor — your assistant gains grounded search, navigation, and citations.</p>
+        </div>
+        <div class="card">
+          <p class="card__meta">// IN YOUR TERMINAL</p>
+          <p class="card__title">As a CLI</p>
+          <p>Search the corpus, read results in context, and manage settings with <code>mnm</code>. Add <code>--json</code> to anything to script it.</p>
+        </div>
+        <div class="card">
+          <p class="card__meta">// HOSTED FOR YOU</p>
+          <p class="card__title">No server to run</p>
+          <p>The indexed corpus is hosted by default — most people never run a server. It's built in, so search works the moment you install.</p>
         </div>
       </div>
     </div>
   </section>
 
-  <section class="section" id="why">
+  <!-- ============ The skill ============ -->
+  <section class="section section--band" id="skill">
     <div class="container" data-reveal>
-      <p class="lead">Your assistant's training data went stale the day it shipped.
-      <strong>midnight-manual</strong> gives it hybrid search over the live Midnight corpus —
-      ranked, reranked, and cited — so its answers trace back to the real docs and source, not a stale guess.</p>
-    </div>
-  </section>
-
-  <section class="section section--band" id="engine">
-    <div class="container" data-reveal>
-      <p class="marker">The retrieval engine</p>
-      <h2 class="h-section">Confidence = trust × relevance</h2>
-      <p class="subhead">Lexical (PostgreSQL full-text) and semantic (pgvector) candidates are fused with
-      Reciprocal Rank Fusion (k=60). VoyageAI reranking (<code>rerank-2.5</code> by default,
-      <code>rerank-2.5-lite</code> for lower latency) sharpens the top results. Then every hit's relevance is
-      multiplied by a <strong>trust score</strong> — and the per-factor breakdown comes back with it, so your
-      assistant can explain <em>why</em> a passage is trustworthy.</p>
-      <div class="factors">
-        <div class="factor"><b>Attribution</b><span>Foundation › Partner › Third-party › Community.</span></div>
-        <div class="factor"><b>Verification</b><span>Verified by the Foundation, a partner, or unverified.</span></div>
-        <div class="factor"><b>Freshness</b><span>Exponential decay by age.</span></div>
-        <div class="factor"><b>Deprecation</b><span>Flagged content is down-weighted.</span></div>
-        <div class="factor"><b>Version match</b><span>Permissive (default) boosts matching versions and penalises near-misses; strict hard-filters to satisfying content only.</span></div>
-      </div>
-    </div>
-  </section>
-
-  <section class="section" id="tools">
-    <div class="container" data-reveal>
-      <p class="marker">Three tools, one binary</p>
-      <h2 class="h-section">One workspace,<br>three ways in</h2>
-      <div class="cards grid-3" style="margin-top:24px">
-        <div class="card"><p class="card__meta">// MCP SERVER</p><p class="card__title">In your AI client</p>
-          <p>Drop <code>mnm mcp serve</code> into Claude Code, Codex, or Cursor — your assistant gains hybrid search, reranking, and document navigation.</p></div>
-        <div class="card"><p class="card__meta">// CLI · mnm</p><p class="card__title">In your terminal</p>
-          <p>Search the corpus, inspect chunks and documents, and manage configuration. Add <code>--json</code> to anything for scripting.</p></div>
-        <div class="card"><p class="card__meta">// CLOUD CORPUS</p><p class="card__title">Hosted by default</p>
-          <p>An <code>axum</code> + Postgres&nbsp;+&nbsp;pgvector service hosts the indexed corpus. It's the compiled-in default — most users never run a server.</p></div>
-      </div>
-    </div>
-  </section>
-
-  <section class="section section--band" id="mcp">
-    <div class="container" data-reveal>
-      <p class="marker">In your AI client</p>
-      <h2 class="h-section">13 tools, lazy-loaded</h2>
-      <p class="subhead">A hand-rolled MCP server (JSON-RPC over stdio) that starts in under half a second.
-      Query embedding and reranking are both remote VoyageAI calls — nothing downloads or runs locally.
-      <code>advanced_search</code> supports HyDE and multi-query fusion (1–10 queries, RRF k=60) in a single
-      round-trip.</p>
-      <div class="cards grid-3" style="margin-top:24px">
-        <div class="card"><p class="card__meta">// SEARCH</p><p class="card__title">Find</p>
-          <p><code>search</code> and <code>advanced_search</code> — hybrid full-text + vector retrieval (plus an optional <code>code_mode</code> for code-shaped queries), VoyageAI rerank, per-facet filters, and <code>version_match</code>. Every hit carries a confidence score.</p></div>
-        <div class="card"><p class="card__meta">// READ IN CONTEXT</p><p class="card__title">Navigate</p>
-          <p><code>get_chunks</code>, <code>get_chunk_next/prev</code>, <code>get_chunk_neighbors</code>, <code>get_chunk_parents</code>, <code>get_document</code>, <code>get_document_chunks</code> — pull exactly as much surrounding context as needed.</p></div>
-        <div class="card"><p class="card__meta">// CORPUS &amp; DIAGNOSTICS</p><p class="card__title">Operate</p>
-          <p><code>list_sources</code>, <code>facets</code>, <code>status</code>, <code>install_search_skill</code> — enumerate sources, discover filter values, report health, and install the Advanced Search Skill.</p></div>
-      </div>
-    </div>
-  </section>
-
-  <section class="section" id="skill">
-    <div class="container" data-reveal>
-      <p class="marker">It teaches the technique</p>
+      <p class="marker">It learns the technique</p>
       <h2 class="h-section">Searches like a<br>seasoned researcher</h2>
-      <p class="subhead">The server gives your assistant the power tools; the Advanced Search Skill teaches the
-      technique. It's a persistent, auto-loaded Agent Skill — install once and your agent reaches for the right
-      retrieval pattern on its own.</p>
-      <div class="cards grid-4" style="margin:24px 0">
-        <div class="card"><p class="card__title">HyDE</p><p>Draft a hypothetical answer and search with it alongside the question.</p></div>
-        <div class="card"><p class="card__title">Multi-query</p><p>Fuse 2–3 paraphrases to beat synonym mismatch.</p></div>
-        <div class="card"><p class="card__title">Step-back</p><p>Pair the specific question with a broader framing.</p></div>
-        <div class="card"><p class="card__title">Lexical anchoring</p><p>Send exact identifiers and error codes verbatim.</p></div>
-        <div class="card"><p class="card__title">Symbol-aware</p><p>Scope by package / language, navigate by symbol path.</p></div>
-        <div class="card"><p class="card__title">Retrieve-read-retrieve</p><p>Broad pass → read neighbours → refine → search again.</p></div>
-        <div class="card"><p class="card__title">Trust-weighted</p><p>Rank and prune on each result's trust factors.</p></div>
-        <div class="card"><p class="card__title">Cross-source</p><p>Surface disagreement instead of silently picking one.</p></div>
+      <p class="subhead">The tool gives your assistant the search; the Advanced Search Skill teaches it how to use it well.
+      Install once and your agent reaches for the right approach on its own.</p>
+      <div class="cards grid-2 skill-list" style="margin:26px 0">
+        <div class="card"><p class="card__title">Rephrases the question</p><p>Searches a few wordings at once, so a synonym mismatch never hides the answer.</p></div>
+        <div class="card"><p class="card__title">Reads around a result</p><p>Pulls the surrounding context instead of a lone snippet, so the answer holds together.</p></div>
+        <div class="card"><p class="card__title">Cross-checks sources</p><p>When sources disagree it surfaces the conflict rather than quietly picking one.</p></div>
+        <div class="card"><p class="card__title">Weighs the evidence</p><p>Ranks and prunes by how much each source can be trusted before it answers.</p></div>
       </div>
-      <div class="cmd" style="max-width:420px">
+      <p class="skill__cta-label">Already have <code>mnm</code>? Ask your assistant to install the skill, or add it yourself:</p>
+      <div class="cmd" style="max-width:360px">
         <code>mnm skills add</code>
         <button class="cmd__copy" data-copy="mnm skills add">Copy</button>
       </div>
     </div>
   </section>
 
-  <section class="section section--band" id="chunker">
-    <div class="container" data-reveal>
-      <p class="marker">The smart chunker</p>
-      <h2 class="h-section">It understands structure</h2>
-      <p class="subhead">Markdown is split along its heading hierarchy (every chunk carries its
-      <code>heading_path</code>). Source files are parsed with tree-sitter and split on real syntactic
-      boundaries — functions, impl blocks, modules — never mid-expression, each recording a structured
-      <code>symbol_path</code>. <strong>Compact is a first-class citizen:</strong> circuits, ledger
-      declarations, witnesses, and contracts each become their own attributable chunk.</p>
-      <div class="langs">
-        <span class="lang lang--first">Compact</span>
-        <span class="lang">Rust</span><span class="lang">TypeScript</span><span class="lang">JavaScript</span>
-        <span class="lang">Python</span><span class="lang">Go</span><span class="lang">Solidity</span>
-        <span class="lang">Java</span><span class="lang">C#</span><span class="lang">Kotlin</span>
-        <span class="lang">Swift</span><span class="lang">Ruby</span><span class="lang">Haskell</span>
-        <span class="lang">Bash</span><span class="lang">Scheme</span><span class="lang">TOML</span>
-        <span class="lang">YAML</span><span class="lang">HTML / XML</span>
-      </div>
-    </div>
-  </section>
-
+  <!-- ============ Privacy ============ -->
   <section class="section" id="private">
     <div class="container" data-reveal>
-      <p class="marker">Privacy</p>
-      <h2 class="h-section">Where your<br>text goes</h2>
-      <div class="cards grid-3" style="margin-top:24px">
-        <div class="card"><p class="card__title">All-remote embeddings and reranking</p>
-          <p>General chunks use <code>voyage-context-3</code> (contextualized); code chunks also get a <code>voyage-code-3</code> vector. Reranking uses VoyageAI <code>rerank-2.5</code>. Bring your own key, or let the hosted server proxy it — it logs only token counts, never your query text. No Python, no ONNX, no local model downloads.</p></div>
-        <div class="card"><p class="card__title">Opt-out telemetry</p>
-          <p>Carries no query or chunk content, no tokens, no paths. Opt out three ways: an env var, a config flag, or <code>mnm telemetry disable</code>.</p></div>
-        <div class="card"><p class="card__title">Enforced by a canary</p>
-          <p>A CI test feeds fake tokens, paths, and queries through every path that touches user content — any leak fails the build.</p></div>
+      <p class="marker">Private by design</p>
+      <h2 class="h-section">Your questions<br>stay yours</h2>
+      <div class="cards grid-3" style="margin-top:26px">
+        <div class="card">
+          <p class="card__title">Never logged</p>
+          <p>Searching runs against the hosted corpus, which records only counts — never your query text or the passages you read.</p>
+        </div>
+        <div class="card">
+          <p class="card__title">Opt out anytime</p>
+          <p>Anonymous usage stats carry no queries, content, or paths. Turn them off with an env var, a config flag, or <code>mnm telemetry disable</code>.</p>
+        </div>
+        <div class="card">
+          <p class="card__title">Leak-tested</p>
+          <p>A continuous test pushes fake secrets through every path that touches your text — any leak fails the build before it ships.</p>
+        </div>
       </div>
     </div>
   </section>
 
   <!-- sticky install CTA -->
-  <a class="btn-pill btn-pill--solid sticky-cta" href="#quickstart">Install</a>
-  <!-- later sections appended below -->
+  <a class="btn-pill btn-pill--solid sticky-cta" href="#start">Get started</a>
   </main>
+
   <footer class="footer">
     <div class="container">
       <p>Pre-production software for the Midnight Network. The hosted corpus resets without notice and interfaces move. <strong>Build something anyway.</strong></p>
