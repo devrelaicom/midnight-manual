@@ -256,7 +256,7 @@ fn resolve_embed_model_name<'a>(
 /// model resolved (the code embedder is unreachable in that case — code
 /// searches 503 before embedding — so the fallback only keeps boot simple).
 ///
-/// Dtype comes from the SAME [`crate::routes::models::CORPUS_DTYPE`] constant
+/// Dtype comes from the SAME `CORPUS_DTYPE` constant (in `routes::models`)
 /// that `/v1/models/active` reports, so the dtype the proxy COMPUTES with cannot
 /// diverge from the dtype the server LABELS the corpus with. The config's
 /// `voyage_output_dtype` is only consulted to warn when an operator set it to

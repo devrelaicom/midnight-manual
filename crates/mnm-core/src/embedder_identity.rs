@@ -42,7 +42,7 @@ pub struct EmbedderIdentity {
 /// What the active-model fetch reported for one model (general or code).
 ///
 /// All three fields are present iff the fetch succeeded AND the model exists; a
-/// failed/absent fetch is represented by passing `None` to [`derive`].
+/// failed/absent fetch is represented by passing `None` to [`derive()`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActiveModelIdentity {
     /// Bare model name from the active-model response.
@@ -91,7 +91,7 @@ pub fn derive(
     derive_inner(which, active, fallback, true)
 }
 
-/// Like [`derive`] but suppresses the fallback `tracing::warn!`.
+/// Like [`derive()`] but suppresses the fallback `tracing::warn!`.
 ///
 /// For callers that already logged the active-fetch failure (avoiding a
 /// warn-per-identity for one event) or that won't use the identity for an
