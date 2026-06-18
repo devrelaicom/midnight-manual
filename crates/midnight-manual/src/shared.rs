@@ -19,6 +19,12 @@ use time::OffsetDateTime;
 ///    (`<https://midnight-manual.midnightntwrk.expert>`).
 ///
 /// Trailing `/` is stripped so callers can safely format `format!("{url}/v1/...")`.
+///
+/// This is the discovery-performing convenience wrapper: it runs
+/// [`Config::discover`](mnm_core::config::Config::discover) itself when no flag
+/// is supplied. Callers that have *already* discovered a config should prefer
+/// [`resolve_server_url_from`] so a single config read backs every derived
+/// value (avoids a TOCTOU desync + a redundant file read).
 #[must_use]
 pub fn resolve_server_url(flag: Option<&str>) -> String {
     if let Some(s) = flag {
@@ -26,7 +32,22 @@ pub fn resolve_server_url(flag: Option<&str>) -> String {
     }
     let env = mnm_core::config::StdEnv;
     let (cfg, _) = mnm_core::config::Config::discover(None, &env).unwrap_or_default();
-    cfg.server.url.trim_end_matches('/').to_owned()
+    resolve_server_url_from(flag, &cfg)
+}
+
+/// Resolve the cloud server URL against an *already-discovered* config.
+///
+/// Same precedence as [`resolve_server_url`] (flag > `cfg.server.url`), but with
+/// no I/O: the caller threads in the `cfg` it already read. This keeps a single
+/// source of truth so e.g. `telemetry_enabled` and `cloud_url` cannot drift
+/// apart across two separate `Config::discover` reads.
+///
+/// Trailing `/` is stripped so callers can safely format `format!("{url}/v1/...")`.
+#[must_use]
+pub fn resolve_server_url_from(flag: Option<&str>, cfg: &mnm_core::config::Config) -> String {
+    flag.unwrap_or(&cfg.server.url)
+        .trim_end_matches('/')
+        .to_owned()
 }
 
 /// Look up the active read-uplift bearer in `$XDG_CONFIG_HOME/midnight-manual/auth.toml`.

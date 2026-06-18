@@ -58,7 +58,7 @@ impl ServerConfig {
     /// enabled (subject to the opt-out resolver).
     #[must_use]
     pub fn with_defaults(cache_dir: PathBuf) -> Self {
-        let cloud_url = "https://midnight-manual.midnightntwrk.expert".to_owned();
+        let cloud_url = mnm_core::config::DEFAULT_SERVER_URL.to_owned();
         let telemetry_url = format!("{cloud_url}/v1/telemetry/events");
         Self {
             cache_dir,

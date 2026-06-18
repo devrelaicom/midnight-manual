@@ -122,10 +122,40 @@ fn apply_effective_overrides(
         cfg.rerank.model = Some(model.to_owned());
     }
 
+    // models.cache_dir — show the directory `mnm` would actually use. The
+    // env override (`MIDNIGHT_MANUAL_MODEL_CACHE_DIR`) sits above the config
+    // value, which sits above the XDG/HOME default. `mnm config show` has no
+    // `--cache-dir` flag, so the env is the top layer here.
+    //
+    // `resolve_with_override` applies config-over-env-chain; the env override
+    // must still win over the config value, so it is checked first.
+    let cache_env = CacheEnvAdapter(env);
+    if let Some(dir) = env
+        .var("MIDNIGHT_MANUAL_MODEL_CACHE_DIR")
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            mnm_embedding::cache::resolve_with_override(cfg.models.cache_dir.as_deref(), &cache_env)
+        })
+    {
+        cfg.models.cache_dir = Some(dir);
+    }
+
     // telemetry.enabled — the --no-telemetry flag (env MIDNIGHT_MANUAL_DISABLE_TELEMETRY,
     // already resolved by clap) forces it off for this invocation.
     if no_telemetry {
         cfg.telemetry.enabled = false;
+    }
+}
+
+/// Bridges the config-side [`ConfigEnv`] trait onto the env-lookup trait
+/// [`mnm_embedding::cache::Env`] so the cache-dir resolver can reuse whatever
+/// env the caller passed in (the real `StdEnv`, or a `FakeEnv` in tests).
+struct CacheEnvAdapter<'a, E: ConfigEnv>(&'a E);
+
+impl<E: ConfigEnv> mnm_embedding::cache::Env for CacheEnvAdapter<'_, E> {
+    fn var(&self, name: &str) -> Option<String> {
+        self.0.var(name)
     }
 }
 
@@ -224,5 +254,37 @@ mod tests {
         assert!(cfg.telemetry.enabled); // default on
         apply_effective_overrides(&mut cfg, None, None, true, &FakeEnv::default());
         assert!(!cfg.telemetry.enabled);
+    }
+
+    #[test]
+    fn cache_dir_env_override_wins_over_config() {
+        let mut cfg = Config::default();
+        cfg.models.cache_dir = Some(std::path::PathBuf::from("/from/config"));
+        let env = FakeEnv::default().set("MIDNIGHT_MANUAL_MODEL_CACHE_DIR", "/from/env");
+        apply_effective_overrides(&mut cfg, None, None, false, &env);
+        assert_eq!(cfg.models.cache_dir.as_deref(), Some(std::path::Path::new("/from/env")));
+    }
+
+    #[test]
+    fn cache_dir_config_value_surfaces_when_no_env() {
+        let mut cfg = Config::default();
+        cfg.models.cache_dir = Some(std::path::PathBuf::from("/from/config"));
+        // No cache-dir env at all → the config value is the effective dir.
+        let env = FakeEnv::default();
+        apply_effective_overrides(&mut cfg, None, None, false, &env);
+        assert_eq!(cfg.models.cache_dir.as_deref(), Some(std::path::Path::new("/from/config")));
+    }
+
+    #[test]
+    fn cache_dir_falls_back_to_xdg_default() {
+        let mut cfg = Config::default();
+        assert!(cfg.models.cache_dir.is_none());
+        // No env override, no config value → resolves the XDG default location.
+        let env = FakeEnv::default().set("XDG_DATA_HOME", "/xdg");
+        apply_effective_overrides(&mut cfg, None, None, false, &env);
+        assert_eq!(
+            cfg.models.cache_dir.as_deref(),
+            Some(std::path::Path::new("/xdg/midnight-manual/models"))
+        );
     }
 }

@@ -48,7 +48,8 @@ pub enum ModelsCmd {
 #[derive(Debug, ClapArgs)]
 pub struct PullArgs {
     /// Override the local model cache directory. Defaults to
-    /// `$MIDNIGHT_MANUAL_MODEL_CACHE_DIR` or `$HOME/.cache/midnight-manual/models`.
+    /// `$MIDNIGHT_MANUAL_MODEL_CACHE_DIR` > `$XDG_DATA_HOME/midnight-manual/models`
+    /// > `$HOME/.local/share/midnight-manual/models`.
     #[arg(long)]
     pub cache_dir: Option<PathBuf>,
 }
@@ -105,7 +106,7 @@ pub async fn run(
     json: bool,
 ) -> Result<()> {
     match args.cmd {
-        ModelsCmd::Pull(p) => run_pull(p, telemetry, cli_version, json).await,
+        ModelsCmd::Pull(p) => run_pull(p, config_path, telemetry, cli_version, json).await,
         ModelsCmd::Active(_) => run_active(server_flag, json).await,
         ModelsCmd::Status(_) => run_status(server_flag, json).await,
         ModelsCmd::Migrate(m) => {
@@ -117,12 +118,16 @@ pub async fn run(
 
 async fn run_pull(
     args: PullArgs,
+    config_path: Option<&Path>,
     telemetry: &TelemetryClient,
     cli_version: &str,
     json: bool,
 ) -> Result<()> {
     let started = Instant::now();
-    let cache_dir = resolve_cache_dir(args.cache_dir)?;
+    // Config supplies the `[models].cache_dir` middle layer (flag > config > env).
+    let cfg_env = mnm_core::config::StdEnv;
+    let (cfg, _) = mnm_core::config::Config::discover(config_path, &cfg_env).unwrap_or_default();
+    let cache_dir = resolve_cache_dir(args.cache_dir, cfg.models.cache_dir.as_deref())?;
     std::fs::create_dir_all(&cache_dir)
         .with_context(|| format!("create model cache dir at {}", cache_dir.display()))?;
 
@@ -635,13 +640,18 @@ pub async fn fetch_active(server_url: &str) -> Result<ActiveModelResponse> {
         .context("parse /v1/models/active response")
 }
 
-fn resolve_cache_dir(flag: Option<PathBuf>) -> Result<PathBuf> {
+/// Resolve the model cache dir for `mnm models pull` with precedence
+/// **flag (`--cache-dir`) > config (`[models].cache_dir`) > env-chain**
+/// (`MIDNIGHT_MANUAL_MODEL_CACHE_DIR` > `XDG_DATA_HOME` > `HOME`).
+fn resolve_cache_dir(flag: Option<PathBuf>, cfg_dir: Option<&Path>) -> Result<PathBuf> {
     if let Some(p) = flag {
         return Ok(p);
     }
     let env = mnm_embedding::cache::StdEnv;
-    mnm_embedding::cache::resolve(&env)
-        .context("could not resolve model cache dir; set MIDNIGHT_MANUAL_MODEL_CACHE_DIR or HOME")
+    mnm_embedding::cache::resolve_with_override(cfg_dir, &env).context(
+        "could not resolve model cache dir; set [models].cache_dir, \
+         MIDNIGHT_MANUAL_MODEL_CACHE_DIR or HOME",
+    )
 }
 
 /// Active-model response — mirrors the server's typed shape.
@@ -818,8 +828,18 @@ mod tests {
     #[test]
     fn resolve_cache_dir_prefers_flag() {
         let p = PathBuf::from("/some/explicit/cache");
-        let resolved = resolve_cache_dir(Some(p.clone())).unwrap();
+        // Flag wins even when a config dir is also present.
+        let resolved = resolve_cache_dir(Some(p.clone()), Some(Path::new("/from/config"))).unwrap();
         assert_eq!(resolved, p);
+    }
+
+    #[test]
+    fn resolve_cache_dir_prefers_config_over_env() {
+        // No flag → the config `[models].cache_dir` wins over the env-chain
+        // fallback (verified inside mnm_embedding::cache::resolve_with_override).
+        let cfg_dir = PathBuf::from("/from/config/cache");
+        let resolved = resolve_cache_dir(None, Some(cfg_dir.as_path())).unwrap();
+        assert_eq!(resolved, cfg_dir);
     }
 
     fn sources_envelope() -> serde_json::Value {

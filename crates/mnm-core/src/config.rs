@@ -34,6 +34,11 @@ pub struct Config {
     pub cli: CliConfig,
 }
 
+/// Compiled-in production cloud base URL. Single source of truth for the
+/// default server endpoint — every other layer (the CLI resolver, the MCP
+/// `ServerConfig` defaults) sources its fallback from here.
+pub const DEFAULT_SERVER_URL: &str = "https://midnight-manual.midnightntwrk.expert";
+
 /// `[server]` — cloud endpoint settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerConfig {
@@ -43,9 +48,7 @@ pub struct ServerConfig {
 
 impl Default for ServerConfig {
     fn default() -> Self {
-        Self {
-            url: "https://midnight-manual.midnightntwrk.expert".into(),
-        }
+        Self { url: DEFAULT_SERVER_URL.into() }
     }
 }
 

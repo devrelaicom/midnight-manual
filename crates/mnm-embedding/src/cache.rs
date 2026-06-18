@@ -36,6 +36,25 @@ pub fn resolve(env: &impl Env) -> Option<PathBuf> {
     None
 }
 
+/// Resolve the model cache directory, honouring a config-file `[models].cache_dir`
+/// override.
+///
+/// When `cfg_dir` is `Some`, it wins outright (the config layer sits above the
+/// env-chain). When `None`, this falls back to [`resolve`] — i.e. the
+/// `MIDNIGHT_MANUAL_MODEL_CACHE_DIR` > `XDG_DATA_HOME` > `HOME` walk.
+///
+/// Note: the *flag* layer (which sits above config, e.g. `mnm models pull
+/// --cache-dir`) is applied by the caller before reaching this helper — flag and
+/// config both short-circuit to a concrete path, so the caller checks the flag
+/// first and only passes `cfg_dir` here.
+#[must_use]
+pub fn resolve_with_override(cfg_dir: Option<&std::path::Path>, env: &impl Env) -> Option<PathBuf> {
+    if let Some(dir) = cfg_dir {
+        return Some(dir.to_path_buf());
+    }
+    resolve(env)
+}
+
 /// Tiny env-lookup trait so tests can substitute a `FakeEnv` without touching
 /// `std::env`.
 pub trait Env {
@@ -105,5 +124,20 @@ mod tests {
     fn none_when_nothing_set() {
         let env = FakeEnv::default();
         assert!(resolve(&env).is_none());
+    }
+
+    #[test]
+    fn override_wins_over_env_chain() {
+        // A config-supplied dir beats even the MIDNIGHT_MANUAL_MODEL_CACHE_DIR env.
+        let env = FakeEnv::default().set("MIDNIGHT_MANUAL_MODEL_CACHE_DIR", "/from-env");
+        let resolved = resolve_with_override(Some(std::path::Path::new("/from-config")), &env);
+        assert_eq!(resolved, Some(PathBuf::from("/from-config")));
+    }
+
+    #[test]
+    fn override_none_falls_back_to_env_chain() {
+        let env = FakeEnv::default().set("XDG_DATA_HOME", "/xdg");
+        let resolved = resolve_with_override(None, &env);
+        assert_eq!(resolved, Some(PathBuf::from("/xdg/midnight-manual/models")));
     }
 }

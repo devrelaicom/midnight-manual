@@ -206,7 +206,9 @@ pub async fn run() -> Result<()> {
             )
             .await
         }
-        Command::Mcp(args) => commands::mcp::run(args).await,
+        Command::Mcp(args) => {
+            commands::mcp::run(args, cli.server.as_deref(), cli.config.as_deref()).await
+        }
         Command::Models(args) => {
             commands::models::run(
                 args,
