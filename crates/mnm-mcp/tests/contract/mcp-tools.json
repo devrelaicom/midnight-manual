@@ -1969,7 +1969,7 @@
             "type": "integer"
           },
           "within": {
-            "description": "Second drill level: enumerate version values within one name (language_target/sdk_dependency) or one package name.",
+            "description": "Second drill level: enumerate the declared version constraints within one name (language_target/sdk_dependency) or one package name. These are the values you supply to advanced_search via a filter's version_satisfies field, where they are matched as a semver requirement against the declared constraint.",
             "type": "string"
           }
         },

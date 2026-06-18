@@ -61,6 +61,11 @@ async fn serve(server_flag: Option<&str>, config_path: Option<&Path>) -> Result<
     std::fs::create_dir_all(&cache_dir)
         .with_context(|| format!("create model cache dir at {}", cache_dir.display()))?;
 
+    // `mnm mcp serve` forwards ONLY the read-uplift bearer (never an admin
+    // token), so it runs at the read-uplift / anonymous tier. This is
+    // deliberate: the read-uplift token's 30-day TTL suits a long-running
+    // server, whereas an admin token's 1-hour TTL would expire mid-session;
+    // and the MCP tool surface is read-only, so admin credentials buy nothing.
     // Resolve a read-uplift bearer if the user has run `mnm auth github`.
     // Anonymous mode is fine — the cloud's read endpoints work without auth,
     // they just hit the lower rate-limit tier.

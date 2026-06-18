@@ -188,6 +188,7 @@ A search result is a chunk. These tools let your assistant pull exactly as much 
 - **VoyageAI reranking.** `advanced_search` re-scores the candidate set with VoyageAI's reranker (`rerank-2.5` by default — see [Models](#models)) for precision on hard queries. It's on by default; set `rerank: false` for lowest latency. On any rerank failure the server **degrades to RRF order and flags why** (a closed-set reason) rather than failing the search.
 - **Confidence you can reason about.** Each result blends a **trust score** (source attribution, verification, freshness, deprecation, version-match) with relevance — and returns the factor breakdown so your assistant can say *why* a passage is trustworthy without another round-trip.
 - **Structured errors that self-correct.** Failures come back as machine-readable envelopes with remediation guidance and `suggested_next_actions` (a stale chunk id, say, suggests a fresh `search`); if the corpus's embedding model has rolled forward, `search` returns an `embedding_model_mismatch` envelope naming both models and the fix — no cryptic failures.
+- **Runs at the read-uplift (or anonymous) tier.** The server forwards only your read-uplift token — never admin credentials — so it sits at the read-uplift tier when you've signed in with `mnm auth github` and the anonymous tier otherwise. That's all it needs: the tool surface is read-only, and the read-uplift token's 30-day life outlasts a long-running session where an admin token's hour would not.
 
 ---
 

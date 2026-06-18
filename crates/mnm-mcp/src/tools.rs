@@ -155,7 +155,7 @@ pub fn list() -> ToolsListResult {
                     "properties": {
                         "facet": { "type": "string", "enum": ["source_slug", "language", "tags", "package", "language_target", "sdk_dependency"],
                             "description": "Drill into one open-set facet's full value list. Omit for the overview." },
-                        "within": { "type": "string", "description": "Second drill level: enumerate version values within one name (language_target/sdk_dependency) or one package name." },
+                        "within": { "type": "string", "description": "Second drill level: enumerate the declared version constraints within one name (language_target/sdk_dependency) or one package name. These are the values you supply to advanced_search via a filter's version_satisfies field, where they are matched as a semver requirement against the declared constraint." },
                         "cursor": { "type": "string", "description": "Opaque token from a previous drill-down response." },
                         "limit": { "type": "integer", "minimum": 1, "maximum": 200, "default": 50 }
                     },

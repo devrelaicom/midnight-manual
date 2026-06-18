@@ -3,7 +3,8 @@
 //! The Model Context Protocol speaks JSON-RPC 2.0 over a transport (stdio in
 //! our case, per US5). We hand-roll the types here rather than depend on an
 //! external MCP SDK — those crates are still moving fast in 2026 (per
-//! research.md R-2). The 7-tool surface our server exposes is small enough
+//! research.md R-2). The small tool surface our server exposes (see
+//! [`crate::tools::list`], the single source of truth) is compact enough
 //! that the wire types fit in this module.
 
 use serde::{Deserialize, Serialize};
