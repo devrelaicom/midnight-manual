@@ -326,6 +326,11 @@ pub struct RunStats {
     /// Total VoyageAI tokens consumed embedding this run's chunks, summed across
     /// every embed call (BYOK and server-proxy alike report usage).
     pub total_tokens: u64,
+    /// Per-document conflicts the server reported across every upload batch:
+    /// documents that were NOT inserted into the finalized version. A non-empty
+    /// list means documents were silently dropped, so it is warn-logged and
+    /// surfaced in both the human summary and `--json` output.
+    pub conflicts: Vec<mnm_core::ingest::UploadConflict>,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -472,6 +477,7 @@ async fn run_inner(
             batch_count: 0,
             failed_batch_index: None,
             total_tokens: 0,
+            conflicts: Vec::new(),
         });
     }
 
@@ -550,32 +556,14 @@ async fn run_inner(
     let voyage_key = mnm_core::config::resolve_voyage_api_key(voyage_api_key, &cfg.models, &env);
     let voyage_timeout_secs =
         mnm_core::config::resolve_voyage_timeout_secs(args.voyage_timeout_secs, &cfg.models, &env);
-    let byok = voyage_key.as_deref().map(|key| ByokEmbedders {
-        general: ContextualizedVoyageEmbedder::new(
-            key,
-            &cfg.models.embedding,
-            cfg.models.voyage_output_dimension,
-            &cfg.models.voyage_output_dtype,
-        )
-        .with_timeout_secs(voyage_timeout_secs),
-        code: VoyageEmbedder::new(
-            key,
-            &cfg.models.code_embedding,
-            cfg.models.voyage_output_dimension,
-            &cfg.models.voyage_output_dtype,
-        )
-        .with_timeout_secs(voyage_timeout_secs),
-    });
-    reporter.phase(
-        "embedder_resolved",
-        serde_json::json!({"mode": if byok.is_some() { "byok" } else { "server" }}),
-    );
 
-    // Resolve the corpus wire ids. One `GET /v1/models/active` round-trip covers
-    // both: the GENERAL wire id (when the sentinel "auto" is present — an
-    // explicit --embedding-model override is honoured directly) and the CODE
-    // wire id (when code embeddings are enabled). These label the start-run
-    // request and the per-batch upload bodies.
+    // Resolve the corpus wire ids FIRST (before building the embedders) so the
+    // embedder identities that COMPUTE the vectors are derived from the SAME
+    // active-model response that LABELS them (cross-element drift fix). One
+    // `GET /v1/models/active` round-trip covers the GENERAL wire id (when the
+    // sentinel "auto" is present — an explicit --embedding-model override is
+    // honoured directly), the CODE wire id (when code embeddings are enabled),
+    // and the {name, dim, dtype} the BYOK embedders are built from.
     let active = if args.embedding_model == DEFAULT_EMBEDDING_MODEL || code_embeddings_enabled {
         Some(
             crate::commands::models::fetch_active(server_url)
@@ -597,6 +585,30 @@ async fn run_inner(
             |c| format!("{}@{}", c.name, c.revision),
         )
     });
+
+    // Derive the BYOK embedder identities from the active fetch (the authority),
+    // with config as a logged fallback. The general identity follows the run's
+    // chosen embedding_model: when "auto" it's the active model; under an
+    // explicit --embedding-model override (e.g. `models migrate`) the bare name
+    // is parsed from that wire id so the embedder matches the targeted model.
+    let general_id =
+        derive_general_ingest_identity(&args.embedding_model, active.as_ref(), &cfg.models);
+    let code_id = derive_code_ingest_identity(active.as_ref(), &cfg.models);
+    let byok = voyage_key.as_deref().map(|key| ByokEmbedders {
+        general: ContextualizedVoyageEmbedder::new(
+            key,
+            &general_id.name,
+            general_id.dim,
+            &general_id.dtype,
+        )
+        .with_timeout_secs(voyage_timeout_secs),
+        code: VoyageEmbedder::new(key, &code_id.name, code_id.dim, &code_id.dtype)
+            .with_timeout_secs(voyage_timeout_secs),
+    });
+    reporter.phase(
+        "embedder_resolved",
+        serde_json::json!({"mode": if byok.is_some() { "byok" } else { "server" }}),
+    );
 
     // ── Phase: start ingest run ──────────────────────────────────────────────
     reporter.phase("start_run", serde_json::json!({"slug": args.source_slug}));
@@ -681,6 +693,11 @@ async fn run_inner(
 
     let mut accepted = 0usize;
     let mut carried = 0usize;
+    // Per-document conflicts accumulated across every upload batch (including the
+    // 413 split-retry path, which concatenates its halves' conflicts). A
+    // conflicted document was NOT inserted, so this is the only signal the
+    // operator gets that documents were silently dropped.
+    let mut conflicts: Vec<mnm_core::ingest::UploadConflict> = Vec::new();
     // Sum of VoyageAI tokens consumed across every embed call this run. Surfaced
     // on RunStats so the model-migration driver can budget at source boundaries.
     let mut total_tokens = 0u64;
@@ -741,6 +758,7 @@ async fn run_inner(
             Ok(r) => {
                 accepted += r.accepted;
                 carried += r.carried;
+                conflicts.extend(r.conflicts);
             }
             Err(e) => {
                 abort_run(&client, server_url, &args.source_slug, start.ingest_run_id, &token)
@@ -774,6 +792,21 @@ async fn run_inner(
 
     reporter.phase_done("finalize", serde_json::json!({"revision": finalize.revision}));
 
+    // A conflicted document was NOT inserted into the finalized version: log each
+    // one so the silent data loss is observable. The count is also surfaced in the
+    // summary / `--json` output below.
+    if !conflicts.is_empty() {
+        tracing::warn!(
+            count = conflicts.len(),
+            source_slug = %args.source_slug,
+            "ingest finalized with document conflicts — these documents were NOT inserted",
+        );
+        for c in &conflicts {
+            tracing::warn!(path = %c.path, reason = %c.reason, "ingest document conflict");
+        }
+    }
+
+    let conflict_count = conflicts.len();
     let stats = RunStats {
         added: accepted.saturating_sub(carried),
         carried,
@@ -781,6 +814,7 @@ async fn run_inner(
         batch_count: u32::try_from(batch_count).unwrap_or(u32::MAX),
         failed_batch_index: None,
         total_tokens,
+        conflicts,
     };
     println!(
         "{}",
@@ -792,6 +826,7 @@ async fn run_inner(
                 demoted_revision: finalize.demoted_revision,
                 documents_added: stats.added,
                 documents_carried: stats.carried,
+                conflict_count,
                 docs_with_language_targets,
                 docs_with_sdk_dependencies,
             },
@@ -918,6 +953,71 @@ fn resolve_admin_bearer_str(token: &str) -> Option<String> {
 struct ByokEmbedders {
     general: ContextualizedVoyageEmbedder,
     code: VoyageEmbedder,
+}
+
+/// Derive the GENERAL embedder identity for an ingest run (cross-element drift
+/// fix): the `{name, dim, dtype}` the contextualized embedder is built from must
+/// match the wire id the run is labelled with.
+///
+/// Under an explicit `--embedding-model` override (e.g. `models migrate` pins a
+/// target wire id) the bare name is parsed from that wire id so the embedder
+/// targets exactly that model. Under the `"auto"` sentinel the active model's
+/// `{name, dim, dtype}` are the authority. Local config is only a logged
+/// fallback (via [`mnm_core::embedder_identity::derive`]) when the active fetch
+/// was unavailable.
+fn derive_general_ingest_identity(
+    embedding_model: &str,
+    active: Option<&crate::commands::models::ActiveModelResponse>,
+    models: &mnm_core::config::ModelsConfig,
+) -> mnm_core::embedder_identity::EmbedderIdentity {
+    use mnm_core::embedder_identity::{derive, ActiveModelIdentity, FallbackIdentity};
+    // For an explicit override the embedder must match the targeted model's
+    // bare name; dim/dtype still come from the active model (the corpus's
+    // encoding) when available, else config.
+    let explicit_name = (embedding_model != DEFAULT_EMBEDDING_MODEL).then(|| {
+        embedding_model
+            .split_once('@')
+            .map_or(embedding_model, |(n, _)| n)
+    });
+    let active_id = active.map(|a| ActiveModelIdentity {
+        name: explicit_name.map_or_else(|| a.name.clone(), str::to_owned),
+        dim: u32::try_from(a.dim).unwrap_or(models.voyage_output_dimension),
+        dtype: a.dtype.clone(),
+    });
+    derive(
+        "general",
+        active_id.as_ref(),
+        &FallbackIdentity {
+            name: explicit_name.unwrap_or(&models.embedding),
+            dim: models.voyage_output_dimension,
+            dtype: &models.voyage_output_dtype,
+        },
+    )
+}
+
+/// Derive the CODE embedder identity for an ingest run from the active model's
+/// `code` half (the authority), with local config as a logged fallback.
+fn derive_code_ingest_identity(
+    active: Option<&crate::commands::models::ActiveModelResponse>,
+    models: &mnm_core::config::ModelsConfig,
+) -> mnm_core::embedder_identity::EmbedderIdentity {
+    use mnm_core::embedder_identity::{derive, ActiveModelIdentity, FallbackIdentity};
+    let active_id = active
+        .and_then(|a| a.code.as_ref())
+        .map(|c| ActiveModelIdentity {
+            name: c.name.clone(),
+            dim: u32::try_from(c.dim).unwrap_or(models.voyage_output_dimension),
+            dtype: c.dtype.clone(),
+        });
+    derive(
+        "code",
+        active_id.as_ref(),
+        &FallbackIdentity {
+            name: &models.code_embedding,
+            dim: models.voyage_output_dimension,
+            dtype: &models.voyage_output_dtype,
+        },
+    )
 }
 
 /// Embed every chunk of `docs` in place: general contextualized vectors for
@@ -1282,17 +1382,27 @@ async fn upload_documents_with_split(
                 batch_count,
             )
             .await?;
-            Ok(UploadDocumentsResponse {
-                accepted: r1.accepted + r2.accepted,
-                carried: r1.carried + r2.carried,
-                conflicts: {
-                    let mut c = r1.conflicts;
-                    c.extend(r2.conflicts);
-                    c
-                },
-            })
+            Ok(merge_split_responses(r1, r2))
         }
         Err(e) => Err(e),
+    }
+}
+
+/// Merge the two half-batch responses produced by the 413 split-retry path:
+/// sum `accepted`/`carried` and concatenate `conflicts` from both halves
+/// exactly once (first half then second). Pure so the merge — the one spot a
+/// future refactor could double-count or drop conflicts — is unit-testable
+/// without an HTTP round-trip.
+fn merge_split_responses(
+    first: UploadDocumentsResponse,
+    second: UploadDocumentsResponse,
+) -> UploadDocumentsResponse {
+    let mut conflicts = first.conflicts;
+    conflicts.extend(second.conflicts);
+    UploadDocumentsResponse {
+        accepted: first.accepted + second.accepted,
+        carried: first.carried + second.carried,
+        conflicts,
     }
 }
 
@@ -1473,9 +1583,11 @@ struct ChunkUpload {
 struct UploadDocumentsResponse {
     accepted: usize,
     carried: usize,
-    #[allow(dead_code)]
+    /// Per-document conflicts — documents the server did NOT insert. Surfaced
+    /// (warn-logged + counted) at run end so partial-failure uploads aren't
+    /// reported as fully successful.
     #[serde(default)]
-    conflicts: Vec<serde_json::Value>,
+    conflicts: Vec<mnm_core::ingest::UploadConflict>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1559,6 +1671,9 @@ struct SuccessOutput<'a> {
     demoted_revision: Option<i32>,
     documents_added: usize,
     documents_carried: usize,
+    /// Documents the server reported as conflicts (NOT inserted). Always present
+    /// in `--json` output so consumers can detect partial-failure uploads.
+    conflict_count: usize,
     docs_with_language_targets: usize,
     docs_with_sdk_dependencies: usize,
 }
@@ -1586,16 +1701,98 @@ fn format_success(out: &SuccessOutput<'_>, json: bool) -> String {
     }
     let (slug, rev, added, carried) =
         (out.source_slug, out.revision, out.documents_added, out.documents_carried);
-    if let Some(prev) = out.demoted_revision {
-        format!("ingested `{slug}` rev {rev} (was {prev}); +{added} new, {carried} carried")
+    // Conflicts are silent data loss; only render the clause when there are any,
+    // so the clean path stays terse, but a non-zero count is always visible.
+    let conflicts = if out.conflict_count > 0 {
+        format!(", {} conflicts", out.conflict_count)
     } else {
-        format!("ingested `{slug}` rev {rev} (first version); +{added} new")
+        String::new()
+    };
+    if let Some(prev) = out.demoted_revision {
+        format!(
+            "ingested `{slug}` rev {rev} (was {prev}); +{added} new, {carried} carried{conflicts}"
+        )
+    } else {
+        format!("ingested `{slug}` rev {rev} (first version); +{added} new{conflicts}")
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::models::{ActiveCode, ActiveModelResponse};
+
+    /// An active-model response whose `{name, dim, dtype}` deliberately differ
+    /// from `ModelsConfig`'s defaults, so a test can prove the embedder identity
+    /// is taken from the active response and NOT from config.
+    fn divergent_active() -> ActiveModelResponse {
+        ActiveModelResponse {
+            name: "voyage-context-3".to_owned(),
+            revision: 1,
+            dim: 512,
+            provider: "voyageai".to_owned(),
+            dtype: "int8".to_owned(),
+            code: Some(ActiveCode {
+                name: "voyage-code-3".to_owned(),
+                revision: 2,
+                dim: 256,
+                provider: "voyageai".to_owned(),
+                dtype: "uint8".to_owned(),
+            }),
+        }
+    }
+
+    /// THE cross-element drift property (ingest side): when the active model is
+    /// available, the GENERAL and CODE embedders are built from the active
+    /// response's `{name, dim, dtype}`, NOT from the (divergent) local config.
+    /// `auto` means "follow the corpus", so the general name is the active name.
+    #[test]
+    fn ingest_identities_come_from_active_not_config() {
+        let active = divergent_active();
+        // Config defaults are voyage-context-3 / voyage-code-3 / 1024 / "float".
+        let models = mnm_core::config::ModelsConfig::default();
+
+        let general =
+            derive_general_ingest_identity(DEFAULT_EMBEDDING_MODEL, Some(&active), &models);
+        assert_eq!(general.name, "voyage-context-3");
+        assert_eq!(general.dim, 512, "dim must come from the active response, not config 1024");
+        assert_eq!(general.dtype, "int8", "dtype must come from the active response, not config");
+
+        let code = derive_code_ingest_identity(Some(&active), &models);
+        assert_eq!(code.name, "voyage-code-3");
+        assert_eq!(code.dim, 256, "code dim must come from the active `code` half");
+        assert_eq!(code.dtype, "uint8", "code dtype must come from the active `code` half");
+    }
+
+    /// An explicit `--embedding-model` override (e.g. `models migrate`) drives
+    /// the GENERAL embedder's name to the targeted model's bare name, so the
+    /// embedder matches the wire id the run is labelled with.
+    #[test]
+    fn ingest_general_identity_honours_explicit_override() {
+        let active = divergent_active();
+        let models = mnm_core::config::ModelsConfig::default();
+        let general = derive_general_ingest_identity("voyage-context-4@3", Some(&active), &models);
+        // Name parsed from the override wire id; dim/dtype still from the corpus.
+        assert_eq!(general.name, "voyage-context-4");
+        assert_eq!(general.dim, 512);
+        assert_eq!(general.dtype, "int8");
+    }
+
+    /// Offline path: with no active-model response, the identities fall back to
+    /// local config (logged). This preserves offline behavior.
+    #[test]
+    fn ingest_identities_fall_back_to_config_when_active_absent() {
+        let models = mnm_core::config::ModelsConfig::default();
+        let general = derive_general_ingest_identity(DEFAULT_EMBEDDING_MODEL, None, &models);
+        assert_eq!(general.name, models.embedding);
+        assert_eq!(general.dim, models.voyage_output_dimension);
+        assert_eq!(general.dtype, models.voyage_output_dtype);
+
+        let code = derive_code_ingest_identity(None, &models);
+        assert_eq!(code.name, models.code_embedding);
+        assert_eq!(code.dim, models.voyage_output_dimension);
+        assert_eq!(code.dtype, models.voyage_output_dtype);
+    }
 
     #[test]
     fn parses_chunk_and_filter_flags() {
@@ -1661,6 +1858,7 @@ mod tests {
                 demoted_revision: None,
                 documents_added: 5,
                 documents_carried: 0,
+                conflict_count: 0,
                 docs_with_language_targets: 0,
                 docs_with_sdk_dependencies: 0,
             },
@@ -1668,6 +1866,7 @@ mod tests {
         );
         assert!(s.contains("first version"));
         assert!(s.contains("+5 new"));
+        assert!(!s.contains("conflict"), "no conflict clause when count is zero");
     }
 
     #[test]
@@ -1680,6 +1879,7 @@ mod tests {
                 demoted_revision: Some(1),
                 documents_added: 3,
                 documents_carried: 4,
+                conflict_count: 0,
                 docs_with_language_targets: 0,
                 docs_with_sdk_dependencies: 0,
             },
@@ -1689,6 +1889,181 @@ mod tests {
         assert!(s.contains("was 1"));
         assert!(s.contains("+3 new"));
         assert!(s.contains("4 carried"));
+    }
+
+    /// A server response carrying conflicts deserializes into the shared
+    /// `UploadConflict` type with a non-zero count — the CLI must not decode it
+    /// as opaque-and-ignored, or the operator loses documents silently.
+    #[test]
+    fn upload_response_decodes_conflicts() {
+        let body = serde_json::json!({
+            "accepted": 2,
+            "carried": 1,
+            "conflicts": [
+                { "path": "a/dup.md", "reason": "duplicate path in this batch" },
+                { "path": "b/bad.md", "reason": "insert failed: boom" },
+            ],
+        });
+        let resp: UploadDocumentsResponse = serde_json::from_value(body).unwrap();
+        assert_eq!(resp.accepted, 2);
+        assert_eq!(resp.carried, 1);
+        assert_eq!(resp.conflicts.len(), 2, "conflicts must be a non-zero count, not dropped");
+        assert_eq!(resp.conflicts[0].path, "a/dup.md");
+        assert_eq!(resp.conflicts[0].reason, "duplicate path in this batch");
+    }
+
+    /// A response with no `conflicts` field (or an empty list) yields an empty
+    /// vec — the clean path stays terse.
+    #[test]
+    fn upload_response_defaults_conflicts_to_empty() {
+        let resp: UploadDocumentsResponse =
+            serde_json::from_value(serde_json::json!({ "accepted": 5, "carried": 0 })).unwrap();
+        assert!(resp.conflicts.is_empty());
+    }
+
+    /// The 413 split-retry merge (`merge_split_responses`) sums `accepted` /
+    /// `carried` and concatenates each half's `conflicts` exactly once, in
+    /// order. This is the one spot a future refactor could double-count or drop
+    /// conflicts, so it is exercised directly (not via the hand-mirrored loop).
+    #[test]
+    fn merge_split_responses_sums_and_concatenates_conflicts_once() {
+        let first: UploadDocumentsResponse = serde_json::from_value(serde_json::json!({
+            "accepted": 3,
+            "carried": 1,
+            "conflicts": [{ "path": "a/dup.md", "reason": "duplicate path in this batch" }],
+        }))
+        .unwrap();
+        let second: UploadDocumentsResponse = serde_json::from_value(serde_json::json!({
+            "accepted": 2,
+            "carried": 4,
+            "conflicts": [
+                { "path": "b/bad.md", "reason": "insert failed: boom" },
+                { "path": "c/dupe.md", "reason": "duplicate path in this batch" },
+            ],
+        }))
+        .unwrap();
+
+        let merged = merge_split_responses(first, second);
+
+        assert_eq!(merged.accepted, 5, "accepted is the sum of both halves");
+        assert_eq!(merged.carried, 5, "carried is the sum of both halves");
+        assert_eq!(
+            merged.conflicts.len(),
+            3,
+            "conflicts concatenated exactly once — not dropped, not doubled"
+        );
+        // Order is preserved: first half's conflicts precede the second half's.
+        assert_eq!(merged.conflicts[0].path, "a/dup.md");
+        assert_eq!(merged.conflicts[1].path, "b/bad.md");
+        assert_eq!(merged.conflicts[2].path, "c/dupe.md");
+    }
+
+    /// A 413 split where one half reports no conflicts must carry the other
+    /// half's conflicts through unchanged (the clean half does not mask the
+    /// dirty half, and the empty list adds nothing).
+    #[test]
+    fn merge_split_responses_one_clean_half() {
+        let clean: UploadDocumentsResponse = serde_json::from_value(serde_json::json!({
+            "accepted": 4,
+            "carried": 0,
+        }))
+        .unwrap();
+        let dirty: UploadDocumentsResponse = serde_json::from_value(serde_json::json!({
+            "accepted": 1,
+            "carried": 0,
+            "conflicts": [{ "path": "b/bad.md", "reason": "insert failed: boom" }],
+        }))
+        .unwrap();
+
+        let merged = merge_split_responses(clean, dirty);
+        assert_eq!(merged.accepted, 5);
+        assert_eq!(merged.carried, 0);
+        assert_eq!(merged.conflicts.len(), 1);
+        assert_eq!(merged.conflicts[0].path, "b/bad.md");
+    }
+
+    /// Conflicts accumulated across batches (as `run_inner` does, and as the 413
+    /// split-retry path concatenates its halves) surface a non-zero count in
+    /// `RunStats` and in the rendered success summary.
+    #[test]
+    fn conflicts_surface_in_stats_and_summary() {
+        let batch_a: UploadDocumentsResponse = serde_json::from_value(serde_json::json!({
+            "accepted": 1,
+            "carried": 0,
+            "conflicts": [{ "path": "a/dup.md", "reason": "duplicate path in this batch" }],
+        }))
+        .unwrap();
+        let batch_b: UploadDocumentsResponse = serde_json::from_value(serde_json::json!({
+            "accepted": 1,
+            "carried": 1,
+            "conflicts": [{ "path": "b/bad.md", "reason": "insert failed: boom" }],
+        }))
+        .unwrap();
+
+        // Accumulate via the real merge helper (same code the 413 split-retry
+        // path uses) rather than hand-mirroring the `extend` loop.
+        let merged = merge_split_responses(batch_a, batch_b);
+
+        let stats = RunStats {
+            added: 1,
+            carried: 1,
+            deleted: 0,
+            batch_count: 2,
+            failed_batch_index: None,
+            total_tokens: 0,
+            conflicts: merged.conflicts,
+        };
+        assert_eq!(stats.conflicts.len(), 2, "RunStats carries a non-zero conflict count");
+
+        let s = format_success(
+            &SuccessOutput {
+                action: "ingest",
+                source_slug: "docs",
+                revision: 2,
+                demoted_revision: Some(1),
+                documents_added: stats.added,
+                documents_carried: stats.carried,
+                conflict_count: stats.conflicts.len(),
+                docs_with_language_targets: 0,
+                docs_with_sdk_dependencies: 0,
+            },
+            false,
+        );
+        assert!(s.contains("2 conflicts"), "human summary surfaces the conflict count: {s}");
+    }
+
+    /// `--json` output always carries `conflict_count` so machine consumers can
+    /// detect partial-failure uploads.
+    #[test]
+    fn success_json_output_includes_conflict_count() {
+        let s = format_success(
+            &SuccessOutput {
+                action: "ingest",
+                source_slug: "docs",
+                revision: 2,
+                demoted_revision: Some(1),
+                documents_added: 3,
+                documents_carried: 4,
+                conflict_count: 2,
+                docs_with_language_targets: 0,
+                docs_with_sdk_dependencies: 0,
+            },
+            true,
+        );
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v["conflict_count"], 2);
+    }
+
+    /// The shared `UploadConflict` serializes to exactly `{path, reason}` — the
+    /// server's wire shape must be byte-identical to what the CLI decodes.
+    #[test]
+    fn upload_conflict_wire_shape_is_path_reason() {
+        let c = mnm_core::ingest::UploadConflict {
+            path: "a/dup.md".to_owned(),
+            reason: "duplicate path in this batch".to_owned(),
+        };
+        let s = serde_json::to_string(&c).unwrap();
+        assert_eq!(s, r#"{"path":"a/dup.md","reason":"duplicate path in this batch"}"#);
     }
 
     #[test]

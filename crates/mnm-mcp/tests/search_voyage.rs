@@ -87,8 +87,13 @@ async fn fetch_active_model_returns_name_at_revision() {
         .fetch_active_model()
         .await
         .expect("fetch active model");
-    assert_eq!(active.general, "voyage-code-3@1");
-    assert_eq!(active.code, None, "no `code` field in the response means no code model");
+    assert_eq!(active.general.wire, "voyage-code-3@1");
+    // The identity carries name/dim/dtype so the embedder is built from the
+    // same source that labels the vectors.
+    assert_eq!(active.general.name, "voyage-code-3");
+    assert_eq!(active.general.dim, 1024);
+    assert_eq!(active.general.dtype, "float");
+    assert!(active.code.is_none(), "no `code` field in the response means no code model");
 }
 
 #[tokio::test]
@@ -107,7 +112,7 @@ async fn fetch_active_model_formats_revision_as_integer() {
 
     let client = CloudClient::new(&server.uri(), None).unwrap();
     let active = client.fetch_active_model().await.expect("fetch");
-    assert_eq!(active.general, "voyage-code-3@42");
+    assert_eq!(active.general.wire, "voyage-code-3@42");
 }
 
 #[tokio::test]
@@ -127,8 +132,12 @@ async fn fetch_active_model_parses_code_wire_id() {
 
     let client = CloudClient::new(&server.uri(), None).unwrap();
     let active = client.fetch_active_model().await.expect("fetch");
-    assert_eq!(active.general, "voyage-context-3@1");
-    assert_eq!(active.code.as_deref(), Some("voyage-code-3@7"));
+    assert_eq!(active.general.wire, "voyage-context-3@1");
+    let code = active.code.expect("code model present");
+    assert_eq!(code.wire, "voyage-code-3@7");
+    assert_eq!(code.name, "voyage-code-3");
+    assert_eq!(code.dim, 1024);
+    assert_eq!(code.dtype, "float");
 }
 
 #[tokio::test]
@@ -150,8 +159,8 @@ async fn fetch_active_model_treats_malformed_code_as_absent() {
 
     let client = CloudClient::new(&server.uri(), None).unwrap();
     let active = client.fetch_active_model().await.expect("fetch");
-    assert_eq!(active.general, "voyage-context-3@1");
-    assert_eq!(active.code, None);
+    assert_eq!(active.general.wire, "voyage-context-3@1");
+    assert!(active.code.is_none());
 }
 
 #[tokio::test]

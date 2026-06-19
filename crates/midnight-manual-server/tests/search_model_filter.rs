@@ -150,6 +150,7 @@ async fn off_model_chunks_excluded_from_results() {
     // the model-id filter deterministically, independent of `get_active` order.
     let corpus_model = Arc::new(RwLock::new(Some(CorpusModel {
         wire: "voyage-code-3@1".to_owned(),
+        name: "voyage-code-3".to_owned(),
         id: corpus_id,
         dim: 1024,
     })));

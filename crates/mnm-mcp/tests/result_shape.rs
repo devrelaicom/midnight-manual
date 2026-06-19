@@ -100,15 +100,28 @@ fn all_passthrough_projectors_conform_to_their_output_schema() {
         cloud: mnm_mcp::status::CloudState::Reachable,
         cloud_version: Some("0.4.2".to_owned()),
         authenticated: true,
-        auth_type: "github_oauth".to_owned(),
+        auth_type: "read_uplift".to_owned(),
         identity: Some("octocat".to_owned()),
         permission_level: "write".to_owned(),
-        rate_limit: Some(serde_json::json!({ "limit": 120, "remaining": 118 })),
-        token_limits: Some(serde_json::json!({
-            "tier": "authenticated",
-            "hourly": { "limit": 1_000_000_u64, "remaining": 990_000_u64 },
-            "daily": { "limit": 10_000_000_u64, "remaining": 9_900_000_u64 }
-        })),
+        rate_limit: Some(mnm_core::introspect::MeRateLimit {
+            tier: "read_uplift".to_owned(),
+            limit: 120,
+            remaining: 118,
+            reset_secs: 7,
+        }),
+        token_limits: Some(mnm_core::introspect::MeTokenLimits {
+            tier: "read_uplift".to_owned(),
+            hourly: mnm_core::introspect::MeTokenWindow {
+                limit: 1_000_000,
+                remaining: 990_000,
+                reset_at_secs: 1_200,
+            },
+            daily: mnm_core::introspect::MeTokenWindow {
+                limit: 10_000_000,
+                remaining: 9_900_000,
+                reset_at_secs: 50_000,
+            },
+        }),
         voyage: mnm_mcp::status::VoyageState::Valid,
         reranker: "rerank-2.5",
         reranker_loaded: true,

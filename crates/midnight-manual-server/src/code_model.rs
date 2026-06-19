@@ -14,6 +14,10 @@ use uuid::Uuid;
 pub struct CodeModel {
     /// Wire id, e.g. "voyage-code-3@1".
     pub wire: String,
+    /// Bare model name (e.g. "voyage-code-3"), used to build the server-side
+    /// code embedder so the model that COMPUTES `/v1/embeddings` code vectors is
+    /// the same one whose wire id LABELS them.
+    pub name: String,
     /// Primary key, used to gate code-vector ANN by `sv.code_embedding_model_id`.
     pub id: Uuid,
     /// Vector dimension, used to validate inbound code query vectors.
@@ -48,6 +52,7 @@ pub async fn resolve(pool: &PgPool, wire: &str) -> anyhow::Result<CodeModel> {
     let m = embedding_model::get_by_name_revision(pool, name, revision).await?;
     Ok(CodeModel {
         wire: format!("{}@{}", m.name, m.revision),
+        name: m.name,
         id: m.id,
         dim: usize::try_from(m.dim)
             .map_err(|_| anyhow::anyhow!("code model dim {} out of range", m.dim))?,

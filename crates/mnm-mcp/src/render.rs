@@ -5,6 +5,7 @@
 //! `suggested_next_actions`). Failure → an `isError: true` result carrying a
 //! shared error envelope.
 
+use mnm_core::introspect::{MeRateLimit, MeTokenLimits};
 use serde_json::{json, Value};
 
 use crate::protocol::{ContentBlock, ToolCallResult};
@@ -804,13 +805,24 @@ pub fn project_facets(env: Value) -> ToolOutcome {
             .get("next_cursor")
             .and_then(Value::as_str)
             .map(str::to_owned);
+        // A level-2 drill (version values within one source name) echoes the
+        // `within` anchor in the body. The next-page action MUST carry it back,
+        // or the server falls back to level-1 (enumerate names) and silently
+        // returns the wrong values. Absent for a level-1 drill.
+        let within = env.get("within").and_then(Value::as_str).map(str::to_owned);
         let summary = format!("{facet}: showing {n} of {total} values.");
         let mut actions = Vec::new();
         if let Some(c) = next_cursor {
+            let mut args = serde_json::Map::new();
+            args.insert("facet".to_owned(), json!(facet));
+            args.insert("cursor".to_owned(), json!(c));
+            if let Some(within) = &within {
+                args.insert("within".to_owned(), json!(within));
+            }
             actions.push(NextAction::call(
                 format!("Fetch the next page of `{facet}` values"),
                 "facets",
-                json!({ "facet": facet, "cursor": c }),
+                Value::Object(args),
             ));
         }
         if let Some(v) = values.first().and_then(Value::as_str) {
@@ -902,33 +914,24 @@ pub fn project_status(env: Value) -> ToolOutcome {
     } else {
         "anonymous (read)".to_owned()
     };
+    // Read the two limit systems through the shared typed contract rather than
+    // stringly-typed pointers, so a server-side field rename is a compile-time
+    // break in `mnm_core::introspect` instead of a silent blank section.
     let rl = env
         .get("rate_limit")
         .filter(|v| !v.is_null())
-        .map(|r| {
-            format!(
-                "; requests {}/{}",
-                r.get("remaining").and_then(Value::as_u64).unwrap_or(0),
-                r.get("limit").and_then(Value::as_u64).unwrap_or(0),
-            )
-        })
+        .and_then(|r| serde_json::from_value::<MeRateLimit>(r.clone()).ok())
+        .map(|r| format!("; requests {}/{}", r.remaining, r.limit))
         .unwrap_or_default();
     let tl = env
         .get("token_limits")
         .filter(|v| !v.is_null())
+        .and_then(|t| serde_json::from_value::<MeTokenLimits>(t.clone()).ok())
         .map(|t| {
-            let w = |k: &str, unit: &str| {
-                format!(
-                    "{}/{} {unit}",
-                    t.pointer(&format!("/{k}/remaining"))
-                        .and_then(Value::as_u64)
-                        .unwrap_or(0),
-                    t.pointer(&format!("/{k}/limit"))
-                        .and_then(Value::as_u64)
-                        .unwrap_or(0),
-                )
-            };
-            format!("; embed tokens {} · {}", w("hourly", "hr"), w("daily", "day"))
+            format!(
+                "; embed tokens {}/{} hr · {}/{} day",
+                t.hourly.remaining, t.hourly.limit, t.daily.remaining, t.daily.limit,
+            )
         })
         .unwrap_or_default();
     let reranker = format!(
@@ -1818,6 +1821,12 @@ mod tests {
         let args = next.arguments.as_ref().unwrap();
         assert_eq!(args["facet"], "tags");
         assert_eq!(args["cursor"], "tok==");
+        // level-1 drill: no `within` anchor in the body, so none is added —
+        // adding one would make the server drill into a non-existent source.
+        assert!(
+            args.get("within").is_none(),
+            "level-1 next-page action must not carry a `within` key: {args}"
+        );
         // filter example uses values[0]
         let example = &o.suggested_next_actions[1];
         assert_eq!(example.tool, Some("advanced_search"));
@@ -1825,6 +1834,34 @@ mod tests {
         assert!(example.description.contains("zk"));
         let args = example.arguments.as_ref().unwrap();
         assert_eq!(args["filters"]["tags"]["any_of"], json!(["zk"]));
+    }
+
+    #[test]
+    fn project_facets_level2_drilldown_next_page_carries_within_anchor() {
+        // A level-2 version drill: the server enumerates version values *within*
+        // one source name and echoes the `within` anchor in the body (see
+        // midnight-manual-server `routes/facets.rs` ~392). The next-page action
+        // must send that anchor back, or the server flips to level-1 and returns
+        // the wrong values (source names instead of versions).
+        let env = json!({
+            "facet": "language_target",
+            "values": ["0.13.0", "0.14.0"],
+            "total": 9,
+            "next_cursor": "tok==",
+            "within": "compact"
+        });
+        let o = super::project_facets(env);
+        assert_eq!(o.summary, "language_target: showing 2 of 9 values.");
+        let next = &o.suggested_next_actions[0];
+        assert_eq!(next.tool, Some("facets"));
+        let args = next.arguments.as_ref().unwrap();
+        assert_eq!(args["facet"], "language_target");
+        assert_eq!(args["cursor"], "tok==");
+        // The fix: the anchor must round-trip on the follow-up page request.
+        assert_eq!(
+            args["within"], "compact",
+            "level-2 next-page action must echo the `within` anchor: {args}"
+        );
     }
 
     #[test]
@@ -1864,13 +1901,13 @@ mod tests {
             "cloud": "reachable",
             "cloud_version": "0.4.2",
             "authenticated": true,
-            "auth_type": "github_oauth",
+            "auth_type": "read_uplift",
             "identity": "octocat",
             "permission_level": "write",
-            "rate_limit": { "tier": "authenticated", "limit": 120, "remaining": 87,
+            "rate_limit": { "tier": "read_uplift", "limit": 120, "remaining": 87,
                             "reset_secs": 31 },
             "token_limits": {
-                "tier": "authenticated",
+                "tier": "read_uplift",
                 "hourly": { "limit": 200_000, "remaining": 150_000, "reset_at_secs": 1_200 },
                 "daily": { "limit": 2_000_000, "remaining": 1_900_000, "reset_at_secs": 50_000 }
             },
@@ -1885,7 +1922,7 @@ mod tests {
         let o = super::project_status(full_status_env());
         assert!(o.summary.contains("Cloud reachable"), "cloud state: {}", o.summary);
         assert!(o.summary.contains("(v0.4.2)"), "cloud version: {}", o.summary);
-        assert!(o.summary.contains("github_oauth octocat (write)"), "identity: {}", o.summary);
+        assert!(o.summary.contains("read_uplift octocat (write)"), "identity: {}", o.summary);
         assert!(o.summary.contains("requests 87/120"), "rate limit: {}", o.summary);
         assert!(
             o.summary

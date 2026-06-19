@@ -5,6 +5,7 @@ use anyhow::Result;
 use clap::Args as ClapArgs;
 use mnm_mcp::cloud_client::CloudClient;
 use mnm_mcp::status::{assemble, CloudState, StatusReport, VoyageState};
+use time::OffsetDateTime;
 
 /// Arguments for `mnm status` (none beyond the globals).
 #[derive(Debug, ClapArgs)]
@@ -69,36 +70,27 @@ pub fn print_human(r: &StatusReport, url: &str) {
         println!("  auth:         anonymous (read) — run `mnm auth github` for higher limits");
     }
     if let Some(rl) = &r.rate_limit {
+        // `reset_secs` is a RELATIVE duration: seconds until the bucket refills.
         println!(
             "  requests:     {}/{} remaining ({} tier, resets in {}s)",
-            rl.get("remaining")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0),
-            rl.get("limit")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0),
-            rl.get("tier")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("?"),
-            rl.get("reset_secs")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0),
+            rl.remaining, rl.limit, rl.tier, rl.reset_secs,
         );
     }
     if let Some(tl) = &r.token_limits {
-        let w = |k: &str| {
-            (
-                tl.pointer(&format!("/{k}/remaining"))
-                    .and_then(serde_json::Value::as_u64)
-                    .unwrap_or(0),
-                tl.pointer(&format!("/{k}/limit"))
-                    .and_then(serde_json::Value::as_u64)
-                    .unwrap_or(0),
-            )
-        };
-        let (hr_rem, hr_lim) = w("hourly");
-        let (day_rem, day_lim) = w("daily");
-        println!("  embed tokens: {hr_rem}/{hr_lim} this hour, {day_rem}/{day_lim} today");
+        // `reset_at_secs` is an ABSOLUTE unix timestamp; render the windows'
+        // budgets plus how far out (in minutes) the soonest window resets,
+        // computed against the current wall clock.
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        let mins_until = |reset_at_secs: i64| ((reset_at_secs - now).max(0) + 59) / 60;
+        println!(
+            "  embed tokens: {}/{} this hour (resets in ~{}m), {}/{} today (resets in ~{}m)",
+            tl.hourly.remaining,
+            tl.hourly.limit,
+            mins_until(tl.hourly.reset_at_secs),
+            tl.daily.remaining,
+            tl.daily.limit,
+            mins_until(tl.daily.reset_at_secs),
+        );
     }
     println!(
         "  voyage key:   {}",

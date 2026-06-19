@@ -18,9 +18,62 @@
 use anyhow::{anyhow, Context as _, Result};
 use clap::{Args as ClapArgs, Subcommand, ValueEnum};
 use mnm_core::auth_file::AuthFile;
-use serde::Serialize;
+use mnm_core::types::SourceKind;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use time::OffsetDateTime;
+
+/// Deserialize-only mirror of the server's `source` row
+/// (`mnm_core::types::Source`, serialized verbatim by the `Json(row)` paths in
+/// [`crate::routes::sources`] and [`crate::routes::admin_sources`]).
+///
+/// The human-output paths (`print_row` for list, `print_show` for show)
+/// deserialize into this instead of reading hard-coded `serde_json::Value`
+/// string keys, so a server-side field rename — including a rename of a
+/// [`SourceKind`] variant, since `kind` reuses the canonical
+/// `#[serde(rename_all = "snake_case")]` enum rather than a bare string — fails
+/// the deserialize test at build time instead of silently degrading the row.
+/// The `--json` paths still emit the verbatim server envelope and never touch
+/// this struct.
+///
+/// Only the fields the human rows print are modelled; `serde` ignores the
+/// `id` / `created_at` fields the rows do not show.
+#[derive(Debug, Deserialize)]
+pub(crate) struct SourceRow {
+    /// Human-readable, URL-safe slug.
+    pub slug: String,
+    /// Display label.
+    pub display_name: String,
+    /// Source kind. Reuses the canonical enum so a variant rename is caught.
+    pub kind: SourceKind,
+    /// Canonical origin URL; `None` when the column is null.
+    #[serde(default)]
+    pub origin_url: Option<String>,
+    /// Historical-version retention count.
+    pub retention_count: i32,
+    /// Retirement timestamp as an RFC 3339 string; `None` for an active source.
+    /// The server serializes the column as a JSON `null` when unset, which
+    /// `serde` maps to `None` for an `Option`, so [`SourceRow::is_retired`] is
+    /// equivalent to the `retired_at.is_null()` check the string-key path used.
+    #[serde(default)]
+    pub retired_at: Option<String>,
+}
+
+impl SourceRow {
+    /// The canonical snake_case wire string for this row's [`SourceKind`]
+    /// (`docs_site` / `code_repo` / `standalone` / `mixed`) — the same token the
+    /// string-key path printed. Delegates to [`SourceKind::as_str`] so the
+    /// mapping lives in `mnm-core` as the single source of truth (test-pinned
+    /// to the serde `rename_all` output) and can never drift here.
+    const fn kind_wire(&self) -> &'static str {
+        self.kind.as_str()
+    }
+
+    /// Whether the source has been retired (`retired_at` is set to a timestamp).
+    const fn is_retired(&self) -> bool {
+        self.retired_at.is_some()
+    }
+}
 
 /// `mnm sources <subcommand>`.
 #[derive(Debug, ClapArgs)]
@@ -445,32 +498,86 @@ fn emit_list_all(v: &serde_json::Value, json: bool) {
     }
 }
 
-fn print_row(row: &serde_json::Value) {
-    let slug = row["slug"].as_str().unwrap_or("?");
-    let display = row["display_name"].as_str().unwrap_or("?");
-    let kind = row["kind"].as_str().unwrap_or("?");
-    println!("  {slug:<32} {kind:<12} {display}");
+fn print_row(value: &serde_json::Value) {
+    let Ok(row) = serde_json::from_value::<SourceRow>(value.clone()) else {
+        println!("  (unexpected source row shape)");
+        return;
+    };
+    println!("  {:<32} {:<12} {}", row.slug, row.kind_wire(), row.display_name);
 }
 
 fn print_show(v: &serde_json::Value) {
-    let slug = v["slug"].as_str().unwrap_or("?");
-    let display = v["display_name"].as_str().unwrap_or("?");
-    let kind = v["kind"].as_str().unwrap_or("?");
-    let origin = v["origin_url"].as_str().unwrap_or("(none)");
-    let retention = v["retention_count"].as_i64().unwrap_or(0);
-    let retired = if v["retired_at"].is_null() {
-        "active"
-    } else {
-        "retired"
+    let Ok(row) = serde_json::from_value::<SourceRow>(v.clone()) else {
+        println!("(unexpected source row shape)");
+        return;
     };
-    println!("slug:           {slug}");
-    println!("display name:   {display}");
-    impl_show_field("kind", kind);
+    let origin = row.origin_url.as_deref().unwrap_or("(none)");
+    let state = if row.is_retired() {
+        "retired"
+    } else {
+        "active"
+    };
+    println!("slug:           {}", row.slug);
+    println!("display name:   {}", row.display_name);
+    impl_show_field("kind", row.kind_wire());
     impl_show_field("origin url", origin);
-    println!("retention:      {retention}");
-    impl_show_field("state", retired);
+    println!("retention:      {}", row.retention_count);
+    impl_show_field("state", state);
 }
 
 fn impl_show_field(key: &str, val: &str) {
     println!("{key:<16}{val}");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A representative server `Json(Source)` row decodes into the human-output
+    /// mirror with the expected typed fields. Renaming a field — or renaming a
+    /// [`SourceKind`] variant's snake_case wire token — fails this test instead
+    /// of silently printing `?` placeholders, since `kind` deserializes through
+    /// the canonical enum.
+    #[test]
+    fn source_row_deserializes_from_server_shape() {
+        let row: SourceRow = serde_json::from_value(serde_json::json!({
+            "id": "00000000-0000-0000-0000-0000000000ee",
+            "slug": "midnight-docs",
+            "display_name": "Midnight Docs",
+            "kind": "docs_site",
+            "origin_url": "https://github.com/m/docs.git",
+            "retention_count": 5,
+            "created_at": "2026-01-01T00:00:00Z",
+            "retired_at": null
+        }))
+        .expect("server source row must decode into SourceRow");
+        assert_eq!(row.slug, "midnight-docs");
+        assert_eq!(row.display_name, "Midnight Docs");
+        assert_eq!(row.kind, SourceKind::DocsSite);
+        assert_eq!(row.kind_wire(), "docs_site");
+        assert_eq!(row.origin_url.as_deref(), Some("https://github.com/m/docs.git"));
+        assert_eq!(row.retention_count, 5);
+        // An explicit JSON `null` retired_at decodes to None → active.
+        assert!(!row.is_retired());
+    }
+
+    /// A retired row (a non-null `retired_at`) and a null `origin_url` decode
+    /// cleanly, and `is_retired()` flips to `true`.
+    #[test]
+    fn source_row_decodes_retired_and_null_origin() {
+        let row: SourceRow = serde_json::from_value(serde_json::json!({
+            "id": "00000000-0000-0000-0000-0000000000ff",
+            "slug": "old-source",
+            "display_name": "Old Source",
+            "kind": "code_repo",
+            "origin_url": null,
+            "retention_count": 5,
+            "created_at": "2026-01-01T00:00:00Z",
+            "retired_at": "2026-06-01T00:00:00Z"
+        }))
+        .expect("retired source row must decode into SourceRow");
+        assert_eq!(row.kind, SourceKind::CodeRepo);
+        assert!(row.origin_url.is_none());
+        assert!(row.is_retired());
+    }
 }

@@ -338,7 +338,7 @@ pub fn status_output_schema() -> Value {
             "cloud": { "type": "string", "enum": ["reachable", "degraded", "unreachable"] },
             "cloud_version": { "type": ["string", "null"] },
             "authenticated": { "type": "boolean" },
-            "auth_type": { "type": "string", "description": "anonymous / github_oauth / admin." },
+            "auth_type": { "type": "string", "description": "anonymous / read_uplift / admin." },
             "identity": { "type": ["string", "null"] },
             "permission_level": { "type": "string", "description": "read / write / admin." },
             "rate_limit": { "type": ["object", "null"], "additionalProperties": true },

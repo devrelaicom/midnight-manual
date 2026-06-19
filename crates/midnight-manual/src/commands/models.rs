@@ -48,7 +48,8 @@ pub enum ModelsCmd {
 #[derive(Debug, ClapArgs)]
 pub struct PullArgs {
     /// Override the local model cache directory. Defaults to
-    /// `$MIDNIGHT_MANUAL_MODEL_CACHE_DIR` or `$HOME/.cache/midnight-manual/models`.
+    /// `$MIDNIGHT_MANUAL_MODEL_CACHE_DIR` > `$XDG_DATA_HOME/midnight-manual/models`
+    /// > `$HOME/.local/share/midnight-manual/models`.
     #[arg(long)]
     pub cache_dir: Option<PathBuf>,
 }
@@ -105,7 +106,7 @@ pub async fn run(
     json: bool,
 ) -> Result<()> {
     match args.cmd {
-        ModelsCmd::Pull(p) => run_pull(p, telemetry, cli_version, json).await,
+        ModelsCmd::Pull(p) => run_pull(p, config_path, telemetry, cli_version, json).await,
         ModelsCmd::Active(_) => run_active(server_flag, json).await,
         ModelsCmd::Status(_) => run_status(server_flag, json).await,
         ModelsCmd::Migrate(m) => {
@@ -117,12 +118,16 @@ pub async fn run(
 
 async fn run_pull(
     args: PullArgs,
+    config_path: Option<&Path>,
     telemetry: &TelemetryClient,
     cli_version: &str,
     json: bool,
 ) -> Result<()> {
     let started = Instant::now();
-    let cache_dir = resolve_cache_dir(args.cache_dir)?;
+    // Config supplies the `[models].cache_dir` middle layer (flag > config > env).
+    let cfg_env = mnm_core::config::StdEnv;
+    let (cfg, _) = mnm_core::config::Config::discover(config_path, &cfg_env).unwrap_or_default();
+    let cache_dir = resolve_cache_dir(args.cache_dir, cfg.models.cache_dir.as_deref())?;
     std::fs::create_dir_all(&cache_dir)
         .with_context(|| format!("create model cache dir at {}", cache_dir.display()))?;
 
@@ -193,6 +198,10 @@ pub struct SourceOutcome {
     pub docs: u64,
     /// VoyageAI tokens consumed by this source's ingest.
     pub tokens: u64,
+    /// Per-document conflicts the server reported for this source's ingest
+    /// (documents NOT inserted). Surfaced so the migrate path's machine output
+    /// is as observable as the single-source `ingest` path.
+    pub conflicts: u64,
 }
 
 /// Outcome of a whole migration run.
@@ -204,6 +213,10 @@ pub struct MigrateSummary {
     pub docs: u64,
     /// Total VoyageAI tokens consumed across migrated sources.
     pub tokens: u64,
+    /// Total per-document conflicts (documents NOT inserted) across migrated
+    /// sources. The per-source warn-logs already fire in the ingest pipeline;
+    /// this surfaces the aggregate in the migrate `--json` output.
+    pub conflicts: u64,
     /// Slugs not attempted — either budget/max-docs stopped before them, or a
     /// mid-source error halted the run (the failed source plus its untried
     /// tail). Empty when the whole list completed.
@@ -260,6 +273,7 @@ where
             Ok(outcome) => {
                 summary.docs = summary.docs.saturating_add(outcome.docs);
                 summary.tokens = summary.tokens.saturating_add(outcome.tokens);
+                summary.conflicts = summary.conflicts.saturating_add(outcome.conflicts);
                 summary.migrated.push(src.slug.clone());
             }
             Err(e) => {
@@ -511,6 +525,7 @@ async fn ingest_source(
     Ok(SourceOutcome {
         docs: stats.added as u64,
         tokens: stats.total_tokens,
+        conflicts: stats.conflicts.len() as u64,
     })
 }
 
@@ -521,6 +536,10 @@ struct MigrateOutput<'a> {
     migrated: &'a [String],
     documents: u64,
     spent_tokens: u64,
+    /// Aggregate per-document conflicts (documents NOT inserted) across migrated
+    /// sources. Always present so machine consumers can detect partial-failure
+    /// migrations — parity with the single-source `ingest` path's `conflict_count`.
+    conflicts: u64,
     remaining: &'a [String],
 }
 
@@ -532,14 +551,20 @@ fn format_migrate_output(summary: &MigrateSummary, target_wire: &str, json: bool
             migrated: &summary.migrated,
             documents: summary.docs,
             spent_tokens: summary.tokens,
+            conflicts: summary.conflicts,
             remaining: &summary.remaining,
         };
         return serde_json::to_string(&body).unwrap_or_default();
     }
     let mut out = String::new();
+    let conflict_clause = if summary.conflicts > 0 {
+        format!(" / {} conflicts", summary.conflicts)
+    } else {
+        String::new()
+    };
     writeln!(
         out,
-        "migrated {} source(s) / {} docs / {} tokens onto {target_wire}",
+        "migrated {} source(s) / {} docs / {} tokens{conflict_clause} onto {target_wire}",
         summary.migrated.len(),
         summary.docs,
         summary.tokens,
@@ -635,13 +660,18 @@ pub async fn fetch_active(server_url: &str) -> Result<ActiveModelResponse> {
         .context("parse /v1/models/active response")
 }
 
-fn resolve_cache_dir(flag: Option<PathBuf>) -> Result<PathBuf> {
+/// Resolve the model cache dir for `mnm models pull` with precedence
+/// **flag (`--cache-dir`) > config (`[models].cache_dir`) > env-chain**
+/// (`MIDNIGHT_MANUAL_MODEL_CACHE_DIR` > `XDG_DATA_HOME` > `HOME`).
+fn resolve_cache_dir(flag: Option<PathBuf>, cfg_dir: Option<&Path>) -> Result<PathBuf> {
     if let Some(p) = flag {
         return Ok(p);
     }
     let env = mnm_embedding::cache::StdEnv;
-    mnm_embedding::cache::resolve(&env)
-        .context("could not resolve model cache dir; set MIDNIGHT_MANUAL_MODEL_CACHE_DIR or HOME")
+    mnm_embedding::cache::resolve_with_override(cfg_dir, &env).context(
+        "could not resolve model cache dir; set [models].cache_dir, \
+         MIDNIGHT_MANUAL_MODEL_CACHE_DIR or HOME",
+    )
 }
 
 /// Active-model response — mirrors the server's typed shape.
@@ -655,11 +685,23 @@ pub struct ActiveModelResponse {
     pub dim: i32,
     /// Provider tag (e.g. `baai`).
     pub provider: String,
+    /// Output dtype the corpus is encoded with (e.g. `"float"`). The client
+    /// derives its embedder's `output_dtype` from this so the model that
+    /// COMPUTES a query vector matches the one whose wire id LABELS it. Defaults
+    /// to `"float"` for servers that predate the field.
+    #[serde(default = "default_active_dtype")]
+    pub dtype: String,
     /// The corpus's code-embedding model (dual embeddings). `None` when the
     /// server has no resolved code model (or predates dual embeddings) —
     /// code search is then unavailable server-side.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code: Option<ActiveCode>,
+}
+
+/// Default dtype for an active-model response that omits the field (a server
+/// that predates the dtype field). The corpus dtype is `"float"`.
+fn default_active_dtype() -> String {
+    "float".to_owned()
 }
 
 /// The code-embedding half of [`ActiveModelResponse`]. `name@revision` forms
@@ -676,6 +718,9 @@ pub struct ActiveCode {
     /// Provider tag (e.g. `voyageai`).
     #[serde(default)]
     pub provider: String,
+    /// Output dtype the code column is encoded with. Defaults to `"float"`.
+    #[serde(default = "default_active_dtype")]
+    pub dtype: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -745,6 +790,7 @@ mod tests {
             revision: 1,
             dim: 768,
             provider: "baai".to_owned(),
+            dtype: "float".to_owned(),
             code: None,
         }
     }
@@ -818,8 +864,18 @@ mod tests {
     #[test]
     fn resolve_cache_dir_prefers_flag() {
         let p = PathBuf::from("/some/explicit/cache");
-        let resolved = resolve_cache_dir(Some(p.clone())).unwrap();
+        // Flag wins even when a config dir is also present.
+        let resolved = resolve_cache_dir(Some(p.clone()), Some(Path::new("/from/config"))).unwrap();
         assert_eq!(resolved, p);
+    }
+
+    #[test]
+    fn resolve_cache_dir_prefers_config_over_env() {
+        // No flag → the config `[models].cache_dir` wins over the env-chain
+        // fallback (verified inside mnm_embedding::cache::resolve_with_override).
+        let cfg_dir = PathBuf::from("/from/config/cache");
+        let resolved = resolve_cache_dir(None, Some(cfg_dir.as_path())).unwrap();
+        assert_eq!(resolved, cfg_dir);
     }
 
     fn sources_envelope() -> serde_json::Value {
@@ -883,6 +939,7 @@ mod tests {
             migrated: vec!["src-1".to_owned()],
             docs: 10,
             tokens: 100,
+            conflicts: 0,
             remaining: vec!["src-2".to_owned()],
         };
         let s = format_migrate_output(&summary, "voyage-code-4@1", false);
@@ -891,6 +948,20 @@ mod tests {
         assert!(s.contains("100 tokens"));
         assert!(s.contains("+ src-1"));
         assert!(s.contains("- src-2"));
+        assert!(!s.contains("conflict"), "no conflict clause when the total is zero: {s}");
+    }
+
+    #[test]
+    fn migrate_output_human_surfaces_conflicts() {
+        let summary = MigrateSummary {
+            migrated: vec!["src-1".to_owned()],
+            docs: 10,
+            tokens: 100,
+            conflicts: 3,
+            remaining: Vec::new(),
+        };
+        let s = format_migrate_output(&summary, "voyage-code-4@1", false);
+        assert!(s.contains("3 conflicts"), "human summary surfaces the conflict total: {s}");
     }
 
     #[test]
@@ -899,6 +970,7 @@ mod tests {
             migrated: vec!["src-1".to_owned()],
             docs: 10,
             tokens: 100,
+            conflicts: 0,
             remaining: vec!["src-2".to_owned()],
         };
         let s = format_migrate_output(&summary, "voyage-code-4@1", true);
@@ -907,7 +979,27 @@ mod tests {
         assert_eq!(v["target_model"], "voyage-code-4@1");
         assert_eq!(v["documents"], 10);
         assert_eq!(v["spent_tokens"], 100);
+        // `conflicts` is always present (parity with single-source `ingest`'s
+        // `conflict_count`), even when zero, so machine consumers can rely on it.
+        assert_eq!(v["conflicts"], 0);
         assert_eq!(v["migrated"][0], "src-1");
         assert_eq!(v["remaining"][0], "src-2");
+    }
+
+    /// The migrate `--json` output carries a non-zero aggregate `conflicts`
+    /// total so machine consumers can detect partial-failure migrations — the
+    /// observability gap this thread closed.
+    #[test]
+    fn migrate_output_json_surfaces_conflicts() {
+        let summary = MigrateSummary {
+            migrated: vec!["src-1".to_owned(), "src-2".to_owned()],
+            docs: 20,
+            tokens: 200,
+            conflicts: 5,
+            remaining: Vec::new(),
+        };
+        let s = format_migrate_output(&summary, "voyage-code-4@1", true);
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v["conflicts"], 5);
     }
 }

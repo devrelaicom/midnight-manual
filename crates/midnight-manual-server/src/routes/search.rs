@@ -566,7 +566,11 @@ async fn search(
                         km.wire,
                     ))
                     .remediation("re-embed code queries with the corpus code model")
-                    .context("code_model", km.wire.clone())
+                    // Emit under `corpus_model` (not `code_model`) so this 409
+                    // matches the general-model guard above and the MCP client's
+                    // `parse_mismatch`, which reads only `corpus_model`/`client_model`.
+                    // The code model IS the corpus's active code model.
+                    .context("corpus_model", km.wire.clone())
                     .context("client_model", client_model.to_owned())
                     .build(),
                 rid,
@@ -2253,5 +2257,65 @@ mod rerank_tests {
                 "reason": "token_budget_exhausted"
             })
         );
+    }
+}
+
+#[cfg(test)]
+mod mismatch_envelope_tests {
+    use super::*;
+    use crate::error::ErrorBody;
+
+    /// Both `embedding_model_mismatch` paths — the general-model guard and the
+    /// code-model guard — must surface the corpus identifier under the SAME
+    /// `corpus_model` context key. The MCP client's `parse_mismatch` reads only
+    /// `corpus_model`/`client_model`; emitting the code path's identifier under a
+    /// divergent `code_model` key (the prior bug) left `corpus_model` empty and
+    /// degraded the agent-facing remediation. This mirrors the route builders at
+    /// the two 409 sites exactly, then asserts the on-the-wire envelope shape.
+    #[test]
+    fn both_mismatch_paths_use_corpus_model_context_key() {
+        // Mirrors the general-model guard (`run_general_vector` branch).
+        let general = CoreError::builder(ErrorCode::EmbeddingModelMismatch)
+            .message("client_embedding_model `m@1` does not match corpus model `m@2`")
+            .remediation("re-run `mnm models pull` to fetch the corpus model")
+            .context("corpus_model", "m@2".to_owned())
+            .context("client_model", "m@1".to_owned())
+            .build();
+
+        // Mirrors the code-model guard (`run_code_vector` branch).
+        let code = CoreError::builder(ErrorCode::EmbeddingModelMismatch)
+            .message("client_code_embedding_model `c@1` does not match code model `c@2`")
+            .remediation("re-embed code queries with the corpus code model")
+            .context("corpus_model", "c@2".to_owned())
+            .context("client_model", "c@1".to_owned())
+            .build();
+
+        for (label, err, corpus, client) in [
+            ("general", general, "m@2", "m@1"),
+            ("code", code, "c@2", "c@1"),
+        ] {
+            // Serialize the full `{ error: {...}, request_id }` envelope the MCP
+            // client actually parses, not just the bare CoreError.
+            let body = ErrorBody {
+                error: err,
+                request_id: "rid-test".to_owned(),
+            };
+            let v = serde_json::to_value(&body).unwrap();
+
+            assert_eq!(v["error"]["code"], "embedding_model_mismatch", "{label}: code");
+            assert_eq!(
+                v["error"]["context"]["corpus_model"], corpus,
+                "{label}: corpus identifier must live under `corpus_model`"
+            );
+            assert_eq!(
+                v["error"]["context"]["client_model"], client,
+                "{label}: client identifier must live under `client_model`"
+            );
+            // The legacy divergent key must never reappear on either path.
+            assert!(
+                v["error"]["context"].get("code_model").is_none(),
+                "{label}: `code_model` context key must not be emitted"
+            );
+        }
     }
 }

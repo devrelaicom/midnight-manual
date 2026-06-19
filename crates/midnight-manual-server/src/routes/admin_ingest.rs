@@ -36,6 +36,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{post, put};
 use axum::{Json, Router};
 use mnm_core::error::{Error as CoreError, ErrorCode};
+use mnm_core::ingest::UploadConflict;
 use mnm_core::model_id::EmbeddingModelId;
 use mnm_core::provenance::Provenance;
 use mnm_core::types::{ChunkStatus, DocumentKind, NodeKind, SourceVersionStatus};
@@ -195,17 +196,9 @@ pub struct UploadDocumentsResponse {
     pub accepted: usize,
     /// Documents carried forward (chunks cloned from prior).
     pub carried: usize,
-    /// Per-document conflicts (e.g. duplicate path).
+    /// Per-document conflicts (e.g. duplicate path). Wire shape is the shared
+    /// [`mnm_core::ingest::UploadConflict`] contract.
     pub conflicts: Vec<UploadConflict>,
-}
-
-/// One per-document conflict surfaced by the upload handler.
-#[derive(Debug, Serialize)]
-pub struct UploadConflict {
-    /// Repo-relative path of the offending document.
-    pub path: String,
-    /// Free-form reason.
-    pub reason: String,
 }
 
 /// Response from `POST .../finalize`.

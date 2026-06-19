@@ -179,6 +179,7 @@ async fn finalize_reresolves_corpus_model_shared() {
     // Inject a stale sentinel so any successful refresh is detectable.
     let old_model = CorpusModel {
         wire: "old@1".to_owned(),
+        name: "old".to_owned(),
         id: Uuid::nil(),
         dim: 1,
     };

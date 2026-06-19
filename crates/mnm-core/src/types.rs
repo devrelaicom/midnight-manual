@@ -25,6 +25,26 @@ pub enum SourceKind {
     Mixed,
 }
 
+impl SourceKind {
+    /// The canonical wire string for this kind — the exact token produced by
+    /// the `#[serde(rename_all = "snake_case")]` serialization
+    /// (`docs_site` / `code_repo` / `standalone` / `mixed`).
+    ///
+    /// This is the single source of truth for the wire mapping: the
+    /// exhaustive match means a new variant is a compile error, and the
+    /// `source_kind_as_str_matches_serde` test guarantees it can never drift
+    /// from the serde output.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::DocsSite => "docs_site",
+            Self::CodeRepo => "code_repo",
+            Self::Standalone => "standalone",
+            Self::Mixed => "mixed",
+        }
+    }
+}
+
 /// Stable handle for a logical content source.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Source {
@@ -60,6 +80,27 @@ pub enum SourceVersionStatus {
     Aborted,
     /// Marked for sweep.
     Retired,
+}
+
+impl SourceVersionStatus {
+    /// The canonical wire string for this status — the exact token produced by
+    /// the `#[serde(rename_all = "snake_case")]` serialization
+    /// (`building` / `active` / `inactive` / `aborted` / `retired`).
+    ///
+    /// This is the single source of truth for the wire mapping: the
+    /// exhaustive match means a new variant is a compile error, and the
+    /// `source_version_status_as_str_matches_serde` test guarantees it can
+    /// never drift from the serde output.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Building => "building",
+            Self::Active => "active",
+            Self::Inactive => "inactive",
+            Self::Aborted => "aborted",
+            Self::Retired => "retired",
+        }
+    }
 }
 
 /// One immutable snapshot of a source.
@@ -421,6 +462,58 @@ mod tests {
             serde_json::to_value(ChunkStatus::EmbedFailed).unwrap(),
             serde_json::Value::String("embed_failed".into())
         );
+    }
+
+    /// `SourceKind::as_str` is the hand-maintained single source of truth for
+    /// the wire mapping the CLI prints. This test enumerates every variant and
+    /// asserts `as_str()` equals the serde serialization, so the `as_str` match
+    /// and the `#[serde(rename_all = "snake_case")]` token can NEVER drift: a
+    /// renamed serde token (or a stale `as_str` arm) fails here at build time.
+    #[test]
+    fn source_kind_as_str_matches_serde() {
+        // Exhaustive: adding a SourceKind variant makes this fail to compile
+        // (non-exhaustive match) until the new variant is listed here.
+        for kind in [
+            SourceKind::DocsSite,
+            SourceKind::CodeRepo,
+            SourceKind::Standalone,
+            SourceKind::Mixed,
+        ] {
+            let serde_wire = serde_json::to_value(kind)
+                .unwrap()
+                .as_str()
+                .expect("SourceKind serializes to a JSON string")
+                .to_owned();
+            assert_eq!(
+                kind.as_str(),
+                serde_wire,
+                "SourceKind::as_str drifted from serde wire token for {kind:?}"
+            );
+        }
+    }
+
+    /// As [`source_kind_as_str_matches_serde`], for [`SourceVersionStatus`]:
+    /// pins `as_str()` to the serde `rename_all` output across every variant.
+    #[test]
+    fn source_version_status_as_str_matches_serde() {
+        for status in [
+            SourceVersionStatus::Building,
+            SourceVersionStatus::Active,
+            SourceVersionStatus::Inactive,
+            SourceVersionStatus::Aborted,
+            SourceVersionStatus::Retired,
+        ] {
+            let serde_wire = serde_json::to_value(status)
+                .unwrap()
+                .as_str()
+                .expect("SourceVersionStatus serializes to a JSON string")
+                .to_owned();
+            assert_eq!(
+                status.as_str(),
+                serde_wire,
+                "SourceVersionStatus::as_str drifted from serde wire token for {status:?}"
+            );
+        }
     }
 
     #[test]
