@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1](https://github.com/devrelaicom/midnight-manual/compare/v0.2.0...v0.2.1) - 2026-06-19
+
+### Fixed
+
+- resolve cross-element drift between server, CLI, and local MCP ([#98](https://github.com/devrelaicom/midnight-manual/pull/98))
+
 ## [0.2.0](https://github.com/devrelaicom/midnight-manual/compare/v0.1.0...v0.2.0) - 2026-06-18
 
 ### Fixed
