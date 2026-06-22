@@ -508,6 +508,8 @@ async fn ingest_source(
         // Follow the manifest's `code_embeddings` option (default on); migrate
         // does not expose the per-run opt-out flag.
         no_code_embeddings: false,
+        // Migrate does not write a structured report file.
+        report_file: None,
     };
 
     let stats = crate::commands::ingest::run::run_with_paths_stats(

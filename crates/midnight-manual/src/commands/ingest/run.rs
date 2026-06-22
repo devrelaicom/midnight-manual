@@ -78,6 +78,26 @@ const EST_BYTES_PER_EMBED_FLOAT: usize = 12; // JSON float incl. comma
 const EST_PER_CHUNK_OVERHEAD: usize = 256; // hashes, paths, indices, JSON keys/braces
 const EST_PER_DOC_OVERHEAD: usize = 512; // path, kind, frontmatter, JSON keys
 
+/// Controls where the `IngestReport` is rendered.
+///
+/// Orthogonal axes:
+/// - `json_stdout`: emit the full `IngestReport` JSON as the final stdout line
+///   (instead of the human-readable summary).
+/// - `write_file`: additionally write the same JSON to `--report-file`.
+pub(super) struct ReportSelection {
+    pub(super) json_stdout: bool,
+    pub(super) write_file: bool,
+}
+
+impl ReportSelection {
+    pub(super) const fn new(json: bool, report_file: Option<&Path>) -> Self {
+        Self {
+            json_stdout: json,
+            write_file: report_file.is_some(),
+        }
+    }
+}
+
 /// Args for `mnm ingest run`.
 #[derive(Debug, ClapArgs)]
 #[allow(clippy::struct_excessive_bools)]
@@ -186,6 +206,11 @@ pub struct Args {
     /// contextualized embeddings.
     #[arg(long)]
     pub no_code_embeddings: bool,
+
+    /// Write the structured IngestReport (JSON) to this path, in addition to
+    /// the stdout summary. Orthogonal to --json.
+    #[arg(long, value_name = "PATH")]
+    pub report_file: Option<PathBuf>,
 }
 
 /// Dispatch.
@@ -343,6 +368,12 @@ async fn run_inner(
     json: bool,
 ) -> Result<RunStats> {
     let mut reporter = crate::progress::pick(json);
+    let started_at = OffsetDateTime::now_utc();
+
+    // ── Report preflight: fail fast before any embedding work ───────────────
+    if let Some(rp) = &args.report_file {
+        super::report::preflight(rp).context("report-file preflight")?;
+    }
 
     // ── Phase: resolve server ────────────────────────────────────────────────
     reporter.phase("resolved_server", serde_json::json!({"url": server_url}));
@@ -399,11 +430,12 @@ async fn run_inner(
             "skipping file during ingest walk",
         );
     }
+    let walk_skipped = outcome.skipped;
     let walked_docs = outcome.documents;
 
     reporter.phase_done(
         "walk",
-        serde_json::json!({"files": walked_docs.len(), "skipped": outcome.skipped.len()}),
+        serde_json::json!({"files": walked_docs.len(), "skipped": walk_skipped.len()}),
     );
 
     // ── Resolve auth + corpus wire ids + prior state (before chunking) ───────
@@ -525,15 +557,32 @@ async fn run_inner(
     );
 
     if args.dry_run {
-        println!(
-            "{}",
+        let finished_at = OffsetDateTime::now_utc();
+        let sel = ReportSelection::new(json, args.report_file.as_deref());
+        let report = assemble_report(
+            "ingest run",
+            &args.source_slug,
+            "dry_run",
+            None,
+            None,
+            &embedding_model,
+            code_embedding_model.as_deref(),
+            started_at,
+            finished_at,
+            &plan,
+            &walk_skipped,
+            Vec::new(),
+            Vec::new(),
+            0,
+        );
+        emit_report(&report, &sel, args.report_file.as_deref(), json, || {
             format_dry_run(
                 &args.source_slug,
                 plan.stats.documents_added,
                 plan.stats.chunks_emitted,
-                json
-            ),
-        );
+                false,
+            )
+        });
         return Ok(RunStats {
             added: plan.stats.documents_added,
             carried: 0,
@@ -641,7 +690,7 @@ async fn run_inner(
         &StartIngestRunRequest {
             ingest_cli_version: env!("CARGO_PKG_VERSION").to_owned(),
             embedding_model: embedding_model.clone(),
-            code_embedding_model,
+            code_embedding_model: code_embedding_model.clone(),
             note: args.note.clone(),
         },
     )
@@ -907,6 +956,9 @@ async fn run_inner(
     }
 
     let conflict_count = conflicts.len();
+    let finished_at = OffsetDateTime::now_utc();
+    let sel = ReportSelection::new(json, args.report_file.as_deref());
+
     let stats = RunStats {
         added: accepted.saturating_sub(carried),
         carried,
@@ -916,23 +968,39 @@ async fn run_inner(
         total_tokens,
         conflicts,
     };
-    println!(
-        "{}",
-        format_success(
-            &SuccessOutput {
-                action: "ingest",
-                source_slug: &args.source_slug,
-                revision: finalize.revision,
-                demoted_revision: finalize.demoted_revision,
-                documents_added: stats.added,
-                documents_carried: stats.carried,
-                conflict_count,
-                docs_with_language_targets,
-                docs_with_sdk_dependencies,
-            },
-            json,
-        )
+
+    let report = assemble_report(
+        "ingest run",
+        &args.source_slug,
+        "finalized",
+        Some(finalize.revision),
+        finalize.demoted_revision,
+        &embedding_model,
+        code_embedding_model.as_deref(),
+        started_at,
+        finished_at,
+        &plan,
+        &walk_skipped,
+        stats.conflicts.clone(),
+        Vec::new(),
+        stats.total_tokens,
     );
+
+    let success_out = SuccessOutput {
+        action: "ingest",
+        source_slug: &args.source_slug,
+        revision: finalize.revision,
+        demoted_revision: finalize.demoted_revision,
+        documents_added: stats.added,
+        documents_carried: stats.carried,
+        conflict_count,
+        docs_with_language_targets,
+        docs_with_sdk_dependencies,
+    };
+    emit_report(&report, &sel, args.report_file.as_deref(), json, || {
+        format_success(&success_out, false)
+    });
+
     Ok(stats)
 }
 
@@ -2026,6 +2094,133 @@ fn build_extracted(
     out
 }
 
+/// Assemble a canonical [`super::report::IngestReport`] from the data available
+/// at the end of an `ingest run` or `ingest plan` invocation.
+///
+/// The stats fields are derived from the plan: `walked` = new + carried + deleted,
+/// `new` = `documents_added`, `carried` = `documents_carried`, etc.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn assemble_report(
+    command: &str,
+    source_slug: &str,
+    outcome: &str,
+    revision: Option<i32>,
+    prior_revision: Option<i32>,
+    embedding_model: &str,
+    code_embedding_model: Option<&str>,
+    started_at: OffsetDateTime,
+    finished_at: OffsetDateTime,
+    plan: &mnm_content::ingest::IngestPlan,
+    walk_skipped: &[mnm_content::ingest::SkippedFile],
+    conflicts: Vec<mnm_core::ingest::UploadConflict>,
+    warnings: Vec<String>,
+    voyage_tokens: u64,
+) -> super::report::IngestReport {
+    use super::report::{IngestReport, ReportDoc, ReportSkip, ReportStats};
+    use time::format_description::well_known::Rfc3339;
+
+    let started_str = started_at
+        .format(&Rfc3339)
+        .unwrap_or_else(|_| started_at.to_string());
+    let finished_str = finished_at
+        .format(&Rfc3339)
+        .unwrap_or_else(|_| finished_at.to_string());
+    let duration_ms =
+        u128::try_from((finished_at - started_at).whole_milliseconds().max(0)).unwrap_or(u128::MAX);
+
+    let walked =
+        plan.new_documents.len() + plan.carried_documents.len() + plan.deleted_documents.len();
+    let stats = ReportStats {
+        walked,
+        new: plan.stats.documents_added,
+        carried: plan.stats.documents_carried,
+        deleted: plan.stats.documents_deleted,
+        chunks_emitted: plan.stats.chunks_emitted,
+        conflicts: conflicts.len(),
+        voyage_tokens,
+    };
+
+    let documents: Vec<ReportDoc> = plan
+        .new_documents
+        .iter()
+        .map(|d| ReportDoc {
+            path: d.path.display().to_string(),
+            classification: "new".to_owned(),
+            chunks: d.chunks.len(),
+            embed_complete: false, // unknown until upload completes; true after finalize
+        })
+        .chain(plan.carried_documents.iter().map(|d| ReportDoc {
+            path: d.path.display().to_string(),
+            classification: "carried".to_owned(),
+            chunks: 0,
+            embed_complete: true,
+        }))
+        .chain(plan.deleted_documents.iter().map(|d| ReportDoc {
+            path: d.path.display().to_string(),
+            classification: "deleted".to_owned(),
+            chunks: 0,
+            embed_complete: false,
+        }))
+        .collect();
+
+    let skipped_files: Vec<ReportSkip> = walk_skipped
+        .iter()
+        .map(|s| ReportSkip {
+            path: s.rel_path.display().to_string(),
+            reason: s.reason.to_string(),
+        })
+        .collect();
+
+    IngestReport {
+        schema_version: IngestReport::SCHEMA_VERSION,
+        command: command.to_owned(),
+        source_slug: source_slug.to_owned(),
+        revision,
+        prior_revision,
+        embedding_model: embedding_model.to_owned(),
+        code_embedding_model: code_embedding_model.map(ToOwned::to_owned),
+        outcome: outcome.to_owned(),
+        started_at: started_str,
+        finished_at: finished_str,
+        duration_ms,
+        stats,
+        documents,
+        conflicts,
+        skipped_files,
+        warnings,
+    }
+}
+
+/// Render the `IngestReport` to stdout and/or disk according to `sel`.
+///
+/// - If `json_stdout`: prints `serde_json::to_string(&report)` as the final
+///   stdout line.
+/// - Else: calls `human_fn()` and prints the result.
+/// - If `write_file`: calls [`super::report::write_atomic`]; on failure prints
+///   to stderr but does NOT propagate the error (the ingest has already been
+///   committed).
+fn emit_report(
+    report: &super::report::IngestReport,
+    sel: &ReportSelection,
+    report_file: Option<&Path>,
+    json: bool,
+    human_fn: impl FnOnce() -> String,
+) {
+    if sel.json_stdout {
+        println!("{}", serde_json::to_string(report).unwrap_or_default());
+    } else if !json {
+        println!("{}", human_fn());
+    }
+    if sel.write_file {
+        if let Some(path) = report_file {
+            if let Err(e) = super::report::write_atomic(path, report) {
+                eprintln!("warning: could not write report file {}: {e}", path.display());
+                std::process::exit(1);
+            }
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct DryRunOutput<'a> {
     action: &'a str,
@@ -3003,6 +3198,27 @@ mod tests {
             Some("https://base/b.md"),
             "trailing slash trimmed; path appended",
         );
+    }
+
+    /// `ReportSelection` is a pure selector — no I/O. Verify the four render
+    /// target combinations resolve correctly.
+    #[test]
+    fn report_render_matrix() {
+        // human + file: write_file true, json_stdout false
+        let sel = ReportSelection::new(false /*json*/, Some(Path::new("out.json")));
+        assert!(sel.write_file);
+        assert!(!sel.json_stdout);
+        // json + file: both true
+        let sel = ReportSelection::new(true, Some(Path::new("out.json")));
+        assert!(sel.write_file && sel.json_stdout);
+        // human only (no --report-file)
+        let sel = ReportSelection::new(false, None);
+        assert!(!sel.write_file);
+        assert!(!sel.json_stdout);
+        // json only (no --report-file)
+        let sel = ReportSelection::new(true, None);
+        assert!(!sel.write_file);
+        assert!(sel.json_stdout);
     }
 }
 

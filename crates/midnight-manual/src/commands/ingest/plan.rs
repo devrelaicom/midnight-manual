@@ -8,6 +8,7 @@ use clap::Args as ClapArgs;
 use mnm_content::ingest::{PlanBuilder, PriorState, WalkContext, Walker};
 use mnm_content::manifest::Manifest;
 use mnm_core::types::{DocumentKind, SourceKind};
+use time::OffsetDateTime;
 
 /// Args for `mnm ingest plan`.
 #[derive(Debug, ClapArgs)]
@@ -36,6 +37,11 @@ pub struct Args {
     /// Emit a single-line JSON object instead of the human-readable summary.
     #[arg(long)]
     pub json: bool,
+
+    /// Write the structured IngestReport (JSON) to this path, in addition to
+    /// the stdout summary. Orthogonal to --json.
+    #[arg(long, value_name = "PATH")]
+    pub report_file: Option<PathBuf>,
 }
 
 /// Dispatch `mnm ingest plan`.
@@ -44,7 +50,15 @@ pub struct Args {
 ///
 /// Returns `anyhow::Error` if the manifest cannot be read, the source tree
 /// walk fails, or the plan builder encounters a duplicate path.
+#[allow(clippy::too_many_lines)]
 pub async fn run(args: Args, server: Option<&str>, _json: bool) -> Result<()> {
+    let started_at = OffsetDateTime::now_utc();
+
+    // Fail fast before any work if the report path is not writable.
+    if let Some(rp) = &args.report_file {
+        super::report::preflight(rp).context("report-file preflight")?;
+    }
+
     let server_url = crate::shared::resolve_server_url(server);
     let body = std::fs::read_to_string(&args.manifest)
         .with_context(|| format!("read manifest at {}", args.manifest.display()))?;
@@ -67,6 +81,7 @@ pub async fn run(args: Args, server: Option<&str>, _json: bool) -> Result<()> {
             "skipping file during ingest plan walk",
         );
     }
+    let walk_skipped = outcome.skipped;
     let walked = outcome.documents;
 
     // Resolve the run's embedding model wire id the same way `ingest run` does:
@@ -125,7 +140,47 @@ pub async fn run(args: Args, server: Option<&str>, _json: bool) -> Result<()> {
             .with_context(|| format!("plan add {}", doc.rel_path.display()))?;
     }
     let plan = b.finalize();
-    print_plan(&plan, args.json);
+    let finished_at = OffsetDateTime::now_utc();
+
+    // Resolve the embedding-model wire id for the report: same logic as above
+    // but we already have `run_model` at this point.
+    let embedding_model_for_report = if run_model.is_empty() {
+        "auto"
+    } else {
+        &run_model
+    };
+
+    let sel = super::run::ReportSelection::new(args.json, args.report_file.as_deref());
+    let report = super::run::assemble_report(
+        "ingest plan",
+        &args.source_slug,
+        "planned",
+        None,
+        None,
+        embedding_model_for_report,
+        None, // plan has no code-embedding model
+        started_at,
+        finished_at,
+        &plan,
+        &walk_skipped,
+        Vec::new(),
+        Vec::new(),
+        0,
+    );
+
+    if sel.json_stdout {
+        println!("{}", serde_json::to_string(&report).unwrap_or_default());
+    } else {
+        print_plan(&plan, false);
+    }
+    if sel.write_file {
+        if let Some(path) = &args.report_file {
+            if let Err(e) = super::report::write_atomic(path, &report) {
+                eprintln!("warning: could not write report file {}: {e}", path.display());
+                std::process::exit(1);
+            }
+        }
+    }
     Ok(())
 }
 
