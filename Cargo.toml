@@ -54,7 +54,7 @@ must_use_candidate      = "allow"
 mnm-core        = { path = "crates/mnm-core", version = "0.2.1" }
 mnm-store       = { path = "crates/mnm-store", version = "0.2.1" }
 mnm-retrieval   = { path = "crates/mnm-retrieval", version = "0.2.1" }
-mnm-content     = { path = "crates/mnm-content", version = "0.2.1" }
+mnm-content     = { path = "crates/mnm-content", version = "0.2.1", default-features = false }
 mnm-embedding   = { path = "crates/mnm-embedding", version = "0.2.1" }
 mnm-auth        = { path = "crates/mnm-auth", version = "0.2.1" }
 mnm-telemetry   = { path = "crates/mnm-telemetry", version = "0.2.1" }
