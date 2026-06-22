@@ -18,3 +18,10 @@ pub use pool::{connect, run_migrations, MIGRATOR};
 
 /// Crate version stamped at build time.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Shared seeding helpers for DB integration tests (`#[sqlx::test]` and
+/// `--features integration` suites).
+///
+/// Gated so this code is never compiled into production builds.
+#[cfg(any(test, feature = "integration"))]
+pub mod test_fixtures;

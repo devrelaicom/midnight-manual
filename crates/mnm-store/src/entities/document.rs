@@ -275,6 +275,52 @@ pub struct DocumentChunkWindow {
     pub total_chunks: usize,
 }
 
+/// One document in a version's inventory, with whether every chunk is embedded.
+#[derive(Debug, Clone)]
+pub struct InventoryDoc {
+    /// Repo-relative source path.
+    pub source_path: String,
+    /// SHA-256 of normalized content.
+    pub content_hash: String,
+    /// Document UUID.
+    pub document_id: Uuid,
+    /// True iff the document has ≥1 chunk and no chunk is `embed_failed`.
+    pub embed_complete: bool,
+}
+
+/// List the documents of a source_version with a per-document embed-complete
+/// rollup, for the prior-state inventory endpoint.
+///
+/// # Errors
+///
+/// Returns [`crate::error::StoreError::Database`] on driver failure.
+pub async fn list_active_inventory(
+    pool: &PgPool,
+    source_version_id: Uuid,
+) -> Result<Vec<InventoryDoc>> {
+    let rows: Vec<(String, String, Uuid, bool)> = sqlx::query_as(
+        "SELECT d.source_path, d.content_hash, d.id, \
+                (COUNT(c.id) > 0 AND COUNT(c.id) FILTER (WHERE c.status = 'embed_failed') = 0) \
+            FROM document d \
+            LEFT JOIN chunk c ON c.document_id = d.id \
+            WHERE d.source_version_id = $1 \
+            GROUP BY d.id, d.source_path, d.content_hash \
+            ORDER BY d.source_path",
+    )
+    .bind(source_version_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(source_path, content_hash, document_id, embed_complete)| InventoryDoc {
+            source_path,
+            content_hash,
+            document_id,
+            embed_complete,
+        })
+        .collect())
+}
+
 /// List every document under a given `source_version`, returning the minimal
 /// fields needed to drive carry-forward decisions.
 ///
