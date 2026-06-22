@@ -129,6 +129,11 @@ pub struct DocumentUpload {
     /// Detected package membership (rust/npm) for this document, if any.
     #[serde(default)]
     pub package: Option<mnm_core::types::PackageRef>,
+    /// True when the CLI intends this as a carry-forward (no chunks supplied;
+    /// the server clones the prior version's chunks). `#[serde(default)]` keeps
+    /// old clients (which never set it) deserializing as `false`.
+    #[serde(default)]
+    pub carried: bool,
 }
 
 /// One chunk to upload.
@@ -518,6 +523,19 @@ async fn upload_documents(
             }
         };
 
+    // Prior active version's model identity, for the carry-compat gate.
+    let can_carry = match source_version::get_active(&state.pool, src.id).await {
+        Ok(prior) => {
+            prior.embedding_model_id == sv.embedding_model_id
+                && prior.code_embedding_model_id == sv.code_embedding_model_id
+        }
+        Err(StoreError::NotFound) => false, // no prior version → nothing to carry
+        Err(e) => {
+            tracing::warn!(request_id = rid, op = "upload_documents", error = %e, "prior model lookup failed");
+            return error::service_unavailable("prior version lookup failed", rid);
+        }
+    };
+
     // Cache the root node; lazily-created.
     let mut root_node: Option<Uuid> = None;
     let mut accepted = 0_usize;
@@ -546,18 +564,38 @@ async fn upload_documents(
         }
         let root = root_node.expect("root cached");
 
-        // Decide carry vs new.
-        let carry_source = prior_by_path
+        let prior_match = prior_by_path
             .get(&doc.path)
-            .filter(|(_, prior_hash)| prior_hash == &doc.content_hash)
-            .map(|(prior_id, _)| *prior_id);
+            .is_some_and(|(_, h)| h == &doc.content_hash);
 
-        let result = if let Some(prior_doc_id) = carry_source {
-            carry_forward_one(&state.pool, sv.id, sv.embedding_model_id, root, prior_doc_id, &doc)
-                .await
-        } else {
-            insert_new_document(&state.pool, sv.id, sv.embedding_model_id, root, &doc).await
-        };
+        let result =
+            match classify_upload(doc.carried, !doc.chunks.is_empty(), prior_match, can_carry) {
+                UploadDecision::Carry => {
+                    let prior_id = prior_by_path
+                        .get(&doc.path)
+                        .map(|(id, _)| *id)
+                        .expect("prior_match guarantees entry exists");
+                    carry_forward_one(
+                        &state.pool,
+                        sv.id,
+                        sv.embedding_model_id,
+                        root,
+                        prior_id,
+                        &doc,
+                    )
+                    .await
+                }
+                UploadDecision::InsertNew => {
+                    insert_new_document(&state.pool, sv.id, sv.embedding_model_id, root, &doc).await
+                }
+                UploadDecision::Conflict(reason) => {
+                    conflicts.push(UploadConflict {
+                        path: doc.path.clone(),
+                        reason: reason.to_owned(),
+                    });
+                    continue;
+                }
+            };
 
         match result {
             Ok(was_carried) => {
@@ -888,6 +926,45 @@ fn check_code_embedded_batch(
     Ok(())
 }
 
+/// Outcome of the per-document carry-vs-insert decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UploadDecision {
+    Carry,
+    InsertNew,
+    Conflict(&'static str),
+}
+
+/// Decide how to handle one uploaded document. The server is the authority:
+/// a carry is honoured only when a prior doc matches AND models are compatible;
+/// a chunk-less document is never inserted (it would be unsearchable).
+#[allow(clippy::fn_params_excessive_bools)]
+const fn classify_upload(
+    carried_flag: bool,
+    has_chunks: bool,
+    prior_match: bool,
+    can_carry: bool,
+) -> UploadDecision {
+    if carried_flag {
+        if prior_match && can_carry {
+            UploadDecision::Carry
+        } else if !can_carry {
+            UploadDecision::Conflict(
+                "carry requested but embedding model changed; re-embed required",
+            )
+        } else {
+            UploadDecision::Conflict(
+                "carry requested but no matching prior document; re-embed required",
+            )
+        }
+    } else if has_chunks {
+        UploadDecision::InsertNew
+    } else {
+        UploadDecision::Conflict(
+            "document has no chunks; refusing to insert an unsearchable document",
+        )
+    }
+}
+
 async fn insert_new_document(
     pool: &sqlx::PgPool,
     sv_id: Uuid,
@@ -1054,6 +1131,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn classify_upload_decisions() {
+        use UploadDecision::*;
+        // carried doc, prior matches, models compatible -> carry
+        assert!(matches!(classify_upload(true, false, true, true), Carry));
+        // carried doc but model changed -> conflict (re-embed), never a chunkless insert
+        assert!(matches!(classify_upload(true, false, true, false), Conflict(_)));
+        // carried doc but no prior match (stale view) -> conflict
+        assert!(matches!(classify_upload(true, false, false, true), Conflict(_)));
+        // new doc with chunks -> insert
+        assert!(matches!(classify_upload(false, true, false, true), InsertNew));
+        // new doc with zero chunks -> conflict (defensive)
+        assert!(matches!(classify_upload(false, false, false, true), Conflict(_)));
+    }
+
+    #[test]
     fn upload_request_deserializes_embedding_and_model() {
         let body = serde_json::json!({
             "embedding_model": "bge-base-en-v1.5@1",
@@ -1126,6 +1218,7 @@ mod tests {
             token_count: 0,
             chunks,
             package: None,
+            carried: false,
         }
     }
 
