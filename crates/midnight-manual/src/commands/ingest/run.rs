@@ -844,7 +844,7 @@ async fn run_inner(
     // NEW uploads (chunk + embed) and upload once more BEFORE finalize.
     let reembed_paths: Vec<String> = conflicts
         .iter()
-        .filter(|c| c.reason.contains("re-embed required"))
+        .filter(|c| c.reason.contains(mnm_core::ingest::REEMBED_REQUIRED_MARKER))
         .map(|c| c.path.clone())
         .collect();
     if !reembed_paths.is_empty() {
@@ -853,7 +853,7 @@ async fn run_inner(
             build_reembed_uploads(&walked_docs, &reembed_paths, &carried_inputs, chunker_config);
         // Drop the resolved conflicts so a clean retry clears them; any conflict
         // the retry itself reports is re-accumulated below and trips the abort.
-        conflicts.retain(|c| !c.reason.contains("re-embed required"));
+        conflicts.retain(|c| !c.reason.contains(mnm_core::ingest::REEMBED_REQUIRED_MARKER));
         let retry_batches = pack_upload_batches(reembed_docs, batch_size, byte_target);
         let retry_count = retry_batches.len();
         for (i, batch) in retry_batches.into_iter().enumerate() {
@@ -2147,9 +2147,10 @@ pub(super) fn assemble_report(
             path: d.path.display().to_string(),
             classification: "new".to_owned(),
             chunks: d.chunks.len(),
-            // CLI has no per-document server embed confirmation; for finalized runs
-            // embedding is committed iff outcome == "finalized"
-            embed_complete: false,
+            // The CLI has no per-document server embed confirmation; for
+            // finalized runs the embedding batch is committed as a whole, so
+            // every new doc's embedding is complete iff the run was finalized.
+            embed_complete: outcome == "finalized",
         })
         .chain(plan.carried_documents.iter().map(|d| ReportDoc {
             path: d.path.display().to_string(),
