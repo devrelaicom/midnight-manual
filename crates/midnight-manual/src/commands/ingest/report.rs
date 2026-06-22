@@ -132,6 +132,13 @@ pub fn preflight(path: &Path) -> anyhow::Result<()> {
             })?;
         }
     }
+    // Probe write permission: a directory may exist but be read-only. Writing a
+    // sentinel file and removing it confirms the post-finalize `write_atomic` will
+    // succeed, so we fail fast before doing any embedding work.
+    let probe = path.with_extension("json.preflight");
+    std::fs::write(&probe, b"")
+        .map_err(|e| anyhow::anyhow!("report path {} not writable: {e}", path.display()))?;
+    let _ = std::fs::remove_file(&probe);
     Ok(())
 }
 
@@ -181,6 +188,45 @@ mod tests {
         let result = write_atomic(&path, &IngestReport::sample());
         assert!(result.is_err(), "expected rename failure");
         assert!(!tmp.exists(), ".tmp must be cleaned up after rename failure");
+    }
+
+    /// `preflight` must error when the parent directory is read-only.
+    ///
+    /// Skipped when running as root (root bypasses POSIX mode bits, so the probe
+    /// write would succeed even on a `0o555` directory, making the assertion
+    /// meaningless). We verify this by attempting the probe write first and
+    /// skip if it unexpectedly succeeds.
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn preflight_errors_on_readonly_parent() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let ro_dir = dir.path().join("readonly");
+        std::fs::create_dir_all(&ro_dir).unwrap();
+
+        // Make the directory read-only (no write bit).
+        std::fs::set_permissions(&ro_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let path = ro_dir.join("report.json");
+
+        // Sanity-check: if the probe write somehow succeeds (e.g. running as
+        // root), restore permissions and skip rather than give a false pass.
+        let probe = path.with_extension("json.preflight");
+        if std::fs::write(&probe, b"").is_ok() {
+            let _ = std::fs::remove_file(&probe);
+            std::fs::set_permissions(&ro_dir, std::fs::Permissions::from_mode(0o755)).unwrap_or(());
+            return; // running as root — skip
+        }
+
+        let result = preflight(&path);
+
+        // Restore write permission so the TempDir destructor can clean up.
+        std::fs::set_permissions(&ro_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(result.is_err(), "preflight must fail for a read-only parent directory");
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("not writable"), "error message must mention 'not writable': {msg}",);
     }
 
     #[test]

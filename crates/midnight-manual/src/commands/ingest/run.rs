@@ -575,7 +575,7 @@ async fn run_inner(
             Vec::new(),
             0,
         );
-        emit_report(&report, &sel, args.report_file.as_deref(), json, || {
+        emit_report(&report, &sel, args.report_file.as_deref(), || {
             format_dry_run(
                 &args.source_slug,
                 plan.stats.documents_added,
@@ -997,7 +997,7 @@ async fn run_inner(
         docs_with_language_targets,
         docs_with_sdk_dependencies,
     };
-    emit_report(&report, &sel, args.report_file.as_deref(), json, || {
+    emit_report(&report, &sel, args.report_file.as_deref(), || {
         format_success(&success_out, false)
     });
 
@@ -2147,7 +2147,9 @@ pub(super) fn assemble_report(
             path: d.path.display().to_string(),
             classification: "new".to_owned(),
             chunks: d.chunks.len(),
-            embed_complete: false, // unknown until upload completes; true after finalize
+            // CLI has no per-document server embed confirmation; for finalized runs
+            // embedding is committed iff outcome == "finalized"
+            embed_complete: false,
         })
         .chain(plan.carried_documents.iter().map(|d| ReportDoc {
             path: d.path.display().to_string(),
@@ -2199,16 +2201,15 @@ pub(super) fn assemble_report(
 /// - If `write_file`: calls [`super::report::write_atomic`]; on failure prints
 ///   to stderr but does NOT propagate the error (the ingest has already been
 ///   committed).
-fn emit_report(
+pub(super) fn emit_report(
     report: &super::report::IngestReport,
     sel: &ReportSelection,
     report_file: Option<&Path>,
-    json: bool,
     human_fn: impl FnOnce() -> String,
 ) {
     if sel.json_stdout {
-        println!("{}", serde_json::to_string(report).unwrap_or_default());
-    } else if !json {
+        println!("{}", serde_json::to_string(report).expect("IngestReport serializes infallibly"));
+    } else {
         println!("{}", human_fn());
     }
     if sel.write_file {

@@ -168,19 +168,24 @@ pub async fn run(args: Args, server: Option<&str>, _json: bool) -> Result<()> {
         0,
     );
 
-    if sel.json_stdout {
-        println!("{}", serde_json::to_string(&report).unwrap_or_default());
-    } else {
-        print_plan(&plan, false);
-    }
-    if sel.write_file {
-        if let Some(path) = &args.report_file {
-            if let Err(e) = super::report::write_atomic(path, &report) {
-                eprintln!("warning: could not write report file {}: {e}", path.display());
-                std::process::exit(1);
-            }
-        }
-    }
+    super::run::emit_report(&report, &sel, args.report_file.as_deref(), || {
+        use std::fmt::Write as _;
+        let mut out = String::new();
+        // Build the human-readable plan summary as a return value so the
+        // renderer is a pure FnOnce() -> String (no direct stdout writes here).
+        let _ = write!(
+            out,
+            "plan for source `{}` (rev {}):\n  walked       {} files\n  chunked      {} chunks\n    new          {} documents\n    carried      {} documents\n    deleted      {} documents",
+            plan.source_slug,
+            plan.target_revision,
+            plan.new_documents.len() + plan.carried_documents.len(),
+            plan.stats.chunks_emitted,
+            plan.stats.documents_added,
+            plan.stats.documents_carried,
+            plan.stats.documents_deleted,
+        );
+        out
+    });
     Ok(())
 }
 
@@ -281,24 +286,6 @@ pub(super) async fn fetch_prior_state(
             })
             .collect(),
     })
-}
-
-/// Print the plan summary in human-readable or JSON form.
-fn print_plan(plan: &mnm_content::ingest::IngestPlan, json: bool) {
-    if json {
-        let v = serde_json::to_value(plan).unwrap_or(serde_json::Value::Null);
-        println!("{v}");
-        return;
-    }
-    println!("plan for source `{}` (rev {}):", plan.source_slug, plan.target_revision);
-    println!(
-        "  walked       {} files",
-        plan.new_documents.len() + plan.carried_documents.len()
-    );
-    println!("  chunked      {} chunks", plan.stats.chunks_emitted);
-    println!("    new          {} documents", plan.stats.documents_added);
-    println!("    carried      {} documents", plan.stats.documents_carried);
-    println!("    deleted      {} documents", plan.stats.documents_deleted);
 }
 
 #[cfg(test)]
