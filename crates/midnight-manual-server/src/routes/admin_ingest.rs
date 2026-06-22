@@ -947,13 +947,13 @@ const fn classify_upload(
     if carried_flag {
         if prior_match && can_carry {
             UploadDecision::Carry
-        } else if !can_carry {
+        } else if !prior_match {
             UploadDecision::Conflict(
-                "carry requested but embedding model changed; re-embed required",
+                "carry requested but no matching prior document; re-embed required",
             )
         } else {
             UploadDecision::Conflict(
-                "carry requested but no matching prior document; re-embed required",
+                "carry requested but embedding model changed; re-embed required",
             )
         }
     } else if has_chunks {
@@ -1132,17 +1132,32 @@ mod tests {
 
     #[test]
     fn classify_upload_decisions() {
-        use UploadDecision::*;
+        use UploadDecision::Conflict;
+
         // carried doc, prior matches, models compatible -> carry
-        assert!(matches!(classify_upload(true, false, true, true), Carry));
-        // carried doc but model changed -> conflict (re-embed), never a chunkless insert
-        assert!(matches!(classify_upload(true, false, true, false), Conflict(_)));
-        // carried doc but no prior match (stale view) -> conflict
-        assert!(matches!(classify_upload(true, false, false, true), Conflict(_)));
+        assert!(matches!(classify_upload(true, false, true, true), UploadDecision::Carry));
+        // carried doc, no prior match, model incompatible -> missing-prior wins (regression case)
+        let Conflict(msg) = classify_upload(true, false, false, false) else {
+            panic!("expected Conflict");
+        };
+        assert!(msg.contains("no matching prior document"), "got: {msg}");
+        // carried doc, no prior match, model compatible -> missing-prior message
+        let Conflict(msg) = classify_upload(true, false, false, true) else {
+            panic!("expected Conflict");
+        };
+        assert!(msg.contains("no matching prior document"), "got: {msg}");
+        // carried doc, prior matches, model changed -> model-mismatch message
+        let Conflict(msg) = classify_upload(true, false, true, false) else {
+            panic!("expected Conflict");
+        };
+        assert!(msg.contains("embedding model changed"), "got: {msg}");
         // new doc with chunks -> insert
-        assert!(matches!(classify_upload(false, true, false, true), InsertNew));
-        // new doc with zero chunks -> conflict (defensive)
-        assert!(matches!(classify_upload(false, false, false, true), Conflict(_)));
+        assert!(matches!(classify_upload(false, true, false, true), UploadDecision::InsertNew));
+        // new doc with zero chunks -> no-chunks conflict
+        let Conflict(msg) = classify_upload(false, false, false, true) else {
+            panic!("expected Conflict");
+        };
+        assert!(msg.contains("no chunks"), "got: {msg}");
     }
 
     #[test]
