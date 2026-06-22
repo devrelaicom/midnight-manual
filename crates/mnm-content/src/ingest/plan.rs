@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::chunk::{Chunker, ChunkerConfig};
+use crate::chunk::ChunkerConfig;
 use crate::content_hash::{chunk_hash, document_hash};
 use crate::frontmatter::FrontmatterSplit;
 
@@ -268,25 +268,17 @@ impl PlanBuilder {
             }
         }
 
-        let chunks: Vec<crate::chunk::Chunk> = match walked.kind {
-            DocumentKind::Markdown => crate::markdown::MarkdownChunker
-                .chunk(&walked.split.body, &self.chunker_config)
-                .unwrap_or_default(),
-            DocumentKind::Code => {
-                let ext = walked
-                    .path
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .unwrap_or("");
-                let lang = crate::code::language::Language::for_extension(ext);
-                crate::code::chunker_for_ext(lang, ext)
-                    .chunk(&walked.split.body, &self.chunker_config)
-                    .unwrap_or_default()
-            }
-            DocumentKind::Plaintext => crate::code::line_window::LineWindowChunker
-                .chunk(&walked.split.body, &self.chunker_config)
-                .unwrap_or_default(),
-        };
+        let ext = walked
+            .path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
+        let chunks: Vec<crate::chunk::Chunk> = crate::chunk::chunk_document(
+            walked.kind,
+            ext,
+            &walked.split.body,
+            &self.chunker_config,
+        );
         let total = u32::try_from(chunks.len()).unwrap_or(u32::MAX);
         let planned_chunks: Vec<PlannedChunk> = chunks
             .into_iter()
@@ -333,7 +325,12 @@ impl PlanBuilder {
 }
 
 /// Most-specific wins: frontmatter > extracted > manifest ancestor (spec §1.2).
-fn merge_provenance(
+///
+/// Exposed so the CLI's carried-document path can compute provenance identically
+/// to the new-document path (same precedence), avoiding any drift between the
+/// two upload builders.
+#[must_use]
+pub fn merge_provenance(
     frontmatter: &Provenance,
     extracted: &Provenance,
     ancestor: &Provenance,

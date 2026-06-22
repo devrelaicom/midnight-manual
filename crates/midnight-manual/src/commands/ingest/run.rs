@@ -406,6 +406,71 @@ async fn run_inner(
         serde_json::json!({"files": walked_docs.len(), "skipped": outcome.skipped.len()}),
     );
 
+    // ── Resolve auth + corpus wire ids + prior state (before chunking) ───────
+    // The plan's new-vs-carried classification depends on the prior active
+    // version's inventory, gated by the embedding-model identity, so both must
+    // be resolved BEFORE PlanBuilder runs. (The BYOK embedders below reuse the
+    // same `active` fetch — one `GET /v1/models/active` round-trip total.)
+    //
+    // A dry-run never uploads and must not require auth or server reachability,
+    // so it keeps the empty prior state (every doc classified "new"), preserving
+    // the pre-existing no-network dry-run behaviour.
+    let env = mnm_core::config::StdEnv;
+    let (cfg, _) = mnm_core::config::Config::discover(config_path, &env).unwrap_or_default();
+    let voyage_key = mnm_core::config::resolve_voyage_api_key(voyage_api_key, &cfg.models, &env);
+    let voyage_timeout_secs =
+        mnm_core::config::resolve_voyage_timeout_secs(args.voyage_timeout_secs, &cfg.models, &env);
+
+    // Strict admin token first (real run only). A missing/expired token must
+    // surface its `mnm login` remediation BEFORE any model/prior network call,
+    // and there is no point hitting the network when the upload would fail auth.
+    let token: Option<String> = if args.dry_run {
+        None
+    } else {
+        Some(load_strict_admin_token(auth_path)?)
+    };
+
+    let active = if !args.dry_run
+        && (args.embedding_model == DEFAULT_EMBEDDING_MODEL || code_embeddings_enabled)
+    {
+        Some(
+            crate::commands::models::fetch_active(server_url)
+                .await
+                .context("resolve active corpus model")?,
+        )
+    } else {
+        None
+    };
+    let embedding_model = active
+        .as_ref()
+        .filter(|_| args.embedding_model == DEFAULT_EMBEDDING_MODEL)
+        .map_or_else(|| args.embedding_model.clone(), |a| format!("{}@{}", a.name, a.revision));
+    // Code wire id: prefer the server's active code model; fall back to the
+    // configured name at revision 1 for servers that predate dual embeddings.
+    let code_embedding_model = code_embeddings_enabled.then(|| {
+        active.as_ref().and_then(|a| a.code.as_ref()).map_or_else(
+            || format!("{}@1", cfg.models.code_embedding),
+            |c| format!("{}@{}", c.name, c.revision),
+        )
+    });
+
+    // Fetch the prior active version's inventory so carry-forward can be
+    // classified. `ingest run` passes its ACTUAL resolved code model (unlike
+    // `plan`, which has no code flag) so the model gate is accurate; any fetch
+    // failure degrades to `PriorState::default()` (all-new), which is safe.
+    let prior = match token.as_deref() {
+        Some(tok) => super::plan::fetch_prior_state(
+            server_url,
+            &args.source_slug,
+            &embedding_model,
+            code_embedding_model.as_deref(),
+            tok,
+        )
+        .await
+        .unwrap_or_default(),
+        None => PriorState::default(),
+    };
+
     // ── Phase: chunk ─────────────────────────────────────────────────────────
     reporter.phase("chunk", serde_json::json!({}));
 
@@ -414,9 +479,8 @@ async fn run_inner(
         .clone()
         .unwrap_or_else(|| super::infer_revision(&source_root));
 
-    let mut builder =
-        PlanBuilder::new(&args.source_slug, SourceKind::DocsSite, &revision, PriorState::default())
-            .with_chunker_config(chunker_config);
+    let mut builder = PlanBuilder::new(&args.source_slug, SourceKind::DocsSite, &revision, prior)
+        .with_chunker_config(chunker_config);
     for doc in &walked_docs {
         let extracted = if doc.resolved.no_extract {
             Provenance::default()
@@ -481,20 +545,9 @@ async fn run_inner(
         });
     }
 
-    // ── Load admin bearer ────────────────────────────────────────────────────
-    let auth_file = AuthFile::read_optional(auth_path)
-        .with_context(|| format!("read auth.toml at {}", auth_path.display()))?
-        .ok_or_else(|| anyhow!("no admin token — run `mnm login --user-id <id>` first"))?;
-    let admin = auth_file
-        .admin
-        .ok_or_else(|| anyhow!("auth.toml has no [admin] section — run `mnm login` first"))?;
-    if admin.expires_at <= OffsetDateTime::now_utc() {
-        return Err(anyhow!(
-            "admin token expired at {}; run `mnm login` to refresh",
-            admin.expires_at,
-        ));
-    }
-    let token = admin.token;
+    // The strict admin token was resolved (and validated) above, before any
+    // network call; a dry-run returns earlier, so a real run always has one.
+    let token = token.expect("non-dry-run resolves a strict admin token above");
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(60))
@@ -544,47 +597,12 @@ async fn run_inner(
     }
 
     // Resolve the embedding context (BYOK Voyage vs server-proxy) and the
-    // bearer up front. Doing this before we create a server-side run means a
-    // missing key / unreachable model resolves fast without leaving an orphaned
-    // `building` source_version. We build the BYOK `VoyageEmbedder` once here so
-    // every batch reuses the same client; the corpus is always embedded
-    // CLI-side now (the old local-model and server-side-embed branches are
-    // gone), so the server never has to load an embedding model.
+    // bearer. The corpus wire ids (`embedding_model`, `code_embedding_model`)
+    // and the `active` fetch were resolved before chunking (so the prior-state
+    // model gate could use them); reuse them here. We build the BYOK
+    // `VoyageEmbedder` once so every batch reuses the same client; the corpus is
+    // always embedded CLI-side now, so the server never loads an embedding model.
     let bearer = resolve_admin_bearer_str(&token);
-    let env = mnm_core::config::StdEnv;
-    let (cfg, _) = mnm_core::config::Config::discover(config_path, &env).unwrap_or_default();
-    let voyage_key = mnm_core::config::resolve_voyage_api_key(voyage_api_key, &cfg.models, &env);
-    let voyage_timeout_secs =
-        mnm_core::config::resolve_voyage_timeout_secs(args.voyage_timeout_secs, &cfg.models, &env);
-
-    // Resolve the corpus wire ids FIRST (before building the embedders) so the
-    // embedder identities that COMPUTE the vectors are derived from the SAME
-    // active-model response that LABELS them (cross-element drift fix). One
-    // `GET /v1/models/active` round-trip covers the GENERAL wire id (when the
-    // sentinel "auto" is present — an explicit --embedding-model override is
-    // honoured directly), the CODE wire id (when code embeddings are enabled),
-    // and the {name, dim, dtype} the BYOK embedders are built from.
-    let active = if args.embedding_model == DEFAULT_EMBEDDING_MODEL || code_embeddings_enabled {
-        Some(
-            crate::commands::models::fetch_active(server_url)
-                .await
-                .context("resolve active corpus model")?,
-        )
-    } else {
-        None
-    };
-    let embedding_model = active
-        .as_ref()
-        .filter(|_| args.embedding_model == DEFAULT_EMBEDDING_MODEL)
-        .map_or_else(|| args.embedding_model.clone(), |a| format!("{}@{}", a.name, a.revision));
-    // Code wire id: prefer the server's active code model; fall back to the
-    // configured name at revision 1 for servers that predate dual embeddings.
-    let code_embedding_model = code_embeddings_enabled.then(|| {
-        active.as_ref().and_then(|a| a.code.as_ref()).map_or_else(
-            || format!("{}@1", cfg.models.code_embedding),
-            |c| format!("{}@{}", c.name, c.revision),
-        )
-    });
 
     // Derive the BYOK embedder identities from the active fetch (the authority),
     // with config as a logged fallback. The general identity follows the run's
@@ -635,57 +653,54 @@ async fn run_inner(
         .phase_done("start_run", serde_json::json!({"run_id": start.ingest_run_id.to_string()}));
 
     // ── Phase: upload documents (chunked) ────────────────────────────────────
-    reporter.phase("upload_documents", serde_json::json!({"documents": plan.new_documents.len()}));
+    // THE invariant: every walked, non-deleted document MUST be uploaded, or it
+    // vanishes from the new active version. The upload set is therefore the
+    // UNION of new docs (with chunks) AND carried docs (empty chunks,
+    // `carried:true`), i.e. `plan.new_documents` + `plan.carried_documents`.
+    let new_count = plan.new_documents.len();
+    let carried_count = plan.carried_documents.len();
+    reporter.phase(
+        "upload_documents",
+        serde_json::json!({"new": new_count, "carried": carried_count}),
+    );
 
-    let docs: Vec<DocumentUpload> = plan
+    let new_docs: Vec<DocumentUpload> = plan
         .new_documents
         .iter()
-        .map(|d| DocumentUpload {
-            path: d.path.display().to_string(),
-            kind: d.kind,
-            content_hash: d.content_hash.clone(),
-            source_url: d.source_url.clone().or_else(|| {
-                args.source_base_url.as_ref().map(|base| {
-                    let base = base.trim_end_matches('/');
-                    format!("{base}/{}", d.path.display())
-                })
-            }),
-            published_url: d.published_url.clone(),
-            language: d.language.clone(),
-            source_modified_at: d.source_modified_at,
-            frontmatter: d.frontmatter.clone(),
-            provenance: d.provenance.clone(),
-            char_count: i32::try_from(d.char_count).unwrap_or(i32::MAX),
-            token_count: i32::try_from(d.token_count).unwrap_or(i32::MAX),
-            chunks: d
-                .chunks
-                .iter()
-                .map(|c| ChunkUpload {
-                    chunk_index: i32::try_from(c.chunk_index).unwrap_or(i32::MAX),
-                    total_chunks: i32::try_from(c.total_chunks).unwrap_or(i32::MAX),
-                    content: c.content.clone(),
-                    content_hash: c.content_hash.clone(),
-                    heading_path: c.heading_path.clone(),
-                    symbol_path: c.symbol_path.clone(),
-                    start_byte: i32::try_from(c.start_byte).unwrap_or(i32::MAX),
-                    end_byte: i32::try_from(c.end_byte).unwrap_or(i32::MAX),
-                    token_count: i32::try_from(c.token_count).unwrap_or(i32::MAX),
-                    embedding: None,
-                    code_embedding: None,
-                })
-                .collect(),
-            package: d.package.clone(),
-            carried: false,
-        })
+        .map(|d| build_new_upload(d, args.source_base_url.as_deref()))
         .collect();
+
+    // Carried docs: join the carry-forward set back to the walked source for
+    // fresh metadata, then emit chunk-less uploads. These never hit `embed_batch`
+    // (own batches, below) so they cost zero Voyage tokens.
+    let carried_inputs = build_carried_inputs(
+        &walked_docs,
+        &plan.carried_documents,
+        &source_root,
+        args.source_base_url.as_deref(),
+        chunker_config,
+    );
+    let carried_docs: Vec<DocumentUpload> =
+        carried_inputs.iter().map(build_carried_upload).collect();
 
     let batch_size = args.batch_size.max(1);
     // Bound each batch by both a document-count ceiling and ~85% of the server's
     // body limit (estimated). The 85% leaves headroom for the rough estimate's
     // slack; anything that still 413s is auto-split by the upload helper.
     let byte_target = mnm_core::limits::MAX_INGEST_BODY_BYTES * 85 / 100;
-    let batches = pack_upload_batches(docs, batch_size, byte_target);
-    let batch_count = batches.len();
+
+    // Tag each batch with whether it needs embedding: new docs do (chunks must
+    // get vectors); carried docs do NOT (no chunks; the server clones prior
+    // vectors). Carried docs go in their OWN batches so `embed_batch` is never
+    // called on them.
+    let mut tagged_batches: Vec<(bool, Vec<DocumentUpload>)> = Vec::new();
+    for b in pack_upload_batches(new_docs, batch_size, byte_target) {
+        tagged_batches.push((true, b));
+    }
+    for b in pack_upload_batches(carried_docs, batch_size, byte_target) {
+        tagged_batches.push((false, b));
+    }
+    let batch_count = tagged_batches.len();
     let upload_url = format!(
         "{server_url}/v1/admin/sources/{slug}/ingest-runs/{id}/documents",
         slug = url_encode(&args.source_slug),
@@ -729,22 +744,25 @@ async fn run_inner(
         )
     });
 
-    for (i, batch) in batches.into_iter().enumerate() {
+    for (i, (needs_embed, batch)) in tagged_batches.into_iter().enumerate() {
         let mut batch_docs = batch;
-        // Embedding is the slow per-batch step; surface it as its own phase so
-        // progress consumers don't appear to hang on "uploading".
-        reporter.batch(i + 1, batch_count, "embedding documents");
-        match embed_batch(general_src, code_src, &mut batch_docs).await {
-            Ok(tokens) => total_tokens = total_tokens.saturating_add(tokens),
-            Err(e) => {
-                abort_run(&client, server_url, &args.source_slug, start.ingest_run_id, &token)
-                    .await;
-                return Err(e.context(format!("embed batch {}/{batch_count}", i + 1)));
+        // Only new-doc batches embed; carried batches (empty chunks) skip it.
+        if needs_embed {
+            // Embedding is the slow per-batch step; surface it as its own phase
+            // so progress consumers don't appear to hang on "uploading".
+            reporter.batch(i + 1, batch_count, "embedding documents");
+            match embed_batch(general_src, code_src, &mut batch_docs).await {
+                Ok(tokens) => total_tokens = total_tokens.saturating_add(tokens),
+                Err(e) => {
+                    abort_run(&client, server_url, &args.source_slug, start.ingest_run_id, &token)
+                        .await;
+                    return Err(e.context(format!("embed batch {}/{batch_count}", i + 1)));
+                }
             }
         }
         reporter.batch(i + 1, batch_count, "uploading documents");
-        // Embeddings are already attached above, so the split path is a pure
-        // upload concern: a 413 splits the batch and PUTs each half once.
+        // Embeddings are already attached above (for new docs), so the split path
+        // is a pure upload concern: a 413 splits the batch and PUTs each half once.
         let result = upload_documents_with_split(
             &client,
             &upload_url,
@@ -770,6 +788,73 @@ async fn run_inner(
         }
     }
 
+    // ── Conflict retry: re-embed carried docs the server refused to carry ────
+    // A carried doc can be refused with reason "...re-embed required" (no
+    // matching prior doc, or the model changed mid-run). Those documents MUST
+    // still land or they vanish from the new version, so rebuild ONLY those as
+    // NEW uploads (chunk + embed) and upload once more BEFORE finalize.
+    let reembed_paths: Vec<String> = conflicts
+        .iter()
+        .filter(|c| c.reason.contains("re-embed required"))
+        .map(|c| c.path.clone())
+        .collect();
+    if !reembed_paths.is_empty() {
+        reporter.phase("conflict_retry", serde_json::json!({"documents": reembed_paths.len()}));
+        let reembed_docs =
+            build_reembed_uploads(&walked_docs, &reembed_paths, &carried_inputs, chunker_config);
+        // Drop the resolved conflicts so a clean retry clears them; any conflict
+        // the retry itself reports is re-accumulated below and trips the abort.
+        conflicts.retain(|c| !c.reason.contains("re-embed required"));
+        let retry_batches = pack_upload_batches(reembed_docs, batch_size, byte_target);
+        let retry_count = retry_batches.len();
+        for (i, batch) in retry_batches.into_iter().enumerate() {
+            let mut batch_docs = batch;
+            reporter.batch(i + 1, retry_count, "re-embedding conflicted documents");
+            if let Err(e) = embed_batch(general_src, code_src, &mut batch_docs).await {
+                abort_run(&client, server_url, &args.source_slug, start.ingest_run_id, &token)
+                    .await;
+                return Err(e.context(format!("re-embed retry batch {}/{retry_count}", i + 1)));
+            }
+            match upload_documents_with_split(
+                &client,
+                &upload_url,
+                &token,
+                &embedding_model,
+                batch_docs,
+                i,
+                retry_count,
+            )
+            .await
+            {
+                Ok(r) => {
+                    accepted += r.accepted;
+                    carried += r.carried;
+                    conflicts.extend(r.conflicts);
+                }
+                Err(e) => {
+                    abort_run(&client, server_url, &args.source_slug, start.ingest_run_id, &token)
+                        .await;
+                    return Err(translate_upload_error(e, i + 1, retry_count, start.ingest_run_id)
+                        .context("upload re-embedded documents"));
+                }
+            }
+        }
+        // SAFETY FLOOR: if anything is still conflicted after the retry, we cannot
+        // produce a complete version. Abort rather than finalize a lossy one.
+        if !conflicts.is_empty() {
+            abort_run(&client, server_url, &args.source_slug, start.ingest_run_id, &token).await;
+            for c in &conflicts {
+                tracing::error!(path = %c.path, reason = %c.reason, "unresolved upload conflict after retry");
+            }
+            return Err(anyhow!(
+                "aborted run {}: {} document(s) still conflicted after re-embed retry; \
+                 refusing to finalize an incomplete version",
+                start.ingest_run_id,
+                conflicts.len(),
+            ));
+        }
+    }
+
     reporter.phase_done(
         "upload_documents",
         serde_json::json!({"accepted": accepted, "carried": carried}),
@@ -783,7 +868,21 @@ async fn run_inner(
         slug = url_encode(&args.source_slug),
         id = start.ingest_run_id,
     );
-    let finalize: FinalizeResult = match post_empty(&client, &finalize_url, &token).await {
+    // Completeness backstop: tell the server exactly how many documents this run
+    // intended to persist — everything walked minus deletions, i.e. new +
+    // carried. The server's finalize guard refuses to activate (and aborts) if
+    // the persisted count differs, so a silently-dropped doc can never ship.
+    let expected_total = i64::try_from(new_count + carried_count).unwrap_or(i64::MAX);
+    let finalize: FinalizeResult = match post_json(
+        &client,
+        &finalize_url,
+        &token,
+        &FinalizeRequest {
+            expected_document_total: expected_total,
+        },
+    )
+    .await
+    {
         Ok(r) => r,
         Err(e) => {
             abort_run(&client, server_url, &args.source_slug, start.ingest_run_id, &token).await;
@@ -934,6 +1033,28 @@ fn attach_embeddings(docs: &mut [DocumentUpload], vectors: Vec<Vec<f32>>) -> Res
         }
     }
     Ok(())
+}
+
+/// Load the admin bearer token, requiring it to be present and unexpired.
+///
+/// A real `ingest run` always uploads, so it MUST hold a valid admin token; this
+/// is resolved up front (before any model/prior-state network call) so a missing
+/// or expired token surfaces its `mnm login` remediation first — never masked by
+/// an unrelated "resolve active corpus model" network error.
+fn load_strict_admin_token(auth_path: &Path) -> Result<String> {
+    let auth_file = AuthFile::read_optional(auth_path)
+        .with_context(|| format!("read auth.toml at {}", auth_path.display()))?
+        .ok_or_else(|| anyhow!("no admin token — run `mnm login --user-id <id>` first"))?;
+    let admin = auth_file
+        .admin
+        .ok_or_else(|| anyhow!("auth.toml has no [admin] section — run `mnm login` first"))?;
+    if admin.expires_at <= OffsetDateTime::now_utc() {
+        return Err(anyhow!(
+            "admin token expired at {}; run `mnm login` to refresh",
+            admin.expires_at,
+        ));
+    }
+    Ok(admin.token)
 }
 
 /// Resolve a non-empty admin bearer string for use on the server-proxy embed
@@ -1446,20 +1567,6 @@ async fn post_json<I: Serialize + Sync, O: for<'de> Deserialize<'de>>(
     decode_response(resp, url).await
 }
 
-async fn post_empty<O: for<'de> Deserialize<'de>>(
-    client: &reqwest::Client,
-    url: &str,
-    token: &str,
-) -> Result<O> {
-    let resp = client
-        .post(url)
-        .bearer_auth(token)
-        .send()
-        .await
-        .with_context(|| format!("POST {url}"))?;
-    decode_response(resp, url).await
-}
-
 async fn put_json<I: Serialize + Sync, O: for<'de> Deserialize<'de>>(
     client: &reqwest::Client,
     url: &str,
@@ -1507,6 +1614,259 @@ fn redact_token_like(s: &str) -> String {
         out.push(' ');
     }
     out.trim_end().to_owned()
+}
+
+/// Freshly-walked document metadata for a carry-forward document.
+///
+/// A carried document re-sends NO chunks (the server clones the prior version's
+/// chunks), but it DOES re-send the document-level metadata: `carry_forward_one`
+/// persists THESE fields onto the new document row, not the prior row's. So the
+/// metadata must be computed from this run's walk exactly as the new-document
+/// path computes it — see [`build_carried_inputs`].
+#[derive(Debug, Clone)]
+struct CarriedUploadInput {
+    path: String,
+    kind: DocumentKind,
+    content_hash: String,
+    source_url: Option<String>,
+    published_url: Option<String>,
+    language: Option<String>,
+    source_modified_at: Option<OffsetDateTime>,
+    frontmatter: Option<serde_json::Value>,
+    provenance: Provenance,
+    char_count: i32,
+    token_count: i32,
+    package: Option<mnm_core::types::PackageRef>,
+}
+
+/// Map one new (`PlannedDocument`) into the upload wire shape: full chunks,
+/// `carried: false`. Chunk embeddings are left unset here and attached later by
+/// [`embed_batch`]. `source_base_url`, when set, supplies a `source_url` for
+/// documents the manifest did not give one (trailing slash trimmed).
+fn build_new_upload(
+    d: &mnm_content::ingest::PlannedDocument,
+    source_base_url: Option<&str>,
+) -> DocumentUpload {
+    DocumentUpload {
+        path: d.path.display().to_string(),
+        kind: d.kind,
+        content_hash: d.content_hash.clone(),
+        source_url: d.source_url.clone().or_else(|| {
+            source_base_url.map(|base| {
+                let base = base.trim_end_matches('/');
+                format!("{base}/{}", d.path.display())
+            })
+        }),
+        published_url: d.published_url.clone(),
+        language: d.language.clone(),
+        source_modified_at: d.source_modified_at,
+        frontmatter: d.frontmatter.clone(),
+        provenance: d.provenance.clone(),
+        char_count: i32::try_from(d.char_count).unwrap_or(i32::MAX),
+        token_count: i32::try_from(d.token_count).unwrap_or(i32::MAX),
+        chunks: d
+            .chunks
+            .iter()
+            .map(|c| ChunkUpload {
+                chunk_index: i32::try_from(c.chunk_index).unwrap_or(i32::MAX),
+                total_chunks: i32::try_from(c.total_chunks).unwrap_or(i32::MAX),
+                content: c.content.clone(),
+                content_hash: c.content_hash.clone(),
+                heading_path: c.heading_path.clone(),
+                symbol_path: c.symbol_path.clone(),
+                start_byte: i32::try_from(c.start_byte).unwrap_or(i32::MAX),
+                end_byte: i32::try_from(c.end_byte).unwrap_or(i32::MAX),
+                token_count: i32::try_from(c.token_count).unwrap_or(i32::MAX),
+                embedding: None,
+                code_embedding: None,
+            })
+            .collect(),
+        package: d.package.clone(),
+        carried: false,
+    }
+}
+
+/// Map one carry-forward document into the upload wire shape: EMPTY chunks,
+/// `carried: true`, freshly-walked metadata. The empty `chunks` is the signal
+/// the server uses to clone the prior version's chunks; it also means
+/// [`embed_batch`] is never called on these (zero Voyage cost) when they are
+/// kept in their own batches.
+fn build_carried_upload(d: &CarriedUploadInput) -> DocumentUpload {
+    DocumentUpload {
+        path: d.path.clone(),
+        kind: d.kind,
+        content_hash: d.content_hash.clone(),
+        source_url: d.source_url.clone(),
+        published_url: d.published_url.clone(),
+        language: d.language.clone(),
+        source_modified_at: d.source_modified_at,
+        frontmatter: d.frontmatter.clone(),
+        provenance: d.provenance.clone(),
+        char_count: d.char_count,
+        token_count: d.token_count,
+        chunks: Vec::new(),
+        package: d.package.clone(),
+        carried: true,
+    }
+}
+
+/// Assemble [`CarriedUploadInput`]s by joining `carried_documents` (which only
+/// hold path + hash + prior id) back to the original walked documents (which
+/// hold the source needed to recompute the document metadata).
+///
+/// The metadata is computed exactly as [`mnm_content::ingest::PlanBuilder`]
+/// computes it for new documents — same hash, same chunker dispatch
+/// ([`mnm_content::chunk::chunk_document`]) for the token total, same provenance
+/// merge ([`mnm_content::ingest::merge_provenance`]), same `source_base_url`
+/// fallback — so a document's persisted metadata is identical whether it lands
+/// as new or carried. Carried docs are NOT re-embedded; the chunker runs only
+/// to recover the document-level token count (local CPU, no Voyage call).
+fn build_carried_inputs(
+    walked: &[mnm_content::ingest::WalkedDocument],
+    carried: &[mnm_content::ingest::CarriedDocument],
+    source_root: &Path,
+    source_base_url: Option<&str>,
+    chunker_config: mnm_content::chunk::ChunkerConfig,
+) -> Vec<CarriedUploadInput> {
+    use std::collections::HashMap;
+    let walked_by_path: HashMap<&Path, &mnm_content::ingest::WalkedDocument> =
+        walked.iter().map(|w| (w.rel_path.as_path(), w)).collect();
+
+    carried
+        .iter()
+        .filter_map(|c| {
+            let Some(w) = walked_by_path.get(c.path.as_path()) else {
+                // A carried path with no matching walked doc would be a planner
+                // bug (carried docs are, by definition, present in this walk).
+                // Skip it loudly rather than upload garbage; the finalize
+                // completeness guard then trips, aborting rather than activating
+                // an incomplete version.
+                tracing::error!(
+                    path = %c.path.display(),
+                    "carried document has no matching walked document; skipping (finalize will abort)",
+                );
+                return None;
+            };
+            let kind = w.resolved.kind;
+            let extracted = if w.resolved.no_extract {
+                Provenance::default()
+            } else {
+                build_extracted(source_root, &w.rel_path, &w.content, kind)
+            };
+            let ext = w.rel_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            let token_count: u32 =
+                mnm_content::chunk::chunk_document(kind, ext, &w.split.body, &chunker_config)
+                    .iter()
+                    .map(|ch| mnm_content::tokens::count(&ch.content))
+                    .sum();
+            let source_url = w.resolved.source_url.clone().or_else(|| {
+                source_base_url.map(|base| {
+                    let base = base.trim_end_matches('/');
+                    format!("{base}/{}", w.rel_path.display())
+                })
+            });
+            Some(CarriedUploadInput {
+                path: c.path.display().to_string(),
+                kind,
+                // The carried doc's content_hash is `document_hash(content)` and
+                // matches the prior version (that is WHY it carried), so reuse it.
+                content_hash: c.content_hash.clone(),
+                source_url,
+                published_url: w.resolved.published_url.clone(),
+                language: mnm_content::language::from_path(&w.resolved.rel_path)
+                    .map(str::to_owned),
+                source_modified_at: w.source_modified_at,
+                frontmatter: w.split.frontmatter.clone(),
+                provenance: mnm_content::ingest::merge_provenance(
+                    &w.split.provenance,
+                    &extracted,
+                    &w.resolved.provenance_override,
+                ),
+                char_count: i32::try_from(w.content.chars().count()).unwrap_or(i32::MAX),
+                token_count: i32::try_from(token_count).unwrap_or(i32::MAX),
+                package: detect_package_ref(source_root, &w.rel_path, &w.content),
+            })
+        })
+        .collect()
+}
+
+/// Rebuild the conflict-retry set as NEW uploads (chunks + `carried:false`).
+///
+/// When the server refuses to carry a document ("re-embed required"), it must
+/// still land or it vanishes from the new version. We chunk the walked source
+/// (so the chunks can be embedded) and reuse the already-computed carried
+/// metadata for the document-level fields. `reembed_paths` is small (only the
+/// conflicted docs), so chunking here is bounded.
+fn build_reembed_uploads(
+    walked: &[mnm_content::ingest::WalkedDocument],
+    reembed_paths: &[String],
+    carried_inputs: &[CarriedUploadInput],
+    chunker_config: mnm_content::chunk::ChunkerConfig,
+) -> Vec<DocumentUpload> {
+    use std::collections::{HashMap, HashSet};
+    let want: HashSet<&str> = reembed_paths.iter().map(String::as_str).collect();
+    let meta_by_path: HashMap<&str, &CarriedUploadInput> = carried_inputs
+        .iter()
+        .map(|c| (c.path.as_str(), c))
+        .collect();
+
+    walked
+        .iter()
+        .filter_map(|w| {
+            let path = w.rel_path.display().to_string();
+            if !want.contains(path.as_str()) {
+                return None;
+            }
+            // The carried metadata was computed for exactly these docs, so it is
+            // present; if it somehow is not, skip (finalize completeness guard
+            // then trips rather than shipping an incomplete version).
+            let meta = (*meta_by_path.get(path.as_str())?).clone();
+            let ext = w
+                .rel_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("");
+            let raw_chunks =
+                mnm_content::chunk::chunk_document(meta.kind, ext, &w.split.body, &chunker_config);
+            let total_chunks = i32::try_from(raw_chunks.len()).unwrap_or(i32::MAX);
+            let chunks: Vec<ChunkUpload> = raw_chunks
+                .into_iter()
+                .map(|c| {
+                    let content_hash = mnm_content::content_hash::chunk_hash(&c.content);
+                    let token_count = mnm_content::tokens::count(&c.content);
+                    ChunkUpload {
+                        chunk_index: i32::try_from(c.chunk_index).unwrap_or(i32::MAX),
+                        total_chunks,
+                        content: c.content,
+                        content_hash,
+                        heading_path: c.heading_path,
+                        symbol_path: c.symbol_path,
+                        start_byte: i32::try_from(c.start_byte).unwrap_or(i32::MAX),
+                        end_byte: i32::try_from(c.end_byte).unwrap_or(i32::MAX),
+                        token_count: i32::try_from(token_count).unwrap_or(i32::MAX),
+                        embedding: None,
+                        code_embedding: None,
+                    }
+                })
+                .collect();
+            Some(DocumentUpload {
+                path: meta.path,
+                kind: meta.kind,
+                content_hash: meta.content_hash,
+                source_url: meta.source_url,
+                published_url: meta.published_url,
+                language: meta.language,
+                source_modified_at: meta.source_modified_at,
+                frontmatter: meta.frontmatter,
+                provenance: meta.provenance,
+                char_count: meta.char_count,
+                token_count: meta.token_count,
+                chunks,
+                package: meta.package,
+                carried: false,
+            })
+        })
+        .collect()
 }
 
 #[derive(Debug, Serialize)]
@@ -1591,6 +1951,15 @@ struct UploadDocumentsResponse {
     /// reported as fully successful.
     #[serde(default)]
     conflicts: Vec<mnm_core::ingest::UploadConflict>,
+}
+
+/// Finalize body. `expected_document_total` is the count this run intended to
+/// persist (new + carried, i.e. everything walked minus deletions). The server's
+/// completeness guard aborts activation if the persisted count differs, so a
+/// silently-dropped document can never reach the active version.
+#[derive(Debug, Serialize)]
+struct FinalizeRequest {
+    expected_document_total: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2536,6 +2905,104 @@ mod tests {
             .as_array()
             .expect("embedding present on the wire");
         assert_eq!(emb.len(), 1024);
+    }
+
+    // ── Upload-builder tests (Task 8) ────────────────────────────────────────
+    //
+    // These guard THE invariant: every walked, non-deleted document must be
+    // uploaded. New docs carry chunks + `carried:false`; carried docs carry NO
+    // chunks (the server clones the prior version's) + `carried:true`, with the
+    // freshly-walked document metadata so the cloned-chunk document row is
+    // accurate.
+
+    /// A `PlannedDocument` (new-doc path) with one chunk and a little metadata.
+    fn sample_planned_new(path: &str) -> mnm_content::ingest::PlannedDocument {
+        use mnm_content::ingest::{PlannedChunk, PlannedDocument};
+        PlannedDocument {
+            path: path.into(),
+            kind: DocumentKind::Markdown,
+            content_hash: "newhash".into(),
+            frontmatter: Some(serde_json::json!({ "title": "B" })),
+            provenance: Provenance::default(),
+            char_count: 42,
+            chunks: vec![PlannedChunk {
+                content: "hello world".into(),
+                heading_path: vec!["Intro".into()],
+                symbol_path: vec![],
+                chunk_index: 0,
+                total_chunks: 1,
+                start_byte: 0,
+                end_byte: 11,
+                content_hash: "chash".into(),
+                token_count: 2,
+            }],
+            published_url: Some("https://docs/b".into()),
+            source_url: None,
+            source_modified_at: None,
+            language: Some("markdown".into()),
+            token_count: 2,
+            package: None,
+        }
+    }
+
+    /// A `CarriedUploadInput` (carried-doc path): freshly-walked metadata, NO
+    /// chunks — the server clones the prior version's chunks.
+    fn sample_carried_input(path: &str) -> CarriedUploadInput {
+        CarriedUploadInput {
+            path: path.to_owned(),
+            kind: DocumentKind::Markdown,
+            content_hash: "priorhash".into(),
+            source_url: Some("https://src/a".into()),
+            published_url: Some("https://docs/a".into()),
+            language: Some("markdown".into()),
+            source_modified_at: None,
+            frontmatter: Some(serde_json::json!({ "title": "A" })),
+            provenance: Provenance::default(),
+            char_count: 100,
+            token_count: 25,
+            package: None,
+        }
+    }
+
+    #[test]
+    fn carried_doc_uploaded_with_empty_chunks_and_flag() {
+        let up = build_carried_upload(&sample_carried_input("a.md"));
+        assert!(up.carried, "carried docs must set the carry-forward flag");
+        assert!(up.chunks.is_empty(), "carried docs must NOT re-send chunks");
+        assert_eq!(up.path, "a.md");
+        // Metadata is carried through unchanged so the cloned-chunk document row
+        // is accurate (the server persists THESE fields, not the prior row's).
+        assert_eq!(up.content_hash, "priorhash");
+        assert_eq!(up.char_count, 100);
+        assert_eq!(up.token_count, 25);
+        assert_eq!(up.language.as_deref(), Some("markdown"));
+        assert_eq!(up.source_url.as_deref(), Some("https://src/a"));
+        assert_eq!(up.published_url.as_deref(), Some("https://docs/a"));
+        assert!(up.frontmatter.is_some(), "frontmatter carried through");
+    }
+
+    #[test]
+    fn new_doc_uploaded_with_chunks_and_no_carry_flag() {
+        let up = build_new_upload(&sample_planned_new("b.md"), None);
+        assert!(!up.carried, "new docs are never carry-forward");
+        assert!(!up.chunks.is_empty(), "new docs carry their freshly-chunked content");
+        assert_eq!(up.path, "b.md");
+        assert_eq!(up.chunks.len(), 1);
+        assert_eq!(up.chunks[0].content, "hello world");
+        // Chunk embeddings are attached later by embed_batch; the builder leaves
+        // them unset.
+        assert!(up.chunks[0].embedding.is_none());
+    }
+
+    #[test]
+    fn new_upload_applies_source_base_url_fallback() {
+        // When a PlannedDocument has no source_url, --source-base-url supplies one.
+        let up = build_new_upload(&sample_planned_new("b.md"), Some("https://base/"));
+        assert_eq!(
+            up.source_url.as_deref(),
+            Some("https://base/b.md"),
+            "trailing slash trimmed; path appended",
+        );
     }
 }
 

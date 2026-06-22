@@ -176,7 +176,11 @@ struct InventoryDocWire {
 /// plan to treat every document as new (safe, conservative). If the prior
 /// version's embedding models differ from the run's the same fallback applies —
 /// we must re-embed everything.
-async fn fetch_prior_state(
+///
+/// Shared with `ingest run` (`super::run`): `pub(super)` keeps it reachable from
+/// the sibling command without duplicating the inventory-fetch + model-gate
+/// logic, so plan and run can never diverge in how they classify carry-forward.
+pub(super) async fn fetch_prior_state(
     server_url: &str,
     slug: &str,
     run_model: &str,

@@ -1,7 +1,7 @@
 //! Shared chunker contract: one trait, one config, one output shape, used by
 //! the markdown chunker, the code chunkers, and the line-window fallback.
 
-use mnm_core::types::SymbolSegment;
+use mnm_core::types::{DocumentKind, SymbolSegment};
 
 /// One chunk emitted by any [`Chunker`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,6 +81,42 @@ pub trait Chunker {
     /// Returns [`ChunkError`] only when the caller asked for strict behavior;
     /// the default implementations recover internally and return `Ok`.
     fn chunk(&self, body: &str, cfg: &ChunkerConfig) -> Result<Vec<Chunk>, ChunkError>;
+}
+
+/// Chunk one document body with the chunker that matches its [`DocumentKind`].
+///
+/// Single source of truth for the kind → chunker dispatch, shared by the ingest
+/// [`PlanBuilder`](crate::ingest::PlanBuilder) (new-document path) and the CLI
+/// carried-document path (which re-chunks carry-forward docs only to recover
+/// their document-level token total — no embedding is performed on them). Both
+/// callers MUST route through this function so the dispatch can never drift
+/// between them.
+///
+/// `ext` is the lowercased file extension (no leading dot); it selects the
+/// per-language code chunker and is ignored for markdown/plaintext. A parser
+/// failure inside any chunker is recovered internally (line-window fallback),
+/// so this never errors and an empty/whitespace body yields no chunks.
+#[must_use]
+pub fn chunk_document(
+    kind: DocumentKind,
+    ext: &str,
+    body: &str,
+    cfg: &ChunkerConfig,
+) -> Vec<Chunk> {
+    match kind {
+        DocumentKind::Markdown => crate::markdown::MarkdownChunker
+            .chunk(body, cfg)
+            .unwrap_or_default(),
+        DocumentKind::Code => {
+            let lang = crate::code::language::Language::for_extension(ext);
+            crate::code::chunker_for_ext(lang, ext)
+                .chunk(body, cfg)
+                .unwrap_or_default()
+        }
+        DocumentKind::Plaintext => crate::code::line_window::LineWindowChunker
+            .chunk(body, cfg)
+            .unwrap_or_default(),
+    }
 }
 
 #[cfg(test)]
