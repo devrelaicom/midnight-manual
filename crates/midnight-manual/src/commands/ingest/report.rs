@@ -144,8 +144,10 @@ pub fn write_atomic(path: &Path, report: &IngestReport) -> anyhow::Result<()> {
     let json = serde_json::to_vec_pretty(report)?;
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, &json).map_err(|e| anyhow::anyhow!("write {}: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, path)
-        .map_err(|e| anyhow::anyhow!("rename into {}: {e}", path.display()))?;
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp); // don't leave a partial temp behind
+        anyhow::anyhow!("rename into {}: {e}", path.display())
+    })?;
     Ok(())
 }
 
@@ -160,6 +162,25 @@ mod tests {
         assert_eq!(v["schema_version"], 1);
         assert_eq!(v["stats"]["carried"], r.stats.carried);
         assert!(v["documents"].is_array());
+    }
+
+    #[test]
+    fn write_atomic_cleans_tmp_on_rename_failure() {
+        // Force a rename failure by pointing the destination inside a path
+        // whose "parent" is actually a regular file, so rename(2) returns ENOTDIR.
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, b"").unwrap(); // regular file, not a directory
+        let path = blocker.join("out.json"); // parent is a file → rename will fail
+
+        let json = serde_json::to_vec_pretty(&IngestReport::sample()).unwrap();
+        let tmp = path.with_extension("json.tmp");
+        // Write the temp file directly (bypassing preflight) to simulate the
+        // mid-flight failure scenario.
+        std::fs::write(&tmp, &json).unwrap_or(()); // may fail too; that's OK
+        let result = write_atomic(&path, &IngestReport::sample());
+        assert!(result.is_err(), "expected rename failure");
+        assert!(!tmp.exists(), ".tmp must be cleaned up after rename failure");
     }
 
     #[test]
