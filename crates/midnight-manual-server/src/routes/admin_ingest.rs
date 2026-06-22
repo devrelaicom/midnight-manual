@@ -206,6 +206,27 @@ pub struct UploadDocumentsResponse {
     pub conflicts: Vec<UploadConflict>,
 }
 
+/// Optional body for `POST .../finalize`.
+///
+/// When `expected_document_total` is present the server counts documents
+/// persisted for the run and refuses to activate a version whose count
+/// differs from the expectation. Absent (or `null`) → guard skipped,
+/// preserving the original bodyless-finalize behaviour for existing callers.
+///
+/// `#[serde(default)]` ensures a bodyless request (no `Content-Type`,
+/// no payload) round-trips cleanly; axum's `Option<Json<T>>` extractor
+/// yields `None` for a missing body, so the struct never needs to be
+/// instantiated for those callers.
+#[derive(Debug, Deserialize)]
+pub struct FinalizeRequest {
+    /// Documents the caller expected to persist (new + carried). When present,
+    /// the guard refuses to activate a version whose persisted count differs.
+    /// Optional + serde-default so a bodyless finalize (existing callers) is
+    /// unaffected; the incremental-ingest CLI always sends it.
+    #[serde(default)]
+    pub expected_document_total: Option<i64>,
+}
+
 /// Response from `POST .../finalize`.
 #[derive(Debug, Serialize)]
 pub struct FinalizeResult {
@@ -628,6 +649,7 @@ async fn finalize_run(
     State(state): State<AppState>,
     Extension(req_id): Extension<RequestId>,
     auth: Option<Extension<AuthContext>>,
+    body: Option<Json<FinalizeRequest>>,
 ) -> Response {
     let rid = req_id.as_str();
     if let Some(resp) = admin_reject(rid, auth.as_ref()) {
@@ -669,6 +691,36 @@ async fn finalize_run(
                 .build(),
             rid,
         );
+    }
+
+    // Completeness guard: when the caller supplies `expected_document_total`,
+    // count persisted documents for this run and refuse to activate a version
+    // whose count differs. A bodyless finalize (existing callers, every server
+    // test) supplies no body → `expected` is `None` → guard skipped entirely.
+    let expected = body.and_then(|Json(r)| r.expected_document_total);
+    if let Some(expected) = expected {
+        let persisted = match source_version::count_documents(&state.pool, run_id).await {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::warn!(request_id = rid, op = "finalize_run", error = %e, "count failed");
+                return error::service_unavailable("document count failed", rid);
+            }
+        };
+        if persisted != expected {
+            // Abort the run so the next attempt starts from a clean building state.
+            let _ = source_version::abort(&state.pool, run_id).await;
+            return error::into_response(
+                CoreError::builder(ErrorCode::InvalidRequest)
+                    .message(format!(
+                        "finalize aborted: persisted {persisted} documents, expected {expected}"
+                    ))
+                    .remediation(
+                        "re-run ingest; some documents were dropped (see upload conflicts)",
+                    )
+                    .build(),
+                rid,
+            );
+        }
     }
 
     match source_version::finalize(&state.pool, run_id).await {

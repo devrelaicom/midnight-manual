@@ -228,6 +228,131 @@ async fn new_doc_with_chunks_inserts_when_no_prior_version() {
     assert_eq!(body["conflicts"].as_array().unwrap().len(), 0, "no conflicts expected: {body}");
 }
 
+// ── Completeness-guard tests (Task 4) ───────────────────────────────────────
+
+/// Returns the revision of the active source_version for `slug`, or `None`
+/// when no version is active.
+async fn active_revision(pool: &sqlx::PgPool, slug: &str) -> Option<i32> {
+    let row: Option<(i32,)> = sqlx::query_as(
+        "SELECT sv.revision \
+         FROM source_version sv \
+         JOIN source s ON s.id = sv.source_id \
+         WHERE s.slug = $1 AND sv.is_active = true \
+         LIMIT 1",
+    )
+    .bind(slug)
+    .fetch_optional(pool)
+    .await
+    .expect("active_revision query");
+    row.map(|(r,)| r)
+}
+
+/// Supplying a wrong `expected_document_total` must 400 and leave the run
+/// unactivated (the run is aborted so the next run starts clean).
+#[tokio::test]
+async fn finalize_rejects_document_count_mismatch() {
+    let h = common::boot().await;
+    let kp = Keypair::generate();
+    let cfg = cfg_with_auth(user_store_for("aaron", &kp), vec![7u8; 32]);
+    let app = app::build(h.pool.clone(), cfg).expect("build app");
+    let token = mint_admin_token(app.clone(), "aaron", &kp).await;
+    let (slug, _) = seed_source_no_version(&h.pool).await;
+
+    let run_id = start_run(&app, &slug, &token).await;
+
+    // Upload exactly 1 document.
+    upload(
+        &app,
+        &slug,
+        &run_id,
+        &token,
+        json!({
+            "documents": [{
+                "path": "a.md",
+                "kind": "markdown",
+                "content_hash": "haaa",
+                "provenance": {},
+                "chunks": [{
+                    "chunk_index": 0,
+                    "total_chunks": 1,
+                    "content": "hello world",
+                    "content_hash": "ca"
+                }]
+            }]
+        }),
+    )
+    .await;
+
+    // Supply a wrong expected total (2) — server has 1 → must 400.
+    let (status, _body) = call(
+        app.clone(),
+        "POST",
+        &format!("/v1/admin/sources/{slug}/ingest-runs/{run_id}/finalize"),
+        Some(&token),
+        Some(json!({ "expected_document_total": 2 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "should 400 on count mismatch");
+
+    // The run must NOT have been promoted to active.
+    assert!(
+        active_revision(&h.pool, &slug).await.is_none(),
+        "source must have no active revision after a rejected finalize"
+    );
+}
+
+/// A finalize with no body at all must still succeed — guard is skipped.
+#[tokio::test]
+async fn finalize_without_body_skips_guard() {
+    let h = common::boot().await;
+    let kp = Keypair::generate();
+    let cfg = cfg_with_auth(user_store_for("aaron", &kp), vec![7u8; 32]);
+    let app = app::build(h.pool.clone(), cfg).expect("build app");
+    let token = mint_admin_token(app.clone(), "aaron", &kp).await;
+    let (slug, _) = seed_source_no_version(&h.pool).await;
+
+    let run_id = start_run(&app, &slug, &token).await;
+
+    upload(
+        &app,
+        &slug,
+        &run_id,
+        &token,
+        json!({
+            "documents": [{
+                "path": "b.md",
+                "kind": "markdown",
+                "content_hash": "hbbb",
+                "provenance": {},
+                "chunks": [{
+                    "chunk_index": 0,
+                    "total_chunks": 1,
+                    "content": "no guard needed",
+                    "content_hash": "cb"
+                }]
+            }]
+        }),
+    )
+    .await;
+
+    // Bodyless finalize — old/non-CLI caller; guard must be skipped → 200.
+    let (status, _body) = call(
+        app.clone(),
+        "POST",
+        &format!("/v1/admin/sources/{slug}/ingest-runs/{run_id}/finalize"),
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "bodyless finalize must succeed");
+
+    // Version is now active.
+    assert!(
+        active_revision(&h.pool, &slug).await.is_some(),
+        "source must have an active revision after a successful finalize"
+    );
+}
+
 /// A new document without chunks is rejected even when there is no prior
 /// active version (zero-chunk guard).
 #[tokio::test]
