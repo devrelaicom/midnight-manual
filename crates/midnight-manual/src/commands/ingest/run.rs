@@ -675,6 +675,7 @@ async fn run_inner(
                 })
                 .collect(),
             package: d.package.clone(),
+            carried: false,
         })
         .collect();
 
@@ -1558,6 +1559,8 @@ struct DocumentUpload {
     chunks: Vec<ChunkUpload>,
     /// Detected package membership (rust/npm) for this document, if any.
     package: Option<mnm_core::types::PackageRef>,
+    /// True for carry-forward docs (no chunks; server clones prior chunks).
+    carried: bool,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -2090,6 +2093,7 @@ mod tests {
                 char_count: 0,
                 token_count: 0,
                 package: None,
+                carried: false,
                 chunks: vec![mk_chunk(0), mk_chunk(1)],
             },
             DocumentUpload {
@@ -2105,6 +2109,7 @@ mod tests {
                 char_count: 0,
                 token_count: 0,
                 package: None,
+                carried: false,
                 chunks: vec![mk_chunk(0)],
             },
         ];
@@ -2226,6 +2231,7 @@ mod tests {
             char_count: 0,
             token_count: 0,
             package: None,
+            carried: false,
             chunks: vec![mk_chunk(0)],
         }];
         assert!(attach_embeddings(&mut docs, vec![]).is_err());
@@ -2279,6 +2285,7 @@ mod tests {
             char_count: 0,
             token_count: 0,
             package: None,
+            carried: false,
             chunks,
         }
     }
@@ -2504,6 +2511,7 @@ mod tests {
                 char_count: 0,
                 token_count: 0,
                 package: None,
+                carried: false,
                 chunks: vec![ChunkUpload {
                     chunk_index: 0,
                     total_chunks: 1,
