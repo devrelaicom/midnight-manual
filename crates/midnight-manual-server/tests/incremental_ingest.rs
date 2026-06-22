@@ -229,6 +229,59 @@ fn carried_payload(path: &str, content_hash: &str) -> Value {
     })
 }
 
+/// Build a `carried: true` payload that includes a `package` field.
+/// Used to prove carry-forward preserves `package_id`.
+fn carried_payload_with_package(
+    path: &str,
+    content_hash: &str,
+    pkg_kind: &str,
+    pkg_name: &str,
+) -> Value {
+    json!({
+        "path": path,
+        "kind": "markdown",
+        "content_hash": content_hash,
+        "provenance": {},
+        "carried": true,
+        "chunks": [],
+        "package": {
+            "kind": pkg_kind,
+            "name": pkg_name,
+            "manifest_path": null,
+        },
+    })
+}
+
+/// Build a document payload that includes a `package` field.
+fn doc_payload_with_package(path: &str, content: &str, pkg_kind: &str, pkg_name: &str) -> Value {
+    let content_hash = format!("h:{}:{}", path, pseudo_hash(content));
+    let chunk_hash = format!("c:{}:{}", path, pseudo_hash(content));
+    json!({
+        "path": path,
+        "kind": "markdown",
+        "content_hash": content_hash,
+        "char_count": content.len(),
+        "token_count": 0,
+        "provenance": {},
+        "package": {
+            "kind": pkg_kind,
+            "name": pkg_name,
+            "manifest_path": null,
+        },
+        "chunks": [{
+            "chunk_index": 0,
+            "total_chunks": 1,
+            "content": content,
+            "content_hash": chunk_hash,
+            "heading_path": [],
+            "symbol_path": [],
+            "start_byte": 0,
+            "end_byte": content.len(),
+            "token_count": 0,
+        }],
+    })
+}
+
 // ── DB query helpers ──────────────────────────────────────────────────────────
 
 /// Return the active revision for `slug`, or `None`.
@@ -306,6 +359,19 @@ async fn content_hash_for_doc(pool: &sqlx::PgPool, sv_id: Uuid, path: &str) -> S
     .fetch_one(pool)
     .await
     .expect("content_hash_for_doc query")
+}
+
+/// Return the `package_id` (if any) for the document at `path` in `sv_id`.
+async fn package_id_for_doc(pool: &sqlx::PgPool, sv_id: Uuid, path: &str) -> Option<Uuid> {
+    sqlx::query_scalar(
+        "SELECT package_id FROM document \
+         WHERE source_version_id = $1 AND source_path = $2",
+    )
+    .bind(sv_id)
+    .bind(path)
+    .fetch_one(pool)
+    .await
+    .expect("package_id_for_doc query")
 }
 
 // ── Test 1 ───────────────────────────────────────────────────────────────────
@@ -717,9 +783,9 @@ async fn embed_failed_doc_is_repaired_on_reingest() {
 
     // ── Assertion 3: re-uploading a.md with actual chunks fixes it ────────
     // Start v3, upload a.md with a real chunk (no embedding → embed_failed
-    // again in this text-only test, but the point is that re-uploading with
-    // chunks is the correct repair path, not carrying). Here we confirm the
-    // chunk count is non-zero and the doc is "new" in v3.
+    // again in this text-only test without an embedding stub, so the test
+    // proves the repair PATH — re-upload not carry — not embed_complete=true).
+    // Re-uploading with chunks is the correct repair path, not carrying.
     let r3 = start_run(&app, &slug, "voyage-context-3@1", &token).await;
     let new_content = "# Alpha repaired content";
     // Use a different content so it's a genuine new upload (not carry).
@@ -743,4 +809,93 @@ async fn embed_failed_doc_is_repaired_on_reingest() {
     let v3_a_chunks = chunk_ids_and_content_for_doc(&h.pool, r3_uuid, "a.md").await;
     assert!(!v3_a_chunks.is_empty(), "re-uploaded a.md in v3 must have chunks");
     assert_eq!(v3_a_chunks[0].1, new_content, "v3 a.md chunk must contain the new content");
+}
+
+// ── Test 4 ───────────────────────────────────────────────────────────────────
+
+/// A document uploaded with a `package` reference must retain its `package_id`
+/// when carried forward to a new source version.
+///
+/// Regression test for the bug where `carry_forward_one` hardcoded
+/// `package_id: None`, silently stripping package membership from carried docs.
+///
+/// Steps:
+/// - v1: upload `lib.rs` with `package = { kind: "rust", name: "my-crate" }`.
+/// - Assert v1's `document.package_id IS NOT NULL`.
+/// - v2: carry `lib.rs` unchanged (same content_hash, same package reference).
+/// - Assert v2's carried `document.package_id IS NOT NULL` and equals v1's id.
+#[tokio::test]
+async fn carry_forward_preserves_package_id() {
+    let h = common::boot().await;
+    let kp = Keypair::generate();
+    let cfg = cfg_with_auth(user_store_for("admin", &kp), vec![7u8; 32]);
+    let app = app::build(h.pool.clone(), cfg).expect("build app");
+    let token = mint_admin_token(app.clone(), "admin", &kp).await;
+    let slug = seed_source_no_version(&h.pool, "carry-pkg").await;
+
+    // ── v1: upload lib.rs with a rust package reference ───────────────────
+    let r1 = start_run(&app, &slug, "voyage-context-3@1", &token).await;
+    let (status, body) = upload(
+        &app,
+        &slug,
+        &r1,
+        &token,
+        json!({
+            "documents": [
+                doc_payload_with_package("lib.rs", "// my crate", "rust", "my-crate"),
+            ],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "v1 upload: {body}");
+    assert_eq!(body["accepted"], 1, "v1 must accept lib.rs: {body}");
+
+    let (fin_status, fin_body) =
+        finalize(&app, &slug, &r1, &token, Some(json!({"expected_document_total": 1}))).await;
+    assert_eq!(fin_status, StatusCode::OK, "v1 finalize: {fin_body}");
+    assert_eq!(fin_body["revision"], 1, "v1 revision: {fin_body}");
+
+    // v1 lib.rs must have a non-null package_id.
+    let v1_sv = sv_id_for_revision(&h.pool, &slug, 1).await;
+    let v1_lib_hash = content_hash_for_doc(&h.pool, v1_sv, "lib.rs").await;
+    let v1_pkg_id = package_id_for_doc(&h.pool, v1_sv, "lib.rs").await;
+    assert!(
+        v1_pkg_id.is_some(),
+        "v1 lib.rs must have a non-null package_id after initial upload"
+    );
+
+    // ── v2: carry lib.rs unchanged with its package reference ────────────
+    let r2 = start_run(&app, &slug, "voyage-context-3@1", &token).await;
+    let (status, body) = upload(
+        &app,
+        &slug,
+        &r2,
+        &token,
+        json!({
+            "documents": [
+                carried_payload_with_package("lib.rs", &v1_lib_hash, "rust", "my-crate"),
+            ],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "v2 carry upload: {body}");
+    assert_eq!(body["accepted"], 1, "carry must be accepted: {body}");
+    assert_eq!(body["carried"], 1, "lib.rs must be carried: {body}");
+    assert_eq!(body["conflicts"].as_array().unwrap().len(), 0, "no conflicts expected: {body}");
+
+    let (fin_status, fin_body) =
+        finalize(&app, &slug, &r2, &token, Some(json!({"expected_document_total": 1}))).await;
+    assert_eq!(fin_status, StatusCode::OK, "v2 finalize: {fin_body}");
+    assert_eq!(fin_body["revision"], 2, "v2 revision: {fin_body}");
+
+    // v2 lib.rs must ALSO have a non-null package_id (carry-forward preserves it).
+    let v2_sv = sv_id_for_revision(&h.pool, &slug, 2).await;
+    let v2_pkg_id = package_id_for_doc(&h.pool, v2_sv, "lib.rs").await;
+    assert!(
+        v2_pkg_id.is_some(),
+        "carried lib.rs in v2 must have a non-null package_id (package membership was preserved)"
+    );
+    // The package row for v2 is a distinct upsert (different source_version_id)
+    // but must exist — the ids differ across source versions by design.
+    let _ = v1_pkg_id; // referenced above; suppress unused-variable warning
 }

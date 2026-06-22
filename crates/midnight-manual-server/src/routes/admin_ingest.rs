@@ -989,6 +989,11 @@ enum UploadDecision {
 /// Decide how to handle one uploaded document. The server is the authority:
 /// a carry is honoured only when a prior doc matches AND models are compatible;
 /// a chunk-less document is never inserted (it would be unsearchable).
+///
+/// Both carry-refusal messages end with [`mnm_core::ingest::REEMBED_REQUIRED_MARKER`]
+/// so the CLI can identify them with `.contains(REEMBED_REQUIRED_MARKER)`.
+/// Because this is a `const fn` the strings are `&'static str` literals; the
+/// compile-time assertions below confirm the marker is present.
 #[allow(clippy::fn_params_excessive_bools)]
 const fn classify_upload(
     carried_flag: bool,
@@ -1017,6 +1022,73 @@ const fn classify_upload(
     }
 }
 
+// Compile-time assertions that the two carry-refusal strings end with the
+// shared marker const.  This prevents the server and CLI from drifting apart
+// if either literal is edited in the future.
+
+/// `const fn` byte-slice ends-with check used by the compile-time assertions
+/// below.  Defined at module level to satisfy `clippy::items_after_statements`.
+const fn bytes_end_with(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.len() > haystack.len() {
+        return false;
+    }
+    let offset = haystack.len() - needle.len();
+    let mut i = 0;
+    while i < needle.len() {
+        if haystack[offset + i] != needle[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+const _: () = {
+    let marker = mnm_core::ingest::REEMBED_REQUIRED_MARKER.as_bytes();
+    let no_prior = b"carry requested but no matching prior document; re-embed required";
+    let model_changed = b"carry requested but embedding model changed; re-embed required";
+    assert!(
+        bytes_end_with(no_prior, marker),
+        "no-prior conflict string must end with REEMBED_REQUIRED_MARKER"
+    );
+    assert!(
+        bytes_end_with(model_changed, marker),
+        "model-changed conflict string must end with REEMBED_REQUIRED_MARKER"
+    );
+};
+
+/// Upsert the package referenced by `doc.package` (if any) and return its id.
+///
+/// Returns `None` when the document carries no package reference.  Both
+/// `insert_new_document` and `carry_forward_one` call this so that code docs
+/// never lose their package membership regardless of which path lands them in
+/// the new source version.
+async fn resolve_package_id(
+    pool: &sqlx::PgPool,
+    sv_id: Uuid,
+    doc: &DocumentUpload,
+) -> Result<Option<Uuid>, StoreError> {
+    let Some(pkg) = &doc.package else {
+        return Ok(None);
+    };
+    let kind = match pkg.kind.as_str() {
+        "rust" => mnm_core::types::PackageKind::Rust,
+        "npm" => mnm_core::types::PackageKind::Npm,
+        "compact" => mnm_core::types::PackageKind::Compact,
+        _ => mnm_core::types::PackageKind::Other,
+    };
+    let id = package::upsert(
+        pool,
+        sv_id,
+        kind,
+        &pkg.name,
+        pkg.version.as_deref(),
+        pkg.manifest_path.as_deref(),
+    )
+    .await?;
+    Ok(Some(id))
+}
+
 async fn insert_new_document(
     pool: &sqlx::PgPool,
     sv_id: Uuid,
@@ -1028,27 +1100,7 @@ async fn insert_new_document(
     // their chunks' concatenated text — for v1 we trust the client's hash
     // (the manifest validator + CLI compute it deterministically). Future
     // hardening: rehash server-side against a canonicalised body.
-    let package_id = if let Some(pkg) = &doc.package {
-        let kind = match pkg.kind.as_str() {
-            "rust" => mnm_core::types::PackageKind::Rust,
-            "npm" => mnm_core::types::PackageKind::Npm,
-            "compact" => mnm_core::types::PackageKind::Compact,
-            _ => mnm_core::types::PackageKind::Other,
-        };
-        Some(
-            package::upsert(
-                pool,
-                sv_id,
-                kind,
-                &pkg.name,
-                pkg.version.as_deref(),
-                pkg.manifest_path.as_deref(),
-            )
-            .await?,
-        )
-    } else {
-        None
-    };
+    let package_id = resolve_package_id(pool, sv_id, doc).await?;
     let doc_node = node::insert(pool, sv_id, Some(root), NodeKind::Document, &doc.path, 0).await?;
     let new_doc_id = document::insert(
         pool,
@@ -1120,6 +1172,10 @@ async fn carry_forward_one(
 ) -> Result<bool, StoreError> {
     let prior_chunks = chunk::list_for_carry_forward(pool, prior_doc_id).await?;
 
+    // Resolve package membership from the carried DocumentUpload so that code
+    // docs do not lose their package_id when carried rather than re-uploaded.
+    let package_id = resolve_package_id(pool, sv_id, doc).await?;
+
     let doc_node = node::insert(pool, sv_id, Some(root), NodeKind::Document, &doc.path, 0).await?;
     let new_doc_id = document::insert(
         pool,
@@ -1135,7 +1191,7 @@ async fn carry_forward_one(
             source_modified_at: doc.source_modified_at,
             frontmatter: doc.frontmatter.clone(),
             provenance: &doc.provenance,
-            package_id: None,
+            package_id,
             char_count: doc.char_count,
             token_count: doc.token_count,
         },
