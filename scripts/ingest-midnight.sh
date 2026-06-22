@@ -396,10 +396,22 @@ printf '\n%s%d ingested%s · %s%d failed%s · %s%d skipped%s\n' \
 # ── 7. aggregate report ───────────────────────────────────────────────────────
 if [ -n "$REPORT_DIR" ]; then
   if command -v jq >/dev/null 2>&1; then
-    jq -s '{ generated_kind: "corpus-ingest-index",
-             totals: { ingested: '"$INGESTED"', failed: '"$FAILED"', skipped: '"$SKIPPED"' },
-             sources: . }' "$REPORT_DIR"/*.json > "$REPORT_DIR/index.json" 2>/dev/null \
-      || echo "warning: could not build index.json (per-source reports present)" >&2
+    shopt -s nullglob
+    report_files=()
+    for f in "$REPORT_DIR"/*.json; do
+      [ "$(basename "$f")" = "index.json" ] && continue
+      report_files+=("$f")
+    done
+    shopt -u nullglob
+    if [ "${#report_files[@]}" -gt 0 ]; then
+      if ! jq -s '{ generated_kind: "corpus-ingest-index",
+                    totals: { ingested: '"$INGESTED"', failed: '"$FAILED"', skipped: '"$SKIPPED"' },
+                    sources: . }' "${report_files[@]}" > "$REPORT_DIR/index.json"; then
+        echo "warning: could not build index.json (jq error above)" >&2
+      fi
+    else
+      echo "warning: no per-source reports written; index.json skipped" >&2
+    fi
   else
     echo "warning: jq not found; per-source reports written, index.json skipped" >&2
   fi
