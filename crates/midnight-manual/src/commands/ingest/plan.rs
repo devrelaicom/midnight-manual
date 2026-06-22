@@ -108,6 +108,9 @@ pub async fn run(args: Args, server: Option<&str>, _json: bool) -> Result<()> {
     // pre-existing behaviour.
     let token = load_optional_admin_token();
 
+    // Pass `None` for the code-embedding model: `ingest plan` intentionally
+    // ignores code-embedding carry, so it conservatively over-reports "new" for
+    // code sources (never under-reports), keeping the preview safe to act on.
     let prior = fetch_prior_state(
         &server_url,
         &args.source_slug,
