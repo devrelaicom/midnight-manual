@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.4](https://github.com/devrelaicom/midnight-manual/compare/v0.2.3...v0.2.4) - 2026-06-23
+
+### Added
+
+- add opt-in Sentry error reporting to server + client ([#102](https://github.com/devrelaicom/midnight-manual/pull/102)) ([#107](https://github.com/devrelaicom/midnight-manual/pull/107))
+
 ## [0.2.3](https://github.com/devrelaicom/midnight-manual/compare/v0.2.2...v0.2.3) - 2026-06-23
 
 ### Fixed
