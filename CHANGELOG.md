@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3](https://github.com/devrelaicom/midnight-manual/compare/v0.2.2...v0.2.3) - 2026-06-23
+
+### Fixed
+
+- make ingest 413 retry-split recursive ([#101](https://github.com/devrelaicom/midnight-manual/pull/101)) ([#105](https://github.com/devrelaicom/midnight-manual/pull/105))
+
 ## [0.2.2](https://github.com/devrelaicom/midnight-manual/compare/v0.2.1...v0.2.2) - 2026-06-23
 
 ### Added
