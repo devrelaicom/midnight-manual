@@ -2730,7 +2730,7 @@ dependencies = [
 
 [[package]]
 name = "midnight-manual"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2763,7 +2763,7 @@ dependencies = [
 
 [[package]]
 name = "midnight-manual-server"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "axum",
@@ -2836,7 +2836,7 @@ dependencies = [
 
 [[package]]
 name = "mnm-auth"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek",
@@ -2859,7 +2859,7 @@ dependencies = [
 
 [[package]]
 name = "mnm-content"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "cc",
@@ -2912,7 +2912,7 @@ dependencies = [
 
 [[package]]
 name = "mnm-core"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "insta",
  "proptest",
@@ -2929,7 +2929,7 @@ dependencies = [
 
 [[package]]
 name = "mnm-embedding"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "mnm-core",
  "once_cell",
@@ -2946,7 +2946,7 @@ dependencies = [
 
 [[package]]
 name = "mnm-mcp"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "jsonschema",
  "mnm-core",
@@ -2969,7 +2969,7 @@ dependencies = [
 
 [[package]]
 name = "mnm-retrieval"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "mnm-core",
  "mnm-store",
@@ -2984,7 +2984,7 @@ dependencies = [
 
 [[package]]
 name = "mnm-sentry"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "mnm-core",
  "sentry",
@@ -2996,7 +2996,7 @@ dependencies = [
 
 [[package]]
 name = "mnm-skills"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "mnm-core",
  "regex",
@@ -3010,7 +3010,7 @@ dependencies = [
 
 [[package]]
 name = "mnm-store"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "mnm-core",
  "pgvector",
@@ -3028,7 +3028,7 @@ dependencies = [
 
 [[package]]
 name = "mnm-telemetry"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "async-trait",
  "jsonschema",
