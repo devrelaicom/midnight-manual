@@ -15,6 +15,8 @@ use std::time::Instant;
 
 use anyhow::Result;
 use clap::{CommandFactory as _, FromArgMatches as _, Parser, Subcommand};
+// `ConfigEnv` brings `.var(..)` into scope for the Sentry DSN lookup in `run`.
+use mnm_core::config::ConfigEnv as _;
 use mnm_telemetry::events::{CliCommandName, Component, EventPayload, Outcome};
 use mnm_telemetry::{Event, TelemetryClient};
 
@@ -144,10 +146,65 @@ pub async fn run() -> Result<()> {
     }
     let matches = cmd.get_matches();
     let cli = Cli::from_arg_matches(&matches).map_err(anyhow::Error::from)?;
-    init_logging(cli.log_level.as_deref());
+
+    let env = mnm_core::config::StdEnv;
+
+    // Opt-in Sentry error reporting (mnm-sentry). Disabled by default. Init
+    // BEFORE `init_logging` so the sentry-tracing layer can attach. The guard
+    // is held for all of `run()` (process lifetime for `mcp serve`); it is
+    // `Send`+`Sync`, so holding it across `.await` is fine. The client gate
+    // also requires the local `auth.toml` to carry an `[admin]` section, but we
+    // only read that file when the cheap env pre-check already passes — so a
+    // disabled-by-default install never touches auth.toml here.
+    let sentry_guard = if mnm_sentry::env_gate_passes(&env) {
+        // Only now touch auth.toml. Any read error (missing, malformed, or
+        // insecure-permission file) is treated as "no admin" — a fail-safe that
+        // disables Sentry rather than blocking startup. Logging isn't initialized
+        // yet here, so there is nowhere to surface the error.
+        let auth = mnm_core::paths::auth_file_path(&env).and_then(|p| {
+            mnm_core::auth_file::AuthFile::read_optional(&p)
+                .ok()
+                .flatten()
+        });
+        let admin = auth.as_ref().and_then(|f| f.admin.as_ref());
+        let admin_present = admin.is_some();
+        let admin_user_id = admin.map(|a| a.user_id.clone());
+        let mut secrets = Vec::new();
+        if let Some(a) = admin {
+            secrets.push(a.token.clone());
+        }
+        if let Some(ru) = auth.as_ref().and_then(|f| f.read_uplift.as_ref()) {
+            secrets.push(ru.token.clone());
+        }
+        if let Some(v) = std::env::var("VOYAGE_API_KEY")
+            .ok()
+            .filter(|s| !s.is_empty())
+        {
+            secrets.push(v);
+        }
+        if let Some(dsn) = env.var(mnm_sentry::KEY_ENV) {
+            secrets.push(dsn);
+        }
+        mnm_sentry::init(
+            &env,
+            mnm_sentry::InitOptions {
+                admin_present,
+                release: crate::VERSION,
+                default_environment: "development",
+                admin_user_id,
+                secrets,
+            },
+        )
+    } else {
+        None
+    };
+
+    init_logging(cli.log_level.as_deref(), sentry_guard.is_some());
+    // Keep the Sentry guard alive until `run()` returns so buffered events
+    // flush on shutdown; it must not drop before command dispatch/await.
+    let _sentry_guard = sentry_guard;
 
     let started = Instant::now();
-    let env = mnm_core::config::StdEnv;
     let (cfg, _) =
         mnm_core::config::Config::discover(cli.config.as_deref(), &env).unwrap_or_default();
     // FR-107 mechanism #3: seed the runtime toggle from the persistent
@@ -327,15 +384,29 @@ fn should_show_admin_cmds() -> bool {
     cfg.cli.show_admin_cmds
 }
 
-fn init_logging(level: Option<&str>) {
+fn init_logging(level: Option<&str>, sentry_on: bool) {
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::util::SubscriberInitExt as _;
     use tracing_subscriber::EnvFilter;
+    use tracing_subscriber::Layer as _;
     let filter = match level {
         Some(l) => EnvFilter::new(l),
         None => EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
     };
     // CLI diagnostics go to stderr (FR-021); stdout is reserved for --json payloads.
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(std::io::stderr)
+    // The sentry-tracing layer is attached only when Sentry initialized (inert
+    // otherwise). `Option<Layer>` is itself a `Layer`, so this is a no-op when off.
+    let sentry_layer = if sentry_on {
+        Some(mnm_sentry::tracing_layer())
+    } else {
+        None
+    };
+    let _ = tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(std::io::stderr)
+                .with_filter(filter),
+        )
+        .with(sentry_layer)
         .try_init();
 }

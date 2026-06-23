@@ -20,13 +20,61 @@ use tracing_subscriber::EnvFilter;
 #[allow(clippy::too_many_lines)]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Structured JSON logs from day one (FR-105). RUST_LOG override permitted.
-    tracing_subscriber::fmt()
-        .json()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::util::SubscriberInitExt as _;
+    use tracing_subscriber::Layer as _;
+
+    // Opt-in Sentry error reporting (mnm-sentry). Init BEFORE the subscriber so
+    // the sentry-tracing layer can attach, and hold the guard for all of `main`
+    // so buffered events flush on shutdown. Disabled by default — see the gate
+    // in `mnm_sentry`. We gather secrets from raw env (config isn't parsed yet,
+    // which also avoids ordering issues): every value below is redacted from
+    // outgoing events. The server has no admin user, so `admin_present = true`
+    // (the admin gate is client-only) and `admin_user_id = None`.
+    let env = mnm_core::config::StdEnv;
+    let sentry_guard = {
+        let mut secrets = Vec::new();
+        for name in [
+            "DATABASE_URL",
+            "VOYAGE_API_KEY",
+            "MIDNIGHT_MANUAL_JWT_SECRET",
+            "MIDNIGHT_MANUAL_GITHUB_OAUTH_CLIENT_SECRET",
+            "MIDNIGHT_MANUAL_USER_STORE",
+            mnm_sentry::KEY_ENV,
+        ] {
+            if let Some(v) = std::env::var(name).ok().filter(|s| !s.is_empty()) {
+                secrets.push(v);
+            }
+        }
+        mnm_sentry::init(
+            &env,
+            mnm_sentry::InitOptions {
+                admin_present: true,
+                release: env!("CARGO_PKG_VERSION"),
+                default_environment: "production",
+                admin_user_id: None,
+                secrets,
+            },
         )
-        .with_target(false)
+    };
+
+    // Structured JSON logs from day one (FR-105). RUST_LOG override permitted.
+    // The EnvFilter is a per-layer filter on the fmt layer (not a global registry
+    // filter), so it gates only the JSON logs; the sentry layer stays unfiltered
+    // and captures ERROR events regardless of RUST_LOG — consistent with the CLI.
+    // The sentry layer is attached only when Sentry initialized (inert otherwise);
+    // `Option<Layer>` is itself a `Layer`.
+    let sentry_layer = sentry_guard.as_ref().map(|_| mnm_sentry::tracing_layer());
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer()
+                .json()
+                .with_target(false)
+                .with_filter(
+                    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+                ),
+        )
+        .with(sentry_layer)
         .init();
 
     let cfg = ServerConfig::from_env().context("load server config")?;

@@ -9,6 +9,7 @@ members = [
     "crates/mnm-telemetry",
     "crates/mnm-skills",
     "crates/mnm-mcp",
+    "crates/mnm-sentry",
     "crates/midnight-manual",
     "crates/midnight-manual-server",
 ]
@@ -60,6 +61,7 @@ mnm-auth        = { path = "crates/mnm-auth", version = "0.2.3" }
 mnm-telemetry   = { path = "crates/mnm-telemetry", version = "0.2.3" }
 mnm-skills      = { path = "crates/mnm-skills", version = "0.2.3" }
 mnm-mcp         = { path = "crates/mnm-mcp", version = "0.2.3" }
+mnm-sentry      = { path = "crates/mnm-sentry", version = "0.2.3" }
 midnight-manual = { path = "crates/midnight-manual", version = "0.2.3" }
 
 # Async runtime + HTTP
@@ -153,6 +155,13 @@ tracing                    = "0.1"
 tracing-subscriber         = { version = "0.3", features = ["env-filter", "json"] }
 metrics                    = "0.23"
 metrics-exporter-prometheus = "0.15"
+# Opt-in Sentry error reporting (mnm-sentry crate). `default-features = false`
+# + `rustls` is mandatory: the default `transport` feature pulls `native-tls`,
+# which violates this workspace's rustls-only TLS policy (reqwest uses
+# `rustls-tls`, sqlx uses `runtime-tokio-rustls`). The explicit feature list
+# below yields a rustls-only reqwest transport.
+sentry          = { version = "0.48", default-features = false, features = ["backtrace", "contexts", "debug-images", "panic", "release-health", "reqwest", "rustls"] }
+sentry-tracing  = "0.48"
 
 # Utilities
 anyhow           = "1"
