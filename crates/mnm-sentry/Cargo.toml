@@ -1,0 +1,23 @@
+[package]
+name = "mnm-sentry"
+description = "Opt-in Sentry error/crash reporting for the midnight-manual server and CLI."
+
+version       = { workspace = true }
+edition       = { workspace = true }
+rust-version  = { workspace = true }
+license       = { workspace = true }
+authors       = { workspace = true }
+repository    = { workspace = true }
+homepage      = { workspace = true }
+
+[lints]
+workspace = true
+
+[dependencies]
+mnm-core           = { workspace = true }
+sentry             = { workspace = true }
+sentry-tracing     = { workspace = true }
+serde_json         = { workspace = true }
+tracing            = { workspace = true }
+# Needed only for the `LookupSpan` bound on `tracing_layer`; no runtime use.
+tracing-subscriber = { workspace = true }
