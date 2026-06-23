@@ -328,6 +328,7 @@ async fn document_metadata_persists_to_postgres_through_full_ingest() {
         max_file_size: 10 * 1024 * 1024,
         unsafe_no_global_limit: false,
         no_code_embeddings: false,
+        report_file: None,
     };
     let telemetry = TelemetryClient::Disabled;
 

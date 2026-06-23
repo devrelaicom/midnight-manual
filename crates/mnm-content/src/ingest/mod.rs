@@ -29,7 +29,7 @@ pub mod plan;
 pub mod walker;
 
 pub use plan::{
-    CarriedDocument, DeletedDocument, IngestError, IngestPlan, IngestStats, PlanBuilder,
-    PlannedChunk, PlannedDocument, PriorDocument, PriorState, WalkContext,
+    merge_provenance, CarriedDocument, DeletedDocument, IngestError, IngestPlan, IngestStats,
+    PlanBuilder, PlannedChunk, PlannedDocument, PriorDocument, PriorState, WalkContext,
 };
 pub use walker::{SkipReason, SkippedFile, WalkError, WalkOutcome, WalkedDocument, Walker};

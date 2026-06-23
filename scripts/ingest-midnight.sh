@@ -28,6 +28,10 @@
 #                         --offset 4 --max-manifests 2 ingests the 5th and 6th.
 #   --sources <path>      Source list (default: manifests/midnight/sources.tsv).
 #   --manifests-dir <dir> Manifest dir (default: manifests/midnight).
+#   --report-dir <dir>    Write per-source <slug>.json reports into <dir> and an
+#                         aggregate index.json after all sources finish.
+#                         Requires jq for the aggregate (per-source reports are
+#                         always written; index.json is skipped if jq is absent).
 #   -h, --help            Show this help.
 
 set -uo pipefail   # NOT -e: we deliberately continue past per-manifest errors.
@@ -41,6 +45,7 @@ OFFSET=0
 SOURCES="manifests/midnight/sources.tsv"
 MANIFESTS_DIR="manifests/midnight"
 CLONE_BASE="/tmp/mn-ingest"
+REPORT_DIR=""  # empty = no per-source report files written
 
 usage() { awk 'NR==1 {next} /^#/ {sub(/^# ?/, ""); print; next} {exit}' "$0"; }
 
@@ -54,6 +59,7 @@ while [ $# -gt 0 ]; do
     --offset)         OFFSET="${2:-}"; shift 2 ;;
     --sources)        SOURCES="${2:-}"; shift 2 ;;
     --manifests-dir)  MANIFESTS_DIR="${2:-}"; shift 2 ;;
+    --report-dir)     REPORT_DIR="${2:-}"; shift 2 ;;
     -h|--help)        usage; exit 0 ;;
     *) echo "error: unknown argument '$1' (try --help)" >&2; exit 2 ;;
   esac
@@ -61,6 +67,10 @@ done
 SERVER="${SERVER%/}"
 # Only forward --server to mnm when the user set one; otherwise let mnm resolve.
 if [ -n "$SERVER" ]; then SERVER_ARGS=(--server "$SERVER"); else SERVER_ARGS=(); fi
+# Create report dir up front so per-source writes succeed; fail early if mkdir fails.
+if [ -n "$REPORT_DIR" ]; then
+  mkdir -p "$REPORT_DIR" || { echo "error: could not create --report-dir '$REPORT_DIR'" >&2; exit 2; }
+fi
 
 if [ -n "$MAX_MANIFESTS" ] && ! [[ "$MAX_MANIFESTS" =~ ^[0-9]+$ ]]; then
   echo "error: --max-manifests must be a non-negative integer" >&2; exit 2
@@ -335,9 +345,12 @@ for row in "${rows[@]}"; do
 
   # run the ingest, streaming JSONL events to a temp file
   ev="$TMP/$slug.jsonl"; er="$TMP/$slug.err"; : >"$ev"; : >"$er"
+  # build optional --report-file arg (mirrors SERVER_ARGS pattern)
+  if [ -n "$REPORT_DIR" ]; then REPORT_ARGS=(--report-file "$REPORT_DIR/$slug.json"); else REPORT_ARGS=(); fi
   start=$SECONDS
   "$MNM" "${SERVER_ARGS[@]+"${SERVER_ARGS[@]}"}" ingest run "$man" \
-      --source-slug "$slug" --source-root "$clone" --yes --json >"$ev" 2>"$er" &
+      --source-slug "$slug" --source-root "$clone" --yes --json \
+      "${REPORT_ARGS[@]+"${REPORT_ARGS[@]}"}" >"$ev" 2>"$er" &
   pid=$!
 
   if [ "$TTY" = 1 ]; then
@@ -379,5 +392,29 @@ if [ "$SKIPPED" -gt 0 ]; then
 fi
 printf '\n%s%d ingested%s · %s%d failed%s · %s%d skipped%s\n' \
   "$GREEN" "$INGESTED" "$NC" "$RED" "$FAILED" "$NC" "$DIM" "$SKIPPED" "$NC"
+
+# ── 7. aggregate report ───────────────────────────────────────────────────────
+if [ -n "$REPORT_DIR" ]; then
+  if command -v jq >/dev/null 2>&1; then
+    shopt -s nullglob
+    report_files=()
+    for f in "$REPORT_DIR"/*.json; do
+      [ "$(basename "$f")" = "index.json" ] && continue
+      report_files+=("$f")
+    done
+    shopt -u nullglob
+    if [ "${#report_files[@]}" -gt 0 ]; then
+      if ! jq -s '{ generated_kind: "corpus-ingest-index",
+                    totals: { ingested: '"$INGESTED"', failed: '"$FAILED"', skipped: '"$SKIPPED"' },
+                    sources: . }' "${report_files[@]}" > "$REPORT_DIR/index.json"; then
+        echo "warning: could not build index.json (jq error above)" >&2
+      fi
+    else
+      echo "warning: no per-source reports written; index.json skipped" >&2
+    fi
+  else
+    echo "warning: jq not found; per-source reports written, index.json skipped" >&2
+  fi
+fi
 
 [ "$FAILED" -gt 0 ] && exit 1 || exit 0

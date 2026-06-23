@@ -7,6 +7,7 @@ use clap::{Args as ClapArgs, Subcommand};
 use mnm_telemetry::TelemetryClient;
 
 pub mod plan;
+pub mod report;
 pub mod run;
 
 /// Infer the git short SHA for the source root, or return `"unknown"`.

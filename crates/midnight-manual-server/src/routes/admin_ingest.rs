@@ -129,6 +129,11 @@ pub struct DocumentUpload {
     /// Detected package membership (rust/npm) for this document, if any.
     #[serde(default)]
     pub package: Option<mnm_core::types::PackageRef>,
+    /// True when the CLI intends this as a carry-forward (no chunks supplied;
+    /// the server clones the prior version's chunks). `#[serde(default)]` keeps
+    /// old clients (which never set it) deserializing as `false`.
+    #[serde(default)]
+    pub carried: bool,
 }
 
 /// One chunk to upload.
@@ -199,6 +204,27 @@ pub struct UploadDocumentsResponse {
     /// Per-document conflicts (e.g. duplicate path). Wire shape is the shared
     /// [`mnm_core::ingest::UploadConflict`] contract.
     pub conflicts: Vec<UploadConflict>,
+}
+
+/// Optional body for `POST .../finalize`.
+///
+/// When `expected_document_total` is present the server counts documents
+/// persisted for the run and refuses to activate a version whose count
+/// differs from the expectation. Absent (or `null`) → guard skipped,
+/// preserving the original bodyless-finalize behaviour for existing callers.
+///
+/// `#[serde(default)]` ensures a bodyless request (no `Content-Type`,
+/// no payload) round-trips cleanly; axum's `Option<Json<T>>` extractor
+/// yields `None` for a missing body, so the struct never needs to be
+/// instantiated for those callers.
+#[derive(Debug, Deserialize)]
+pub struct FinalizeRequest {
+    /// Documents the caller expected to persist (new + carried). When present,
+    /// the guard refuses to activate a version whose persisted count differs.
+    /// Optional + serde-default so a bodyless finalize (existing callers) is
+    /// unaffected; the incremental-ingest CLI always sends it.
+    #[serde(default)]
+    pub expected_document_total: Option<i64>,
 }
 
 /// Response from `POST .../finalize`.
@@ -518,6 +544,19 @@ async fn upload_documents(
             }
         };
 
+    // Prior active version's model identity, for the carry-compat gate.
+    let can_carry = match source_version::get_active(&state.pool, src.id).await {
+        Ok(prior) => {
+            prior.embedding_model_id == sv.embedding_model_id
+                && prior.code_embedding_model_id == sv.code_embedding_model_id
+        }
+        Err(StoreError::NotFound) => false, // no prior version → nothing to carry
+        Err(e) => {
+            tracing::warn!(request_id = rid, op = "upload_documents", error = %e, "prior model lookup failed");
+            return error::service_unavailable("prior version lookup failed", rid);
+        }
+    };
+
     // Cache the root node; lazily-created.
     let mut root_node: Option<Uuid> = None;
     let mut accepted = 0_usize;
@@ -546,18 +585,38 @@ async fn upload_documents(
         }
         let root = root_node.expect("root cached");
 
-        // Decide carry vs new.
-        let carry_source = prior_by_path
+        let prior_match = prior_by_path
             .get(&doc.path)
-            .filter(|(_, prior_hash)| prior_hash == &doc.content_hash)
-            .map(|(prior_id, _)| *prior_id);
+            .is_some_and(|(_, h)| h == &doc.content_hash);
 
-        let result = if let Some(prior_doc_id) = carry_source {
-            carry_forward_one(&state.pool, sv.id, sv.embedding_model_id, root, prior_doc_id, &doc)
-                .await
-        } else {
-            insert_new_document(&state.pool, sv.id, sv.embedding_model_id, root, &doc).await
-        };
+        let result =
+            match classify_upload(doc.carried, !doc.chunks.is_empty(), prior_match, can_carry) {
+                UploadDecision::Carry => {
+                    let prior_id = prior_by_path
+                        .get(&doc.path)
+                        .map(|(id, _)| *id)
+                        .expect("prior_match guarantees entry exists");
+                    carry_forward_one(
+                        &state.pool,
+                        sv.id,
+                        sv.embedding_model_id,
+                        root,
+                        prior_id,
+                        &doc,
+                    )
+                    .await
+                }
+                UploadDecision::InsertNew => {
+                    insert_new_document(&state.pool, sv.id, sv.embedding_model_id, root, &doc).await
+                }
+                UploadDecision::Conflict(reason) => {
+                    conflicts.push(UploadConflict {
+                        path: doc.path.clone(),
+                        reason: reason.to_owned(),
+                    });
+                    continue;
+                }
+            };
 
         match result {
             Ok(was_carried) => {
@@ -590,6 +649,7 @@ async fn finalize_run(
     State(state): State<AppState>,
     Extension(req_id): Extension<RequestId>,
     auth: Option<Extension<AuthContext>>,
+    body: Option<Json<FinalizeRequest>>,
 ) -> Response {
     let rid = req_id.as_str();
     if let Some(resp) = admin_reject(rid, auth.as_ref()) {
@@ -631,6 +691,36 @@ async fn finalize_run(
                 .build(),
             rid,
         );
+    }
+
+    // Completeness guard: when the caller supplies `expected_document_total`,
+    // count persisted documents for this run and refuse to activate a version
+    // whose count differs. A bodyless finalize (existing callers, every server
+    // test) supplies no body → `expected` is `None` → guard skipped entirely.
+    let expected = body.and_then(|Json(r)| r.expected_document_total);
+    if let Some(expected) = expected {
+        let persisted = match source_version::count_documents(&state.pool, run_id).await {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::warn!(request_id = rid, op = "finalize_run", error = %e, "count failed");
+                return error::service_unavailable("document count failed", rid);
+            }
+        };
+        if persisted != expected {
+            // Abort the run so the next attempt starts from a clean building state.
+            let _ = source_version::abort(&state.pool, run_id).await;
+            return error::into_response(
+                CoreError::builder(ErrorCode::InvalidRequest)
+                    .message(format!(
+                        "finalize aborted: persisted {persisted} documents, expected {expected}"
+                    ))
+                    .remediation(
+                        "re-run ingest; some documents were dropped (see upload conflicts)",
+                    )
+                    .build(),
+                rid,
+            );
+        }
     }
 
     match source_version::finalize(&state.pool, run_id).await {
@@ -888,6 +978,117 @@ fn check_code_embedded_batch(
     Ok(())
 }
 
+/// Outcome of the per-document carry-vs-insert decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UploadDecision {
+    Carry,
+    InsertNew,
+    Conflict(&'static str),
+}
+
+/// Decide how to handle one uploaded document. The server is the authority:
+/// a carry is honoured only when a prior doc matches AND models are compatible;
+/// a chunk-less document is never inserted (it would be unsearchable).
+///
+/// Both carry-refusal messages end with [`mnm_core::ingest::REEMBED_REQUIRED_MARKER`]
+/// so the CLI can identify them with `.contains(REEMBED_REQUIRED_MARKER)`.
+/// Because this is a `const fn` the strings are `&'static str` literals; the
+/// compile-time assertions below confirm the marker is present.
+#[allow(clippy::fn_params_excessive_bools)]
+const fn classify_upload(
+    carried_flag: bool,
+    has_chunks: bool,
+    prior_match: bool,
+    can_carry: bool,
+) -> UploadDecision {
+    if carried_flag {
+        if prior_match && can_carry {
+            UploadDecision::Carry
+        } else if !prior_match {
+            UploadDecision::Conflict(
+                "carry requested but no matching prior document; re-embed required",
+            )
+        } else {
+            UploadDecision::Conflict(
+                "carry requested but embedding model changed; re-embed required",
+            )
+        }
+    } else if has_chunks {
+        UploadDecision::InsertNew
+    } else {
+        UploadDecision::Conflict(
+            "document has no chunks; refusing to insert an unsearchable document",
+        )
+    }
+}
+
+// Compile-time assertions that the two carry-refusal strings end with the
+// shared marker const.  This prevents the server and CLI from drifting apart
+// if either literal is edited in the future.
+
+/// `const fn` byte-slice ends-with check used by the compile-time assertions
+/// below.  Defined at module level to satisfy `clippy::items_after_statements`.
+const fn bytes_end_with(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.len() > haystack.len() {
+        return false;
+    }
+    let offset = haystack.len() - needle.len();
+    let mut i = 0;
+    while i < needle.len() {
+        if haystack[offset + i] != needle[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+const _: () = {
+    let marker = mnm_core::ingest::REEMBED_REQUIRED_MARKER.as_bytes();
+    let no_prior = b"carry requested but no matching prior document; re-embed required";
+    let model_changed = b"carry requested but embedding model changed; re-embed required";
+    assert!(
+        bytes_end_with(no_prior, marker),
+        "no-prior conflict string must end with REEMBED_REQUIRED_MARKER"
+    );
+    assert!(
+        bytes_end_with(model_changed, marker),
+        "model-changed conflict string must end with REEMBED_REQUIRED_MARKER"
+    );
+};
+
+/// Upsert the package referenced by `doc.package` (if any) and return its id.
+///
+/// Returns `None` when the document carries no package reference.  Both
+/// `insert_new_document` and `carry_forward_one` call this so that code docs
+/// never lose their package membership regardless of which path lands them in
+/// the new source version.
+async fn resolve_package_id(
+    pool: &sqlx::PgPool,
+    sv_id: Uuid,
+    doc: &DocumentUpload,
+) -> Result<Option<Uuid>, StoreError> {
+    let Some(pkg) = &doc.package else {
+        return Ok(None);
+    };
+    let kind = match pkg.kind.as_str() {
+        "rust" => mnm_core::types::PackageKind::Rust,
+        "npm" => mnm_core::types::PackageKind::Npm,
+        "compact" => mnm_core::types::PackageKind::Compact,
+        _ => mnm_core::types::PackageKind::Other,
+    };
+    let id = package::upsert(
+        pool,
+        sv_id,
+        kind,
+        &pkg.name,
+        pkg.version.as_deref(),
+        pkg.manifest_path.as_deref(),
+    )
+    .await?;
+    Ok(Some(id))
+}
+
 async fn insert_new_document(
     pool: &sqlx::PgPool,
     sv_id: Uuid,
@@ -899,27 +1100,7 @@ async fn insert_new_document(
     // their chunks' concatenated text — for v1 we trust the client's hash
     // (the manifest validator + CLI compute it deterministically). Future
     // hardening: rehash server-side against a canonicalised body.
-    let package_id = if let Some(pkg) = &doc.package {
-        let kind = match pkg.kind.as_str() {
-            "rust" => mnm_core::types::PackageKind::Rust,
-            "npm" => mnm_core::types::PackageKind::Npm,
-            "compact" => mnm_core::types::PackageKind::Compact,
-            _ => mnm_core::types::PackageKind::Other,
-        };
-        Some(
-            package::upsert(
-                pool,
-                sv_id,
-                kind,
-                &pkg.name,
-                pkg.version.as_deref(),
-                pkg.manifest_path.as_deref(),
-            )
-            .await?,
-        )
-    } else {
-        None
-    };
+    let package_id = resolve_package_id(pool, sv_id, doc).await?;
     let doc_node = node::insert(pool, sv_id, Some(root), NodeKind::Document, &doc.path, 0).await?;
     let new_doc_id = document::insert(
         pool,
@@ -991,6 +1172,10 @@ async fn carry_forward_one(
 ) -> Result<bool, StoreError> {
     let prior_chunks = chunk::list_for_carry_forward(pool, prior_doc_id).await?;
 
+    // Resolve package membership from the carried DocumentUpload so that code
+    // docs do not lose their package_id when carried rather than re-uploaded.
+    let package_id = resolve_package_id(pool, sv_id, doc).await?;
+
     let doc_node = node::insert(pool, sv_id, Some(root), NodeKind::Document, &doc.path, 0).await?;
     let new_doc_id = document::insert(
         pool,
@@ -1006,7 +1191,7 @@ async fn carry_forward_one(
             source_modified_at: doc.source_modified_at,
             frontmatter: doc.frontmatter.clone(),
             provenance: &doc.provenance,
-            package_id: None,
+            package_id,
             char_count: doc.char_count,
             token_count: doc.token_count,
         },
@@ -1052,6 +1237,36 @@ async fn carry_forward_one(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn classify_upload_decisions() {
+        use UploadDecision::Conflict;
+
+        // carried doc, prior matches, models compatible -> carry
+        assert!(matches!(classify_upload(true, false, true, true), UploadDecision::Carry));
+        // carried doc, no prior match, model incompatible -> missing-prior wins (regression case)
+        let Conflict(msg) = classify_upload(true, false, false, false) else {
+            panic!("expected Conflict");
+        };
+        assert!(msg.contains("no matching prior document"), "got: {msg}");
+        // carried doc, no prior match, model compatible -> missing-prior message
+        let Conflict(msg) = classify_upload(true, false, false, true) else {
+            panic!("expected Conflict");
+        };
+        assert!(msg.contains("no matching prior document"), "got: {msg}");
+        // carried doc, prior matches, model changed -> model-mismatch message
+        let Conflict(msg) = classify_upload(true, false, true, false) else {
+            panic!("expected Conflict");
+        };
+        assert!(msg.contains("embedding model changed"), "got: {msg}");
+        // new doc with chunks -> insert
+        assert!(matches!(classify_upload(false, true, false, true), UploadDecision::InsertNew));
+        // new doc with zero chunks -> no-chunks conflict
+        let Conflict(msg) = classify_upload(false, false, false, true) else {
+            panic!("expected Conflict");
+        };
+        assert!(msg.contains("no chunks"), "got: {msg}");
+    }
 
     #[test]
     fn upload_request_deserializes_embedding_and_model() {
@@ -1126,6 +1341,7 @@ mod tests {
             token_count: 0,
             chunks,
             package: None,
+            carried: false,
         }
     }
 

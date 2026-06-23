@@ -331,6 +331,20 @@ pub async fn sweep_aborted(pool: &PgPool, grace_seconds: i64) -> Result<Vec<(Uui
     Ok(pairs)
 }
 
+/// Count the documents currently persisted under a source_version (used by the
+/// finalize completeness guard).
+///
+/// # Errors
+///
+/// Returns [`crate::error::StoreError::Database`] on driver failure.
+pub async fn count_documents(pool: &PgPool, source_version_id: Uuid) -> Result<i64> {
+    let (n,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM document WHERE source_version_id = $1")
+        .bind(source_version_id)
+        .fetch_one(pool)
+        .await?;
+    Ok(n)
+}
+
 /// Fetch a source_version by its monotonic revision.
 ///
 /// # Errors

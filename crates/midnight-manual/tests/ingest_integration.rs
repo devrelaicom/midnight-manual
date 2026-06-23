@@ -197,6 +197,7 @@ async fn happy_path_posts_three_step_flow() {
         max_file_size: 10 * 1024 * 1024,
         unsafe_no_global_limit: false,
         no_code_embeddings: false,
+        report_file: None,
     };
     let telemetry = TelemetryClient::Disabled;
 
@@ -287,6 +288,7 @@ async fn dry_run_does_not_hit_the_server() {
         max_file_size: 10 * 1024 * 1024,
         unsafe_no_global_limit: false,
         no_code_embeddings: false,
+        report_file: None,
     };
     let telemetry = TelemetryClient::Disabled;
 
@@ -332,6 +334,7 @@ async fn missing_admin_token_errors_with_clear_message() {
         max_file_size: 10 * 1024 * 1024,
         unsafe_no_global_limit: false,
         no_code_embeddings: false,
+        report_file: None,
     };
     let telemetry = TelemetryClient::Disabled;
 
@@ -421,6 +424,7 @@ async fn aborts_run_when_upload_fails() {
         max_file_size: 10 * 1024 * 1024,
         unsafe_no_global_limit: false,
         no_code_embeddings: false,
+        report_file: None,
     };
     let telemetry = TelemetryClient::Disabled;
 
@@ -532,6 +536,7 @@ async fn published_url_inheritance_survives_to_upload_body() {
         max_file_size: 10 * 1024 * 1024,
         unsafe_no_global_limit: false,
         no_code_embeddings: false,
+        report_file: None,
     };
     let telemetry = mnm_telemetry::TelemetryClient::Disabled;
 
@@ -699,6 +704,7 @@ async fn upload_413_is_split_and_retried() {
         max_file_size: 10 * 1024 * 1024,
         unsafe_no_global_limit: false,
         no_code_embeddings: false,
+        report_file: None,
     };
     let telemetry = TelemetryClient::Disabled;
 
@@ -757,6 +763,7 @@ async fn manifest_missing_file_errors_before_any_http() {
         max_file_size: 10 * 1024 * 1024,
         unsafe_no_global_limit: false,
         no_code_embeddings: false,
+        report_file: None,
     };
     let telemetry = TelemetryClient::Disabled;
 

@@ -11,6 +11,14 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Marker suffix appended to carry-conflict reasons when the failure requires
+/// the CLI to re-embed and re-upload the document rather than just retrying.
+///
+/// The server embeds this string in its conflict messages; the CLI matches
+/// against it with `.contains(REEMBED_REQUIRED_MARKER)`. Anchoring both sides
+/// to this constant makes the cross-crate contract compiler-checked.
+pub const REEMBED_REQUIRED_MARKER: &str = "re-embed required";
+
 /// One per-document conflict surfaced by the document-upload handler.
 ///
 /// A document carrying a conflict was NOT inserted into the corpus version

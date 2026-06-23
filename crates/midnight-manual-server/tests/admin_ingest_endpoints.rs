@@ -134,6 +134,24 @@ fn sample_document_payload(path: &str, content: &str) -> Value {
     })
 }
 
+/// A carry-forward upload: declares `carried: true` with an empty `chunks`
+/// array (the carry signal) and the SAME `content_hash` as the prior active
+/// version, so the server clones the prior version's chunks instead of
+/// inserting a fresh document. Mirrors what the CLI sends for unchanged docs.
+fn carried_document_payload(path: &str, content: &str) -> Value {
+    let content_hash = format!("h:{path}:{}", hash_of(content));
+    json!({
+        "path": path,
+        "kind": "markdown",
+        "content_hash": content_hash,
+        "char_count": content.len(),
+        "token_count": 0,
+        "provenance": {},
+        "carried": true,
+        "chunks": [],
+    })
+}
+
 fn hash_of(s: &str) -> String {
     // Trivial fold — only the deterministic property matters, not the
     // collision resistance, because the server stores whatever we send.
@@ -238,7 +256,9 @@ async fn carry_forward_reuses_unchanged_documents() {
         Some(&token),
         Some(json!({
             "documents": [
-                sample_document_payload("intro.md", intro_body),
+                // intro.md is unchanged → the CLI would carry it forward
+                // (carried:true, no chunks); the server clones prior chunks.
+                carried_document_payload("intro.md", intro_body),
                 sample_document_payload("guide.md", "# Guide\n\nSecond version with changes."),
             ],
         })),

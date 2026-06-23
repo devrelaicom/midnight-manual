@@ -22,9 +22,10 @@ use mnm_core::error::{Error as CoreError, ErrorCode};
 use mnm_core::model_id::EmbeddingModelId;
 use mnm_core::types::SourceKind;
 use mnm_store::entities::source::SourcePatch;
-use mnm_store::entities::{embedding_model, source};
+use mnm_store::entities::{document, embedding_model, source, source_version};
 use mnm_store::StoreError;
 use serde::Deserialize;
+use uuid::Uuid;
 
 use crate::app::AppState;
 use crate::error;
@@ -37,6 +38,10 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/v1/admin/sources", post(create_source).get(list_sources))
         .route("/v1/admin/sources/:slug", patch(update_source).delete(retire_source))
+        .route(
+            "/v1/admin/sources/:slug/active-version/documents",
+            axum::routing::get(active_version_documents),
+        )
 }
 
 /// Query parameters for `GET /v1/admin/sources`.
@@ -350,6 +355,96 @@ async fn list_sources(
             error::service_unavailable("source list failed", rid)
         }
     }
+}
+
+/// One document entry in the active-version inventory response.
+#[derive(serde::Serialize)]
+struct InventoryDocResponse {
+    source_path: String,
+    content_hash: String,
+    document_id: Uuid,
+    embed_complete: bool,
+}
+
+/// Response shape for `GET /v1/admin/sources/:slug/active-version/documents`.
+#[derive(serde::Serialize)]
+struct ActiveInventoryResponse {
+    /// Primary embedding model wire id, e.g. `"voyage-context-3@1"`.
+    embedding_model: String,
+    /// Code-embedding model wire id, or `null` when none.
+    code_embedding_model: Option<String>,
+    /// Documents belonging to the active version.
+    documents: Vec<InventoryDocResponse>,
+}
+
+async fn active_version_documents(
+    Path(slug): Path<String>,
+    State(state): State<AppState>,
+    Extension(req_id): Extension<RequestId>,
+    auth: Option<Extension<AuthContext>>,
+) -> Response {
+    let rid = req_id.as_str();
+    if let Some(resp) = admin_reject(rid, auth.as_ref()) {
+        return resp;
+    }
+    let src = match source::get_by_slug(&state.pool, &slug).await {
+        Ok(s) => s,
+        Err(StoreError::NotFound) => {
+            return error::not_found(format!("source `{slug}` not found"), rid);
+        }
+        Err(e) => {
+            tracing::warn!(request_id = rid, op = "active_inventory", error = %e, "source lookup failed");
+            return error::service_unavailable("source lookup failed", rid);
+        }
+    };
+    let active = match source_version::get_active(&state.pool, src.id).await {
+        Ok(a) => a,
+        Err(StoreError::NotFound) => {
+            return error::not_found(format!("source `{slug}` has no active version"), rid);
+        }
+        Err(e) => {
+            tracing::warn!(request_id = rid, op = "active_inventory", error = %e, "active version lookup failed");
+            return error::service_unavailable("active version lookup failed", rid);
+        }
+    };
+    let model = match embedding_model::get_by_id(&state.pool, active.embedding_model_id).await {
+        Ok(m) => format!("{}@{}", m.name, m.revision),
+        Err(e) => {
+            tracing::warn!(request_id = rid, op = "active_inventory", error = %e, "model lookup failed");
+            return error::service_unavailable("model lookup failed", rid);
+        }
+    };
+    let code_model = match active.code_embedding_model_id {
+        None => None,
+        Some(id) => match embedding_model::get_by_id(&state.pool, id).await {
+            Ok(m) => Some(format!("{}@{}", m.name, m.revision)),
+            Err(e) => {
+                tracing::warn!(request_id = rid, op = "active_inventory", error = %e, "code model lookup failed");
+                return error::service_unavailable("code model lookup failed", rid);
+            }
+        },
+    };
+    let docs = match document::list_active_inventory(&state.pool, active.id).await {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!(request_id = rid, op = "active_inventory", error = %e, "inventory query failed");
+            return error::service_unavailable("inventory query failed", rid);
+        }
+    };
+    Json(ActiveInventoryResponse {
+        embedding_model: model,
+        code_embedding_model: code_model,
+        documents: docs
+            .into_iter()
+            .map(|d| InventoryDocResponse {
+                source_path: d.source_path,
+                content_hash: d.content_hash,
+                document_id: d.document_id,
+                embed_complete: d.embed_complete,
+            })
+            .collect(),
+    })
+    .into_response()
 }
 
 /// Returns `Some(response)` to short-circuit the handler with an auth-failure
