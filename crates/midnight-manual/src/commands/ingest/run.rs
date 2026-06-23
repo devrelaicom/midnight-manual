@@ -811,7 +811,8 @@ async fn run_inner(
         }
         reporter.batch(i + 1, batch_count, "uploading documents");
         // Embeddings are already attached above (for new docs), so the split path
-        // is a pure upload concern: a 413 splits the batch and PUTs each half once.
+        // is a pure upload concern: a 413 recursively splits the batch down to
+        // single-document PUTs.
         let result = upload_documents_with_split(
             &client,
             &upload_url,
@@ -1526,8 +1527,11 @@ fn pack_upload_batches(
 }
 
 /// PUT one already-embedded batch. On HTTP 413 (payload too large), split the
-/// documents into two approximate halves and PUT each ONCE (single-level, no
-/// recursion — a half that still 413s propagates its error). `batch_index` /
+/// documents into two approximate halves and retry each RECURSIVELY: every half
+/// re-attempts a single PUT and, on a further 413, splits again — bottoming out
+/// at one document per request. A lone document that still 413s propagates its
+/// error (the `documents.len() > 1` guard is the floor that stops the recursion
+/// and surfaces the actionable single-doc message). `batch_index` /
 /// `batch_count` are informational (server logs only).
 async fn upload_documents_with_split(
     client: &reqwest::Client,
@@ -1552,7 +1556,11 @@ async fn upload_documents_with_split(
             let mut it = docs.into_iter();
             let first: Vec<DocumentUpload> = it.by_ref().take(mid).collect();
             let second: Vec<DocumentUpload> = it.collect();
-            let r1 = put_documents_once(
+            // Recurse: each half re-attempts a single PUT and splits again on a
+            // further 413, down to the 1-document floor. Box::pin gives the
+            // async self-recursion a finite size (the future would otherwise be
+            // infinitely sized).
+            let r1 = Box::pin(upload_documents_with_split(
                 client,
                 url,
                 token,
@@ -1560,9 +1568,9 @@ async fn upload_documents_with_split(
                 first,
                 batch_index,
                 batch_count,
-            )
+            ))
             .await?;
-            let r2 = put_documents_once(
+            let r2 = Box::pin(upload_documents_with_split(
                 client,
                 url,
                 token,
@@ -1570,7 +1578,7 @@ async fn upload_documents_with_split(
                 second,
                 batch_index,
                 batch_count,
-            )
+            ))
             .await?;
             Ok(merge_split_responses(r1, r2))
         }
@@ -1594,25 +1602,6 @@ fn merge_split_responses(
         carried: first.carried + second.carried,
         conflicts,
     }
-}
-
-/// Build the upload request and PUT it exactly once (no splitting).
-async fn put_documents_once(
-    client: &reqwest::Client,
-    url: &str,
-    token: &str,
-    embedding_model: &str,
-    documents: Vec<DocumentUpload>,
-    batch_index: usize,
-    batch_count: usize,
-) -> Result<UploadDocumentsResponse> {
-    let body = UploadDocumentsRequest {
-        documents,
-        batch_index: Some(batch_index),
-        batch_count: Some(batch_count),
-        embedding_model: Some(embedding_model.to_owned()),
-    };
-    put_json(client, url, token, &body).await
 }
 
 fn is_payload_too_large(e: &anyhow::Error) -> bool {
@@ -2549,6 +2538,58 @@ mod tests {
         assert_eq!(merged.carried, 0);
         assert_eq!(merged.conflicts.len(), 1);
         assert_eq!(merged.conflicts[0].path, "b/bad.md");
+    }
+
+    /// `merge_split_responses` composes correctly when nested, mirroring the
+    /// recursion tree for a 4-document batch: `merge(merge(a, b), merge(c, d))`.
+    /// `accepted`/`carried` sum across all four leaves; each leaf's conflict is
+    /// concatenated exactly once (none dropped, none doubled); and the
+    /// left-to-right order a,b,c,d survives the nesting. The fn itself is
+    /// unchanged by issue #101, so this passes before and after the fix — it
+    /// guards that the recursion's two-at-a-time merge stays correct.
+    #[test]
+    fn merge_split_responses_nested_for_four_docs() {
+        let a: UploadDocumentsResponse = serde_json::from_value(serde_json::json!({
+            "accepted": 1,
+            "carried": 0,
+            "conflicts": [{ "path": "a.md", "reason": "duplicate path in this batch" }],
+        }))
+        .unwrap();
+        let b: UploadDocumentsResponse = serde_json::from_value(serde_json::json!({
+            "accepted": 2,
+            "carried": 1,
+            "conflicts": [{ "path": "b.md", "reason": "insert failed: boom" }],
+        }))
+        .unwrap();
+        let c: UploadDocumentsResponse = serde_json::from_value(serde_json::json!({
+            "accepted": 4,
+            "carried": 2,
+            "conflicts": [{ "path": "c.md", "reason": "duplicate path in this batch" }],
+        }))
+        .unwrap();
+        let d: UploadDocumentsResponse = serde_json::from_value(serde_json::json!({
+            "accepted": 8,
+            "carried": 4,
+            "conflicts": [{ "path": "d.md", "reason": "insert failed: kaboom" }],
+        }))
+        .unwrap();
+
+        let merged =
+            merge_split_responses(merge_split_responses(a, b), merge_split_responses(c, d));
+
+        assert_eq!(merged.accepted, 15, "accepted sums all four leaves (1+2+4+8)");
+        assert_eq!(merged.carried, 7, "carried sums all four leaves (0+1+2+4)");
+        assert_eq!(
+            merged.conflicts.len(),
+            4,
+            "each leaf's conflict concatenated exactly once — none dropped, none doubled"
+        );
+        let paths: Vec<&str> = merged.conflicts.iter().map(|c| c.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            ["a.md", "b.md", "c.md", "d.md"],
+            "left-to-right order preserved through nested merges"
+        );
     }
 
     /// Conflicts accumulated across batches (as `run_inner` does, and as the 413

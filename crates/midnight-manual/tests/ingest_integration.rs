@@ -733,6 +733,162 @@ async fn upload_413_is_split_and_retried() {
     );
 }
 
+/// A batch that exceeds ~2x the server body limit — i.e. EVERY multi-document
+/// PUT 413s, not just the first — must still upload successfully by splitting
+/// RECURSIVELY down to one-document requests. This is the regression guard for
+/// issue #101: the old split was single-level, so a half that still 413'd
+/// propagated its error and aborted the whole run. Here a 4-document batch can
+/// only succeed if each 2-document half, after 413ing, splits again into two
+/// 1-document PUTs.
+///
+/// The single PUT mock decides its response from the request body: any PUT
+/// carrying more than one document returns 413; a PUT carrying exactly one
+/// document returns 200. So the call tree is: 4-doc PUT (413) → two 2-doc PUTs
+/// (each 413) → four 1-doc PUTs (each 200). That is three 413s and four 200s.
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // full three-step flow + body-driven 413 mock
+async fn upload_413_splits_recursively_to_single_docs() {
+    let server = MockServer::start().await;
+    let n_413 = Arc::new(Mutex::new(0_usize));
+    let n_200 = Arc::new(Mutex::new(0_usize));
+    let abort_hit = Arc::new(Mutex::new(false));
+
+    mount_embedding_mocks(&server).await;
+
+    // Mock: GET /v1/sources/:slug — source exists.
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/v1/sources/[^/]+$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "slug": "docs",
+            "kind": "docs_site",
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path_regex(r"^/v1/admin/sources/[^/]+/ingest-runs$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ingest_run_id": "00000000-0000-0000-0000-000000000414",
+            "source_version_id": "00000000-0000-0000-0000-000000000414",
+            "source_version_revision": 1,
+        })))
+        .mount(&server)
+        .await;
+
+    // Single PUT mock: 413 for any multi-document body, 200 for a lone document.
+    // The 413/200 counters let us prove the recursion went beyond one level.
+    let c413 = Arc::clone(&n_413);
+    let c200 = Arc::clone(&n_200);
+    Mock::given(method("PUT"))
+        .and(path_regex(r"^/v1/admin/sources/[^/]+/ingest-runs/[^/]+/documents$"))
+        .respond_with(move |req: &Request| {
+            let body: serde_json::Value = req.body_json().unwrap_or(serde_json::Value::Null);
+            let count = body["documents"].as_array().map_or(0, Vec::len);
+            if count > 1 {
+                *c413.lock().unwrap() += 1;
+                ResponseTemplate::new(413).set_body_string("payload too large")
+            } else {
+                *c200.lock().unwrap() += 1;
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "accepted": 1,
+                    "carried": 0,
+                    "conflicts": [],
+                }))
+            }
+        })
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path_regex(r"^/v1/admin/sources/[^/]+/ingest-runs/[^/]+/finalize$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "source_version_id": "00000000-0000-0000-0000-000000000414",
+            "revision": 1,
+            "is_active": true,
+            "demoted_revision": null,
+        })))
+        .mount(&server)
+        .await;
+
+    // If the run ever aborts, flip a flag so the test fails with a clear message.
+    let abort = Arc::clone(&abort_hit);
+    Mock::given(method("POST"))
+        .and(path_regex(r"^/v1/admin/sources/[^/]+/ingest-runs/[^/]+/abort$"))
+        .respond_with(move |_req: &Request| {
+            *abort.lock().unwrap() = true;
+            ResponseTemplate::new(200)
+        })
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    // Four documents packed into ONE batch (batch_size 50). Recursion must split
+    // 4 → 2+2 → 1+1+1+1 because every multi-doc PUT 413s.
+    write_file(dir.path(), "a.md", "# A\n\nBody of A.");
+    write_file(dir.path(), "b.md", "# B\n\nBody of B.");
+    write_file(dir.path(), "c.md", "# C\n\nBody of C.");
+    write_file(dir.path(), "d.md", "# D\n\nBody of D.");
+    let manifest_path = write_manifest(dir.path(), &["a.md", "b.md", "c.md", "d.md"]);
+    let auth_path = write_admin_auth(dir.path());
+
+    let args = IngestArgs {
+        manifest: manifest_path,
+        source_slug: "docs".to_owned(),
+        revision: Some("rev-414".to_owned()),
+        embedding_model: DEFAULT_EMBEDDING_MODEL.to_owned(),
+        note: None,
+        source_root: Some(dir.path().to_path_buf()),
+        dry_run: false,
+        yes: false,
+        source_base_url: None,
+        batch_size: 50,
+        voyage_timeout_secs: None,
+        chunk_tokens: 400,
+        include: vec![],
+        exclude: vec![],
+        no_respect_gitignore: false,
+        disable_default_ignore_list: false,
+        max_file_size: 10 * 1024 * 1024,
+        unsafe_no_global_limit: false,
+        no_code_embeddings: false,
+        report_file: None,
+    };
+    let telemetry = TelemetryClient::Disabled;
+
+    midnight_manual::commands::ingest::run::run_with_paths(
+        args,
+        &server.uri(),
+        &auth_path,
+        None,
+        None,
+        &telemetry,
+        "0.1.0-test",
+        true,
+    )
+    .await
+    .expect("ingest run should succeed after recursive 413 splitting");
+
+    assert!(
+        !*abort_hit.lock().unwrap(),
+        "run must NOT abort — recursive splitting must upload every document"
+    );
+    // Recursion bottomed out at one document per request: all four uploaded
+    // individually.
+    assert_eq!(
+        *n_200.lock().unwrap(),
+        4,
+        "recursion must bottom out at four single-document 200 PUTs"
+    );
+    // The 4-doc batch plus both 2-doc halves each 413'd before recursing. With
+    // the OLD single-level split the 2-doc halves would 413 and abort the run,
+    // so this count proves the split recursed beyond one level.
+    assert_eq!(
+        *n_413.lock().unwrap(),
+        3,
+        "the 4-doc batch and both 2-doc halves must each 413 before splitting again"
+    );
+}
+
 #[tokio::test]
 async fn manifest_missing_file_errors_before_any_http() {
     let server = MockServer::start().await;
