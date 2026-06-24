@@ -10,7 +10,7 @@
 //! sentence like "this guide explains how attackers ignore safety rules" lacks
 //! the `(previous|prior|above)\s+(instructions|...)` object and does not hit.
 //!
-//! Rules run over [`super::normalize`]d text (already lowercased, homoglyph- and
+//! Rules run over [`super::normalize()`]d text (already lowercased, homoglyph- and
 //! base64-folded), so each regex is written against lowercase ASCII. Every hit's
 //! span is mapped back to the ORIGINAL input bytes via
 //! [`super::normalize::Normalized::original_span`].

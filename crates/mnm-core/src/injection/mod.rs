@@ -3,7 +3,7 @@
 //! This module hosts the two layers of the prompt-injection defense, both pure
 //! and shared across the workspace's server, CLI, and MCP surfaces:
 //!
-//! 1. **Server-side scoring** (ingest time). [`normalize`] de-obfuscates
+//! 1. **Server-side scoring** (ingest time). [`normalize()`] de-obfuscates
 //!    untrusted text, [`pattern::detect`] runs a curated literal+regex ruleset
 //!    over it to produce a risk score, and [`policy::InjectionPolicy`] blends
 //!    that pattern score with an optional model score and decides whether to

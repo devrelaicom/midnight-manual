@@ -143,10 +143,11 @@ static BASE64_RUN: LazyLock<Regex> =
 ///    decoded text (offsets pointing back at the run start) so patterns can
 ///    match smuggled content.
 ///
-/// The returned [`Normalized::offsets`] maps each normalized byte back to its
-/// originating original byte. Steps 1–4 are computed char-by-char over the
-/// original input so offsets stay accurate even through NFKC's 1→N expansions;
-/// step 5 appends decoded bytes all attributed to the run's start offset.
+/// The returned [`Normalized`]'s offset map records, for each normalized byte,
+/// its originating original byte (read it via [`Normalized::original_span`]).
+/// Steps 1–4 are computed char-by-char over the original input so offsets stay
+/// accurate even through NFKC's 1→N expansions; step 5 appends decoded bytes all
+/// attributed to the run's start offset.
 #[must_use]
 pub fn normalize(input: &str) -> Normalized {
     let original_len = input.len();

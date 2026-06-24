@@ -49,6 +49,9 @@ pub struct ServerConfig {
     /// content is wrapped in a nonce-tagged untrusted block before the model
     /// sees it — and at [`SecurityLevel::Strict`], whether pattern-flagged
     /// content is removed. Defaults to [`SecurityLevel::Moderate`].
+    ///
+    /// [`SecurityLevel::Strict`]: mnm_core::injection::SecurityLevel::Strict
+    /// [`SecurityLevel::Moderate`]: mnm_core::injection::SecurityLevel::Moderate
     pub security: mnm_core::injection::SecurityLevel,
 }
 

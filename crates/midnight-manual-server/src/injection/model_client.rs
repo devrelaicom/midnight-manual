@@ -7,8 +7,8 @@
 //! [`mnm_core::injection::ModelReport`].
 //!
 //! HF Inference Endpoints "scale to zero": the first request after an idle
-//! period returns HTTP 502/503 while the endpoint cold-starts. Both
-//! [`HfClient::classify_window`] (a small retry budget) and
+//! period returns HTTP 502/503 while the endpoint cold-starts. Both the
+//! per-window classify call (a small retry budget) and
 //! [`HfClient::service_start`] (a long warm-and-wait) treat 502/503 as a
 //! transient cold-start signal and back off.
 
@@ -83,8 +83,8 @@ impl HfClient {
         })
     }
 
-    /// Score `text` by splitting it into ≤[`WINDOW_CHARS`]-char windows on char
-    /// boundaries and classifying each. Returns the max malicious probability
+    /// Score `text` by splitting it into bounded char-windows (see `WINDOW_CHARS`)
+    /// on char boundaries and classifying each. Returns the max malicious probability
     /// across windows and per-window detail for windows that met
     /// `model_threshold` (spans are byte offsets into the ORIGINAL input).
     ///
@@ -188,11 +188,11 @@ impl HfClient {
     /// Idempotent warm-and-wait. Repeatedly pings the endpoint until it answers
     /// (returns `Ok(true)`) or `deadline` elapses (returns `Ok(false)`).
     ///
-    /// [`classify_window`](Self::classify_window) already retries 502/503 over
-    /// its own short budget then surfaces the 502/503 as [`HfError::Status`];
-    /// this outer loop catches that condition and keeps retrying for the full
-    /// `deadline`, so service-start gets longer patience than an inline scan.
-    /// Any other error propagates immediately.
+    /// The per-window classify call already retries 502/503 over its own short
+    /// budget then surfaces the 502/503 as [`HfError::Status`]; this outer loop
+    /// catches that condition and keeps retrying for the full `deadline`, so
+    /// service-start gets longer patience than an inline scan. Any other error
+    /// propagates immediately.
     ///
     /// # Errors
     ///
