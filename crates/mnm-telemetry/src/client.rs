@@ -25,7 +25,7 @@ use async_trait::async_trait;
 use tokio::sync::Mutex;
 use url::Url;
 
-use crate::events::Event;
+use crate::events::AnyEvent as Event;
 use crate::optout;
 
 /// Default events-per-batch threshold (FR-108).
@@ -489,7 +489,7 @@ impl TelemetryClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::events::{Component, EventPayload, ModelState};
+    use crate::events::{McpStartup, ModelState};
     use crate::test_lock::lock as test_lock;
 
     /// Resets the process-wide runtime-disabled flag on drop so a panicking
@@ -502,14 +502,10 @@ mod tests {
     }
 
     fn sample_event() -> Event {
-        Event::new(
-            Component::Mcp,
-            "0.1.0",
-            EventPayload::McpStartup {
-                startup_ms: 1,
-                model_state: ModelState::Missing,
-            },
-        )
+        Event::McpStartup(McpStartup {
+            startup_ms: 1,
+            model_state: ModelState::Missing,
+        })
     }
 
     // `NoopClient::emit` is fully synchronous (no internal `.await`), so

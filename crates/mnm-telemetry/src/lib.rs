@@ -48,8 +48,11 @@ pub use client::{
     RETRY_BUDGET,
 };
 pub use events::{
-    CliCommandName, Component, Event, EventPayload, McpToolName, ModelState, Outcome,
+    AnyEvent, CliCommand, CliCommandName, IngestComplete, McpShutdown, McpStartup, McpToolCall,
+    McpToolName, ModelState, Outcome, PullModels, Rerank,
 };
+pub use gauge_telemetry::common::Surface;
+pub use gauge_telemetry::event::Event;
 pub use optout::{is_enabled, DISABLE_ENV_VAR, HELP_TEXT};
 
 /// Crate version stamped at build time.
