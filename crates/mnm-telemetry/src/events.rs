@@ -276,44 +276,6 @@ impl Event for McpShutdown {
     }
 }
 
-/// Concrete union of all event variants.
-///
-/// Used by [`crate::client::Client`] as a transitional concrete type while the
-/// client is being migrated to the new per-struct event model (later task).
-/// The wrapper is `Send + Serialize` so it can be queued and serialised by
-/// the existing HTTP client without changes to that file.
-#[derive(Debug, Clone, Serialize)]
-#[serde(untagged)]
-pub enum AnyEvent {
-    /// One MCP tool invocation completed.
-    McpToolCall(McpToolCall),
-    /// One rerank decision.
-    Rerank(Rerank),
-    /// One top-level CLI subcommand completed.
-    CliCommand(CliCommand),
-    /// One ingest run finished.
-    IngestComplete(IngestComplete),
-    /// `mnm models pull` ran to completion.
-    PullModels(PullModels),
-    /// MCP server bootstrap completed.
-    McpStartup(McpStartup),
-    /// MCP server shutting down.
-    McpShutdown(McpShutdown),
-}
-
-impl Event for AnyEvent {
-    fn name(&self) -> Cow<'_, str> {
-        match self {
-            Self::McpToolCall(e) => e.name(),
-            Self::Rerank(e) => e.name(),
-            Self::CliCommand(e) => e.name(),
-            Self::IngestComplete(e) => e.name(),
-            Self::PullModels(e) => e.name(),
-            Self::McpStartup(e) => e.name(),
-            Self::McpShutdown(e) => e.name(),
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {
