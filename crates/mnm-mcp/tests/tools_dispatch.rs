@@ -1014,7 +1014,7 @@ async fn dispatch_search_mismatch_produces_iserror_envelope() {
 
     let mut cfg = ServerConfig::with_defaults(std::path::PathBuf::from("/tmp/test-mcp-cache"));
     cfg.cloud_url.clone_from(&server.uri());
-    cfg.telemetry_url = format!("{}/v1/telemetry/events", server.uri());
+    server.uri().clone_into(&mut cfg.telemetry_endpoint);
 
     let cloud = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
 
