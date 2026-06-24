@@ -43,13 +43,6 @@ pub struct ServerConfig {
     /// `MIDNIGHT_MANUAL_READ_TOKEN_TTL_DAYS` — read-uplift JWT TTL in days
     /// (FR-117). Defaults to 30; clamped to `[1, 90]`.
     pub read_token_ttl_days: i64,
-    /// `MIDNIGHT_MANUAL_TELEMETRY_RAW_RETENTION_DAYS` — rolling window after
-    /// which `telemetry_event_raw` rows are rolled up into
-    /// `telemetry_aggregate_daily` and deleted (FR-110). Defaults to 90;
-    /// clamped to `[1, 365]`. Note: raised from FR-110's documented default
-    /// of 7 — the `telemetry_search_daily` rollup preserves the signal
-    /// long-term, and 90 days of raw rows provides a useful granular window.
-    pub telemetry_raw_retention_days: i64,
     /// GitHub API base URL. Defaults to `https://api.github.com`. Tests
     /// override this to point at a mock server.
     pub github_api_base_url: String,
@@ -218,7 +211,6 @@ impl Default for ServerConfig {
             github_oauth_redirect_url: None,
             github_org: None,
             read_token_ttl_days: 30,
-            telemetry_raw_retention_days: 90,
             github_api_base_url: "https://api.github.com".into(),
             github_authorize_url: "https://github.com/login/oauth/authorize".into(),
             github_token_url: "https://github.com/login/oauth/access_token".into(),
@@ -294,10 +286,6 @@ impl ServerConfig {
             .ok()
             .and_then(|s| s.parse::<i64>().ok())
             .map_or(30, |v| v.clamp(1, 90));
-        let telemetry_raw_retention_days = env::var("MIDNIGHT_MANUAL_TELEMETRY_RAW_RETENTION_DAYS")
-            .ok()
-            .and_then(|s| s.parse::<i64>().ok())
-            .map_or(90, |v| v.clamp(1, 365));
         let source_retirement_enabled = env::var("MIDNIGHT_MANUAL_SOURCE_RETIREMENT_ENABLED")
             .map(|v| !matches!(v.as_str(), "0" | "false" | "no"))
             .unwrap_or(true);
@@ -424,7 +412,6 @@ impl ServerConfig {
             github_oauth_redirect_url,
             github_org,
             read_token_ttl_days,
-            telemetry_raw_retention_days,
             github_api_base_url: "https://api.github.com".into(),
             github_authorize_url: "https://github.com/login/oauth/authorize".into(),
             github_token_url: "https://github.com/login/oauth/access_token".into(),
@@ -627,12 +614,6 @@ mod tests {
         let loaded = resolve_scoring_policy(Some(path.display().to_string())).unwrap();
         assert!((loaded.blend.trust_weight - 0.7).abs() < 1e-12);
         std::fs::remove_file(&path).ok();
-    }
-
-    #[test]
-    fn telemetry_raw_retention_defaults_to_ninety() {
-        let c = ServerConfig::default();
-        assert_eq!(c.telemetry_raw_retention_days, 90);
     }
 
     #[test]

@@ -925,12 +925,6 @@ async fn search(
     };
     scored.truncate(limit as usize);
 
-    if rerank_meta.meta.applied {
-        metrics::counter!("rerank_applied_total").increment(1);
-    } else if let Some(reason) = rerank_meta.meta.reason.filter(|r| *r != "not_requested") {
-        metrics::counter!("rerank_degraded_total", "reason" => reason).increment(1);
-    }
-
     let results: Vec<SearchResult> = scored
         .into_iter()
         .map(|c| c.into_result(req.include_scores))
@@ -1081,7 +1075,6 @@ async fn rerank_stage(
     state
         .token_limiter
         .settle(&subject, reservation, billed, now, false);
-    metrics::counter!("rerank_billed_tokens_total").increment(billed);
 
     // Rescore in place: Voyage relevance_score is already in [0, 1] — used
     // directly, no sigmoid. Indices refer into the pool (== `scored`) order.
