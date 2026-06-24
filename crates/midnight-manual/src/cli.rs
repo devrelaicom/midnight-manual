@@ -17,8 +17,8 @@ use anyhow::Result;
 use clap::{CommandFactory as _, FromArgMatches as _, Parser, Subcommand};
 // `ConfigEnv` brings `.var(..)` into scope for the Sentry DSN lookup in `run`.
 use mnm_core::config::ConfigEnv as _;
-use mnm_telemetry::events::{CliCommandName, Component, EventPayload, Outcome};
-use mnm_telemetry::{Event, TelemetryClient};
+use mnm_telemetry::events::{CliCommand, CliCommandName, Outcome};
+use mnm_telemetry::{build as build_telemetry, BuildParams, Telemetry, FLUSH_ARGS};
 
 use crate::commands;
 
@@ -54,8 +54,8 @@ pub struct Cli {
     #[arg(long, global = true, env = "RUST_LOG")]
     pub log_level: Option<String>,
 
-    /// Disable telemetry for this invocation (FR-107 mechanism #1).
-    #[arg(long, global = true, env = "MIDNIGHT_MANUAL_DISABLE_TELEMETRY")]
+    /// Disable telemetry for this invocation (FR-107 mechanism #1 is the env var).
+    #[arg(long, global = true)]
     pub no_telemetry: bool,
 
     /// Voyage API key for BYOK embedding (overrides env + config).
@@ -210,17 +210,30 @@ pub async fn run() -> Result<()> {
     let started = Instant::now();
     let (cfg, _) =
         mnm_core::config::Config::discover(cli.config.as_deref(), &env).unwrap_or_default();
-    // FR-107 mechanism #3: seed the runtime toggle from the persistent
-    // marker so a previous `mnm telemetry disable` survives invocation
-    // boundaries. The two other mechanisms are env (#1) and config (#2).
-    mnm_telemetry::optout::load_persistent_marker(
-        mnm_core::paths::telemetry_marker_path(&env).as_deref(),
-    );
-    let cloud_url = cli.server.clone().unwrap_or_else(|| cfg.server.url.clone());
-    let telemetry_url = format!("{}/v1/telemetry/events", cloud_url.trim_end_matches('/'));
-    let config_enabled = cfg.telemetry.enabled && !cli.no_telemetry;
-    let telemetry =
-        TelemetryClient::boot(&telemetry_url, config_enabled).unwrap_or(TelemetryClient::Disabled);
+
+    // Resolve the three opt-out mechanisms into Gauge's two consent inputs.
+    let marker = mnm_core::paths::telemetry_marker_path(&env);
+    let runtime_enabled = !cli.no_telemetry
+        && !mnm_telemetry::optout::env_disabled(&env)
+        && !marker.as_deref().is_some_and(mnm_telemetry::optout::marker_present);
+    let endpoint = mnm_core::config::resolve_telemetry_endpoint(&cfg.telemetry, &env);
+    let telemetry: Telemetry = build_telemetry(BuildParams {
+        app_version: crate::VERSION.to_owned(),
+        endpoint,
+        install_id_path: mnm_core::paths::telemetry_install_id_path(&env),
+        config_enabled: cfg.telemetry.enabled,
+        runtime_enabled,
+        flush_args: FLUSH_ARGS.iter().map(|s| (*s).to_owned()).collect(),
+    });
+
+    // Hidden `telemetry flush` re-exec: drain and exit BEFORE any normal path
+    // (load-bearing — see gauge_telemetry::Telemetry::run_flush docs).
+    if let Command::Telemetry(args) = &cli.cmd {
+        if matches!(args.cmd, commands::telemetry::TelemetryCmd::Flush) {
+            telemetry.run_flush();
+            return Ok(());
+        }
+    }
 
     let command_name = cli_command_name(&cli.cmd);
 
@@ -243,7 +256,6 @@ pub async fn run() -> Result<()> {
                 cli.config.as_deref(),
                 cli.voyage_api_key.as_deref(),
                 &telemetry,
-                crate::VERSION,
                 cli.json,
             )
             .await
@@ -276,7 +288,6 @@ pub async fn run() -> Result<()> {
                 cli.config.as_deref(),
                 cli.voyage_api_key.as_deref(),
                 &telemetry,
-                crate::VERSION,
                 cli.json,
             )
             .await
@@ -294,7 +305,6 @@ pub async fn run() -> Result<()> {
                 cli.config.as_deref(),
                 cli.voyage_api_key.as_deref(),
                 &telemetry,
-                crate::VERSION,
                 cli.json,
             )
             .await
@@ -306,43 +316,23 @@ pub async fn run() -> Result<()> {
             commands::tokenlimits::run(args, cli.server.as_deref(), cli.json).await
         }
         Command::Manifest(args) => commands::manifest::run(args).await,
-        Command::Chunks(args) => {
-            commands::chunks::run(args, cli.server.as_deref(), &telemetry, crate::VERSION, cli.json)
-                .await
-        }
+        Command::Chunks(args) => commands::chunks::run(args, cli.server.as_deref(), cli.json).await,
         Command::Documents(args) => {
-            commands::documents::run(
-                args,
-                cli.server.as_deref(),
-                &telemetry,
-                crate::VERSION,
-                cli.json,
-            )
-            .await
+            commands::documents::run(args, cli.server.as_deref(), cli.json).await
         }
         Command::Skills(args) => commands::skills::run(args, cli.json),
     };
 
     let duration_ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
-    let outcome = if result.is_ok() {
-        Outcome::Ok
-    } else {
-        Outcome::Error
-    };
-    telemetry
-        .emit(Event::new(
-            Component::Cli,
-            crate::VERSION,
-            EventPayload::CliCommand {
-                command: command_name,
-                duration_ms,
-                outcome,
-            },
-        ))
-        .await;
-    // Force the queue out before exit — the CLI is typically too short-lived
-    // to hit the 30s timer.
-    telemetry.flush().await;
+    let outcome = if result.is_ok() { Outcome::Ok } else { Outcome::Error };
+    telemetry.emit(&CliCommand {
+        command: command_name,
+        duration_ms,
+        outcome,
+    });
+    // Hand the queue to a detached flusher so the user's prompt returns now;
+    // events are already durably on disk from emit().
+    telemetry.spawn_detached_flush();
 
     result
 }
