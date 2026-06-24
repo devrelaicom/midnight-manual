@@ -1,5 +1,6 @@
 //! Per-subcommand modules.
 
+pub mod admin;
 pub mod auth;
 pub mod chunks;
 pub mod config;

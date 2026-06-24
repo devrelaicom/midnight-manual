@@ -20,6 +20,7 @@ pub mod code_model;
 pub mod config;
 pub mod corpus_model;
 pub mod error;
+pub mod injection;
 pub mod jobs;
 pub mod middleware;
 pub mod pagination;

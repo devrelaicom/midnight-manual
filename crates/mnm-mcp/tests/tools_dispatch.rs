@@ -742,7 +742,8 @@ async fn dispatch_get_chunks_single_structured_content_and_full_content_fence() 
         }],
         "missing": []
     });
-    let result = render::project_chunks(raw).into_result();
+    let result =
+        render::project_chunks(raw, mnm_core::injection::SecurityLevel::Disabled).into_result();
     assert!(!result.is_error);
     let sc = result.structured_content.unwrap();
     assert_eq!(sc["chunks"][0]["id"], id);
@@ -772,7 +773,8 @@ async fn dispatch_get_chunks_multi_fence_uses_snippets() {
         ],
         "missing": []
     });
-    let result = render::project_chunks(raw).into_result();
+    let result =
+        render::project_chunks(raw, mnm_core::injection::SecurityLevel::Disabled).into_result();
     assert!(!result.is_error);
     let text = match &result.content[0] {
         mnm_mcp::protocol::ContentBlock::Text { text } => text.clone(),
@@ -790,7 +792,9 @@ async fn dispatch_get_chunks_multi_fence_uses_snippets() {
 async fn dispatch_get_chunk_next_structured_content_has_chunks_array() {
     use mnm_mcp::render;
     let raw = json!({ "chunks": [{"id": "a"}, {"id": "b"}] });
-    let result = render::project_chunk_list(raw, "after").into_result();
+    let result =
+        render::project_chunk_list(raw, "after", mnm_core::injection::SecurityLevel::Disabled)
+            .into_result();
     assert!(!result.is_error);
     let sc = result.structured_content.unwrap();
     assert!(sc["chunks"].is_array(), "structuredContent must have a chunks array");
@@ -809,7 +813,8 @@ async fn dispatch_get_document_chunks_structured_content_has_from_and_limit() {
         "from": 3, "limit": 7, "total_chunks": 35,
         "chunks": [{"chunk_id": "a"}, {"chunk_id": "b"}]
     });
-    let result = render::project_document_window(raw).into_result();
+    let result = render::project_document_window(raw, mnm_core::injection::SecurityLevel::Disabled)
+        .into_result();
     assert!(!result.is_error);
     let sc = result.structured_content.unwrap();
     // DocumentChunkWindow is flattened — from/limit are top-level.
@@ -829,7 +834,8 @@ async fn dispatch_get_chunk_neighbors_structured_content_shape() {
         "chunk": { "id": id, "content": "anchor" },
         "next": { "chunks": [{"id": "n1"}, {"id": "n2"}] }
     });
-    let result = render::project_neighbors(raw).into_result();
+    let result =
+        render::project_neighbors(raw, mnm_core::injection::SecurityLevel::Disabled).into_result();
     assert!(!result.is_error);
     let sc = result.structured_content.unwrap();
     // Neighbors keeps nested shape: sc["chunk"]["id"]
@@ -894,7 +900,8 @@ async fn dispatch_get_chunks_full_pipeline_via_wiremock() {
         .await
         .unwrap();
     // Thread through the projector (same as run_passthrough_tool does).
-    let result = render::project_chunks(v).into_result();
+    let result =
+        render::project_chunks(v, mnm_core::injection::SecurityLevel::Disabled).into_result();
     assert!(!result.is_error);
     let sc = result.structured_content.unwrap();
     assert_eq!(sc["chunks"][0]["id"], id);
@@ -927,7 +934,8 @@ async fn dispatch_get_document_chunks_full_pipeline_via_wiremock() {
     let v = run_document_chunks(&json!({"id": id, "from": 3, "limit": 7}), &client)
         .await
         .unwrap();
-    let result = render::project_document_window(v).into_result();
+    let result = render::project_document_window(v, mnm_core::injection::SecurityLevel::Disabled)
+        .into_result();
     assert!(!result.is_error);
     let sc = result.structured_content.unwrap();
     assert_eq!(sc["from"], 3);
@@ -1093,7 +1101,8 @@ async fn dispatch_get_chunk_neighbors_full_pipeline_via_wiremock() {
     let v = run_chunk_neighbors(&json!({"id": id}), &client)
         .await
         .unwrap();
-    let result = render::project_neighbors(v).into_result();
+    let result =
+        render::project_neighbors(v, mnm_core::injection::SecurityLevel::Disabled).into_result();
     assert!(!result.is_error);
     let sc = result.structured_content.unwrap();
     assert_eq!(sc["chunk"]["id"], id);

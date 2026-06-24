@@ -40,6 +40,7 @@ async fn main() -> anyhow::Result<()> {
             "MIDNIGHT_MANUAL_JWT_SECRET",
             "MIDNIGHT_MANUAL_GITHUB_OAUTH_CLIENT_SECRET",
             "MIDNIGHT_MANUAL_USER_STORE",
+            "MIDNIGHT_MANUAL_INJECTION_HF_TOKEN",
             mnm_sentry::KEY_ENV,
         ] {
             if let Some(v) = std::env::var(name).ok().filter(|s| !s.is_empty()) {

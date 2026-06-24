@@ -179,6 +179,27 @@ pub struct ServerConfig {
     /// `MIDNIGHT_MANUAL_TOKEN_LIMIT_GLOBAL_WINDOW_SECS` — rolling window for the
     /// global cap. Defaults to 10_800 s (3 h).
     pub token_limit_global_window_secs: u64,
+    /// `MIDNIGHT_MANUAL_INJECTION_ENABLED` — master switch for ingest-time
+    /// prompt-injection scanning (issue #103). Default `false` so
+    /// `Default::default()` (used by tests) never scans; production opts in.
+    pub injection_enabled: bool,
+    /// `MIDNIGHT_MANUAL_INJECTION_HF_ENDPOINT_URL` — base URL of the
+    /// self-hosted Hugging Face text-classification endpoint (Llama-Prompt-
+    /// Guard-2) for the model-detector leg. `None` (and the pattern leg still
+    /// runs) when unset.
+    pub injection_hf_endpoint_url: Option<String>,
+    /// `MIDNIGHT_MANUAL_INJECTION_HF_TOKEN` — bearer token for the HF endpoint.
+    /// `None` disables the model leg (pattern-only still runs). Redacted from
+    /// Sentry events (see `main.rs`).
+    pub injection_hf_token: Option<String>,
+    /// `MIDNIGHT_MANUAL_INJECTION_HF_MODEL` — optional model id sent in the HF
+    /// request payload. `None` lets the endpoint use its configured default.
+    pub injection_hf_model: Option<String>,
+    /// Resolved injection-scoring policy. Loaded once at boot from the TOML file
+    /// at `MIDNIGHT_MANUAL_INJECTION_POLICY`; the compiled-in
+    /// [`mnm_core::injection::InjectionPolicy::default`] is used when the env var
+    /// is unset. An invalid file fails startup (Constitution VI / VIII).
+    pub injection_policy: mnm_core::injection::InjectionPolicy,
 }
 
 impl Default for ServerConfig {
@@ -231,6 +252,11 @@ impl Default for ServerConfig {
             token_snapshot_secs: 300,
             token_limit_global: 10_000_000,
             token_limit_global_window_secs: 10_800,
+            injection_enabled: false,
+            injection_hf_endpoint_url: None,
+            injection_hf_token: None,
+            injection_hf_model: None,
+            injection_policy: mnm_core::injection::InjectionPolicy::default(),
         }
     }
 }
@@ -323,6 +349,19 @@ impl ServerConfig {
             .and_then(|s| s.parse::<u32>().ok())
             .map_or(10, |v| v.clamp(1, 50));
         let scoring_policy = load_scoring_policy()?;
+        let injection_policy = load_injection_policy()?;
+        let injection_enabled = env::var("MIDNIGHT_MANUAL_INJECTION_ENABLED")
+            .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+            .unwrap_or(false);
+        let injection_hf_endpoint_url = env::var("MIDNIGHT_MANUAL_INJECTION_HF_ENDPOINT_URL")
+            .ok()
+            .filter(|s| !s.is_empty());
+        let injection_hf_token = env::var("MIDNIGHT_MANUAL_INJECTION_HF_TOKEN")
+            .ok()
+            .filter(|s| !s.is_empty());
+        let injection_hf_model = env::var("MIDNIGHT_MANUAL_INJECTION_HF_MODEL")
+            .ok()
+            .filter(|s| !s.is_empty());
         let server_rerank_enabled = env::var("MIDNIGHT_MANUAL_SERVER_RERANK")
             .map(|v| v != "off")
             .unwrap_or(true);
@@ -419,6 +458,11 @@ impl ServerConfig {
             token_snapshot_secs,
             token_limit_global,
             token_limit_global_window_secs,
+            injection_enabled,
+            injection_hf_endpoint_url,
+            injection_hf_token,
+            injection_hf_model,
+            injection_policy,
         })
     }
 }
@@ -447,6 +491,38 @@ fn resolve_scoring_policy(path: Option<String>) -> Result<ScoringPolicy, ConfigE
         .map_err(|e| ConfigError::ScoringPolicyParse { path, message: e.to_string() })
 }
 
+/// Resolve the injection-scoring policy from `MIDNIGHT_MANUAL_INJECTION_POLICY`.
+///
+/// The env var, when set, names a TOML file path. Absent → compiled-in
+/// [`mnm_core::injection::InjectionPolicy::default`]. A path that can't be read
+/// or whose TOML is invalid fails startup (fail-fast, Constitution VIII).
+///
+/// # Errors
+///
+/// Returns [`ConfigError::InjectionPolicyRead`] when the named file cannot be
+/// read, or [`ConfigError::InjectionPolicyParse`] when its TOML is invalid.
+fn load_injection_policy() -> Result<mnm_core::injection::InjectionPolicy, ConfigError> {
+    let path = env::var("MIDNIGHT_MANUAL_INJECTION_POLICY")
+        .ok()
+        .filter(|s| !s.is_empty());
+    resolve_injection_policy(path)
+}
+
+/// Resolve an injection policy from an optional file path. Factored out of
+/// [`load_injection_policy`] so it can be unit-tested without mutating process
+/// env.
+fn resolve_injection_policy(
+    path: Option<String>,
+) -> Result<mnm_core::injection::InjectionPolicy, ConfigError> {
+    let Some(path) = path else {
+        return Ok(mnm_core::injection::InjectionPolicy::default());
+    };
+    let body = std::fs::read_to_string(&path)
+        .map_err(|e| ConfigError::InjectionPolicyRead { path: path.clone(), source: e })?;
+    mnm_core::injection::InjectionPolicy::parse(&body)
+        .map_err(|e| ConfigError::InjectionPolicyParse { path, message: e.to_string() })
+}
+
 /// All the ways config loading can fail.
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -465,6 +541,23 @@ pub enum ConfigError {
     /// The scoring-policy file was read but failed validation.
     #[error("invalid scoring policy at `{path}`: {message}")]
     ScoringPolicyParse {
+        /// The path that failed to parse.
+        path: String,
+        /// The parse/validation error.
+        message: String,
+    },
+    /// The injection-policy file named by `MIDNIGHT_MANUAL_INJECTION_POLICY`
+    /// could not be read.
+    #[error("could not read injection policy at `{path}`: {source}")]
+    InjectionPolicyRead {
+        /// The path that failed to read.
+        path: String,
+        /// The underlying IO error.
+        source: std::io::Error,
+    },
+    /// The injection-policy file was read but failed validation.
+    #[error("invalid injection policy at `{path}`: {message}")]
+    InjectionPolicyParse {
         /// The path that failed to parse.
         path: String,
         /// The parse/validation error.
@@ -553,5 +646,47 @@ mod tests {
 
         let missing = resolve_scoring_policy(Some("/nonexistent/mnm/policy.toml".to_owned()));
         assert!(matches!(missing.unwrap_err(), ConfigError::ScoringPolicyRead { .. }));
+    }
+
+    #[test]
+    fn injection_policy_defaults_when_unset() {
+        use mnm_core::injection::InjectionPolicy;
+        assert_eq!(resolve_injection_policy(None).unwrap(), InjectionPolicy::default());
+        assert_eq!(ServerConfig::default().injection_policy, InjectionPolicy::default());
+    }
+
+    #[test]
+    fn injection_disabled_by_default() {
+        let c = ServerConfig::default();
+        assert!(!c.injection_enabled);
+        assert!(c.injection_hf_endpoint_url.is_none());
+        assert!(c.injection_hf_token.is_none());
+        assert!(c.injection_hf_model.is_none());
+    }
+
+    #[test]
+    fn injection_policy_loads_from_file() {
+        use mnm_core::injection::InjectionPolicy;
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("mnm-injection-{}.toml", uuid::Uuid::new_v4()));
+        let policy = InjectionPolicy::default();
+        std::fs::write(&path, toml::to_string(&policy).unwrap()).unwrap();
+        let loaded = resolve_injection_policy(Some(path.display().to_string())).unwrap();
+        assert!((loaded.reject_threshold - policy.reject_threshold).abs() < 1e-12);
+        assert_eq!(loaded, policy);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn injection_policy_invalid_fails_startup() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("mnm-injection-bad-{}.toml", uuid::Uuid::new_v4()));
+        std::fs::write(&path, "schema_version = 1\nbogus = 9\n").unwrap();
+        let err = resolve_injection_policy(Some(path.display().to_string())).unwrap_err();
+        assert!(matches!(err, ConfigError::InjectionPolicyParse { .. }));
+        std::fs::remove_file(&path).ok();
+
+        let missing = resolve_injection_policy(Some("/nonexistent/mnm/injection.toml".to_owned()));
+        assert!(matches!(missing.unwrap_err(), ConfigError::InjectionPolicyRead { .. }));
     }
 }

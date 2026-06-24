@@ -2914,8 +2914,10 @@ dependencies = [
 name = "mnm-core"
 version = "0.2.4"
 dependencies = [
+ "base64 0.22.1",
  "insta",
  "proptest",
+ "regex",
  "semver",
  "serde",
  "serde_json",
@@ -2924,6 +2926,7 @@ dependencies = [
  "time",
  "toml",
  "tracing",
+ "unicode-normalization",
  "uuid",
 ]
 
