@@ -922,7 +922,20 @@ async fn run_inner(
     // intended to persist — everything walked minus deletions, i.e. new +
     // carried. The server's finalize guard refuses to activate (and aborts) if
     // the persisted count differs, so a silently-dropped doc can never ship.
-    let expected_total = i64::try_from(new_count + carried_count).unwrap_or(i64::MAX);
+    //
+    // Prompt-injection drops (issue #103) are INTENTIONAL: the server scans
+    // ingested docs and refuses any it flags. Those rejected docs were counted
+    // in new/carried but are deliberately not persisted, so we subtract them
+    // from the expectation — otherwise the first flagged doc would trip the
+    // backstop and abort the whole run. Accidental drops (failed inserts) are
+    // still caught, since they are not injection rejections.
+    let injection_dropped = conflicts
+        .iter()
+        .filter(|c| c.is_injection_rejection())
+        .count();
+    let expected_total =
+        i64::try_from((new_count + carried_count).saturating_sub(injection_dropped))
+            .unwrap_or(i64::MAX);
     let finalize: FinalizeResult = match post_json(
         &client,
         &finalize_url,
@@ -2664,14 +2677,13 @@ mod tests {
         assert_eq!(v["conflict_count"], 2);
     }
 
-    /// The shared `UploadConflict` serializes to exactly `{path, reason}` — the
-    /// server's wire shape must be byte-identical to what the CLI decodes.
+    /// A non-injection `UploadConflict` serializes to exactly `{path, reason}` —
+    /// the server's wire shape must be byte-identical to what the CLI decodes.
+    /// The #103 injection-detail fields are `skip_serializing_if = None`, so a
+    /// plain conflict keeps the historical two-field shape.
     #[test]
     fn upload_conflict_wire_shape_is_path_reason() {
-        let c = mnm_core::ingest::UploadConflict {
-            path: "a/dup.md".to_owned(),
-            reason: "duplicate path in this batch".to_owned(),
-        };
+        let c = mnm_core::ingest::UploadConflict::plain("a/dup.md", "duplicate path in this batch");
         let s = serde_json::to_string(&c).unwrap();
         assert_eq!(s, r#"{"path":"a/dup.md","reason":"duplicate path in this batch"}"#);
     }

@@ -22,6 +22,9 @@ uuid        = { workspace = true }
 time        = { workspace = true }
 tracing     = { workspace = true }
 semver      = { workspace = true }
+regex       = { workspace = true }
+base64      = { workspace = true }
+unicode-normalization = { workspace = true }
 
 [dev-dependencies]
 proptest    = { workspace = true }

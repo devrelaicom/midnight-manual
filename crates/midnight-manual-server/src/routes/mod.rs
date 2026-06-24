@@ -1,6 +1,7 @@
 //! HTTP route modules.
 
 pub mod admin_ingest;
+pub mod admin_injection;
 pub mod admin_ratelimits;
 pub mod admin_sources;
 pub mod admin_status;

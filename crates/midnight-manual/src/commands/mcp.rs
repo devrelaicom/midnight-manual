@@ -73,6 +73,7 @@ async fn serve(server_flag: Option<&str>, config_path: Option<&Path>) -> Result<
 
     let mut server_cfg = build_serve_config(server_flag, &cfg, cache_dir);
     server_cfg.bearer_token = bearer_token;
+    server_cfg.security = mnm_core::config::resolve_security_level(None, &cfg.security, &cfg_env);
 
     mnm_mcp::run(server_cfg)
         .await
@@ -166,5 +167,23 @@ mod tests {
 
         let cli = Cli::parse_from(["mnm", "--server", "http://localhost:8080", "mcp", "serve"]);
         assert_eq!(cli.server.as_deref(), Some("http://localhost:8080"));
+    }
+
+    /// `[security] level = "strict"` in the discovered config must reach the
+    /// MCP `ServerConfig` via the same `resolve_security_level` call `serve`
+    /// uses. With a no-op env (every var `None`), the config layer is the sole
+    /// deciding source, so the strict level proves the config wiring works.
+    #[test]
+    fn serve_security_level_resolves_strict_from_config() {
+        struct NoEnv;
+        impl mnm_core::config::ConfigEnv for NoEnv {
+            fn var(&self, _name: &str) -> Option<String> {
+                None
+            }
+        }
+        let mut cfg = Config::default();
+        cfg.security.level = Some("strict".into());
+        let level = mnm_core::config::resolve_security_level(None, &cfg.security, &NoEnv);
+        assert_eq!(level, mnm_core::injection::SecurityLevel::Strict);
     }
 }

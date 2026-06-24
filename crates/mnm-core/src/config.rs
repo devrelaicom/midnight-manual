@@ -32,6 +32,9 @@ pub struct Config {
     /// `[cli]` section — admin-visibility flag etc.
     #[serde(default)]
     pub cli: CliConfig,
+    /// `[security]` section — MCP client injection-guarding level.
+    #[serde(default)]
+    pub security: SecurityConfig,
 }
 
 /// Compiled-in production cloud base URL. Single source of truth for the
@@ -132,6 +135,15 @@ pub struct CliConfig {
     /// override. Per D23, this never gates invocation.
     #[serde(default)]
     pub show_admin_cmds: bool,
+}
+
+/// `[security]` — MCP client prompt-injection guarding level (issue #103).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct SecurityConfig {
+    /// Guarding level: `"disabled"` | `"low"` | `"moderate"` | `"high"` |
+    /// `"strict"`. Unknown/empty falls through to the resolver default.
+    pub level: Option<String>,
 }
 
 impl Config {
@@ -348,6 +360,35 @@ pub fn resolve_rerank_model(
         })
         .or_else(|| cfg.model.as_deref().and_then(parse))
         .unwrap_or(RerankParam::Rerank25)
+}
+
+/// Resolve the MCP client security level with precedence flag >
+/// `MIDNIGHT_MANUAL_SECURITY` env > `[security].level` config > default
+/// [`crate::injection::SecurityLevel::Moderate`].
+///
+/// An empty or unrecognized value at any level is treated as absent and falls
+/// through to the next source, matching the other config resolvers.
+#[must_use]
+pub fn resolve_security_level(
+    flag: Option<&str>,
+    cfg: &SecurityConfig,
+    env: &impl ConfigEnv,
+) -> crate::injection::SecurityLevel {
+    use std::str::FromStr as _;
+
+    use crate::injection::SecurityLevel;
+
+    let parse = |s: &str| SecurityLevel::from_str(s).ok();
+    flag.filter(|s| !s.is_empty())
+        .and_then(parse)
+        .or_else(|| {
+            env.var("MIDNIGHT_MANUAL_SECURITY")
+                .filter(|s| !s.is_empty())
+                .as_deref()
+                .and_then(parse)
+        })
+        .or_else(|| cfg.level.as_deref().and_then(parse))
+        .unwrap_or_default()
 }
 
 /// All the ways config discovery can fail.
@@ -619,5 +660,27 @@ model = "rerank-2.5-lite"
             resolve_rerank_model(Some("bogus"), &RerankConfig::default(), &no_env),
             RerankParam::Rerank25
         );
+    }
+
+    #[test]
+    fn resolve_security_level_precedence_and_default() {
+        use crate::injection::SecurityLevel;
+
+        let cfg = SecurityConfig { level: Some("high".into()) };
+        let env = FakeEnv::default().set("MIDNIGHT_MANUAL_SECURITY", "strict");
+
+        // flag > env > config.
+        assert_eq!(resolve_security_level(Some("low"), &cfg, &env), SecurityLevel::Low);
+        // No flag -> env wins over config.
+        assert_eq!(resolve_security_level(None, &cfg, &env), SecurityLevel::Strict);
+        // No flag, no env -> config wins.
+        let no_env = FakeEnv::default();
+        assert_eq!(resolve_security_level(None, &cfg, &no_env), SecurityLevel::High);
+        // Nothing anywhere -> default Moderate.
+        let empty = SecurityConfig::default();
+        assert_eq!(resolve_security_level(None, &empty, &no_env), SecurityLevel::Moderate);
+        // Unknown/empty flag falls through to the next level.
+        assert_eq!(resolve_security_level(Some("bogus"), &cfg, &no_env), SecurityLevel::High);
+        assert_eq!(resolve_security_level(Some(""), &empty, &no_env), SecurityLevel::Moderate);
     }
 }

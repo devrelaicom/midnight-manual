@@ -103,6 +103,8 @@ pub enum Command {
     Login(commands::login::Args),
     /// Local user-store CRUD (admin; hidden by default).
     Users(commands::users::Args),
+    /// Admin tooling group: prompt-injection detector warmup + scoring (admin; hidden by default).
+    Admin(commands::admin::Args),
     /// Run an admin ingest from a manifest (admin; hidden by default).
     Ingest(commands::ingest::Args),
     /// Per-CIDR rate-limit override CRUD (admin; hidden by default).
@@ -122,6 +124,7 @@ pub enum Command {
 /// Subcommand names that are admin-only and therefore hidden from `--help`
 /// unless `MIDNIGHT_MANUAL_SHOW_ADMIN_CMDS=1` is set (FR-066).
 const ADMIN_SUBCOMMANDS: &[&str] = &[
+    "admin",
     "keys",
     "login",
     "users",
@@ -283,6 +286,7 @@ pub async fn run() -> Result<()> {
         Command::Keys(args) => commands::keys::run(args, cli.json),
         Command::Login(args) => commands::login::run(args, cli.server.as_deref(), cli.json).await,
         Command::Users(args) => commands::users::run(args, cli.json),
+        Command::Admin(args) => commands::admin::run(args, cli.server.as_deref(), cli.json).await,
         Command::Ingest(args) => {
             commands::ingest::run(
                 args,
@@ -360,6 +364,7 @@ const fn cli_command_name(cmd: &Command) -> CliCommandName {
             CliCommandName::Auth
         }
         Command::Telemetry(_) => CliCommandName::Telemetry,
+        Command::Admin(_) => CliCommandName::Admin,
         Command::Ingest(_) => CliCommandName::Ingest,
         Command::Ratelimits(_) => CliCommandName::Ratelimits,
         Command::Tokenlimits(_) => CliCommandName::Tokenlimits,

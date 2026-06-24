@@ -262,6 +262,8 @@ pub enum CliCommandName {
     Auth,
     /// `mnm telemetry` (any sub).
     Telemetry,
+    /// `mnm admin` (any sub).
+    Admin,
     /// `mnm ingest` (admin).
     Ingest,
     /// `mnm ratelimits` (admin).
@@ -572,6 +574,10 @@ mod tests {
         assert_eq!(
             serde_json::to_value(CliCommandName::Status).unwrap(),
             serde_json::Value::String("status".into())
+        );
+        assert_eq!(
+            serde_json::to_value(CliCommandName::Admin).unwrap(),
+            serde_json::Value::String("admin".into())
         );
     }
 

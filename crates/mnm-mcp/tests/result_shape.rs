@@ -73,6 +73,7 @@ fn advanced_search_structured_conforms_to_output_schema() {
         reranker_used: Some("rerank-2.5".to_owned()),
         advanced: true,
         skill_installed: true,
+        security: mnm_core::injection::SecurityLevel::default(),
     };
     let result = mnm_mcp::render::project_search(env, &opts).into_result();
     let sc = result
@@ -95,6 +96,9 @@ fn advanced_search_structured_conforms_to_output_schema() {
 fn all_passthrough_projectors_conform_to_their_output_schema() {
     // A representative success from each passthrough projector validates
     // against the outputSchema advertised for its tool in tools::list().
+    // Default (Moderate) guarding wraps the (unknown/unverified) body chunks;
+    // the additive `security` block + wrapped string content must still conform.
+    const SEC: mnm_core::injection::SecurityLevel = mnm_core::injection::SecurityLevel::Moderate;
     let status_report = mnm_mcp::status::StatusReport {
         mcp_version: "0.4.0",
         cloud: mnm_mcp::status::CloudState::Reachable,
@@ -133,15 +137,19 @@ fn all_passthrough_projectors_conform_to_their_output_schema() {
             "get_chunks (single)",
             mnm_mcp::render::project_chunks(
                 serde_json::json!({ "chunks": [chunk_env("c1")], "missing": [] }),
+                SEC,
             ),
             mnm_mcp::schemas::chunks_output_schema(),
         ),
         (
             "get_chunks (multi + missing)",
-            mnm_mcp::render::project_chunks(serde_json::json!({
-                "chunks": [chunk_env("c1"), chunk_env("c2")],
-                "missing": ["c3"]
-            })),
+            mnm_mcp::render::project_chunks(
+                serde_json::json!({
+                    "chunks": [chunk_env("c1"), chunk_env("c2")],
+                    "missing": ["c3"]
+                }),
+                SEC,
+            ),
             mnm_mcp::schemas::chunks_output_schema(),
         ),
         (
@@ -149,6 +157,7 @@ fn all_passthrough_projectors_conform_to_their_output_schema() {
             mnm_mcp::render::project_chunk_list(
                 serde_json::json!({ "chunks": [chunk_env("c2"), chunk_env("c3")] }),
                 "after",
+                SEC,
             ),
             mnm_mcp::schemas::chunk_list_output_schema(),
         ),
@@ -157,16 +166,20 @@ fn all_passthrough_projectors_conform_to_their_output_schema() {
             mnm_mcp::render::project_chunk_list(
                 serde_json::json!({ "chunks": [chunk_env("c0")] }),
                 "before",
+                SEC,
             ),
             mnm_mcp::schemas::chunk_list_output_schema(),
         ),
         (
             "get_chunk_neighbors",
-            mnm_mcp::render::project_neighbors(serde_json::json!({
-                "prev": { "chunks": [chunk_env("c0")] },
-                "chunk": chunk_env("c1"),
-                "next": { "chunks": [chunk_env("c2")] }
-            })),
+            mnm_mcp::render::project_neighbors(
+                serde_json::json!({
+                    "prev": { "chunks": [chunk_env("c0")] },
+                    "chunk": chunk_env("c1"),
+                    "next": { "chunks": [chunk_env("c2")] }
+                }),
+                SEC,
+            ),
             mnm_mcp::schemas::neighbors_output_schema(),
         ),
         (
@@ -194,14 +207,17 @@ fn all_passthrough_projectors_conform_to_their_output_schema() {
         ),
         (
             "get_document_chunks (window)",
-            mnm_mcp::render::project_document_window(serde_json::json!({
-                "id": "d1", "source_path": "docs/x.md", "from": 0, "total_chunks": 5,
-                "source": { "slug": "s", "display_name": "S" },
-                "chunks": [
-                    { "chunk_id": "c1", "chunk_index": 0, "content": "body one" },
-                    { "chunk_id": "c2", "chunk_index": 1, "content": "body two" }
-                ]
-            })),
+            mnm_mcp::render::project_document_window(
+                serde_json::json!({
+                    "id": "d1", "source_path": "docs/x.md", "from": 0, "total_chunks": 5,
+                    "source": { "slug": "s", "display_name": "S" },
+                    "chunks": [
+                        { "chunk_id": "c1", "chunk_index": 0, "content": "body one" },
+                        { "chunk_id": "c2", "chunk_index": 1, "content": "body two" }
+                    ]
+                }),
+                SEC,
+            ),
             mnm_mcp::schemas::document_window_output_schema(),
         ),
         (

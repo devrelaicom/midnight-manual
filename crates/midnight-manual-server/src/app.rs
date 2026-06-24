@@ -78,6 +78,11 @@ pub struct AppState {
     /// Held per-app (not a module-global static) so each constructed app —
     /// including each integration test's app — gets an isolated cache.
     pub facets_cache: crate::routes::facets::FacetsCache,
+    /// Ingest-time prompt-injection scanning state (issue #103). Holds the
+    /// resolved policy and the optional hosted-model client. Pattern-only when
+    /// the model leg is unconfigured; the whole scan is a no-op when
+    /// `injection_enabled = false`.
+    pub injection: std::sync::Arc<crate::injection::scan::InjectionState>,
 }
 
 /// Resolved auth subsystem state — set once at boot when both the user
@@ -444,6 +449,8 @@ pub fn build_with_limiter(
     // never fails on it.
     let cache_dir = mnm_embedding::cache::resolve(&mnm_embedding::cache::StdEnv)
         .unwrap_or_else(std::env::temp_dir);
+    // Build from `&cfg` BEFORE the struct literal moves `cfg` into `Arc::new`.
+    let injection = std::sync::Arc::new(crate::injection::scan::InjectionState::from_config(&cfg));
     let state = AppState {
         pool,
         cfg: Arc::new(cfg),
@@ -457,6 +464,7 @@ pub fn build_with_limiter(
         token_limiter,
         cache_dir,
         facets_cache: crate::routes::facets::new_cache(),
+        injection,
     };
 
     Ok(Router::new()
@@ -471,6 +479,7 @@ pub fn build_with_limiter(
         .merge(crate::routes::documents::router())
         .merge(crate::routes::auth::router())
         .merge(crate::routes::admin_ingest::router())
+        .merge(crate::routes::admin_injection::router())
         .merge(crate::routes::admin_ratelimits::router())
         .merge(crate::routes::admin_sources::router())
         .merge(crate::routes::admin_status::router())

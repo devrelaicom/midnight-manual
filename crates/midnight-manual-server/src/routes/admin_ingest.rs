@@ -36,7 +36,10 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{post, put};
 use axum::{Json, Router};
 use mnm_core::error::{Error as CoreError, ErrorCode};
-use mnm_core::ingest::UploadConflict;
+use mnm_core::ingest::{
+    UploadConflict, PROMPT_INJECTION_REASON, PROMPT_INJECTION_UNAVAILABLE_REASON,
+};
+use mnm_core::injection::Verdict;
 use mnm_core::model_id::EmbeddingModelId;
 use mnm_core::provenance::Provenance;
 use mnm_core::types::{ChunkStatus, DocumentKind, NodeKind, SourceVersionStatus};
@@ -50,6 +53,7 @@ use uuid::Uuid;
 
 use crate::app::AppState;
 use crate::error;
+use crate::injection::scan::{ScanAbort, ScanResult};
 use crate::middleware::bearer::AuthContext;
 use crate::middleware::request_id::RequestId;
 
@@ -204,6 +208,11 @@ pub struct UploadDocumentsResponse {
     /// Per-document conflicts (e.g. duplicate path). Wire shape is the shared
     /// [`mnm_core::ingest::UploadConflict`] contract.
     pub conflicts: Vec<UploadConflict>,
+    /// `Some(true)` when at least one document was scanned with the model leg
+    /// requested but unreachable and the policy failed open (issue #103).
+    /// Omitted otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub injection_model_unavailable: Option<bool>,
 }
 
 /// Optional body for `POST .../finalize`.
@@ -562,14 +571,12 @@ async fn upload_documents(
     let mut accepted = 0_usize;
     let mut carried = 0_usize;
     let mut conflicts: Vec<UploadConflict> = Vec::new();
+    let mut model_unavailable_any = false;
     let mut seen_in_batch: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for doc in req.documents {
         if !seen_in_batch.insert(doc.path.clone()) {
-            conflicts.push(UploadConflict {
-                path: doc.path.clone(),
-                reason: "duplicate path in this batch".to_owned(),
-            });
+            conflicts.push(UploadConflict::plain(doc.path.clone(), "duplicate path in this batch"));
             continue;
         }
 
@@ -607,13 +614,50 @@ async fn upload_documents(
                     .await
                 }
                 UploadDecision::InsertNew => {
+                    // Prompt-injection scan (issue #103) runs only on the
+                    // InsertNew path — carried docs are unchanged and were
+                    // scanned when first ingested. Skipped entirely when
+                    // injection scanning is disabled.
+                    if state.injection.enabled {
+                        let doc_text = doc
+                            .chunks
+                            .iter()
+                            .map(|c| c.content.as_str())
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        let attribution =
+                            crate::injection::scan::attribution_str(doc.provenance.attribution);
+                        match state.injection.scan(&doc_text, attribution).await {
+                            Ok(ScanResult { report, model_unavailable })
+                                if report.verdict == Verdict::Reject =>
+                            {
+                                model_unavailable_any |= model_unavailable;
+                                conflicts.push(UploadConflict {
+                                    path: doc.path.clone(),
+                                    reason: PROMPT_INJECTION_REASON.to_owned(),
+                                    final_score: Some(report.blended_score),
+                                    reject_threshold: Some(report.reject_threshold),
+                                    pattern: Some(report.pattern),
+                                    model: report.model,
+                                });
+                                continue;
+                            }
+                            Ok(ScanResult { model_unavailable, .. }) => {
+                                model_unavailable_any |= model_unavailable;
+                            }
+                            Err(ScanAbort) => {
+                                conflicts.push(UploadConflict::plain(
+                                    doc.path.clone(),
+                                    format!("{PROMPT_INJECTION_UNAVAILABLE_REASON} (fail-closed)"),
+                                ));
+                                continue;
+                            }
+                        }
+                    }
                     insert_new_document(&state.pool, sv.id, sv.embedding_model_id, root, &doc).await
                 }
                 UploadDecision::Conflict(reason) => {
-                    conflicts.push(UploadConflict {
-                        path: doc.path.clone(),
-                        reason: reason.to_owned(),
-                    });
+                    conflicts.push(UploadConflict::plain(doc.path.clone(), reason));
                     continue;
                 }
             };
@@ -633,15 +677,19 @@ async fn upload_documents(
                     error = %e,
                     "document insert failed",
                 );
-                conflicts.push(UploadConflict {
-                    path: doc.path.clone(),
-                    reason: format!("insert failed: {e}"),
-                });
+                conflicts
+                    .push(UploadConflict::plain(doc.path.clone(), format!("insert failed: {e}")));
             }
         }
     }
 
-    Json(UploadDocumentsResponse { accepted, carried, conflicts }).into_response()
+    Json(UploadDocumentsResponse {
+        accepted,
+        carried,
+        conflicts,
+        injection_model_unavailable: model_unavailable_any.then_some(true),
+    })
+    .into_response()
 }
 
 async fn finalize_run(
@@ -1491,5 +1539,47 @@ mod tests {
         let err = check_code_embedded_batch(&docs, Some(EXPECTED_DIM)).unwrap_err();
         assert_eq!(err.code, ErrorCode::InvalidRequest);
         assert!(!err.remediation.is_empty());
+    }
+
+    // ── Prompt-injection response shape (issue #103) ──
+
+    #[test]
+    fn upload_response_serializes_injection_field() {
+        let with_flag = UploadDocumentsResponse {
+            accepted: 0,
+            carried: 0,
+            conflicts: vec![],
+            injection_model_unavailable: Some(true),
+        };
+        let s = serde_json::to_string(&with_flag).unwrap();
+        assert!(s.contains("\"injection_model_unavailable\":true"), "got: {s}");
+
+        let without = UploadDocumentsResponse {
+            accepted: 0,
+            carried: 0,
+            conflicts: vec![],
+            injection_model_unavailable: None,
+        };
+        let s = serde_json::to_string(&without).unwrap();
+        assert!(!s.contains("injection_model_unavailable"), "field must be omitted: {s}");
+    }
+
+    #[test]
+    fn injection_conflict_shape() {
+        use mnm_core::injection::PatternResult;
+        let conflict = UploadConflict {
+            path: "a.md".into(),
+            reason: PROMPT_INJECTION_REASON.into(),
+            final_score: Some(0.9),
+            reject_threshold: Some(0.85),
+            pattern: Some(PatternResult::default()),
+            model: None,
+        };
+        let s = serde_json::to_string(&conflict).unwrap();
+        assert!(s.contains("\"reason\":\"prompt_injection\""), "got: {s}");
+        assert!(s.contains("\"final_score\":0.9"), "got: {s}");
+        assert!(s.contains("\"reject_threshold\":0.85"), "got: {s}");
+        // `model` is None → omitted from the wire JSON.
+        assert!(!s.contains("\"model\""), "model must be omitted when None: {s}");
     }
 }

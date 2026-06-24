@@ -44,6 +44,15 @@ pub struct ServerConfig {
     /// Config-side master telemetry-enabled flag. The runtime opt-out
     /// resolver still wins over this (FR-107).
     pub telemetry_enabled: bool,
+    /// Client-side prompt-injection guarding level (issue #103). Decides, per
+    /// returned chunk's source attribution and verification status, whether the
+    /// content is wrapped in a nonce-tagged untrusted block before the model
+    /// sees it — and at [`SecurityLevel::Strict`], whether pattern-flagged
+    /// content is removed. Defaults to [`SecurityLevel::Moderate`].
+    ///
+    /// [`SecurityLevel::Strict`]: mnm_core::injection::SecurityLevel::Strict
+    /// [`SecurityLevel::Moderate`]: mnm_core::injection::SecurityLevel::Moderate
+    pub security: mnm_core::injection::SecurityLevel,
 }
 
 impl ServerConfig {
@@ -62,6 +71,7 @@ impl ServerConfig {
             bearer_token: None,
             telemetry_url,
             telemetry_enabled: true,
+            security: mnm_core::injection::SecurityLevel::default(),
         }
     }
 }
@@ -513,6 +523,7 @@ async fn run_search_dispatch(params: &ToolCallParams, state: &ServerState) -> To
                 reranker_used: reranker_name,
                 advanced,
                 skill_installed: mnm_skills::installed_anywhere(&mnm_skills::StdSkillEnv),
+                security: state.cfg.security,
             };
             let outcome = render::project_search(success.envelope, &opts);
             let telemetry = outcome.telemetry.clone();
@@ -571,12 +582,13 @@ async fn run_passthrough_tool(params: &ToolCallParams, state: &ServerState) -> T
     use crate::render;
     let cloud = &state.cloud;
     let args = &params.arguments;
+    let security = state.cfg.security;
 
     // Inline each arm to avoid macro/closure type-inference fights.
     match params.name.as_str() {
         "get_chunks" => match tools::run_get_chunks(args, cloud).await {
             Ok(v) => ToolResponse {
-                result: render::project_chunks(v).into_result(),
+                result: render::project_chunks(v, security).into_result(),
                 telemetry: None,
                 rerank: None,
                 outcome: Outcome::Ok,
@@ -594,7 +606,7 @@ async fn run_passthrough_tool(params: &ToolCallParams, state: &ServerState) -> T
         "get_chunk_next" => {
             match tools::run_chunk_nav(args, cloud, tools::ChunkNavDirection::Next).await {
                 Ok(v) => ToolResponse {
-                    result: render::project_chunk_list(v, "after").into_result(),
+                    result: render::project_chunk_list(v, "after", security).into_result(),
                     telemetry: None,
                     rerank: None,
                     outcome: Outcome::Ok,
@@ -613,7 +625,7 @@ async fn run_passthrough_tool(params: &ToolCallParams, state: &ServerState) -> T
         "get_chunk_prev" => {
             match tools::run_chunk_nav(args, cloud, tools::ChunkNavDirection::Prev).await {
                 Ok(v) => ToolResponse {
-                    result: render::project_chunk_list(v, "before").into_result(),
+                    result: render::project_chunk_list(v, "before", security).into_result(),
                     telemetry: None,
                     rerank: None,
                     outcome: Outcome::Ok,
@@ -631,7 +643,7 @@ async fn run_passthrough_tool(params: &ToolCallParams, state: &ServerState) -> T
         }
         "get_chunk_neighbors" => match tools::run_chunk_neighbors(args, cloud).await {
             Ok(v) => ToolResponse {
-                result: render::project_neighbors(v).into_result(),
+                result: render::project_neighbors(v, security).into_result(),
                 telemetry: None,
                 rerank: None,
                 outcome: Outcome::Ok,
@@ -686,7 +698,7 @@ async fn run_passthrough_tool(params: &ToolCallParams, state: &ServerState) -> T
         }
         "get_document_chunks" => match tools::run_document_chunks(args, cloud).await {
             Ok(v) => ToolResponse {
-                result: render::project_document_window(v).into_result(),
+                result: render::project_document_window(v, security).into_result(),
                 telemetry: None,
                 rerank: None,
                 outcome: Outcome::Ok,
