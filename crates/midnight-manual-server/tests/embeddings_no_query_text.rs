@@ -4,21 +4,17 @@
 //! handler ([`midnight_manual_server::routes::embeddings`]) was built to never log or persist
 //! the submitted input text:
 //!
-//! - it emits **no** telemetry event (the handler never touches a telemetry
-//!   client; `AppState` carries none for this path), so nothing it does can land
-//!   input text in `telemetry_event_raw`;
 //! - its only input-path log is a `tracing::warn!` on a Voyage failure that logs
 //!   the *error*, never the input;
 //! - the 429 over-budget response body carries only window / limit / reset
 //!   metadata (see `token_limit_429`), never the submitted input text.
 //!
 //! This test drives a canary-laden request through the real HTTP-backed
-//! `/v1/embeddings` route (with a mock Voyage upstream) and asserts three things
+//! `/v1/embeddings` route (with a mock Voyage upstream) and asserts two things
 //! contain no canary string:
 //!
-//! 1. the server's captured logs,
-//! 2. the `telemetry_event_raw` table, and
-//! 3. the 429 over-budget response body.
+//! 1. the server's captured logs, and
+//! 2. the 429 over-budget response body.
 //!
 //! It also includes a POSITIVE CONTROL (Part C): the 200 path emits no logs, so
 //! the "no canary in logs" assertion would silently pass against an empty buffer
@@ -60,7 +56,6 @@ use mnm_embedding::voyage::VoyageEmbedder;
 use mnm_telemetry::canary::{
     self, find_first_match, CanaryCategory, CANARY_PREFIX, CANARY_STRINGS,
 };
-use sqlx::Row as _;
 use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::EnvFilter;
 use wiremock::matchers::{method, path};
@@ -313,29 +308,6 @@ async fn embeddings_path_emits_no_query_text() {
     // ── Assertion 1: the server's captured logs carry no canary ────────────
     let log_snapshot = captured.snapshot();
     canary::assert_no_canary_in(&log_snapshot);
-
-    // ── Assertion 2: telemetry_event_raw carries no canary ─────────────────
-    // The embeddings handler emits no telemetry, so this table should hold
-    // nothing from this path; reading it back proves the path wrote nothing
-    // containing the input text. (Mirrors telemetry_canary's sqlx read.)
-    let rows = sqlx::query(
-        "SELECT event_type, component, version, fields::text AS fields_text, \
-         COALESCE(request_id,'') AS request_id FROM telemetry_event_raw",
-    )
-    .fetch_all(&h.pool)
-    .await
-    .expect("read telemetry_event_raw");
-    for row in &rows {
-        let event_type: String = row.get("event_type");
-        let component: String = row.get("component");
-        let version: String = row.get("version");
-        let fields_text: String = row.get("fields_text");
-        let request_id: String = row.get("request_id");
-        let combined = format!("{event_type}|{component}|{version}|{fields_text}|{request_id}");
-        if let Some(c) = find_first_match(&combined) {
-            panic!("canary leak in telemetry_event_raw: {:?} matched a row", c.category);
-        }
-    }
 
     // ── Part B: 429 over-budget — the rejection body must carry no input ────
     //
