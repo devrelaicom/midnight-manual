@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/devrelaicom/midnight-manual/compare/v0.2.4...v0.3.0) - 2026-06-24
+
+### Added
+
+- prompt-injection protection — ingest scanning (server) + response guarding (MCP) ([#103](https://github.com/devrelaicom/midnight-manual/pull/103)) ([#109](https://github.com/devrelaicom/midnight-manual/pull/109))
+
 ## [0.2.4](https://github.com/devrelaicom/midnight-manual/compare/v0.2.3...v0.2.4) - 2026-06-23
 
 ### Added
