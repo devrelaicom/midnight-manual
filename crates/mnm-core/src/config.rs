@@ -406,10 +406,11 @@ pub fn resolve_security_level(
         .unwrap_or_default()
 }
 
-/// Resolve the Gauge telemetry endpoint with precedence
-/// `MIDNIGHT_MANUAL_GAUGE_ENDPOINT` env > `[telemetry].endpoint` config >
-/// baked-in [`DEFAULT_TELEMETRY_ENDPOINT`]. An empty value at any level falls
-/// through to the next source.
+/// Resolve the Gauge telemetry endpoint.
+///
+/// Precedence: `MIDNIGHT_MANUAL_GAUGE_ENDPOINT` env > `[telemetry].endpoint`
+/// config > baked-in [`DEFAULT_TELEMETRY_ENDPOINT`]. An empty value at any
+/// level falls through to the next source.
 #[must_use]
 pub fn resolve_telemetry_endpoint(cfg: &TelemetryConfig, env: &impl ConfigEnv) -> String {
     env.var("MIDNIGHT_MANUAL_GAUGE_ENDPOINT")

@@ -4,23 +4,6 @@
 //! wires the Gauge [`Telemetry`] handle with midnight-manual's opt-out,
 //! identity, and endpoint, and a slim opt-out marker module ([`optout`]).
 
-#[cfg(test)]
-pub(crate) mod test_lock {
-    //! One process-wide `Mutex` shared by every test that touches the
-    //! `optout::RUNTIME_DISABLED` static. `cargo test` runs tests in
-    //! parallel within a single binary; without a shared lock the toggle
-    //! tests race the resolver tests and produce flaky failures.
-    use std::sync::Mutex;
-
-    pub static LOCK: Mutex<()> = Mutex::new(());
-
-    /// Acquire the lock, recovering from a previous panic that poisoned it.
-    pub fn lock() -> std::sync::MutexGuard<'static, ()> {
-        LOCK.lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-}
-
 pub mod canary;
 pub mod events;
 pub mod optout;

@@ -17,21 +17,10 @@ workspace = true
 integration = []
 
 [dependencies]
-# events.rs / new telemetry core
 mnm-core        = { workspace = true }
 gauge-telemetry = { workspace = true }
 serde           = { workspace = true }
 tracing         = { workspace = true }
-# client.rs requires these until it is rewritten in a later task
-async-trait  = "0.1"
-thiserror    = { workspace = true }
-tokio        = { workspace = true }
-reqwest      = { workspace = true }
-url          = { workspace = true }
 
 [dev-dependencies]
-serde_json         = { workspace = true }
-tempfile           = { workspace = true }
-tracing-subscriber = { workspace = true }
-wiremock           = { workspace = true }
-tokio              = { workspace = true }
+serde_json = { workspace = true }

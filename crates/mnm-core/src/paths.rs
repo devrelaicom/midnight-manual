@@ -72,10 +72,11 @@ pub fn telemetry_marker_path(env: &impl ConfigEnv) -> Option<PathBuf> {
     config_home(env).map(|p| p.join("telemetry-disabled"))
 }
 
-/// Resolve the persistent telemetry install-id path
-/// (`<config_home>/telemetry/id`). Gauge mints an anonymous UUID here on first
-/// run; the queue file defaults alongside it. Returns `None` when no config
-/// home can be resolved (telemetry then stays disabled).
+/// Resolve the persistent telemetry install-id path (`<config_home>/telemetry/id`).
+///
+/// Gauge mints an anonymous UUID here on first run; the queue file defaults
+/// alongside it. Returns `None` when no config home can be resolved (telemetry
+/// then stays disabled).
 #[must_use]
 pub fn telemetry_install_id_path(env: &impl ConfigEnv) -> Option<PathBuf> {
     config_home(env).map(|p| p.join("telemetry").join("id"))
