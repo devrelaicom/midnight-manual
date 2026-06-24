@@ -4,6 +4,22 @@
 
 pub use gauge_telemetry::FORBIDDEN_SUBSTRINGS as FORBIDDEN;
 
+/// Probe prefix for leak-detection tests.
+///
+/// A string that appears in [`FORBIDDEN`]. Use it to construct probe inputs
+/// (e.g. `format!("{CANARY_PREFIX}my_token")`) — any rendered string
+/// containing the prefix will be caught by [`find_first_match`].
+///
+/// The value is `"@"` (the first entry of `FORBIDDEN_SUBSTRINGS`).
+pub const CANARY_PREFIX: &str = "@";
+
+/// Return the first [`FORBIDDEN`] substring found in `s`, or `None`.
+///
+/// Use this in assertion messages for output leak-detection tests.
+pub fn find_first_match(s: &str) -> Option<&'static str> {
+    FORBIDDEN.iter().copied().find(|&forbidden| s.contains(forbidden))
+}
+
 #[cfg(test)]
 mod tests {
     use gauge_telemetry::assert_no_forbidden;

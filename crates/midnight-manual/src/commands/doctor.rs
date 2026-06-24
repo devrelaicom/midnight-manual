@@ -42,8 +42,8 @@ struct Report {
 struct TelemetryReport {
     /// `true` when the three-mechanism resolver currently allows emission.
     enabled: bool,
-    /// Resolved sink URL, derived from `[server].url`.
-    sink_url: String,
+    /// Resolved Gauge endpoint.
+    endpoint: String,
     /// Resolved persistent-marker path (mechanism #3). `None` when no
     /// `HOME` / `XDG_CONFIG_HOME` is set.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -98,22 +98,18 @@ pub async fn run(args: Args, json: bool) -> Result<()> {
     let env = mnm_core::config::StdEnv;
     let (cfg, path) = mnm_core::config::Config::discover(None, &env)?;
     let marker = mnm_core::paths::telemetry_marker_path(&env);
-    optout::load_persistent_marker(marker.as_deref());
-    let env_disabled = std::env::var(optout::DISABLE_ENV_VAR)
-        .ok()
-        .is_some_and(|v| {
-            matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
-        });
-    let marker_present = marker.as_deref().is_some_and(std::path::Path::exists);
+    let env_disabled = optout::env_disabled(&env);
+    let marker_present = marker.as_deref().is_some_and(optout::marker_present);
+    let disabled_by_config = !cfg.telemetry.enabled;
     let telemetry = TelemetryReport {
-        enabled: optout::is_enabled(&optout::StdEnv, cfg.telemetry.enabled),
-        sink_url: format!("{}/v1/telemetry/events", cfg.server.url.trim_end_matches('/')),
+        enabled: !disabled_by_config && !env_disabled && !marker_present,
+        endpoint: mnm_core::config::resolve_telemetry_endpoint(&cfg.telemetry, &env),
         marker_path: marker.as_ref().map(|p| p.display().to_string()),
         marker_present,
         disabled_by: DisabledBy {
             env: env_disabled,
-            config: !cfg.telemetry.enabled,
-            runtime: optout::runtime_disabled(),
+            config: disabled_by_config,
+            runtime: marker_present,
         },
     };
 
@@ -162,13 +158,9 @@ fn print_human(report: &Report, had_admin_token: bool) {
     );
     println!("  admin visibility:  {}", if report.admin_visibility { "on" } else { "off" },);
     println!(
-        "  telemetry:         {} (sink: {})",
-        if report.telemetry.enabled {
-            "on"
-        } else {
-            "off"
-        },
-        report.telemetry.sink_url,
+        "  telemetry:         {} (endpoint: {})",
+        if report.telemetry.enabled { "on" } else { "off" },
+        report.telemetry.endpoint,
     );
     if let Some(p) = report.telemetry.marker_path.as_deref() {
         println!(
