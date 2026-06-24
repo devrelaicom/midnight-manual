@@ -15,8 +15,8 @@ use std::time::Instant;
 
 use anyhow::{anyhow, Context as _, Result};
 use clap::{Args as ClapArgs, Subcommand};
-use mnm_telemetry::events::{Component, EventPayload, Outcome};
-use mnm_telemetry::{Event, TelemetryClient};
+use mnm_telemetry::events::{Outcome, PullModels};
+use mnm_telemetry::Telemetry;
 use serde::{Deserialize, Serialize};
 
 /// `mnm models <subcommand>`.
@@ -101,17 +101,15 @@ pub async fn run(
     server_flag: Option<&str>,
     config_path: Option<&Path>,
     voyage_api_key: Option<&str>,
-    telemetry: &TelemetryClient,
-    cli_version: &str,
+    telemetry: &Telemetry,
     json: bool,
 ) -> Result<()> {
     match args.cmd {
-        ModelsCmd::Pull(p) => run_pull(p, config_path, telemetry, cli_version, json).await,
+        ModelsCmd::Pull(p) => run_pull(p, config_path, telemetry, json).await,
         ModelsCmd::Active(_) => run_active(server_flag, json).await,
         ModelsCmd::Status(_) => run_status(server_flag, json).await,
         ModelsCmd::Migrate(m) => {
-            run_migrate(m, server_flag, config_path, voyage_api_key, telemetry, cli_version, json)
-                .await
+            run_migrate(m, server_flag, config_path, voyage_api_key, telemetry, json).await
         }
     }
 }
@@ -119,8 +117,7 @@ pub async fn run(
 async fn run_pull(
     args: PullArgs,
     config_path: Option<&Path>,
-    telemetry: &TelemetryClient,
-    cli_version: &str,
+    telemetry: &Telemetry,
     json: bool,
 ) -> Result<()> {
     let started = Instant::now();
@@ -134,19 +131,13 @@ async fn run_pull(
     // Both the embedder and the reranker are remote VoyageAI now, so there is
     // nothing to download — `pull` only primes the cache directory.
     let duration_ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
-    telemetry
-        .emit(Event::new(
-            Component::Cli,
-            cli_version,
-            EventPayload::PullModels {
-                // Nothing is fetched locally: both models are remote VoyageAI.
-                embedder_downloaded: false,
-                reranker_downloaded: false,
-                duration_ms,
-                outcome: Outcome::Ok,
-            },
-        ))
-        .await;
+    telemetry.emit(&PullModels {
+        // Nothing is fetched locally: both models are remote VoyageAI.
+        embedder_downloaded: false,
+        reranker_downloaded: false,
+        duration_ms,
+        outcome: Outcome::Ok,
+    });
 
     println!("{}", format_pull_output(duration_ms, &cache_dir, json));
     Ok(())
@@ -315,8 +306,7 @@ pub async fn run_migrate(
     server_flag: Option<&str>,
     config_path: Option<&Path>,
     voyage_api_key: Option<&str>,
-    telemetry: &TelemetryClient,
-    cli_version: &str,
+    telemetry: &Telemetry,
     json: bool,
 ) -> Result<()> {
     let server_url = crate::shared::resolve_server_url(server_flag);
@@ -385,7 +375,6 @@ pub async fn run_migrate(
                 config_path,
                 voyage_api_key,
                 telemetry,
-                cli_version,
                 json,
             )
             .await
@@ -450,8 +439,7 @@ async fn ingest_source(
     auth_path: &Path,
     config_path: Option<&Path>,
     voyage_api_key: Option<&str>,
-    telemetry: &TelemetryClient,
-    cli_version: &str,
+    telemetry: &Telemetry,
     json: bool,
 ) -> Result<SourceOutcome> {
     // origin_url is guaranteed Some here (run_migrate pre-filters None away), but
@@ -519,7 +507,6 @@ async fn ingest_source(
         config_path,
         voyage_api_key,
         telemetry,
-        cli_version,
         json,
     )
     .await?;
