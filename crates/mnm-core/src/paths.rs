@@ -72,6 +72,15 @@ pub fn telemetry_marker_path(env: &impl ConfigEnv) -> Option<PathBuf> {
     config_home(env).map(|p| p.join("telemetry-disabled"))
 }
 
+/// Resolve the persistent telemetry install-id path
+/// (`<config_home>/telemetry/id`). Gauge mints an anonymous UUID here on first
+/// run; the queue file defaults alongside it. Returns `None` when no config
+/// home can be resolved (telemetry then stays disabled).
+#[must_use]
+pub fn telemetry_install_id_path(env: &impl ConfigEnv) -> Option<PathBuf> {
+    config_home(env).map(|p| p.join("telemetry").join("id"))
+}
+
 /// Resolve the user-store path on the CLI side.
 ///
 /// On the CLI side, `MIDNIGHT_MANUAL_USER_STORE` is read as a **file path**;
@@ -177,5 +186,26 @@ mod tests {
     fn user_store_xdg_fallback() {
         let env = FakeEnv::default().set("XDG_CONFIG_HOME", "/x");
         assert_eq!(user_store_path(&env), Some(PathBuf::from("/x/midnight-manual/users.toml")),);
+    }
+
+    #[test]
+    fn install_id_path_under_config_home() {
+        struct E;
+        impl crate::config::ConfigEnv for E {
+            fn var(&self, name: &str) -> Option<String> {
+                (name == "XDG_CONFIG_HOME").then(|| "/tmp/xdg".to_owned())
+            }
+        }
+        let p = telemetry_install_id_path(&E).expect("path");
+        assert!(p.ends_with("midnight-manual/telemetry/id"), "got {p:?}");
+    }
+
+    #[test]
+    fn install_id_path_none_without_home() {
+        struct E;
+        impl crate::config::ConfigEnv for E {
+            fn var(&self, _: &str) -> Option<String> { None }
+        }
+        assert!(telemetry_install_id_path(&E).is_none());
     }
 }
