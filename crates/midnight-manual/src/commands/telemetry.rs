@@ -110,7 +110,7 @@ fn run_enable(json: bool) -> Result<()> {
 
 fn run_status(json: bool) -> Result<()> {
     let env = mnm_core::config::StdEnv;
-    let (cfg, _) = mnm_core::config::Config::discover(None, &env).unwrap_or_default();
+    let (cfg, _) = mnm_core::config::Config::discover(None, &env)?;
     let path = mnm_core::paths::telemetry_marker_path(&env);
     let marker_present = path.as_deref().is_some_and(optout::marker_present);
     let disabled_by_env = optout::env_disabled(&env);

@@ -45,7 +45,7 @@ async fn serve(server_flag: Option<&str>, config_path: Option<&Path>) -> Result<
     // `build_serve_config`) — see `resolve_server_url_from` for why threading
     // the one `cfg` matters.
     let cfg_env = mnm_core::config::StdEnv;
-    let (cfg, _) = Config::discover(config_path, &cfg_env).unwrap_or_default();
+    let (cfg, _) = Config::discover(config_path, &cfg_env)?;
 
     // Cache dir precedence for `mnm mcp serve`: config (`[models].cache_dir`) >
     // env-chain (`MIDNIGHT_MANUAL_MODEL_CACHE_DIR` > `XDG_DATA_HOME` > `HOME`).

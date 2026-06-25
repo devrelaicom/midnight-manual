@@ -67,6 +67,9 @@ pub fn resolve_server_url(flag: Option<&str>) -> String {
         return s.trim_end_matches('/').to_owned();
     }
     let env = mnm_core::config::StdEnv;
+    // Best-effort: this convenience wrapper is only reached with no pre-discovered
+    // cfg; the authoritative loud discover already ran in `cli::run`. Callers that
+    // have a cfg should use `resolve_server_url_from` instead.
     let (cfg, _) = mnm_core::config::Config::discover(None, &env).unwrap_or_default();
     resolve_server_url_from(flag, &cfg)
 }

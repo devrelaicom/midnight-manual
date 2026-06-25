@@ -123,7 +123,7 @@ async fn run_pull(
     let started = Instant::now();
     // Config supplies the `[models].cache_dir` middle layer (flag > config > env).
     let cfg_env = mnm_core::config::StdEnv;
-    let (cfg, _) = mnm_core::config::Config::discover(config_path, &cfg_env).unwrap_or_default();
+    let (cfg, _) = mnm_core::config::Config::discover(config_path, &cfg_env)?;
     let cache_dir = resolve_cache_dir(args.cache_dir, cfg.models.cache_dir.as_deref())?;
     std::fs::create_dir_all(&cache_dir)
         .with_context(|| format!("create model cache dir at {}", cache_dir.display()))?;

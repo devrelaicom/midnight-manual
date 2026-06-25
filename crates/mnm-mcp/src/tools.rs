@@ -613,7 +613,8 @@ pub async fn run_search(
     // Resolve the Voyage API key from env / config (MCP has no CLI flag, so
     // every `flag` is `None`).
     let cfg_env = mnm_core::config::StdEnv;
-    let (core_cfg, _) = mnm_core::config::Config::discover(None, &cfg_env).unwrap_or_default();
+    let (core_cfg, _) = mnm_core::config::Config::discover(None, &cfg_env)
+        .map_err(|e| SearchError::Cloud(e.to_string()))?;
     let voyage_key = mnm_core::config::resolve_voyage_api_key(None, &core_cfg.models, &cfg_env);
 
     // Resolve the rerank placement/model/base-url and apply the local-without-key

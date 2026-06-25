@@ -417,8 +417,9 @@ async fn dispatch_tool_inner(
             // (flag is always None on the MCP surface; env + config only).
             let voyage_key = {
                 let cfg_env = mnm_core::config::StdEnv;
-                let (core_cfg, _) =
-                    mnm_core::config::Config::discover(None, &cfg_env).unwrap_or_default();
+                let (core_cfg, _) = mnm_core::config::Config::discover(None, &cfg_env).map_err(
+                    |e| Response::err(id.clone(), ErrorCode::InternalError, e.to_string()),
+                )?;
                 mnm_core::config::resolve_voyage_api_key(None, &core_cfg.models, &cfg_env)
             };
             let report = crate::status::assemble(&state.cloud, voyage_key.as_deref()).await;

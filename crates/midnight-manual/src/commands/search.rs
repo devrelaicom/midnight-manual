@@ -272,7 +272,7 @@ pub async fn run_with_paths(
     // Resolve the Voyage API key (flag > VOYAGE_API_KEY env > config). Honor the
     // caller's `--config` path so a key stored in a non-default config is found.
     let env = mnm_core::config::StdEnv;
-    let (cfg, _) = mnm_core::config::Config::discover(config_path, &env).unwrap_or_default();
+    let (cfg, _) = mnm_core::config::Config::discover(config_path, &env)?;
     let voyage_key = mnm_core::config::resolve_voyage_api_key(voyage_api_key, &cfg.models, &env);
 
     // Resolve rerank placement + model and validate the instruction up front, so
