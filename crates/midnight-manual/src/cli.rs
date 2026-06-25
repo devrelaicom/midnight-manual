@@ -215,7 +215,9 @@ pub async fn run() -> Result<()> {
     let marker = mnm_core::paths::telemetry_marker_path(&env);
     let runtime_enabled = !cli.no_telemetry
         && !mnm_telemetry::optout::env_disabled(&env)
-        && !marker.as_deref().is_some_and(mnm_telemetry::optout::marker_present);
+        && !marker
+            .as_deref()
+            .is_some_and(mnm_telemetry::optout::marker_present);
     let endpoint = mnm_core::config::resolve_telemetry_endpoint(&cfg.telemetry, &env);
     let telemetry: Telemetry = build_telemetry(BuildParams {
         app_version: crate::VERSION.to_owned(),
@@ -324,7 +326,11 @@ pub async fn run() -> Result<()> {
     };
 
     let duration_ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
-    let outcome = if result.is_ok() { Outcome::Ok } else { Outcome::Error };
+    let outcome = if result.is_ok() {
+        Outcome::Ok
+    } else {
+        Outcome::Error
+    };
     telemetry.emit(&CliCommand {
         command: command_name,
         duration_ms,

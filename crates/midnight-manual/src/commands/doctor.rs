@@ -159,7 +159,11 @@ fn print_human(report: &Report, had_admin_token: bool) {
     println!("  admin visibility:  {}", if report.admin_visibility { "on" } else { "off" },);
     println!(
         "  telemetry:         {} (endpoint: {})",
-        if report.telemetry.enabled { "on" } else { "off" },
+        if report.telemetry.enabled {
+            "on"
+        } else {
+            "off"
+        },
         report.telemetry.endpoint,
     );
     if let Some(p) = report.telemetry.marker_path.as_deref() {

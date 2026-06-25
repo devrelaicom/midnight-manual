@@ -232,16 +232,8 @@ pub async fn run(
     let env = mnm_core::config::StdEnv;
     let auth_path = mnm_core::paths::auth_file_path(&env)
         .ok_or_else(|| anyhow!("could not resolve auth.toml path (set XDG_CONFIG_HOME or HOME)"))?;
-    run_with_paths(
-        args,
-        &server_url,
-        &auth_path,
-        config_path,
-        voyage_api_key,
-        telemetry,
-        json,
-    )
-    .await
+    run_with_paths(args, &server_url, &auth_path, config_path, voyage_api_key, telemetry, json)
+        .await
 }
 
 /// Path-explicit driver, exposed for integration tests. Returns `Result<()>`
@@ -262,17 +254,9 @@ pub async fn run_with_paths(
     telemetry: &mnm_telemetry::Telemetry,
     json: bool,
 ) -> Result<()> {
-    run_with_paths_stats(
-        args,
-        server_url,
-        auth_path,
-        config_path,
-        voyage_api_key,
-        telemetry,
-        json,
-    )
-    .await
-    .map(|_| ())
+    run_with_paths_stats(args, server_url, auth_path, config_path, voyage_api_key, telemetry, json)
+        .await
+        .map(|_| ())
 }
 
 /// Run a single-source ingest and return the per-run [`RunStats`] (document and

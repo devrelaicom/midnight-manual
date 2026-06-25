@@ -442,17 +442,9 @@ async fn server_rerank_keeps_limit_and_omits_sort_by() {
     args.limit = 5;
     args.rerank = "server".to_owned(); // server reranks inline; no client over-fetch
 
-    run_with_paths(
-        args,
-        &server.uri(),
-        Some(&auth_path),
-        None,
-        None,
-        &noop_telemetry(),
-        false,
-    )
-    .await
-    .expect("server-rerank run_with_paths should succeed");
+    run_with_paths(args, &server.uri(), Some(&auth_path), None, None, &noop_telemetry(), false)
+        .await
+        .expect("server-rerank run_with_paths should succeed");
 
     let body = captured.lock().unwrap().clone();
     assert_eq!(

@@ -205,7 +205,9 @@ mod tests {
     fn install_id_path_none_without_home() {
         struct E;
         impl crate::config::ConfigEnv for E {
-            fn var(&self, _: &str) -> Option<String> { None }
+            fn var(&self, _: &str) -> Option<String> {
+                None
+            }
         }
         assert!(telemetry_install_id_path(&E).is_none());
     }

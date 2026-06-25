@@ -276,7 +276,6 @@ impl Event for McpShutdown {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

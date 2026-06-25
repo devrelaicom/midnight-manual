@@ -8,8 +8,13 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use mnm_telemetry::events::{McpShutdown, McpStartup, McpToolCall, McpToolName, ModelState, Outcome, Rerank};
-use mnm_telemetry::{build as build_telemetry, BuildParams, Flusher, Surface, Telemetry, FLUSH_ARGS, DEFAULT_FLUSH_TIMEOUT};
+use mnm_telemetry::events::{
+    McpShutdown, McpStartup, McpToolCall, McpToolName, ModelState, Outcome, Rerank,
+};
+use mnm_telemetry::{
+    build as build_telemetry, BuildParams, Flusher, Surface, Telemetry, DEFAULT_FLUSH_TIMEOUT,
+    FLUSH_ARGS,
+};
 use tokio::io::{stdin, stdout, Stdin, Stdout};
 use tracing::{debug, info, warn};
 
@@ -96,7 +101,9 @@ pub async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error + Se
     let env = mnm_core::config::StdEnv;
     let marker = mnm_core::paths::telemetry_marker_path(&env);
     let runtime_enabled = !mnm_telemetry::optout::env_disabled(&env)
-        && !marker.as_deref().is_some_and(mnm_telemetry::optout::marker_present);
+        && !marker
+            .as_deref()
+            .is_some_and(mnm_telemetry::optout::marker_present);
     let telemetry: Telemetry = build_telemetry(BuildParams {
         app_version: crate::VERSION.to_owned(),
         endpoint: cfg.telemetry_endpoint.clone(),
@@ -147,7 +154,9 @@ pub async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error + Se
     info!("mnm-mcp server: stdin EOF, shutting down");
     let uptime_s = u32::try_from(state.started_at.elapsed().as_secs()).unwrap_or(u32::MAX);
     let tools_served = state.tools_served.load(Ordering::Relaxed);
-    state.telemetry.emit(&McpShutdown { uptime_s, tools_served });
+    state
+        .telemetry
+        .emit(&McpShutdown { uptime_s, tools_served });
     drop(flusher); // stop the background loop + join
     state.telemetry.flush_blocking(DEFAULT_FLUSH_TIMEOUT); // final drain
     Ok(())

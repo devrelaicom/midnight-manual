@@ -134,7 +134,10 @@ fn run_status(json: bool) -> Result<()> {
         println!("  endpoint:           {}", report.endpoint);
         println!(
             "  marker file:        {}",
-            report.marker_path.as_deref().unwrap_or("(no HOME / XDG_CONFIG_HOME)"),
+            report
+                .marker_path
+                .as_deref()
+                .unwrap_or("(no HOME / XDG_CONFIG_HOME)"),
         );
         println!("  marker present:     {}", report.marker_present);
         if report.disabled_by.disabled_by_env {

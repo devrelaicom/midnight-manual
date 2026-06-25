@@ -728,7 +728,10 @@ model = "rerank-2.5-lite"
                     .then(|| "https://localhost:9000".to_owned())
             }
         }
-        let cfg = TelemetryConfig { enabled: true, endpoint: "https://from-config".into() };
+        let cfg = TelemetryConfig {
+            enabled: true,
+            endpoint: "https://from-config".into(),
+        };
         assert_eq!(resolve_telemetry_endpoint(&cfg, &E), "https://localhost:9000");
     }
 
@@ -736,9 +739,14 @@ model = "rerank-2.5-lite"
     fn telemetry_endpoint_falls_through_empty_env_to_config() {
         struct E;
         impl ConfigEnv for E {
-            fn var(&self, _: &str) -> Option<String> { Some(String::new()) }
+            fn var(&self, _: &str) -> Option<String> {
+                Some(String::new())
+            }
         }
-        let cfg = TelemetryConfig { enabled: true, endpoint: "https://from-config".into() };
+        let cfg = TelemetryConfig {
+            enabled: true,
+            endpoint: "https://from-config".into(),
+        };
         assert_eq!(resolve_telemetry_endpoint(&cfg, &E), "https://from-config");
     }
 }
