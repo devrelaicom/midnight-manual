@@ -487,9 +487,9 @@ fn resolve_rerank(
         cfg,
         env,
         has_voyage_key,
-    );
+    )?;
     let rerank_model =
-        mnm_core::config::resolve_rerank_model(args.rerank_model.as_deref(), cfg, env);
+        mnm_core::config::resolve_rerank_model(args.rerank_model.as_deref(), cfg, env)?;
     if let Some(i) = args.rerank_instructions.as_deref() {
         mnm_core::rerank::validate_instruction(i).map_err(|e| anyhow!(e))?;
     }

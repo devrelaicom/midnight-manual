@@ -539,8 +539,10 @@ fn resolve_rerank_for_search(
 > {
     use mnm_core::config::RerankPlacement;
     let placement =
-        mnm_core::config::resolve_rerank_placement(None, rerank_cfg, env, voyage_key.is_some());
-    let rerank_model = mnm_core::config::resolve_rerank_model(None, rerank_cfg, env);
+        mnm_core::config::resolve_rerank_placement(None, rerank_cfg, env, voyage_key.is_some())
+            .map_err(|e| SearchError::Cloud(e.to_string()))?;
+    let rerank_model = mnm_core::config::resolve_rerank_model(None, rerank_cfg, env)
+        .map_err(|e| SearchError::Cloud(e.to_string()))?;
     let voyage_base_url = env
         .var("MIDNIGHT_MANUAL_VOYAGE_BASE_URL")
         .filter(|s| !s.is_empty());
