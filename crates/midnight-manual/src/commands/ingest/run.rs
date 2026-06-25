@@ -423,7 +423,7 @@ async fn run_inner(
     let (cfg, _) = mnm_core::config::Config::discover(config_path, &env).unwrap_or_default();
     let voyage_key = mnm_core::config::resolve_voyage_api_key(voyage_api_key, &cfg.models, &env);
     let voyage_timeout_secs =
-        mnm_core::config::resolve_voyage_timeout_secs(args.voyage_timeout_secs, &cfg.models, &env);
+        mnm_core::config::resolve_voyage_timeout_secs(args.voyage_timeout_secs, &cfg.models, &env)?;
 
     // Strict admin token first (real run only). A missing/expired token must
     // surface its `mnm login` remediation BEFORE any model/prior network call,

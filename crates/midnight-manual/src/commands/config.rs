@@ -111,7 +111,7 @@ fn apply_effective_overrides(
     cfg.models.voyage_api_key = resolved_key.as_ref().map(|_| REDACTED.to_owned());
 
     // models.voyage_timeout_secs — env > config (no global flag for timeout).
-    cfg.models.voyage_timeout_secs = resolve_voyage_timeout_secs(None, &cfg.models, env);
+    cfg.models.voyage_timeout_secs = resolve_voyage_timeout_secs(None, &cfg.models, env)?;
 
     // rerank.location / rerank.model — resolve "auto"/env into the concrete
     // placement and model the CLI would use. Placement keys off whether a
