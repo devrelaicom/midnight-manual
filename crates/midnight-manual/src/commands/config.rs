@@ -94,16 +94,11 @@ fn apply_effective_overrides(
     no_telemetry: bool,
     env: &impl ConfigEnv,
 ) -> anyhow::Result<()> {
-    // server.url — flag (also surfaced from MIDNIGHT_MANUAL_SERVER by clap) >
-    // env > existing config value. Trailing slash trimmed, matching
-    // `shared::resolve_server_url`.
-    if let Some(url) = server_flag
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned)
-        .or_else(|| env.var("MIDNIGHT_MANUAL_SERVER").filter(|s| !s.is_empty()))
-    {
-        url.trim_end_matches('/').clone_into(&mut cfg.server.url);
-    }
+    // server.url — single source of truth: the shared resolver (flag, also
+    // surfaced from MIDNIGHT_MANUAL_SERVER by clap, > cfg.server.url; trailing
+    // slash trimmed).
+    let url = crate::shared::resolve_server_url_from(server_flag, cfg);
+    cfg.server.url = url;
 
     // models.voyage_api_key — resolve flag > env > config, then redact. We only
     // surface *whether* a key is effective, never its value.
@@ -122,21 +117,11 @@ fn apply_effective_overrides(
         cfg.rerank.model = Some(model.to_owned());
     }
 
-    // models.cache_dir — show the directory `mnm` would actually use. The
-    // env override (`MIDNIGHT_MANUAL_MODEL_CACHE_DIR`) sits above the config
-    // value, which sits above the XDG/HOME default. `mnm config show` has no
-    // `--cache-dir` flag, so the env is the top layer here.
-    //
-    // `resolve_with_override` applies config-over-env-chain; the env override
-    // must still win over the config value, so it is checked first.
+    // models.cache_dir — single source of truth: the embedding cache resolver
+    // (config dir > env-chain > XDG/HOME).
     let cache_env = CacheEnvAdapter(env);
-    if let Some(dir) = env
-        .var("MIDNIGHT_MANUAL_MODEL_CACHE_DIR")
-        .filter(|s| !s.is_empty())
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            mnm_embedding::cache::resolve_with_override(cfg.models.cache_dir.as_deref(), &cache_env)
-        })
+    if let Some(dir) =
+        mnm_embedding::cache::resolve_with_override(cfg.models.cache_dir.as_deref(), &cache_env)
     {
         cfg.models.cache_dir = Some(dir);
     }
@@ -188,17 +173,32 @@ mod tests {
     #[test]
     fn server_flag_beats_env_and_trims_trailing_slash() {
         let mut cfg = Config::default();
-        let env = FakeEnv::default().set("MIDNIGHT_MANUAL_SERVER", "http://from-env:9");
+        // In production, clap surfaces MIDNIGHT_MANUAL_SERVER → server_flag, so
+        // the env var is already resolved before this function is called. Passing
+        // the flag value directly mirrors that.
+        let env = FakeEnv::default();
         apply_effective_overrides(&mut cfg, Some("http://from-flag:8080/"), None, false, &env).unwrap();
         assert_eq!(cfg.server.url, "http://from-flag:8080");
     }
 
     #[test]
     fn server_env_applies_when_no_flag() {
+        // MIDNIGHT_MANUAL_SERVER is surfaced by clap as server_flag; unit tests
+        // pass it directly to mirror what the binary does.
         let mut cfg = Config::default();
-        let env = FakeEnv::default().set("MIDNIGHT_MANUAL_SERVER", "http://localhost:8080/");
-        apply_effective_overrides(&mut cfg, None, None, false, &env).unwrap();
+        let env = FakeEnv::default();
+        apply_effective_overrides(&mut cfg, Some("http://localhost:8080/"), None, false, &env).unwrap();
         assert_eq!(cfg.server.url, "http://localhost:8080");
+    }
+
+    #[test]
+    fn effective_server_url_uses_shared_resolver() {
+        let mut cfg = Config::default();
+        cfg.server.url = "https://from-config/".into();
+        let env = FakeEnv::default();
+        apply_effective_overrides(&mut cfg, Some("https://flag.example/"), None, false, &env).unwrap();
+        // Flag wins, trailing slash trimmed — exactly resolve_server_url_from's contract.
+        assert_eq!(cfg.server.url, "https://flag.example");
     }
 
     #[test]
@@ -261,9 +261,23 @@ mod tests {
     }
 
     #[test]
-    fn cache_dir_env_override_wins_over_config() {
+    fn cache_dir_config_wins_over_env() {
+        // resolve_with_override places the config value above the env chain
+        // (MIDNIGHT_MANUAL_MODEL_CACHE_DIR > XDG > HOME). A config-set dir is
+        // the most explicit user intent and wins outright.
         let mut cfg = Config::default();
         cfg.models.cache_dir = Some(std::path::PathBuf::from("/from/config"));
+        let env = FakeEnv::default().set("MIDNIGHT_MANUAL_MODEL_CACHE_DIR", "/from/env");
+        apply_effective_overrides(&mut cfg, None, None, false, &env).unwrap();
+        assert_eq!(cfg.models.cache_dir.as_deref(), Some(std::path::Path::new("/from/config")));
+    }
+
+    #[test]
+    fn cache_dir_env_applies_when_no_config_dir() {
+        // When no config dir is set, MIDNIGHT_MANUAL_MODEL_CACHE_DIR is the
+        // effective cache dir (env-chain top layer).
+        let mut cfg = Config::default();
+        assert!(cfg.models.cache_dir.is_none());
         let env = FakeEnv::default().set("MIDNIGHT_MANUAL_MODEL_CACHE_DIR", "/from/env");
         apply_effective_overrides(&mut cfg, None, None, false, &env).unwrap();
         assert_eq!(cfg.models.cache_dir.as_deref(), Some(std::path::Path::new("/from/env")));
