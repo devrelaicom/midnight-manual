@@ -92,7 +92,7 @@ async fn serve(server_flag: Option<&str>, config_path: Option<&Path>) -> Result<
 ///   `Config::discover` internally) keeps `cloud_url` and `telemetry_enabled`
 ///   in lockstep — they cannot read two different on-disk states.
 /// - `telemetry_endpoint` comes from `resolve_telemetry_endpoint`, which reads
-///   the config's `[telemetry].endpoint` and the `MIDNIGHT_MANUAL_TELEMETRY_ENDPOINT`
+///   the config's `[telemetry].endpoint` and the `MIDNIGHT_MANUAL_GAUGE_ENDPOINT`
 ///   env override, defaulting to [`mnm_core::config::DEFAULT_TELEMETRY_ENDPOINT`].
 ///   The endpoint is Gauge-specific and independent of the cloud server URL.
 /// - `cache_dir` is passed through verbatim (the caller has already applied the
