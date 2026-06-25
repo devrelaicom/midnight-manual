@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.91.0
+      - uses: dtolnay/rust-toolchain@1.93.0
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
@@ -27,7 +27,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.91.0
+      - uses: dtolnay/rust-toolchain@1.93.0
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
@@ -40,9 +40,9 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        toolchain: ["1.91.0", "stable"]
+        toolchain: ["1.93.0", "stable"]
     env:
-      # rust-toolchain.toml pins channel=1.91.0 for local dev; in CI we want
+      # rust-toolchain.toml pins channel=1.93.0 for local dev; in CI we want
       # the matrix toolchain to win. RUSTUP_TOOLCHAIN overrides the file.
       # Without this, the rustup install path interacts poorly with
       # dtolnay/rust-toolchain on macOS-stable runners (intermittent
@@ -79,7 +79,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.91.0
+      - uses: dtolnay/rust-toolchain@1.93.0
       - uses: Swatinem/rust-cache@v2
         with:
           cache-bin: false
@@ -104,7 +104,7 @@ jobs:
       DATABASE_URL: postgresql://postgres:dev@localhost:5432/postgres
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.91.0
+      - uses: dtolnay/rust-toolchain@1.93.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --features integration --no-fail-fast
 
@@ -128,6 +128,6 @@ jobs:
       RUSTDOCFLAGS: "-D warnings"
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.91.0
+      - uses: dtolnay/rust-toolchain@1.93.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo doc --workspace --no-deps --all-features
