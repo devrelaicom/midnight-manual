@@ -419,6 +419,21 @@ pub fn resolve_telemetry_endpoint(cfg: &TelemetryConfig, env: &impl ConfigEnv) -
         .unwrap_or_else(default_telemetry_endpoint)
 }
 
+/// Resolve admin-command visibility (D23 / FR-066).
+///
+/// Precedence: `MIDNIGHT_MANUAL_SHOW_ADMIN_CMDS` env (truthy-set
+/// `{1,true,TRUE,yes,YES}`) > `[cli].show_admin_cmds` config > hidden. A set
+/// env var is authoritative — a non-truthy value (`0`, `no`, …) resolves to
+/// `false` and does NOT fall through to config. This is the single source of
+/// truth for both `mnm --help` visibility and the `doctor` report.
+#[must_use]
+pub fn resolve_show_admin_cmds(cfg: &CliConfig, env: &impl ConfigEnv) -> bool {
+    if let Some(v) = env.var("MIDNIGHT_MANUAL_SHOW_ADMIN_CMDS") {
+        return matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES");
+    }
+    cfg.show_admin_cmds
+}
+
 /// All the ways config discovery can fail.
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -748,5 +763,24 @@ model = "rerank-2.5-lite"
             endpoint: "https://from-config".into(),
         };
         assert_eq!(resolve_telemetry_endpoint(&cfg, &E), "https://from-config");
+    }
+
+    #[test]
+    fn resolve_show_admin_cmds_env_truthy_then_config() {
+        let cfg_on = CliConfig { show_admin_cmds: true };
+        let cfg_off = CliConfig { show_admin_cmds: false };
+
+        // Env set to a truthy token wins regardless of config.
+        let env = FakeEnv::default().set("MIDNIGHT_MANUAL_SHOW_ADMIN_CMDS", "1");
+        assert!(resolve_show_admin_cmds(&cfg_off, &env));
+
+        // Env set to a non-truthy token is authoritative (does NOT fall through).
+        let env = FakeEnv::default().set("MIDNIGHT_MANUAL_SHOW_ADMIN_CMDS", "0");
+        assert!(!resolve_show_admin_cmds(&cfg_on, &env));
+
+        // Env unset -> config field decides.
+        let empty = FakeEnv::default();
+        assert!(resolve_show_admin_cmds(&cfg_on, &empty));
+        assert!(!resolve_show_admin_cmds(&cfg_off, &empty));
     }
 }

@@ -376,13 +376,13 @@ const fn cli_command_name(cmd: &Command) -> CliCommandName {
 /// Precedence: `MIDNIGHT_MANUAL_SHOW_ADMIN_CMDS` env > `cli.show_admin_cmds`
 /// config field > hidden.
 fn should_show_admin_cmds() -> bool {
-    if let Ok(v) = std::env::var("MIDNIGHT_MANUAL_SHOW_ADMIN_CMDS") {
-        // Match the same truthy-set the rest of the CLI uses (FR-016).
-        return matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES");
-    }
+    // Best-effort: this runs before clap parsing (to decide which subcommands
+    // to hide) so it cannot honor `--config`, and a malformed config here just
+    // hides admin commands — the authoritative loud failure fires moments later
+    // at the main `Config::discover` in `run`.
     let env = mnm_core::config::StdEnv;
     let (cfg, _) = mnm_core::config::Config::discover(None, &env).unwrap_or_default();
-    cfg.cli.show_admin_cmds
+    mnm_core::config::resolve_show_admin_cmds(&cfg.cli, &env)
 }
 
 fn init_logging(level: Option<&str>, sentry_on: bool) {
