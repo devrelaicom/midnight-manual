@@ -531,6 +531,7 @@ const RERANK_FETCH: u32 = 50;
 fn resolve_rerank_for_search(
     parsed: &ParsedSearchArgs,
     rerank_cfg: &mnm_core::config::RerankConfig,
+    models_cfg: &mnm_core::config::ModelsConfig,
     voyage_key: Option<&str>,
     env: &impl mnm_core::config::ConfigEnv,
 ) -> Result<
@@ -543,9 +544,7 @@ fn resolve_rerank_for_search(
             .map_err(|e| SearchError::Cloud(e.to_string()))?;
     let rerank_model = mnm_core::config::resolve_rerank_model(None, rerank_cfg, env)
         .map_err(|e| SearchError::Cloud(e.to_string()))?;
-    let voyage_base_url = env
-        .var("MIDNIGHT_MANUAL_VOYAGE_BASE_URL")
-        .filter(|s| !s.is_empty());
+    let voyage_base_url = mnm_core::config::resolve_voyage_base_url(models_cfg, env);
     let effective = if parsed.rerank {
         placement
     } else {
@@ -619,8 +618,13 @@ pub async fn run_search(
 
     // Resolve the rerank placement/model/base-url and apply the local-without-key
     // guard before any embedding / network work.
-    let (effective, rerank_model, voyage_base_url) =
-        resolve_rerank_for_search(parsed, &core_cfg.rerank, voyage_key.as_deref(), &cfg_env)?;
+    let (effective, rerank_model, voyage_base_url) = resolve_rerank_for_search(
+        parsed,
+        &core_cfg.rerank,
+        &core_cfg.models,
+        voyage_key.as_deref(),
+        &cfg_env,
+    )?;
 
     // fts mode skips embedding entirely (its whole point): send text-only query
     // pairs with empty vectors and no model label — the cloud ignores both when
@@ -2338,8 +2342,14 @@ mod tests {
             model: None,
         };
         let env = FakeEnv::default();
-        let err = resolve_rerank_for_search(&parsed_args(true), &cfg, None, &env)
-            .expect_err("local without a key must error");
+        let err = resolve_rerank_for_search(
+            &parsed_args(true),
+            &cfg,
+            &mnm_core::config::ModelsConfig::default(),
+            None,
+            &env,
+        )
+        .expect_err("local without a key must error");
         let SearchError::Cloud(msg) = err else {
             panic!("expected SearchError::Cloud, got {err:?}");
         };
@@ -2355,8 +2365,14 @@ mod tests {
             model: None,
         };
         let env = FakeEnv::default();
-        let (placement, model, _) =
-            resolve_rerank_for_search(&parsed_args(true), &cfg, Some("vk"), &env).unwrap();
+        let (placement, model, _) = resolve_rerank_for_search(
+            &parsed_args(true),
+            &cfg,
+            &mnm_core::config::ModelsConfig::default(),
+            Some("vk"),
+            &env,
+        )
+        .unwrap();
         assert_eq!(placement, RerankPlacement::Local);
         assert_eq!(model.model_name(), Some("rerank-2.5"));
     }
@@ -2373,8 +2389,14 @@ mod tests {
         };
         let env = FakeEnv::default();
         // No key AND rerank:false: must NOT error (Off, not the local guard).
-        let (placement, _, _) =
-            resolve_rerank_for_search(&parsed_args(false), &cfg, None, &env).unwrap();
+        let (placement, _, _) = resolve_rerank_for_search(
+            &parsed_args(false),
+            &cfg,
+            &mnm_core::config::ModelsConfig::default(),
+            None,
+            &env,
+        )
+        .unwrap();
         assert_eq!(placement, RerankPlacement::Off);
     }
 
@@ -2384,8 +2406,14 @@ mod tests {
         use mnm_core::config::RerankConfig;
         let cfg = RerankConfig::default();
         let env = FakeEnv::default().set("MIDNIGHT_MANUAL_VOYAGE_BASE_URL", "https://proxy.test");
-        let (_, _, base) =
-            resolve_rerank_for_search(&parsed_args(true), &cfg, Some("vk"), &env).unwrap();
+        let (_, _, base) = resolve_rerank_for_search(
+            &parsed_args(true),
+            &cfg,
+            &mnm_core::config::ModelsConfig::default(),
+            Some("vk"),
+            &env,
+        )
+        .unwrap();
         assert_eq!(base.as_deref(), Some("https://proxy.test"));
     }
 

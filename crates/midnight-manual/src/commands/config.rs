@@ -12,7 +12,7 @@ use anyhow::Result;
 use clap::{Args as ClapArgs, Subcommand};
 use mnm_core::config::{
     resolve_rerank_model, resolve_rerank_placement, resolve_voyage_api_key,
-    resolve_voyage_timeout_secs, Config, ConfigEnv, StdEnv,
+    resolve_voyage_base_url, resolve_voyage_timeout_secs, Config, ConfigEnv, StdEnv,
 };
 
 /// Marker substituted for a resolved secret in `--effective` output.
@@ -140,6 +140,9 @@ fn apply_effective_overrides(
     {
         cfg.models.cache_dir = Some(dir);
     }
+
+    // models.voyage_base_url — env > config; surface the effective value.
+    cfg.models.voyage_base_url = resolve_voyage_base_url(&cfg.models, env);
 
     // telemetry.enabled — the --no-telemetry flag (env MIDNIGHT_MANUAL_DISABLE_TELEMETRY,
     // already resolved by clap) forces it off for this invocation.

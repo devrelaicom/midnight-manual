@@ -52,7 +52,6 @@ use std::time::Instant;
 use anyhow::{anyhow, Context as _, Result};
 use clap::Args as ClapArgs;
 use mnm_core::auth_file::AuthFile;
-use mnm_core::config::ConfigEnv as _;
 use mnm_retrieval::filters::SearchFilters;
 use mnm_telemetry::events::{CliCommand, CliCommandName, Outcome, Rerank};
 use mnm_telemetry::{Surface, Telemetry};
@@ -353,9 +352,7 @@ pub async fn run_with_paths(
     // threading an `&impl ConfigEnv` borrow through the `.await` below would make
     // this future non-`Send` for arbitrary impls; resolving to an owned value
     // first keeps `DispatchSearch` env-free and its future `Send`.
-    let voyage_base_url = env
-        .var("MIDNIGHT_MANUAL_VOYAGE_BASE_URL")
-        .filter(|s| !s.is_empty());
+    let voyage_base_url = mnm_core::config::resolve_voyage_base_url(&cfg.models, &env);
 
     let result = dispatch_search(DispatchSearch {
         placement,

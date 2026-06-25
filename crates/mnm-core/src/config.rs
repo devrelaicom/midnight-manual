@@ -82,6 +82,10 @@ pub struct ModelsConfig {
     /// well above the old 30s ceiling. Resolved with flag > env > config precedence.
     #[serde(default = "default_voyage_timeout_secs")]
     pub voyage_timeout_secs: u64,
+    /// Override the Voyage API base URL (self-hosted proxy / regional endpoint).
+    /// `None` uses the baked-in default. Resolved env > config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voyage_base_url: Option<String>,
 }
 
 const fn default_voyage_dim() -> u32 {
@@ -110,6 +114,7 @@ impl Default for ModelsConfig {
             voyage_output_dimension: default_voyage_dim(),
             voyage_output_dtype: default_voyage_dtype(),
             voyage_timeout_secs: default_voyage_timeout_secs(),
+            voyage_base_url: None,
         }
     }
 }
@@ -295,6 +300,18 @@ pub fn resolve_voyage_timeout_secs(
         }
     }
     nonzero("[models].voyage_timeout_secs", cfg.voyage_timeout_secs)
+}
+
+/// Resolve the Voyage API base-URL override.
+///
+/// Precedence: `MIDNIGHT_MANUAL_VOYAGE_BASE_URL` env > `[models].voyage_base_url`
+/// config > `None` (use the baked-in default). Empty values fall through.
+/// Free-form URL — not validated here.
+#[must_use]
+pub fn resolve_voyage_base_url(cfg: &ModelsConfig, env: &impl ConfigEnv) -> Option<String> {
+    env.var("MIDNIGHT_MANUAL_VOYAGE_BASE_URL")
+        .filter(|s| !s.is_empty())
+        .or_else(|| cfg.voyage_base_url.clone().filter(|s| !s.is_empty()))
 }
 
 /// `[rerank]` — client-side rerank placement and model selection (spec §4).
@@ -843,6 +860,30 @@ model = "rerank-2.5-lite"
             endpoint: "https://from-config".into(),
         };
         assert_eq!(resolve_telemetry_endpoint(&cfg, &E), "https://from-config");
+    }
+
+    #[test]
+    fn resolve_voyage_base_url_env_over_config() {
+        let cfg = ModelsConfig { voyage_base_url: Some("https://from-config".into()), ..Default::default() };
+        let env = FakeEnv::default().set("MIDNIGHT_MANUAL_VOYAGE_BASE_URL", "https://from-env");
+        assert_eq!(resolve_voyage_base_url(&cfg, &env).as_deref(), Some("https://from-env"));
+
+        let no_env = FakeEnv::default();
+        assert_eq!(resolve_voyage_base_url(&cfg, &no_env).as_deref(), Some("https://from-config"));
+
+        // Empty env falls through to config; nothing anywhere -> None.
+        let env_empty = FakeEnv::default().set("MIDNIGHT_MANUAL_VOYAGE_BASE_URL", "");
+        assert_eq!(resolve_voyage_base_url(&cfg, &env_empty).as_deref(), Some("https://from-config"));
+        assert_eq!(resolve_voyage_base_url(&ModelsConfig::default(), &no_env), None);
+    }
+
+    #[test]
+    fn models_config_voyage_base_url_roundtrips() {
+        let toml_src =
+            "embedding = \"voyage-context-3\"\nvoyage_base_url = \"https://proxy.example/v1\"\n";
+        let m: ModelsConfig = toml::from_str(toml_src).unwrap();
+        assert_eq!(m.voyage_base_url.as_deref(), Some("https://proxy.example/v1"));
+        assert!(ModelsConfig::default().voyage_base_url.is_none());
     }
 
     #[test]
