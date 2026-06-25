@@ -377,33 +377,69 @@ pub fn resolve_rerank_model(
         .unwrap_or(RerankParam::Rerank25)
 }
 
-/// Resolve the MCP client security level with precedence flag >
-/// `MIDNIGHT_MANUAL_SECURITY` env > `[security].level` config > default
+/// Resolve a bounded (closed-set) string setting across flag > env > config.
+///
+/// The first layer whose trimmed value is non-empty and not a recognized
+/// `sentinel` is authoritative: it is parsed (case-insensitively) and, on
+/// failure, yields [`ConfigError::InvalidValue`] rather than falling through.
+/// Empty/absent/sentinel layers are skipped. If every layer defers, `default`
+/// is used.
+fn resolve_bounded<T>(
+    layers: [(&'static str, Option<String>); 3],
+    expected: &str,
+    sentinels: &[&str],
+    parse: impl Fn(&str) -> Option<T>,
+    default: impl FnOnce() -> T,
+) -> Result<T, ConfigError> {
+    for (layer_label, raw) in layers {
+        let Some(raw) = raw else { continue };
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let lower = trimmed.to_lowercase();
+        if sentinels.contains(&lower.as_str()) {
+            continue;
+        }
+        return parse(&lower).ok_or_else(|| ConfigError::InvalidValue {
+            location: (*layer_label).to_owned(),
+            value: trimmed.to_owned(),
+            expected: expected.to_owned(),
+        });
+    }
+    Ok(default())
+}
+
+/// Resolve the MCP client security level: flag > `MIDNIGHT_MANUAL_SECURITY`
+/// env > `[security].level` config > default
 /// [`crate::injection::SecurityLevel::Moderate`].
 ///
-/// An empty or unrecognized value at any level is treated as absent and falls
-/// through to the next source, matching the other config resolvers.
-#[must_use]
+/// A non-empty unrecognized value at the authoritative layer is an error
+/// (does not silently downgrade). Empty/absent layers fall through.
+///
+/// # Errors
+/// Returns [`ConfigError::InvalidValue`] if the authoritative layer holds an
+/// unrecognized value.
 pub fn resolve_security_level(
     flag: Option<&str>,
     cfg: &SecurityConfig,
     env: &impl ConfigEnv,
-) -> crate::injection::SecurityLevel {
+) -> Result<crate::injection::SecurityLevel, ConfigError> {
     use std::str::FromStr as _;
 
     use crate::injection::SecurityLevel;
 
-    let parse = |s: &str| SecurityLevel::from_str(s).ok();
-    flag.filter(|s| !s.is_empty())
-        .and_then(parse)
-        .or_else(|| {
-            env.var("MIDNIGHT_MANUAL_SECURITY")
-                .filter(|s| !s.is_empty())
-                .as_deref()
-                .and_then(parse)
-        })
-        .or_else(|| cfg.level.as_deref().and_then(parse))
-        .unwrap_or_default()
+    resolve_bounded(
+        [
+            ("the --security flag", flag.map(str::to_owned)),
+            ("MIDNIGHT_MANUAL_SECURITY", env.var("MIDNIGHT_MANUAL_SECURITY")),
+            ("[security].level", cfg.level.clone()),
+        ],
+        "disabled, low, moderate, high, strict",
+        &[],
+        |s| SecurityLevel::from_str(s).ok(),
+        SecurityLevel::default,
+    )
 }
 
 /// Resolve the Gauge telemetry endpoint.
@@ -452,6 +488,16 @@ pub enum ConfigError {
         path: PathBuf,
         /// Underlying parser error message.
         message: String,
+    },
+    /// A recognized setting was given a non-empty value that is not valid.
+    #[error("invalid value `{value}` for {location}: expected one of {expected}")]
+    InvalidValue {
+        /// Human label for where the bad value came from (env var, flag, or config field).
+        location: String,
+        /// The offending value (trimmed, original case).
+        value: String,
+        /// Comma-separated list of accepted values.
+        expected: String,
     },
 }
 
@@ -713,18 +759,43 @@ model = "rerank-2.5-lite"
         let env = FakeEnv::default().set("MIDNIGHT_MANUAL_SECURITY", "strict");
 
         // flag > env > config.
-        assert_eq!(resolve_security_level(Some("low"), &cfg, &env), SecurityLevel::Low);
-        // No flag -> env wins over config.
-        assert_eq!(resolve_security_level(None, &cfg, &env), SecurityLevel::Strict);
-        // No flag, no env -> config wins.
+        assert_eq!(resolve_security_level(Some("low"), &cfg, &env).unwrap(), SecurityLevel::Low);
+        assert_eq!(resolve_security_level(None, &cfg, &env).unwrap(), SecurityLevel::Strict);
+
         let no_env = FakeEnv::default();
-        assert_eq!(resolve_security_level(None, &cfg, &no_env), SecurityLevel::High);
+        assert_eq!(resolve_security_level(None, &cfg, &no_env).unwrap(), SecurityLevel::High);
+
+        // An empty flag is treated as absent and falls through to config `high`.
+        assert_eq!(resolve_security_level(Some(""), &cfg, &no_env).unwrap(), SecurityLevel::High);
+
         // Nothing anywhere -> default Moderate.
         let empty = SecurityConfig::default();
-        assert_eq!(resolve_security_level(None, &empty, &no_env), SecurityLevel::Moderate);
-        // Unknown/empty flag falls through to the next level.
-        assert_eq!(resolve_security_level(Some("bogus"), &cfg, &no_env), SecurityLevel::High);
-        assert_eq!(resolve_security_level(Some(""), &empty, &no_env), SecurityLevel::Moderate);
+        assert_eq!(resolve_security_level(None, &empty, &no_env).unwrap(), SecurityLevel::Moderate);
+
+        // Case-insensitive.
+        let env_caps = FakeEnv::default().set("MIDNIGHT_MANUAL_SECURITY", "STRICT");
+        assert_eq!(resolve_security_level(None, &empty, &env_caps).unwrap(), SecurityLevel::Strict);
+    }
+
+    #[test]
+    fn resolve_security_level_invalid_value_is_loud() {
+        let empty = SecurityConfig::default();
+        let env = FakeEnv::default().set("MIDNIGHT_MANUAL_SECURITY", "strct");
+        let err = resolve_security_level(None, &empty, &env).unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidValue { .. }));
+        let msg = err.to_string();
+        assert!(msg.contains("strct") && msg.contains("MIDNIGHT_MANUAL_SECURITY"));
+
+        // An invalid value does NOT fall through to config.
+        let cfg = SecurityConfig { level: Some("high".into()) };
+        assert!(resolve_security_level(None, &cfg, &env).is_err());
+
+        // Empty env still falls through (treated as absent).
+        let env_empty = FakeEnv::default().set("MIDNIGHT_MANUAL_SECURITY", "");
+        assert_eq!(
+            resolve_security_level(None, &cfg, &env_empty).unwrap(),
+            crate::injection::SecurityLevel::High
+        );
     }
 
     #[test]
