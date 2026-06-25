@@ -36,7 +36,7 @@ impl std::str::FromStr for SecurityLevel {
     type Err = ();
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
+        match s.trim().to_lowercase().as_str() {
             "disabled" => Ok(Self::Disabled),
             "low" => Ok(Self::Low),
             "moderate" => Ok(Self::Moderate),
@@ -212,6 +212,15 @@ mod tests {
     #[test]
     fn default_is_moderate() {
         assert_eq!(SecurityLevel::default(), SecurityLevel::Moderate);
+    }
+
+    #[test]
+    fn from_str_is_case_insensitive_and_trimmed() {
+        use std::str::FromStr;
+        assert_eq!(SecurityLevel::from_str("Strict"), Ok(SecurityLevel::Strict));
+        assert_eq!(SecurityLevel::from_str("STRICT"), Ok(SecurityLevel::Strict));
+        assert_eq!(SecurityLevel::from_str("  moderate  "), Ok(SecurityLevel::Moderate));
+        assert_eq!(SecurityLevel::from_str("strct"), Err(()));
     }
 
     const ATTRIBUTIONS: [&str; 5] = [
