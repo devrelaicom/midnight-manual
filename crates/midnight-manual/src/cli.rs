@@ -202,14 +202,18 @@ pub async fn run() -> Result<()> {
         None
     };
 
-    init_logging(cli.log_level.as_deref(), sentry_guard.is_some());
-    // Keep the Sentry guard alive until `run()` returns so buffered events
-    // flush on shutdown; it must not drop before command dispatch/await.
+    // Discover config BEFORE logging so `[log].level` can govern the logger.
+    // A genuinely-absent file still yields defaults; a present-but-malformed
+    // file fails loud here (propagated to `main` -> stderr + exit 1). Sentry is
+    // already initialised above and stays config-independent.
+    let (cfg, _) = mnm_core::config::Config::discover(cli.config.as_deref(), &env)?;
+
+    let log_level = mnm_core::config::resolve_log_level(cli.log_level.as_deref(), &cfg.log, &env);
+    init_logging(log_level.as_deref(), sentry_guard.is_some());
+    // Keep the Sentry guard alive until `run()` returns so buffered events flush.
     let _sentry_guard = sentry_guard;
 
     let started = Instant::now();
-    let (cfg, _) =
-        mnm_core::config::Config::discover(cli.config.as_deref(), &env).unwrap_or_default();
 
     // Resolve the three opt-out mechanisms into Gauge's two consent inputs.
     let marker = mnm_core::paths::telemetry_marker_path(&env);
