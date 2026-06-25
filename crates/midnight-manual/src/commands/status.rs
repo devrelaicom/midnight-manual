@@ -30,7 +30,7 @@ pub async fn run(
     // Same resolution the embed-capable commands use (flag > env > config).
     let voyage_key = {
         let cfg_env = mnm_core::config::StdEnv;
-        let (core_cfg, _) = mnm_core::config::Config::discover(None, &cfg_env).unwrap_or_default();
+        let (core_cfg, _) = mnm_core::config::Config::discover(None, &cfg_env)?;
         mnm_core::config::resolve_voyage_api_key(voyage_api_key_flag, &core_cfg.models, &cfg_env)
     };
     let report = assemble(&cloud, voyage_key.as_deref()).await;

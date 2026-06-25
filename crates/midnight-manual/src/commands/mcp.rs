@@ -45,7 +45,7 @@ async fn serve(server_flag: Option<&str>, config_path: Option<&Path>) -> Result<
     // `build_serve_config`) — see `resolve_server_url_from` for why threading
     // the one `cfg` matters.
     let cfg_env = mnm_core::config::StdEnv;
-    let (cfg, _) = Config::discover(config_path, &cfg_env).unwrap_or_default();
+    let (cfg, _) = Config::discover(config_path, &cfg_env)?;
 
     // Cache dir precedence for `mnm mcp serve`: config (`[models].cache_dir`) >
     // env-chain (`MIDNIGHT_MANUAL_MODEL_CACHE_DIR` > `XDG_DATA_HOME` > `HOME`).
@@ -73,7 +73,7 @@ async fn serve(server_flag: Option<&str>, config_path: Option<&Path>) -> Result<
 
     let mut server_cfg = build_serve_config(server_flag, &cfg, cache_dir);
     server_cfg.bearer_token = bearer_token;
-    server_cfg.security = mnm_core::config::resolve_security_level(None, &cfg.security, &cfg_env);
+    server_cfg.security = mnm_core::config::resolve_security_level(None, &cfg.security, &cfg_env)?;
 
     mnm_mcp::run(server_cfg)
         .await
@@ -186,7 +186,8 @@ mod tests {
         }
         let mut cfg = Config::default();
         cfg.security.level = Some("strict".into());
-        let level = mnm_core::config::resolve_security_level(None, &cfg.security, &NoEnv);
+        let level = mnm_core::config::resolve_security_level(None, &cfg.security, &NoEnv)
+            .expect("config level=strict resolves cleanly");
         assert_eq!(level, mnm_core::injection::SecurityLevel::Strict);
     }
 }

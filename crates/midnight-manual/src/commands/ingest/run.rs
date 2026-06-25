@@ -420,10 +420,10 @@ async fn run_inner(
     // so it keeps the empty prior state (every doc classified "new"), preserving
     // the pre-existing no-network dry-run behaviour.
     let env = mnm_core::config::StdEnv;
-    let (cfg, _) = mnm_core::config::Config::discover(config_path, &env).unwrap_or_default();
+    let (cfg, _) = mnm_core::config::Config::discover(config_path, &env)?;
     let voyage_key = mnm_core::config::resolve_voyage_api_key(voyage_api_key, &cfg.models, &env);
     let voyage_timeout_secs =
-        mnm_core::config::resolve_voyage_timeout_secs(args.voyage_timeout_secs, &cfg.models, &env);
+        mnm_core::config::resolve_voyage_timeout_secs(args.voyage_timeout_secs, &cfg.models, &env)?;
 
     // Strict admin token first (real run only). A missing/expired token must
     // surface its `mnm login` remediation BEFORE any model/prior network call,

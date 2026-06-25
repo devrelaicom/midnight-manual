@@ -35,6 +35,9 @@ pub struct Config {
     /// `[security]` section — MCP client injection-guarding level.
     #[serde(default)]
     pub security: SecurityConfig,
+    /// `[log]` section — logging verbosity.
+    #[serde(default)]
+    pub log: LogConfig,
 }
 
 /// Compiled-in production cloud base URL. Single source of truth for the
@@ -82,6 +85,10 @@ pub struct ModelsConfig {
     /// well above the old 30s ceiling. Resolved with flag > env > config precedence.
     #[serde(default = "default_voyage_timeout_secs")]
     pub voyage_timeout_secs: u64,
+    /// Override the Voyage API base URL (self-hosted proxy / regional endpoint).
+    /// `None` uses the baked-in default. Resolved env > config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voyage_base_url: Option<String>,
 }
 
 const fn default_voyage_dim() -> u32 {
@@ -110,6 +117,7 @@ impl Default for ModelsConfig {
             voyage_output_dimension: default_voyage_dim(),
             voyage_output_dtype: default_voyage_dtype(),
             voyage_timeout_secs: default_voyage_timeout_secs(),
+            voyage_base_url: None,
         }
     }
 }
@@ -150,6 +158,15 @@ pub struct CliConfig {
     /// override. Per D23, this never gates invocation.
     #[serde(default)]
     pub show_admin_cmds: bool,
+}
+
+/// `[log]` — logging verbosity.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LogConfig {
+    /// Logging directive fed to `EnvFilter` (e.g. `info` or `mnm=debug,hyper=warn`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub level: Option<String>,
 }
 
 /// `[security]` — MCP client prompt-injection guarding level (issue #103).
@@ -250,26 +267,63 @@ pub fn resolve_voyage_api_key(
         .or_else(|| cfg.voyage_api_key.clone().filter(|s| !s.is_empty()))
 }
 
-/// Resolve the Voyage request timeout (seconds): flag > `VOYAGE_TIMEOUT_SECS` env > config.
+/// Resolve the Voyage request timeout (seconds): flag > `VOYAGE_TIMEOUT_SECS`
+/// env > `[models].voyage_timeout_secs` config.
 ///
-/// The env var is parsed as `u64`; a non-numeric, empty, or **zero** value at
-/// any level is treated as absent and falls through. Zero is rejected because
-/// reqwest treats `timeout(0)` as an immediately-expiring deadline (which would
-/// fail every request), not "unlimited". If every source is absent/zero, the
-/// built-in default (`default_voyage_timeout_secs`, 120s) is used.
+/// A non-empty value that is non-numeric or zero is an error (zero is rejected
+/// because reqwest treats `timeout(0)` as an immediately-expiring deadline).
+/// Empty/absent env falls through; the config field carries the serde default
+/// (120), so an unset config resolves to 120.
+///
+/// # Errors
+/// [`ConfigError::InvalidValue`] for a non-numeric or zero value at the
+/// authoritative layer.
 pub fn resolve_voyage_timeout_secs(
     flag: Option<u64>,
     cfg: &ModelsConfig,
     env: &impl ConfigEnv,
-) -> u64 {
-    flag.filter(|&n| n > 0)
-        .or_else(|| {
-            env.var("VOYAGE_TIMEOUT_SECS")
-                .and_then(|s| s.parse::<u64>().ok())
-                .filter(|&n| n > 0)
-        })
-        .or_else(|| (cfg.voyage_timeout_secs > 0).then_some(cfg.voyage_timeout_secs))
-        .unwrap_or_else(default_voyage_timeout_secs)
+) -> Result<u64, ConfigError> {
+    let nonzero = |location: &str, n: u64| -> Result<u64, ConfigError> {
+        if n == 0 {
+            Err(ConfigError::InvalidValue {
+                location: location.to_owned(),
+                value: "0".to_owned(),
+                expected: "a positive integer (seconds)".to_owned(),
+            })
+        } else {
+            Ok(n)
+        }
+    };
+
+    if let Some(n) = flag {
+        return nonzero("the voyage-timeout flag", n);
+    }
+    if let Some(raw) = env.var("VOYAGE_TIMEOUT_SECS") {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            let n = trimmed
+                .parse::<u64>()
+                .map_err(|_| ConfigError::InvalidValue {
+                    location: "VOYAGE_TIMEOUT_SECS".to_owned(),
+                    value: trimmed.to_owned(),
+                    expected: "a positive integer (seconds)".to_owned(),
+                })?;
+            return nonzero("VOYAGE_TIMEOUT_SECS", n);
+        }
+    }
+    nonzero("[models].voyage_timeout_secs", cfg.voyage_timeout_secs)
+}
+
+/// Resolve the Voyage API base-URL override.
+///
+/// Precedence: `MIDNIGHT_MANUAL_VOYAGE_BASE_URL` env > `[models].voyage_base_url`
+/// config > `None` (use the baked-in default). Empty values fall through.
+/// Free-form URL — not validated here.
+#[must_use]
+pub fn resolve_voyage_base_url(cfg: &ModelsConfig, env: &impl ConfigEnv) -> Option<String> {
+    env.var("MIDNIGHT_MANUAL_VOYAGE_BASE_URL")
+        .filter(|s| !s.is_empty())
+        .or_else(|| cfg.voyage_base_url.clone().filter(|s| !s.is_empty()))
 }
 
 /// `[rerank]` — client-side rerank placement and model selection (spec §4).
@@ -308,102 +362,137 @@ impl RerankPlacement {
     }
 }
 
-/// Resolve rerank placement with precedence flag > `MIDNIGHT_MANUAL_RERANK` env > config.
+/// Resolve rerank placement with precedence flag > env > config > key-detection.
 ///
-/// The config fallback is `[rerank].location`, ending at auto. Auto (and any
-/// unrecognized value) resolves by key detection: a Voyage key present means
-/// local BYOK, absent means server (D6). Mirrors the embedding-path defaulting.
+/// `auto` is a recognized sentinel that defers to key detection (a Voyage key
+/// present => local BYOK, absent => server).
 ///
-/// An empty flag or env value is treated as absent and falls through to the
-/// next source, matching the other config resolvers.
-#[must_use]
+/// # Errors
+/// [`ConfigError::InvalidValue`] if the authoritative layer holds a value that
+/// is neither `local`/`server`/`off`/`auto`.
 pub fn resolve_rerank_placement(
     flag: Option<&str>,
     cfg: &RerankConfig,
     env: &impl ConfigEnv,
     has_voyage_key: bool,
-) -> RerankPlacement {
-    let explicit = |s: &str| match s {
-        "local" => Some(RerankPlacement::Local),
-        "server" => Some(RerankPlacement::Server),
-        "off" => Some(RerankPlacement::Off),
-        _ => None, // "auto" or unknown: fall through
-    };
-    flag.filter(|s| !s.is_empty())
-        .and_then(explicit)
-        .or_else(|| {
-            env.var("MIDNIGHT_MANUAL_RERANK")
-                .filter(|s| !s.is_empty())
-                .as_deref()
-                .and_then(explicit)
-        })
-        .or_else(|| cfg.location.as_deref().and_then(explicit))
-        .unwrap_or(if has_voyage_key {
-            RerankPlacement::Local
-        } else {
-            RerankPlacement::Server
-        })
+) -> Result<RerankPlacement, ConfigError> {
+    resolve_bounded(
+        [
+            ("the --rerank flag", flag.map(str::to_owned)),
+            ("MIDNIGHT_MANUAL_RERANK", env.var("MIDNIGHT_MANUAL_RERANK")),
+            ("[rerank].location", cfg.location.clone()),
+        ],
+        "local, server, off, auto",
+        &["auto"],
+        |s| match s {
+            "local" => Some(RerankPlacement::Local),
+            "server" => Some(RerankPlacement::Server),
+            "off" => Some(RerankPlacement::Off),
+            _ => None,
+        },
+        || {
+            if has_voyage_key {
+                RerankPlacement::Local
+            } else {
+                RerankPlacement::Server
+            }
+        },
+    )
 }
 
-/// Resolve the rerank model with precedence flag > `MIDNIGHT_MANUAL_RERANK_MODEL` env > config.
+/// Resolve the rerank model: flag > `MIDNIGHT_MANUAL_RERANK_MODEL` env >
+/// config > `rerank-2.5`. Returns a model variant only (placement handles
+/// "off").
 ///
-/// The config fallback is `[rerank].model`, ending at `rerank-2.5`. Returns a
-/// model variant only — never [`crate::rerank::RerankParam::None`] (placement
-/// handles "off").
-///
-/// An empty flag or env value is treated as absent and falls through to the
-/// next source, matching the other config resolvers.
-#[must_use]
+/// # Errors
+/// [`ConfigError::InvalidValue`] if the authoritative layer holds a value that
+/// is neither `rerank-2.5` nor `rerank-2.5-lite`.
 pub fn resolve_rerank_model(
     flag: Option<&str>,
     cfg: &RerankConfig,
     env: &impl ConfigEnv,
-) -> crate::rerank::RerankParam {
+) -> Result<crate::rerank::RerankParam, ConfigError> {
     use crate::rerank::RerankParam;
-    let parse = |s: &str| match s {
-        "rerank-2.5" => Some(RerankParam::Rerank25),
-        "rerank-2.5-lite" => Some(RerankParam::Rerank25Lite),
-        _ => None,
-    };
-    flag.filter(|s| !s.is_empty())
-        .and_then(parse)
-        .or_else(|| {
-            env.var("MIDNIGHT_MANUAL_RERANK_MODEL")
-                .filter(|s| !s.is_empty())
-                .as_deref()
-                .and_then(parse)
-        })
-        .or_else(|| cfg.model.as_deref().and_then(parse))
-        .unwrap_or(RerankParam::Rerank25)
+    resolve_bounded(
+        [
+            ("the --rerank-model flag", flag.map(str::to_owned)),
+            ("MIDNIGHT_MANUAL_RERANK_MODEL", env.var("MIDNIGHT_MANUAL_RERANK_MODEL")),
+            ("[rerank].model", cfg.model.clone()),
+        ],
+        "rerank-2.5, rerank-2.5-lite",
+        &[],
+        |s| match s {
+            "rerank-2.5" => Some(RerankParam::Rerank25),
+            "rerank-2.5-lite" => Some(RerankParam::Rerank25Lite),
+            _ => None,
+        },
+        || RerankParam::Rerank25,
+    )
 }
 
-/// Resolve the MCP client security level with precedence flag >
-/// `MIDNIGHT_MANUAL_SECURITY` env > `[security].level` config > default
+/// Resolve a bounded (closed-set) string setting across flag > env > config.
+///
+/// The first layer whose trimmed value is non-empty and not a recognized
+/// `sentinel` is authoritative: it is parsed (case-insensitively) and, on
+/// failure, yields [`ConfigError::InvalidValue`] rather than falling through.
+/// Empty/absent/sentinel layers are skipped. If every layer defers, `default`
+/// is used.
+fn resolve_bounded<T>(
+    layers: [(&'static str, Option<String>); 3],
+    expected: &str,
+    sentinels: &[&str],
+    parse: impl Fn(&str) -> Option<T>,
+    default: impl FnOnce() -> T,
+) -> Result<T, ConfigError> {
+    for (layer_label, raw) in layers {
+        let Some(raw) = raw else { continue };
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let lower = trimmed.to_lowercase();
+        if sentinels.contains(&lower.as_str()) {
+            continue;
+        }
+        return parse(&lower).ok_or_else(|| ConfigError::InvalidValue {
+            location: (*layer_label).to_owned(),
+            value: trimmed.to_owned(),
+            expected: expected.to_owned(),
+        });
+    }
+    Ok(default())
+}
+
+/// Resolve the MCP client security level: flag > `MIDNIGHT_MANUAL_SECURITY`
+/// env > `[security].level` config > default
 /// [`crate::injection::SecurityLevel::Moderate`].
 ///
-/// An empty or unrecognized value at any level is treated as absent and falls
-/// through to the next source, matching the other config resolvers.
-#[must_use]
+/// A non-empty unrecognized value at the authoritative layer is an error
+/// (does not silently downgrade). Empty/absent layers fall through.
+///
+/// # Errors
+/// Returns [`ConfigError::InvalidValue`] if the authoritative layer holds an
+/// unrecognized value.
 pub fn resolve_security_level(
     flag: Option<&str>,
     cfg: &SecurityConfig,
     env: &impl ConfigEnv,
-) -> crate::injection::SecurityLevel {
+) -> Result<crate::injection::SecurityLevel, ConfigError> {
     use std::str::FromStr as _;
 
     use crate::injection::SecurityLevel;
 
-    let parse = |s: &str| SecurityLevel::from_str(s).ok();
-    flag.filter(|s| !s.is_empty())
-        .and_then(parse)
-        .or_else(|| {
-            env.var("MIDNIGHT_MANUAL_SECURITY")
-                .filter(|s| !s.is_empty())
-                .as_deref()
-                .and_then(parse)
-        })
-        .or_else(|| cfg.level.as_deref().and_then(parse))
-        .unwrap_or_default()
+    resolve_bounded(
+        [
+            ("the --security flag", flag.map(str::to_owned)),
+            ("MIDNIGHT_MANUAL_SECURITY", env.var("MIDNIGHT_MANUAL_SECURITY")),
+            ("[security].level", cfg.level.clone()),
+        ],
+        "disabled, low, moderate, high, strict",
+        &[],
+        |s| SecurityLevel::from_str(s).ok(),
+        SecurityLevel::default,
+    )
 }
 
 /// Resolve the Gauge telemetry endpoint.
@@ -417,6 +506,39 @@ pub fn resolve_telemetry_endpoint(cfg: &TelemetryConfig, env: &impl ConfigEnv) -
         .filter(|s| !s.is_empty())
         .or_else(|| Some(cfg.endpoint.clone()).filter(|s| !s.is_empty()))
         .unwrap_or_else(default_telemetry_endpoint)
+}
+
+/// Resolve admin-command visibility (D23 / FR-066).
+///
+/// Precedence: `MIDNIGHT_MANUAL_SHOW_ADMIN_CMDS` env (truthy-set
+/// `{1,true,TRUE,yes,YES}`) > `[cli].show_admin_cmds` config > hidden. A set
+/// env var is authoritative — a non-truthy value (`0`, `no`, …) resolves to
+/// `false` and does NOT fall through to config. This is the single source of
+/// truth for both `mnm --help` visibility and the `doctor` report.
+#[must_use]
+pub fn resolve_show_admin_cmds(cfg: &CliConfig, env: &impl ConfigEnv) -> bool {
+    if let Some(v) = env.var("MIDNIGHT_MANUAL_SHOW_ADMIN_CMDS") {
+        return matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES");
+    }
+    cfg.show_admin_cmds
+}
+
+/// Resolve the log-level directive: flag > `RUST_LOG` env > `[log].level` config > `None`.
+///
+/// The caller keeps its built-in default when `None` is returned. Values are
+/// free-form `EnvFilter` directives (e.g. `"info"`, `"mnm=debug,hyper=warn"`)
+/// and are not validated here. Empty values at any layer fall through to the
+/// next source.
+#[must_use]
+pub fn resolve_log_level(
+    flag: Option<&str>,
+    cfg: &LogConfig,
+    env: &impl ConfigEnv,
+) -> Option<String> {
+    flag.map(str::to_owned)
+        .filter(|s| !s.is_empty())
+        .or_else(|| env.var("RUST_LOG").filter(|s| !s.is_empty()))
+        .or_else(|| cfg.level.clone().filter(|s| !s.is_empty()))
 }
 
 /// All the ways config discovery can fail.
@@ -437,6 +559,16 @@ pub enum ConfigError {
         path: PathBuf,
         /// Underlying parser error message.
         message: String,
+    },
+    /// A recognized setting was given a non-empty value that is not valid.
+    #[error("invalid value `{value}` for {location}: expected one of {expected}")]
+    InvalidValue {
+        /// Human label for where the bad value came from (env var, flag, or config field).
+        location: String,
+        /// The offending value (trimmed, original case).
+        value: String,
+        /// Comma-separated list of accepted values.
+        expected: String,
     },
 }
 
@@ -577,35 +709,43 @@ voyage_output_dtype = "float"
     }
 
     #[test]
-    fn resolve_voyage_timeout_prefers_flag_then_env_then_config() {
+    fn resolve_voyage_timeout_precedence_and_invalid() {
         let cfg = ModelsConfig {
             voyage_timeout_secs: 90,
             ..Default::default()
         };
         let env = FakeEnv::default().set("VOYAGE_TIMEOUT_SECS", "60");
 
-        assert_eq!(resolve_voyage_timeout_secs(Some(45), &cfg, &env), 45);
-        assert_eq!(resolve_voyage_timeout_secs(None, &cfg, &env), 60);
+        assert_eq!(resolve_voyage_timeout_secs(Some(45), &cfg, &env).unwrap(), 45);
+        assert_eq!(resolve_voyage_timeout_secs(None, &cfg, &env).unwrap(), 60);
 
         let empty = FakeEnv::default();
-        assert_eq!(resolve_voyage_timeout_secs(None, &cfg, &empty), 90);
+        assert_eq!(resolve_voyage_timeout_secs(None, &cfg, &empty).unwrap(), 90);
 
-        // Non-numeric and empty env values are ignored and fall through to config.
-        let env_garbage = FakeEnv::default().set("VOYAGE_TIMEOUT_SECS", "not-a-number");
-        assert_eq!(resolve_voyage_timeout_secs(None, &cfg, &env_garbage), 90);
+        // Empty env falls through to config.
         let env_empty = FakeEnv::default().set("VOYAGE_TIMEOUT_SECS", "");
-        assert_eq!(resolve_voyage_timeout_secs(None, &cfg, &env_empty), 90);
+        assert_eq!(resolve_voyage_timeout_secs(None, &cfg, &env_empty).unwrap(), 90);
 
-        // Zero at any level is rejected (reqwest `timeout(0)` fails every
-        // request) and falls through; all-zero yields the 120s default.
+        // Non-numeric env is loud.
+        let env_garbage = FakeEnv::default().set("VOYAGE_TIMEOUT_SECS", "abc");
+        assert!(resolve_voyage_timeout_secs(None, &cfg, &env_garbage).is_err());
+
+        // Zero is loud at every layer.
+        assert!(resolve_voyage_timeout_secs(Some(0), &cfg, &empty).is_err());
+        let env_zero = FakeEnv::default().set("VOYAGE_TIMEOUT_SECS", "0");
+        assert!(resolve_voyage_timeout_secs(None, &cfg, &env_zero).is_err());
         let zero_cfg = ModelsConfig {
             voyage_timeout_secs: 0,
             ..Default::default()
         };
-        assert_eq!(resolve_voyage_timeout_secs(Some(0), &zero_cfg, &empty), 120);
-        assert_eq!(resolve_voyage_timeout_secs(Some(0), &cfg, &empty), 90);
-        let env_zero = FakeEnv::default().set("VOYAGE_TIMEOUT_SECS", "0");
-        assert_eq!(resolve_voyage_timeout_secs(None, &zero_cfg, &env_zero), 120);
+        assert!(resolve_voyage_timeout_secs(None, &zero_cfg, &empty).is_err());
+
+        // Absent everywhere -> serde default (120) lives in the config field, so a
+        // default ModelsConfig resolves to 120.
+        assert_eq!(
+            resolve_voyage_timeout_secs(None, &ModelsConfig::default(), &empty).unwrap(),
+            120
+        );
     }
 
     #[test]
@@ -624,34 +764,36 @@ model = "rerank-2.5-lite"
     }
 
     #[test]
-    fn resolve_rerank_placement_precedence_and_auto() {
+    fn resolve_rerank_placement_precedence_auto_and_invalid() {
         let cfg = RerankConfig {
             location: Some("off".into()),
             model: None,
         };
         let env = FakeEnv::default().set("MIDNIGHT_MANUAL_RERANK", "server");
-        // flag > env > config.
         assert_eq!(
-            resolve_rerank_placement(Some("local"), &cfg, &env, false),
+            resolve_rerank_placement(Some("local"), &cfg, &env, false).unwrap(),
             RerankPlacement::Local
         );
-        assert_eq!(resolve_rerank_placement(None, &cfg, &env, true), RerankPlacement::Server);
-        let no_env = FakeEnv::default();
-        assert_eq!(resolve_rerank_placement(None, &cfg, &no_env, true), RerankPlacement::Off);
-        // Auto everywhere -> key detection: key => local, no key => server.
-        let empty = RerankConfig::default();
-        assert_eq!(resolve_rerank_placement(None, &empty, &no_env, true), RerankPlacement::Local);
-        assert_eq!(resolve_rerank_placement(None, &empty, &no_env, false), RerankPlacement::Server);
-        // Explicit "auto" at any level falls through to key detection.
         assert_eq!(
-            resolve_rerank_placement(Some("auto"), &empty, &no_env, false),
+            resolve_rerank_placement(None, &cfg, &env, true).unwrap(),
             RerankPlacement::Server
         );
-        // Unknown value falls through to the next level (lenient, like other resolvers).
+
+        // `auto` defers to key detection (key => Local, no key => Server).
+        let empty = RerankConfig::default();
+        let no_env = FakeEnv::default();
         assert_eq!(
-            resolve_rerank_placement(Some("bogus"), &empty, &no_env, true),
+            resolve_rerank_placement(Some("auto"), &empty, &no_env, true).unwrap(),
             RerankPlacement::Local
         );
+        assert_eq!(
+            resolve_rerank_placement(None, &empty, &no_env, false).unwrap(),
+            RerankPlacement::Server
+        );
+
+        // A genuine typo is loud (does not silently pick a placement).
+        let err = resolve_rerank_placement(Some("servr"), &empty, &no_env, true).unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidValue { .. }));
     }
 
     #[test]
@@ -665,7 +807,7 @@ model = "rerank-2.5-lite"
     }
 
     #[test]
-    fn resolve_rerank_model_precedence_and_default() {
+    fn resolve_rerank_model_precedence_and_invalid() {
         use crate::rerank::RerankParam;
         let cfg = RerankConfig {
             location: None,
@@ -673,21 +815,17 @@ model = "rerank-2.5-lite"
         };
         let env = FakeEnv::default().set("MIDNIGHT_MANUAL_RERANK_MODEL", "rerank-2.5");
         assert_eq!(
-            resolve_rerank_model(Some("rerank-2.5-lite"), &cfg, &env),
+            resolve_rerank_model(Some("rerank-2.5-lite"), &cfg, &env).unwrap(),
             RerankParam::Rerank25Lite
         );
-        assert_eq!(resolve_rerank_model(None, &cfg, &env), RerankParam::Rerank25);
+        assert_eq!(resolve_rerank_model(None, &cfg, &env).unwrap(), RerankParam::Rerank25);
         let no_env = FakeEnv::default();
-        assert_eq!(resolve_rerank_model(None, &cfg, &no_env), RerankParam::Rerank25Lite);
-        // Nothing anywhere -> rerank-2.5; unknown strings fall through.
         assert_eq!(
-            resolve_rerank_model(None, &RerankConfig::default(), &no_env),
+            resolve_rerank_model(None, &RerankConfig::default(), &no_env).unwrap(),
             RerankParam::Rerank25
         );
-        assert_eq!(
-            resolve_rerank_model(Some("bogus"), &RerankConfig::default(), &no_env),
-            RerankParam::Rerank25
-        );
+        // Typo is loud.
+        assert!(resolve_rerank_model(Some("rerank-3"), &RerankConfig::default(), &no_env).is_err());
     }
 
     #[test]
@@ -698,18 +836,43 @@ model = "rerank-2.5-lite"
         let env = FakeEnv::default().set("MIDNIGHT_MANUAL_SECURITY", "strict");
 
         // flag > env > config.
-        assert_eq!(resolve_security_level(Some("low"), &cfg, &env), SecurityLevel::Low);
-        // No flag -> env wins over config.
-        assert_eq!(resolve_security_level(None, &cfg, &env), SecurityLevel::Strict);
-        // No flag, no env -> config wins.
+        assert_eq!(resolve_security_level(Some("low"), &cfg, &env).unwrap(), SecurityLevel::Low);
+        assert_eq!(resolve_security_level(None, &cfg, &env).unwrap(), SecurityLevel::Strict);
+
         let no_env = FakeEnv::default();
-        assert_eq!(resolve_security_level(None, &cfg, &no_env), SecurityLevel::High);
+        assert_eq!(resolve_security_level(None, &cfg, &no_env).unwrap(), SecurityLevel::High);
+
+        // An empty flag is treated as absent and falls through to config `high`.
+        assert_eq!(resolve_security_level(Some(""), &cfg, &no_env).unwrap(), SecurityLevel::High);
+
         // Nothing anywhere -> default Moderate.
         let empty = SecurityConfig::default();
-        assert_eq!(resolve_security_level(None, &empty, &no_env), SecurityLevel::Moderate);
-        // Unknown/empty flag falls through to the next level.
-        assert_eq!(resolve_security_level(Some("bogus"), &cfg, &no_env), SecurityLevel::High);
-        assert_eq!(resolve_security_level(Some(""), &empty, &no_env), SecurityLevel::Moderate);
+        assert_eq!(resolve_security_level(None, &empty, &no_env).unwrap(), SecurityLevel::Moderate);
+
+        // Case-insensitive.
+        let env_caps = FakeEnv::default().set("MIDNIGHT_MANUAL_SECURITY", "STRICT");
+        assert_eq!(resolve_security_level(None, &empty, &env_caps).unwrap(), SecurityLevel::Strict);
+    }
+
+    #[test]
+    fn resolve_security_level_invalid_value_is_loud() {
+        let empty = SecurityConfig::default();
+        let env = FakeEnv::default().set("MIDNIGHT_MANUAL_SECURITY", "strct");
+        let err = resolve_security_level(None, &empty, &env).unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidValue { .. }));
+        let msg = err.to_string();
+        assert!(msg.contains("strct") && msg.contains("MIDNIGHT_MANUAL_SECURITY"));
+
+        // An invalid value does NOT fall through to config.
+        let cfg = SecurityConfig { level: Some("high".into()) };
+        assert!(resolve_security_level(None, &cfg, &env).is_err());
+
+        // Empty env still falls through (treated as absent).
+        let env_empty = FakeEnv::default().set("MIDNIGHT_MANUAL_SECURITY", "");
+        assert_eq!(
+            resolve_security_level(None, &cfg, &env_empty).unwrap(),
+            crate::injection::SecurityLevel::High
+        );
     }
 
     #[test]
@@ -748,5 +911,73 @@ model = "rerank-2.5-lite"
             endpoint: "https://from-config".into(),
         };
         assert_eq!(resolve_telemetry_endpoint(&cfg, &E), "https://from-config");
+    }
+
+    #[test]
+    fn resolve_voyage_base_url_env_over_config() {
+        let cfg = ModelsConfig {
+            voyage_base_url: Some("https://from-config".into()),
+            ..Default::default()
+        };
+        let env = FakeEnv::default().set("MIDNIGHT_MANUAL_VOYAGE_BASE_URL", "https://from-env");
+        assert_eq!(resolve_voyage_base_url(&cfg, &env).as_deref(), Some("https://from-env"));
+
+        let no_env = FakeEnv::default();
+        assert_eq!(resolve_voyage_base_url(&cfg, &no_env).as_deref(), Some("https://from-config"));
+
+        // Empty env falls through to config; nothing anywhere -> None.
+        let env_empty = FakeEnv::default().set("MIDNIGHT_MANUAL_VOYAGE_BASE_URL", "");
+        assert_eq!(
+            resolve_voyage_base_url(&cfg, &env_empty).as_deref(),
+            Some("https://from-config")
+        );
+        assert_eq!(resolve_voyage_base_url(&ModelsConfig::default(), &no_env), None);
+    }
+
+    #[test]
+    fn models_config_voyage_base_url_roundtrips() {
+        let toml_src =
+            "embedding = \"voyage-context-3\"\nvoyage_base_url = \"https://proxy.example/v1\"\n";
+        let m: ModelsConfig = toml::from_str(toml_src).unwrap();
+        assert_eq!(m.voyage_base_url.as_deref(), Some("https://proxy.example/v1"));
+        assert!(ModelsConfig::default().voyage_base_url.is_none());
+    }
+
+    #[test]
+    fn resolve_log_level_flag_then_env_then_config() {
+        let cfg = LogConfig { level: Some("info".into()) };
+        let env = FakeEnv::default().set("RUST_LOG", "debug");
+        assert_eq!(resolve_log_level(Some("trace"), &cfg, &env).as_deref(), Some("trace"));
+        assert_eq!(resolve_log_level(None, &cfg, &env).as_deref(), Some("debug"));
+        let no_env = FakeEnv::default();
+        assert_eq!(resolve_log_level(None, &cfg, &no_env).as_deref(), Some("info"));
+        assert_eq!(resolve_log_level(None, &LogConfig::default(), &no_env), None);
+    }
+
+    #[test]
+    fn log_config_roundtrips() {
+        let cfg: Config = toml::from_str("[log]\nlevel = \"mnm=debug,hyper=warn\"\n").unwrap();
+        assert_eq!(cfg.log.level.as_deref(), Some("mnm=debug,hyper=warn"));
+        let empty: Config = toml::from_str("").unwrap();
+        assert!(empty.log.level.is_none());
+    }
+
+    #[test]
+    fn resolve_show_admin_cmds_env_truthy_then_config() {
+        let cfg_on = CliConfig { show_admin_cmds: true };
+        let cfg_off = CliConfig { show_admin_cmds: false };
+
+        // Env set to a truthy token wins regardless of config.
+        let env = FakeEnv::default().set("MIDNIGHT_MANUAL_SHOW_ADMIN_CMDS", "1");
+        assert!(resolve_show_admin_cmds(&cfg_off, &env));
+
+        // Env set to a non-truthy token is authoritative (does NOT fall through).
+        let env = FakeEnv::default().set("MIDNIGHT_MANUAL_SHOW_ADMIN_CMDS", "0");
+        assert!(!resolve_show_admin_cmds(&cfg_on, &env));
+
+        // Env unset -> config field decides.
+        let empty = FakeEnv::default();
+        assert!(resolve_show_admin_cmds(&cfg_on, &empty));
+        assert!(!resolve_show_admin_cmds(&cfg_off, &empty));
     }
 }

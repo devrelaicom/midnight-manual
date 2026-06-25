@@ -52,7 +52,6 @@ use std::time::Instant;
 use anyhow::{anyhow, Context as _, Result};
 use clap::Args as ClapArgs;
 use mnm_core::auth_file::AuthFile;
-use mnm_core::config::ConfigEnv as _;
 use mnm_retrieval::filters::SearchFilters;
 use mnm_telemetry::events::{CliCommand, CliCommandName, Outcome, Rerank};
 use mnm_telemetry::{Surface, Telemetry};
@@ -273,7 +272,7 @@ pub async fn run_with_paths(
     // Resolve the Voyage API key (flag > VOYAGE_API_KEY env > config). Honor the
     // caller's `--config` path so a key stored in a non-default config is found.
     let env = mnm_core::config::StdEnv;
-    let (cfg, _) = mnm_core::config::Config::discover(config_path, &env).unwrap_or_default();
+    let (cfg, _) = mnm_core::config::Config::discover(config_path, &env)?;
     let voyage_key = mnm_core::config::resolve_voyage_api_key(voyage_api_key, &cfg.models, &env);
 
     // Resolve rerank placement + model and validate the instruction up front, so
@@ -353,9 +352,7 @@ pub async fn run_with_paths(
     // threading an `&impl ConfigEnv` borrow through the `.await` below would make
     // this future non-`Send` for arbitrary impls; resolving to an owned value
     // first keeps `DispatchSearch` env-free and its future `Send`.
-    let voyage_base_url = env
-        .var("MIDNIGHT_MANUAL_VOYAGE_BASE_URL")
-        .filter(|s| !s.is_empty());
+    let voyage_base_url = mnm_core::config::resolve_voyage_base_url(&cfg.models, &env);
 
     let result = dispatch_search(DispatchSearch {
         placement,
@@ -487,9 +484,9 @@ fn resolve_rerank(
         cfg,
         env,
         has_voyage_key,
-    );
+    )?;
     let rerank_model =
-        mnm_core::config::resolve_rerank_model(args.rerank_model.as_deref(), cfg, env);
+        mnm_core::config::resolve_rerank_model(args.rerank_model.as_deref(), cfg, env)?;
     if let Some(i) = args.rerank_instructions.as_deref() {
         mnm_core::rerank::validate_instruction(i).map_err(|e| anyhow!(e))?;
     }

@@ -202,14 +202,18 @@ pub async fn run() -> Result<()> {
         None
     };
 
-    init_logging(cli.log_level.as_deref(), sentry_guard.is_some());
-    // Keep the Sentry guard alive until `run()` returns so buffered events
-    // flush on shutdown; it must not drop before command dispatch/await.
+    // Discover config BEFORE logging so `[log].level` can govern the logger.
+    // A genuinely-absent file still yields defaults; a present-but-malformed
+    // file fails loud here (propagated to `main` -> stderr + exit 1). Sentry is
+    // already initialised above and stays config-independent.
+    let (cfg, _) = mnm_core::config::Config::discover(cli.config.as_deref(), &env)?;
+
+    let log_level = mnm_core::config::resolve_log_level(cli.log_level.as_deref(), &cfg.log, &env);
+    init_logging(log_level.as_deref(), sentry_guard.is_some());
+    // Keep the Sentry guard alive until `run()` returns so buffered events flush.
     let _sentry_guard = sentry_guard;
 
     let started = Instant::now();
-    let (cfg, _) =
-        mnm_core::config::Config::discover(cli.config.as_deref(), &env).unwrap_or_default();
 
     // Resolve the three opt-out mechanisms into Gauge's two consent inputs.
     let marker = mnm_core::paths::telemetry_marker_path(&env);
@@ -376,13 +380,13 @@ const fn cli_command_name(cmd: &Command) -> CliCommandName {
 /// Precedence: `MIDNIGHT_MANUAL_SHOW_ADMIN_CMDS` env > `cli.show_admin_cmds`
 /// config field > hidden.
 fn should_show_admin_cmds() -> bool {
-    if let Ok(v) = std::env::var("MIDNIGHT_MANUAL_SHOW_ADMIN_CMDS") {
-        // Match the same truthy-set the rest of the CLI uses (FR-016).
-        return matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES");
-    }
+    // Best-effort: this runs before clap parsing (to decide which subcommands
+    // to hide) so it cannot honor `--config`, and a malformed config here just
+    // hides admin commands — the authoritative loud failure fires moments later
+    // at the main `Config::discover` in `run`.
     let env = mnm_core::config::StdEnv;
     let (cfg, _) = mnm_core::config::Config::discover(None, &env).unwrap_or_default();
-    cfg.cli.show_admin_cmds
+    mnm_core::config::resolve_show_admin_cmds(&cfg.cli, &env)
 }
 
 fn init_logging(level: Option<&str>, sentry_on: bool) {

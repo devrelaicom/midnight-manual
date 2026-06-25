@@ -130,9 +130,7 @@ pub async fn run(args: Args, json: bool) -> Result<()> {
     let report = Report {
         cli: VersionInfo::current(),
         config_file: path.map(|p| p.display().to_string()),
-        admin_visibility: std::env::var("MIDNIGHT_MANUAL_SHOW_ADMIN_CMDS")
-            .ok()
-            .is_some_and(|v| !matches!(v.as_str(), "0" | "false" | "no")),
+        admin_visibility: mnm_core::config::resolve_show_admin_cmds(&cfg.cli, &env),
         telemetry,
         corpus,
     };
