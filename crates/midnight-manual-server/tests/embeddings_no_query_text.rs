@@ -1,6 +1,6 @@
-//! Privacy canary: the `/v1/embeddings` path emits NO query text (FR-112 / SC-061).
+//! Privacy probe: the `/v1/embeddings` path emits NO query text (FR-112 / SC-061).
 //!
-//! This is a regression-guard canary, not a fail-first test. The embeddings
+//! This is a regression-guard probe, not a fail-first test. The embeddings
 //! handler ([`midnight_manual_server::routes::embeddings`]) was built to never log or persist
 //! the submitted input text:
 //!
@@ -9,30 +9,28 @@
 //! - the 429 over-budget response body carries only window / limit / reset
 //!   metadata (see `token_limit_429`), never the submitted input text.
 //!
-//! This test drives a canary-laden request through the real HTTP-backed
+//! This test drives a probe-laden request through the real HTTP-backed
 //! `/v1/embeddings` route (with a mock Voyage upstream) and asserts two things
-//! contain no canary string:
+//! contain no probe string:
 //!
 //! 1. the server's captured logs, and
 //! 2. the 429 over-budget response body.
 //!
 //! It also includes a POSITIVE CONTROL (Part C): the 200 path emits no logs, so
-//! the "no canary in logs" assertion would silently pass against an empty buffer
+//! the "no probe in logs" assertion would silently pass against an empty buffer
 //! if the `EnvFilter` target scoping were ever broken (e.g. a typo'd
-//! `midnight_manual_server` target) — a canary that cannot fail. Part C drives a request at a
+//! `midnight_manual_server` target) — a probe that cannot fail. Part C drives a request at a
 //! Voyage upstream that returns HTTP 500, forcing the handler's only input-path
 //! log (`tracing::warn!(.., "voyage embedding failed")`), and asserts the
 //! captured buffer DOES contain that marker. This proves the capture pipeline
 //! genuinely sees midnight-manual-server's `tracing` output, so a future success-path
 //! regression (e.g. `info!(?req.input)`) would be captured and would fail the
-//! canary. Part C additionally asserts the failure log + 502 body (which embed
-//! the upstream error string) leak neither the sentinel nor the canary prefix.
+//! probe. Part C additionally asserts the failure log + 502 body (which embed
+//! the upstream error string) leak neither the sentinel nor the probe prefix.
 //!
-//! The canary input is the EXISTING `CanaryCategory::QueryText` sentinel from
-//! [`mnm_telemetry::canary::CANARY_STRINGS`]
-//! (`CANARY_zzz_xyz_query_how_to_compile_a_compact_contract`). Reusing the
-//! registry value means the CI grep gate's `CANARY_zzz_xyz_` prefix also guards
-//! this path.
+//! The probe input is a self-contained local sentinel string (`QUERY_PROBE`),
+//! chosen to be unique enough that any appearance in server output can only
+//! originate from a leak of the submitted query text.
 //!
 //! Scoping note (avoiding false positives from the test's own plumbing): the
 //! wiremock upstream and the `reqwest` client BOTH legitimately see the input
@@ -53,9 +51,7 @@ use std::time::Duration;
 use midnight_manual_server::{app, config::ServerConfig};
 use mnm_embedding::contextualized::ContextualizedVoyageEmbedder;
 use mnm_embedding::voyage::VoyageEmbedder;
-use mnm_telemetry::canary::{
-    self, find_first_match, CanaryCategory, CANARY_PREFIX, CANARY_STRINGS,
-};
+use mnm_telemetry::canary::CANARY_PREFIX;
 use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::EnvFilter;
 use wiremock::matchers::{method, path};
@@ -91,6 +87,17 @@ impl std::io::Write for LogSink {
         Ok(())
     }
 }
+
+// ── Probe sentinel ───────────────────────────────────────────────────────────
+
+/// A self-contained local probe string used in place of the old canary registry
+/// sentinel. Any appearance of this string in server-emitted logs or response
+/// bodies can only originate from a query-text leak.
+///
+/// The string deliberately avoids all `FORBIDDEN` substrings (e.g. `@`,
+/// `/Users/`, `http://`) so it won't trigger forbidden-substring checks on the
+/// probe itself — only on unintended leaks.
+const QUERY_PROBE: &str = "zzCanaryQueryProbe_how_to_compile_a_compact_contract";
 
 // ── App-with-mock-Voyage harness (mirrors tests/code_ingest_e2e.rs) ─────────
 
@@ -233,25 +240,14 @@ async fn voyage_mock_500() -> MockServer {
     mock
 }
 
-/// The existing `QueryText` sentinel from the canary registry. Reusing the
-/// registry value (rather than inventing a literal) means the CI grep prefix
-/// `CANARY_zzz_xyz_` also guards this path.
-fn query_sentinel() -> &'static str {
-    CANARY_STRINGS
-        .iter()
-        .find(|c| c.category == CanaryCategory::QueryText)
-        .expect("a QueryText canary must exist in CANARY_STRINGS")
-        .value
-}
-
 // ── Test ─────────────────────────────────────────────────────────────────────
 
-/// Canary: drive a query-text-laden request through `/v1/embeddings` and assert
-/// that NEITHER the server's logs, NOR `telemetry_event_raw`, NOR the 429
-/// over-budget body contains the sentinel (or the canary prefix).
+/// Probe: drive a query-text-laden request through `/v1/embeddings` and assert
+/// that NEITHER the server's logs NOR the 429 over-budget body contains the
+/// probe string (or the canary prefix).
 #[tokio::test]
 async fn embeddings_path_emits_no_query_text() {
-    let sentinel = query_sentinel();
+    let sentinel = QUERY_PROBE;
 
     // Install a captured-logs subscriber filtered to mn_* targets ONLY, so the
     // wiremock/reqwest/hyper/tower/sqlx machinery (which legitimately handles
@@ -305,9 +301,12 @@ async fn embeddings_path_emits_no_query_text() {
     // Let any spawned writes settle before snapshotting the table.
     tokio::time::sleep(Duration::from_millis(150)).await;
 
-    // ── Assertion 1: the server's captured logs carry no canary ────────────
+    // ── Assertion 1: the server's captured logs carry no probe ─────────────
     let log_snapshot = captured.snapshot();
-    canary::assert_no_canary_in(&log_snapshot);
+    assert!(
+        !log_snapshot.contains(sentinel),
+        "query-text probe leaked into server logs: {log_snapshot}"
+    );
 
     // ── Part B: 429 over-budget — the rejection body must carry no input ────
     //
@@ -342,7 +341,6 @@ async fn embeddings_path_emits_no_query_text() {
         let body = resp.text().await.expect("read 429 body");
         // The 429 body must contain NEITHER the sentinel NOR the canary prefix.
         // Do NOT print `body` (it must not reach stdout for the CI grep gate).
-        canary::assert_no_canary_in(&body);
         assert!(
             !body.contains(sentinel),
             "429 over-budget body must not contain the submitted input text"
@@ -366,8 +364,12 @@ async fn embeddings_path_emits_no_query_text() {
 
     // Final guard: the captured logs across the 200 + 429 requests (the outer
     // shared buffer; the positive-control 500 request used its own scoped
-    // buffer) stay canary-clean.
-    canary::assert_no_canary_in(&captured.snapshot());
+    // buffer) stay probe-clean.
+    let final_snapshot = captured.snapshot();
+    assert!(
+        !final_snapshot.contains(sentinel),
+        "query-text probe leaked into server logs (final check): {final_snapshot}"
+    );
 
     // Keep the mock alive until the very end.
     drop(voyage_mock_server);
@@ -454,15 +456,13 @@ async fn positive_control_voyage_failure(pool: sqlx::PgPool, sentinel: &str) {
     // LEAK ASSERTION on the failure path: even the Voyage-failure log (which
     // logs `error = %e`) must NOT smuggle the submitted input text. Do NOT print
     // `ctl_snapshot` (it must not reach stdout for the CI grep gate).
-    canary::assert_no_canary_in(&ctl_snapshot);
     assert!(
         !ctl_snapshot.contains(sentinel),
         "the Voyage-failure log must not contain the submitted input text"
     );
 
     // The 502 body (which embeds the upstream error string) must likewise carry
-    // no canary / no sentinel — mirroring the 429 body check.
-    canary::assert_no_canary_in(&body);
+    // no probe / no sentinel — mirroring the 429 body check.
     assert!(
         !body.contains(sentinel),
         "502 Voyage-failure body must not contain the submitted input text"

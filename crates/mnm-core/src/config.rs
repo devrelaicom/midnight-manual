@@ -295,8 +295,8 @@ pub enum RerankPlacement {
 
 impl RerankPlacement {
     /// Stable telemetry wire string (`"local"` | `"server"` | `"off"`), matching
-    /// the `EventPayload::Rerank.placement` field. This is the single source of
-    /// truth shared by the CLI and MCP clients so the placement label stays
+    /// the rerank event's `placement` field. This is the single source of truth
+    /// shared by the CLI and MCP clients so the placement label stays
     /// byte-aligned across both (and with the server-side telemetry validator).
     #[must_use]
     pub const fn wire(self) -> &'static str {

@@ -33,7 +33,6 @@ use mnm_core::auth_file::AuthFile;
 use mnm_core::types::SourceKind;
 use mnm_embedding::voyage::VoyageEmbedder;
 use mnm_store::entities::source;
-use mnm_telemetry::TelemetryClient;
 use time::OffsetDateTime;
 use uuid::Uuid;
 use wiremock::matchers::{method, path};
@@ -190,6 +189,17 @@ created_at = "2026-05-14"
     )
 }
 
+fn disabled_telemetry() -> mnm_telemetry::Telemetry {
+    mnm_telemetry::build(mnm_telemetry::BuildParams {
+        app_version: env!("CARGO_PKG_VERSION").to_owned(),
+        endpoint: "https://telemetry.disabled.invalid".to_owned(),
+        install_id_path: None,
+        config_enabled: false,
+        runtime_enabled: false,
+        flush_args: Vec::new(),
+    })
+}
+
 fn write_admin_auth_toml(dir: &Path, user_id: &str, token: &str) -> PathBuf {
     let auth_path = dir.join("auth.toml");
     let future = OffsetDateTime::now_utc() + time::Duration::hours(1);
@@ -315,12 +325,12 @@ async fn code_ingest_smoke_persists_symbol_paths_and_packages() {
         no_code_embeddings: false,
         report_file: None,
     };
-    let telemetry = TelemetryClient::Disabled;
+    let telemetry = disabled_telemetry();
 
     // Server-proxy embedding mode: no BYOK key (config discovery bypassed,
     // no --voyage-api-key) so the CLI embeds via the live server's
     // /v1/embeddings, which holds the platform Voyage key.
-    run_with_paths(args, &server_url, &auth_path, None, None, &telemetry, "0.1.0-e2e", true)
+    run_with_paths(args, &server_url, &auth_path, None, None, &telemetry, true)
         .await
         .expect("ingest run completes against live midnight-manual-server");
 
