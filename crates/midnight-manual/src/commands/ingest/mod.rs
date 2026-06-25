@@ -4,7 +4,6 @@ use std::path::Path;
 
 use anyhow::Result;
 use clap::{Args as ClapArgs, Subcommand};
-use mnm_telemetry::TelemetryClient;
 
 pub mod plan;
 pub mod report;
@@ -45,20 +44,18 @@ pub enum IngestCmd {
 }
 
 /// Dispatch `mnm ingest <subcommand>`.
-#[allow(clippy::too_many_arguments)]
 pub async fn run(
     args: Args,
     server: Option<&str>,
     config_path: Option<&Path>,
     voyage_api_key: Option<&str>,
-    telemetry: &TelemetryClient,
-    cli_version: &str,
+    telemetry: &mnm_telemetry::Telemetry,
     json: bool,
 ) -> Result<()> {
     match args.cmd {
         IngestCmd::Plan(a) => plan::run(a, server, json).await,
         IngestCmd::Run(a) => {
-            run::run(a, server, config_path, voyage_api_key, telemetry, cli_version, json).await
+            run::run(a, server, config_path, voyage_api_key, telemetry, json).await
         }
     }
 }

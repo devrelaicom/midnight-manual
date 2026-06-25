@@ -2,7 +2,6 @@
 
 use anyhow::{Context as _, Result};
 use clap::{Args as ClapArgs, Subcommand};
-use mnm_telemetry::TelemetryClient;
 
 pub mod neighbors;
 pub mod next;
@@ -31,13 +30,7 @@ pub enum ChunksCmd {
 }
 
 /// Dispatcher for chunks namespace.
-pub async fn run(
-    args: Args,
-    server: Option<&str>,
-    _telemetry: &TelemetryClient,
-    _cli_version: &str,
-    json: bool,
-) -> Result<()> {
+pub async fn run(args: Args, server: Option<&str>, json: bool) -> Result<()> {
     match args.cmd {
         ChunksCmd::Show(a) => show::run(a, server, json).await,
         ChunksCmd::Next(a) => next::run(a, server, json).await,

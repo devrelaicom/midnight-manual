@@ -2,7 +2,6 @@
 
 use anyhow::{Context as _, Result};
 use clap::{Args as ClapArgs, Subcommand};
-use mnm_telemetry::TelemetryClient;
 
 pub mod chunks;
 pub mod show;
@@ -25,13 +24,7 @@ pub enum DocumentsCmd {
 }
 
 /// Dispatcher for documents namespace.
-pub async fn run(
-    args: Args,
-    server: Option<&str>,
-    _telemetry: &TelemetryClient,
-    _cli_version: &str,
-    json: bool,
-) -> Result<()> {
+pub async fn run(args: Args, server: Option<&str>, json: bool) -> Result<()> {
     match args.cmd {
         DocumentsCmd::Show(a) => show::run(a, server, json).await,
         DocumentsCmd::Chunks(a) => chunks::run(a, server, json).await,

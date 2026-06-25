@@ -438,13 +438,10 @@ point at a different deployment.
 
 ## 12. (Optional) Alerting
 
-The server emits Prometheus metrics on `GET /metrics`. Point Grafana or your
-metrics collector at it; useful starting alerts:
-
-- `up{job="midnight-manual"} == 0` for 2m → page on-call.
-- `histogram_quantile(0.95, rate(http_request_duration_seconds_bucket{route="/v1/search"}[5m])) > 0.5`
-  → SC-013 budget breach.
-- `rate(http_requests_total{status=~"5.."}[5m]) > 0.05` → 5% server error rate.
+Usage analytics are now delivered to the Gauge telemetry service (default
+`https://gauge-telemetry.fly.dev`) — the server no longer exposes a
+Prometheus `/metrics` endpoint. The server does expose `/healthz` (liveness)
+and `/readyz` (readiness); point your uptime checks at those.
 
 Dashboards/alert YAML aren't checked into this repo yet — see the open
 operational gaps in the project's production-readiness audit.

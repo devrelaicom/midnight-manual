@@ -18,7 +18,7 @@ resolver = "2"
 [workspace.package]
 version       = "0.3.0"
 edition       = "2021"
-rust-version  = "1.91"
+rust-version  = "1.93"
 license       = "Apache-2.0 OR MIT"
 authors       = ["Midnight Network Contributors"]
 repository    = "https://github.com/devrelaicom/midnight-manual"
@@ -153,8 +153,6 @@ tokenizers       = { version = "0.21", default-features = false, features = ["fa
 # Observability
 tracing                    = "0.1"
 tracing-subscriber         = { version = "0.3", features = ["env-filter", "json"] }
-metrics                    = "0.23"
-metrics-exporter-prometheus = "0.15"
 # Opt-in Sentry error reporting (mnm-sentry crate). `default-features = false`
 # + `rustls` is mandatory: the default `transport` feature pulls `native-tls`,
 # which violates this workspace's rustls-only TLS policy (reqwest uses
@@ -162,6 +160,9 @@ metrics-exporter-prometheus = "0.15"
 # below yields a rustls-only reqwest transport.
 sentry          = { version = "0.48", default-features = false, features = ["backtrace", "contexts", "debug-images", "panic", "release-health", "reqwest", "rustls"] }
 sentry-tracing  = "0.48"
+# Privacy-first usage telemetry (Gauge). Pulls gauge-events (sender) → reqwest
+# blocking + rustls-tls. Replaces the former bespoke mnm-telemetry pipeline.
+gauge-telemetry = "0.3"
 
 # Utilities
 anyhow           = "1"

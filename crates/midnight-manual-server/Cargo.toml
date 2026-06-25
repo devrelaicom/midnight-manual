@@ -56,8 +56,6 @@ sqlx           = { workspace = true }
 pgvector       = { workspace = true }
 tracing        = { workspace = true }
 tracing-subscriber = { workspace = true }
-metrics        = { workspace = true }
-metrics-exporter-prometheus = { workspace = true }
 utoipa         = { workspace = true }
 anyhow         = { workspace = true }
 thiserror      = { workspace = true }

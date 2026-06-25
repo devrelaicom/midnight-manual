@@ -47,8 +47,7 @@ use mnm_core::types::{DocumentKind, SourceKind};
 use mnm_embedding::client::{EmbedSource, GeneralEmbedSource};
 use mnm_embedding::contextualized::ContextualizedVoyageEmbedder;
 use mnm_embedding::voyage::{InputType, VoyageEmbedder};
-use mnm_telemetry::events::{Component, EventPayload, Outcome};
-use mnm_telemetry::{Event, TelemetryClient};
+use mnm_telemetry::events::Outcome;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -226,25 +225,15 @@ pub async fn run(
     server_flag: Option<&str>,
     config_path: Option<&Path>,
     voyage_api_key: Option<&str>,
-    telemetry: &TelemetryClient,
-    cli_version: &str,
+    telemetry: &mnm_telemetry::Telemetry,
     json: bool,
 ) -> Result<()> {
     let server_url = crate::shared::resolve_server_url(server_flag);
     let env = mnm_core::config::StdEnv;
     let auth_path = mnm_core::paths::auth_file_path(&env)
         .ok_or_else(|| anyhow!("could not resolve auth.toml path (set XDG_CONFIG_HOME or HOME)"))?;
-    run_with_paths(
-        args,
-        &server_url,
-        &auth_path,
-        config_path,
-        voyage_api_key,
-        telemetry,
-        cli_version,
-        json,
-    )
-    .await
+    run_with_paths(args, &server_url, &auth_path, config_path, voyage_api_key, telemetry, json)
+        .await
 }
 
 /// Path-explicit driver, exposed for integration tests. Returns `Result<()>`
@@ -262,22 +251,12 @@ pub async fn run_with_paths(
     auth_path: &Path,
     config_path: Option<&Path>,
     voyage_api_key: Option<&str>,
-    telemetry: &TelemetryClient,
-    cli_version: &str,
+    telemetry: &mnm_telemetry::Telemetry,
     json: bool,
 ) -> Result<()> {
-    run_with_paths_stats(
-        args,
-        server_url,
-        auth_path,
-        config_path,
-        voyage_api_key,
-        telemetry,
-        cli_version,
-        json,
-    )
-    .await
-    .map(|_| ())
+    run_with_paths_stats(args, server_url, auth_path, config_path, voyage_api_key, telemetry, json)
+        .await
+        .map(|_| ())
 }
 
 /// Run a single-source ingest and return the per-run [`RunStats`] (document and
@@ -300,8 +279,7 @@ pub async fn run_with_paths_stats(
     auth_path: &Path,
     config_path: Option<&Path>,
     voyage_api_key: Option<&str>,
-    telemetry: &TelemetryClient,
-    cli_version: &str,
+    telemetry: &mnm_telemetry::Telemetry,
     json: bool,
 ) -> Result<RunStats> {
     let started = Instant::now();
@@ -320,21 +298,15 @@ pub async fn run_with_paths_stats(
             ),
             Err(_) => (0, 0, 0, 0, None, Outcome::Error),
         };
-    telemetry
-        .emit(Event::new(
-            Component::Cli,
-            cli_version,
-            EventPayload::IngestComplete {
-                documents_added: u32::try_from(added).unwrap_or(u32::MAX),
-                documents_updated: u32::try_from(carried).unwrap_or(u32::MAX),
-                documents_skipped: u32::try_from(deleted).unwrap_or(u32::MAX),
-                duration_ms,
-                outcome: telemetry_outcome,
-                batch_count: Some(batch_count),
-                failed_batch_index,
-            },
-        ))
-        .await;
+    telemetry.emit(&mnm_telemetry::events::IngestComplete {
+        documents_added: u32::try_from(added).unwrap_or(u32::MAX),
+        documents_updated: u32::try_from(carried).unwrap_or(u32::MAX),
+        documents_skipped: u32::try_from(deleted).unwrap_or(u32::MAX),
+        duration_ms,
+        outcome: telemetry_outcome,
+        batch_count: Some(batch_count),
+        failed_batch_index,
+    });
 
     outcome
 }

@@ -54,8 +54,8 @@ use clap::Args as ClapArgs;
 use mnm_core::auth_file::AuthFile;
 use mnm_core::config::ConfigEnv as _;
 use mnm_retrieval::filters::SearchFilters;
-use mnm_telemetry::events::{CliCommandName, Component, EventPayload, Outcome};
-use mnm_telemetry::{Event, TelemetryClient};
+use mnm_telemetry::events::{CliCommand, CliCommandName, Outcome, Rerank};
+use mnm_telemetry::{Surface, Telemetry};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
@@ -226,8 +226,7 @@ pub async fn run(
     server_flag: Option<&str>,
     config_path: Option<&Path>,
     voyage_api_key: Option<&str>,
-    telemetry: &TelemetryClient,
-    cli_version: &str,
+    telemetry: &Telemetry,
     json: bool,
 ) -> Result<()> {
     let server_url = crate::shared::resolve_server_url(server_flag);
@@ -240,7 +239,6 @@ pub async fn run(
         config_path,
         voyage_api_key,
         telemetry,
-        cli_version,
         json,
     )
     .await
@@ -262,8 +260,7 @@ pub async fn run_with_paths(
     auth_path: Option<&Path>,
     config_path: Option<&Path>,
     voyage_api_key: Option<&str>,
-    telemetry: &TelemetryClient,
-    cli_version: &str,
+    telemetry: &Telemetry,
     json: bool,
 ) -> Result<()> {
     let texts = collect_query_texts(&args)?;
@@ -377,14 +374,12 @@ pub async fn run_with_paths(
     let duration_ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
     emit_search_telemetry(EmitSearchTelemetry {
         telemetry,
-        cli_version,
         placement,
         rerank_model,
         outcome: result.as_ref().ok(),
         ok: result.is_ok(),
         duration_ms,
-    })
-    .await;
+    });
     result.map(|_| ())
 }
 
@@ -392,9 +387,7 @@ pub async fn run_with_paths(
 /// positional argument list.
 struct EmitSearchTelemetry<'a> {
     /// Telemetry sink (the three-mechanism opt-out wraps each `emit`).
-    telemetry: &'a TelemetryClient,
-    /// Reporting component version for the event envelope.
-    cli_version: &'a str,
+    telemetry: &'a Telemetry,
     /// Resolved rerank placement (drives the `Rerank` event's wire fields).
     placement: mnm_core::config::RerankPlacement,
     /// Resolved Voyage rerank model.
@@ -411,10 +404,10 @@ struct EmitSearchTelemetry<'a> {
 /// Emit the two FR-109 events for one search (spec §6): the `Rerank` event and
 /// the `CliCommand` event. Factored out of [`run_with_paths`] so the dispatch
 /// body stays focused on the request round-trip.
-async fn emit_search_telemetry(args: EmitSearchTelemetry<'_>) {
+#[allow(clippy::needless_pass_by_value)]
+fn emit_search_telemetry(args: EmitSearchTelemetry<'_>) {
     let EmitSearchTelemetry {
         telemetry,
-        cli_version,
         placement,
         rerank_model,
         outcome,
@@ -425,21 +418,13 @@ async fn emit_search_telemetry(args: EmitSearchTelemetry<'_>) {
     // from the `RerankOutcome`; on failure the rerank never completed, so it is
     // reported as not applied (the three-mechanism opt-out wraps each `emit`).
     let rerank_payload = rerank_event(placement, rerank_model, outcome);
-    telemetry
-        .emit(Event::new(Component::Cli, cli_version, rerank_payload))
-        .await;
+    telemetry.emit(&rerank_payload);
     let outcome = if ok { Outcome::Ok } else { Outcome::Error };
-    telemetry
-        .emit(Event::new(
-            Component::Cli,
-            cli_version,
-            EventPayload::CliCommand {
-                command: CliCommandName::Search,
-                duration_ms,
-                outcome,
-            },
-        ))
-        .await;
+    telemetry.emit(&CliCommand {
+        command: CliCommandName::Search,
+        duration_ms,
+        outcome,
+    });
 }
 
 /// The rerank model name for the `Rerank` event: the resolved model on the
@@ -468,13 +453,14 @@ fn rerank_event(
     placement: mnm_core::config::RerankPlacement,
     rerank_model: mnm_core::rerank::RerankParam,
     outcome: Option<&RerankOutcome>,
-) -> EventPayload {
-    EventPayload::Rerank {
+) -> Rerank {
+    Rerank {
         placement: placement.wire().to_owned(),
         model: rerank_event_model(placement, rerank_model),
         applied: outcome.is_some_and(|o| o.applied),
         reason: outcome.and_then(|o| o.reason.clone()),
         billed_tokens: outcome.and_then(|o| o.billed_tokens),
+        surface: Surface::Cli,
     }
 }
 
@@ -2274,22 +2260,11 @@ mod tests {
 
         // Off: no model, not applied, no reason/tokens — regardless of outcome.
         let p = rerank_event(RerankPlacement::Off, RerankParam::None, None);
-        match p {
-            EventPayload::Rerank {
-                placement,
-                model,
-                applied,
-                reason,
-                billed_tokens,
-            } => {
-                assert_eq!(placement, "off");
-                assert_eq!(model, None);
-                assert!(!applied);
-                assert_eq!(reason, None);
-                assert_eq!(billed_tokens, None);
-            }
-            _ => panic!("expected Rerank payload"),
-        }
+        assert_eq!(p.placement, "off");
+        assert_eq!(p.model, None);
+        assert!(!p.applied);
+        assert_eq!(p.reason, None);
+        assert_eq!(p.billed_tokens, None);
 
         // Local applied: model named, applied=true, billed tokens carried.
         let outcome = RerankOutcome {
@@ -2298,21 +2273,10 @@ mod tests {
             billed_tokens: Some(321),
         };
         let p = rerank_event(RerankPlacement::Local, RerankParam::Rerank25, Some(&outcome));
-        match p {
-            EventPayload::Rerank {
-                placement,
-                model,
-                applied,
-                billed_tokens,
-                ..
-            } => {
-                assert_eq!(placement, "local");
-                assert_eq!(model.as_deref(), Some("rerank-2.5"));
-                assert!(applied);
-                assert_eq!(billed_tokens, Some(321));
-            }
-            _ => panic!("expected Rerank payload"),
-        }
+        assert_eq!(p.placement, "local");
+        assert_eq!(p.model.as_deref(), Some("rerank-2.5"));
+        assert!(p.applied);
+        assert_eq!(p.billed_tokens, Some(321));
 
         // Server degrade: model named, applied=false with a documented reason.
         let outcome = RerankOutcome {
@@ -2321,33 +2285,15 @@ mod tests {
             billed_tokens: None,
         };
         let p = rerank_event(RerankPlacement::Server, RerankParam::Rerank25Lite, Some(&outcome));
-        match p {
-            EventPayload::Rerank {
-                placement,
-                model,
-                applied,
-                reason,
-                ..
-            } => {
-                assert_eq!(placement, "server");
-                assert_eq!(model.as_deref(), Some("rerank-2.5-lite"));
-                assert!(!applied);
-                assert_eq!(reason.as_deref(), Some("provider_error"));
-            }
-            _ => panic!("expected Rerank payload"),
-        }
+        assert_eq!(p.placement, "server");
+        assert_eq!(p.model.as_deref(), Some("rerank-2.5-lite"));
+        assert!(!p.applied);
+        assert_eq!(p.reason.as_deref(), Some("provider_error"));
 
         // Search failed before rerank (outcome=None): reported as not applied.
         let p = rerank_event(RerankPlacement::Server, RerankParam::Rerank25, None);
-        match p {
-            EventPayload::Rerank {
-                applied, reason, billed_tokens, ..
-            } => {
-                assert!(!applied);
-                assert_eq!(reason, None);
-                assert_eq!(billed_tokens, None);
-            }
-            _ => panic!("expected Rerank payload"),
-        }
+        assert!(!p.applied);
+        assert_eq!(p.reason, None);
+        assert_eq!(p.billed_tokens, None);
     }
 }

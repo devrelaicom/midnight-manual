@@ -557,7 +557,7 @@ A background sweep job retires stale and aborted versions on a grace window, so 
 - **Stack:** `axum` + `tower` over PostgreSQL 16 with the `pgvector` extension. An HNSW index powers vector search; a GIN index powers full-text.
 - **API surface:** anonymous **read** endpoints (`/v1/search` with inline rerank, `/v1/embeddings` proxy, `/v1/facets`, `/v1/chunks/{id}` + batch `/v1/chunks` + `/next`/`/prev`/`/parents`, `/v1/documents/{id}` + `/chunks`, `/v1/sources` + `/{slug}` + `/versions`, `/v1/models/active`, `/v1/me`) and authenticated **admin** endpoints (the ingest-run protocol, version promote/retire, rate-limit + token-limit management). Auth is Ed25519 challenge-response plus GitHub OAuth read-uplift.
 - **Tiered rate limiting.** Anonymous traffic is limited per-IP; signing in via **GitHub OAuth** (a 30-day read-uplift token) raises your limit; admins can add per-CIDR overrides. A tier guard runs before the role guard, so an uplift token can never gain write access.
-- **Operable by default.** `/healthz` (liveness) and `/readyz` (readiness), `/metrics` in Prometheus format, request-ID propagation on every request for traceability, and automatic migrations on startup.
+- **Operable by default.** `/healthz` (liveness) and `/readyz` (readiness), request-ID propagation on every request for traceability, and automatic migrations on startup.
 - **Ships small.** Multi-stage Docker build onto `gcr.io/distroless/cc` (no shell, no toolchain), built for `linux/amd64` + `linux/arm64` and deployed to Fly.io. The server is Docker-only — built and deployed by the operator (`flyctl deploy`), not via CI and not part of the prebuilt binary matrix.
 
 Run your own against a local Postgres:
@@ -607,11 +607,13 @@ Every emission also carries the `component` (`cli`/`mcp`/`server`), the crate `v
 2. **Config:** `telemetry.enabled = false` in your config file.
 3. **Runtime:** `mnm telemetry disable` (writes a persistent marker read at every startup; reverse with `mnm telemetry enable`, inspect with `mnm telemetry status`).
 
-When disabled, no connection is ever opened to the telemetry endpoint and any queued events are discarded. Events otherwise batch in memory and flush every 30 seconds or 100 events, with jittered backoff on failure.
+When disabled, no events are written and nothing is sent. Additionally, `GAUGE_TELEMETRY_DISABLE=1` acts as a global kill switch, and telemetry is auto-disabled when `CI` is set in the environment.
+
+When enabled, events are written at emit time to a crash-safe on-disk queue, then delivered out-of-band: the CLI spawns a detached flush process on exit; the MCP server uses a background flusher (approximately every 30 seconds) and drains the queue at shutdown. Events are sent to the Gauge telemetry service (default endpoint `https://gauge-telemetry.fly.dev`). Override the endpoint via `MIDNIGHT_MANUAL_GAUGE_ENDPOINT` or `[telemetry].endpoint` in your config file — this is independent of the `--server`/corpus URL.
 
 ### The canary
 
-A CI test feeds query stand-ins, fake tokens, fake paths, and fake env values through every code path that touches user content, then greps every captured log and telemetry row for the canary set. **Any match fails the build.** The infrastructure lives in [`crates/mnm-telemetry/src/canary.rs`](crates/mnm-telemetry/src/canary.rs).
+Each event type is checked by asserting it carries no forbidden substrings from the canary set — the assertion runs at the per-event level. Integration tests inject local query probes and assert they do not appear in logs or responses. **Any match fails the build.** The infrastructure lives in [`crates/mnm-telemetry/src/canary.rs`](crates/mnm-telemetry/src/canary.rs).
 
 ---
 
@@ -696,7 +698,8 @@ location = "auto"                     # auto (default) | local | server | off
 model    = "rerank-2.5"               # rerank-2.5 (default) | rerank-2.5-lite
 
 [telemetry]
-enabled = true
+enabled  = true
+# endpoint = "https://gauge-telemetry.fly.dev"  # optional — override the Gauge endpoint
 
 [cli]
 show_admin_cmds = false
@@ -715,6 +718,7 @@ mnm config show       # the effective, merged config
 | `MIDNIGHT_MANUAL_SERVER` | Corpus URL (same as `--server`). |
 | `MIDNIGHT_MANUAL_CONFIG` | Config file path. |
 | `MIDNIGHT_MANUAL_DISABLE_TELEMETRY` | Opt out of telemetry. |
+| `MIDNIGHT_MANUAL_GAUGE_ENDPOINT` | Override the Gauge telemetry endpoint (default `https://gauge-telemetry.fly.dev`). |
 | `MIDNIGHT_MANUAL_SHOW_ADMIN_CMDS` | Reveal admin subcommands. |
 | `VOYAGE_API_KEY` | Your Voyage key for BYOK embedding and reranking. Unset → embedding and reranking are proxied by the hosted server. |
 | `VOYAGE_TIMEOUT_SECS` | Per-request timeout (seconds) for Voyage embedding calls (default 120). Flag form: `--voyage-timeout-secs`. |

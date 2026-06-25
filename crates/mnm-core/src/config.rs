@@ -114,17 +114,32 @@ impl Default for ModelsConfig {
     }
 }
 
+/// Compiled-in default Gauge ingest endpoint (no trailing slash; the client
+/// appends `/v1/logs`). Override with `MIDNIGHT_MANUAL_GAUGE_ENDPOINT` or
+/// `[telemetry].endpoint` in config.toml.
+pub const DEFAULT_TELEMETRY_ENDPOINT: &str = "https://gauge-telemetry.fly.dev";
+
+fn default_telemetry_endpoint() -> String {
+    DEFAULT_TELEMETRY_ENDPOINT.to_owned()
+}
+
 /// `[telemetry]` — opt-out telemetry knobs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TelemetryConfig {
     /// Master enable flag. Three mechanisms (FR-107) — env, this flag, or `mnm
     /// telemetry disable` — turn the entire pipeline off.
     pub enabled: bool,
+    /// Gauge ingest endpoint base URL. Defaults to [`DEFAULT_TELEMETRY_ENDPOINT`].
+    #[serde(default = "default_telemetry_endpoint")]
+    pub endpoint: String,
 }
 
 impl Default for TelemetryConfig {
     fn default() -> Self {
-        Self { enabled: true }
+        Self {
+            enabled: true,
+            endpoint: default_telemetry_endpoint(),
+        }
     }
 }
 
@@ -280,8 +295,8 @@ pub enum RerankPlacement {
 
 impl RerankPlacement {
     /// Stable telemetry wire string (`"local"` | `"server"` | `"off"`), matching
-    /// the `EventPayload::Rerank.placement` field. This is the single source of
-    /// truth shared by the CLI and MCP clients so the placement label stays
+    /// the rerank event's `placement` field. This is the single source of truth
+    /// shared by the CLI and MCP clients so the placement label stays
     /// byte-aligned across both (and with the server-side telemetry validator).
     #[must_use]
     pub const fn wire(self) -> &'static str {
@@ -389,6 +404,19 @@ pub fn resolve_security_level(
         })
         .or_else(|| cfg.level.as_deref().and_then(parse))
         .unwrap_or_default()
+}
+
+/// Resolve the Gauge telemetry endpoint.
+///
+/// Precedence: `MIDNIGHT_MANUAL_GAUGE_ENDPOINT` env > `[telemetry].endpoint`
+/// config > baked-in [`DEFAULT_TELEMETRY_ENDPOINT`]. An empty value at any
+/// level falls through to the next source.
+#[must_use]
+pub fn resolve_telemetry_endpoint(cfg: &TelemetryConfig, env: &impl ConfigEnv) -> String {
+    env.var("MIDNIGHT_MANUAL_GAUGE_ENDPOINT")
+        .filter(|s| !s.is_empty())
+        .or_else(|| Some(cfg.endpoint.clone()).filter(|s| !s.is_empty()))
+        .unwrap_or_else(default_telemetry_endpoint)
 }
 
 /// All the ways config discovery can fail.
@@ -682,5 +710,43 @@ model = "rerank-2.5-lite"
         // Unknown/empty flag falls through to the next level.
         assert_eq!(resolve_security_level(Some("bogus"), &cfg, &no_env), SecurityLevel::High);
         assert_eq!(resolve_security_level(Some(""), &empty, &no_env), SecurityLevel::Moderate);
+    }
+
+    #[test]
+    fn telemetry_endpoint_defaults_to_baked_in() {
+        let cfg = TelemetryConfig::default();
+        assert_eq!(cfg.endpoint, DEFAULT_TELEMETRY_ENDPOINT);
+        assert_eq!(cfg.endpoint, "https://gauge-telemetry.fly.dev");
+    }
+
+    #[test]
+    fn telemetry_endpoint_env_overrides_config() {
+        struct E;
+        impl ConfigEnv for E {
+            fn var(&self, name: &str) -> Option<String> {
+                (name == "MIDNIGHT_MANUAL_GAUGE_ENDPOINT")
+                    .then(|| "https://localhost:9000".to_owned())
+            }
+        }
+        let cfg = TelemetryConfig {
+            enabled: true,
+            endpoint: "https://from-config".into(),
+        };
+        assert_eq!(resolve_telemetry_endpoint(&cfg, &E), "https://localhost:9000");
+    }
+
+    #[test]
+    fn telemetry_endpoint_falls_through_empty_env_to_config() {
+        struct E;
+        impl ConfigEnv for E {
+            fn var(&self, _: &str) -> Option<String> {
+                Some(String::new())
+            }
+        }
+        let cfg = TelemetryConfig {
+            enabled: true,
+            endpoint: "https://from-config".into(),
+        };
+        assert_eq!(resolve_telemetry_endpoint(&cfg, &E), "https://from-config");
     }
 }

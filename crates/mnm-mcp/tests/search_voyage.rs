@@ -345,7 +345,7 @@ async fn embed_general_server_mode_forwards_bearer_token() {
 fn make_server_cfg(cloud_url: &str) -> ServerConfig {
     let mut cfg = ServerConfig::with_defaults(std::path::PathBuf::from("/tmp/test-mcp-cache"));
     cloud_url.clone_into(&mut cfg.cloud_url);
-    cfg.telemetry_url = format!("{cloud_url}/v1/telemetry/events");
+    cloud_url.clone_into(&mut cfg.telemetry_endpoint);
     cfg
 }
 

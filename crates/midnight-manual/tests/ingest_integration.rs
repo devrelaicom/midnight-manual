@@ -24,11 +24,26 @@ use std::sync::{Arc, Mutex};
 
 use midnight_manual::commands::ingest::run::{Args as IngestArgs, DEFAULT_EMBEDDING_MODEL};
 use mnm_core::auth_file::AuthFile;
-use mnm_telemetry::TelemetryClient;
+use mnm_telemetry::{build as build_telemetry, BuildParams};
 use serde_json::json;
 use time::OffsetDateTime;
 use wiremock::matchers::{method, path, path_regex};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+
+/// Build a no-op [`mnm_telemetry::Telemetry`] for integration tests.
+///
+/// `config_enabled: false` makes `build()` return a no-op handle without
+/// touching any on-disk queue or endpoint.
+fn noop_telemetry() -> mnm_telemetry::Telemetry {
+    build_telemetry(BuildParams {
+        app_version: "0.0.0-test".into(),
+        endpoint: "https://telemetry.disabled.invalid".into(),
+        install_id_path: Some(std::path::PathBuf::from("/nonexistent/mnm-telemetry-id")),
+        config_enabled: false,
+        runtime_enabled: false,
+        flush_args: vec![],
+    })
+}
 
 /// The active-model response → corpus wire id `voyage-code-3@1`.
 fn active_model_body() -> serde_json::Value {
@@ -199,7 +214,7 @@ async fn happy_path_posts_three_step_flow() {
         no_code_embeddings: false,
         report_file: None,
     };
-    let telemetry = TelemetryClient::Disabled;
+    let telemetry = noop_telemetry();
 
     midnight_manual::commands::ingest::run::run_with_paths(
         args,
@@ -208,7 +223,6 @@ async fn happy_path_posts_three_step_flow() {
         None, // config_path → bypass discovery so no stray BYOK key resolves
         None, // voyage_api_key → server-proxy embedding mode
         &telemetry,
-        "0.1.0-test",
         true,
     )
     .await
@@ -290,7 +304,7 @@ async fn dry_run_does_not_hit_the_server() {
         no_code_embeddings: false,
         report_file: None,
     };
-    let telemetry = TelemetryClient::Disabled;
+    let telemetry = noop_telemetry();
 
     midnight_manual::commands::ingest::run::run_with_paths(
         args,
@@ -299,7 +313,6 @@ async fn dry_run_does_not_hit_the_server() {
         None,
         None,
         &telemetry,
-        "0.1.0-test",
         true,
     )
     .await
@@ -336,7 +349,7 @@ async fn missing_admin_token_errors_with_clear_message() {
         no_code_embeddings: false,
         report_file: None,
     };
-    let telemetry = TelemetryClient::Disabled;
+    let telemetry = noop_telemetry();
 
     let err = midnight_manual::commands::ingest::run::run_with_paths(
         args,
@@ -345,7 +358,6 @@ async fn missing_admin_token_errors_with_clear_message() {
         None,
         None,
         &telemetry,
-        "0.1.0-test",
         true,
     )
     .await
@@ -426,7 +438,7 @@ async fn aborts_run_when_upload_fails() {
         no_code_embeddings: false,
         report_file: None,
     };
-    let telemetry = TelemetryClient::Disabled;
+    let telemetry = noop_telemetry();
 
     let err = midnight_manual::commands::ingest::run::run_with_paths(
         args,
@@ -435,7 +447,6 @@ async fn aborts_run_when_upload_fails() {
         None,
         None,
         &telemetry,
-        "0.1.0-test",
         true,
     )
     .await
@@ -538,7 +549,7 @@ async fn published_url_inheritance_survives_to_upload_body() {
         no_code_embeddings: false,
         report_file: None,
     };
-    let telemetry = mnm_telemetry::TelemetryClient::Disabled;
+    let telemetry = noop_telemetry();
 
     midnight_manual::commands::ingest::run::run_with_paths(
         args,
@@ -547,7 +558,6 @@ async fn published_url_inheritance_survives_to_upload_body() {
         None,
         None,
         &telemetry,
-        "0.1.0-test",
         true,
     )
     .await
@@ -706,7 +716,7 @@ async fn upload_413_is_split_and_retried() {
         no_code_embeddings: false,
         report_file: None,
     };
-    let telemetry = TelemetryClient::Disabled;
+    let telemetry = noop_telemetry();
 
     midnight_manual::commands::ingest::run::run_with_paths(
         args,
@@ -715,7 +725,6 @@ async fn upload_413_is_split_and_retried() {
         None,
         None,
         &telemetry,
-        "0.1.0-test",
         true,
     )
     .await
@@ -853,7 +862,7 @@ async fn upload_413_splits_recursively_to_single_docs() {
         no_code_embeddings: false,
         report_file: None,
     };
-    let telemetry = TelemetryClient::Disabled;
+    let telemetry = noop_telemetry();
 
     midnight_manual::commands::ingest::run::run_with_paths(
         args,
@@ -862,7 +871,6 @@ async fn upload_413_splits_recursively_to_single_docs() {
         None,
         None,
         &telemetry,
-        "0.1.0-test",
         true,
     )
     .await
@@ -921,7 +929,7 @@ async fn manifest_missing_file_errors_before_any_http() {
         no_code_embeddings: false,
         report_file: None,
     };
-    let telemetry = TelemetryClient::Disabled;
+    let telemetry = noop_telemetry();
 
     let err = midnight_manual::commands::ingest::run::run_with_paths(
         args,
@@ -930,7 +938,6 @@ async fn manifest_missing_file_errors_before_any_http() {
         None,
         None,
         &telemetry,
-        "0.1.0-test",
         true,
     )
     .await

@@ -90,11 +90,11 @@ async fn serve(server_flag: Option<&str>, config_path: Option<&Path>) -> Result<
 ///   (`--server`/`MIDNIGHT_MANUAL_SERVER`) > config `[server].url` >
 ///   compiled-in default. Reusing that one `cfg` (rather than re-running
 ///   `Config::discover` internally) keeps `cloud_url` and `telemetry_enabled`
-///   in lockstep — they cannot read two different on-disk states. The previous
-///   code read `cfg.server.url` directly, silently ignoring the flag/env (the
-///   bug this commit fixes).
-/// - `telemetry_url` is derived from that *same* resolved `cloud_url`, so
-///   pointing the CLI at a local server also redirects telemetry there.
+///   in lockstep — they cannot read two different on-disk states.
+/// - `telemetry_endpoint` comes from `resolve_telemetry_endpoint`, which reads
+///   the config's `[telemetry].endpoint` and the `MIDNIGHT_MANUAL_GAUGE_ENDPOINT`
+///   env override, defaulting to [`mnm_core::config::DEFAULT_TELEMETRY_ENDPOINT`].
+///   The endpoint is Gauge-specific and independent of the cloud server URL.
 /// - `cache_dir` is passed through verbatim (the caller has already applied the
 ///   config > env precedence).
 ///
@@ -105,9 +105,11 @@ fn build_serve_config(
     cfg: &Config,
     cache_dir: PathBuf,
 ) -> mnm_mcp::ServerConfig {
+    let env = mnm_core::config::StdEnv;
     let cloud_url = crate::shared::resolve_server_url_from(server_flag, cfg);
     let mut server_cfg = mnm_mcp::ServerConfig::with_defaults(cache_dir);
-    server_cfg.telemetry_url = format!("{cloud_url}/v1/telemetry/events");
+    server_cfg.telemetry_endpoint =
+        mnm_core::config::resolve_telemetry_endpoint(&cfg.telemetry, &env);
     server_cfg.telemetry_enabled = cfg.telemetry.enabled;
     server_cfg.cloud_url = cloud_url;
     server_cfg
@@ -127,8 +129,8 @@ mod tests {
             build_serve_config(Some("http://localhost:8080/"), &cfg, PathBuf::from("/cache"));
         // Flag wins and the trailing slash is stripped by the shared resolver.
         assert_eq!(built.cloud_url, "http://localhost:8080");
-        // Telemetry is derived from the SAME resolved URL, not the config value.
-        assert_eq!(built.telemetry_url, "http://localhost:8080/v1/telemetry/events");
+        // Telemetry endpoint now comes from Gauge config, not derived from the server URL.
+        assert_eq!(built.telemetry_endpoint, mnm_core::config::DEFAULT_TELEMETRY_ENDPOINT);
         assert_eq!(built.cache_dir, PathBuf::from("/cache"));
     }
 
@@ -151,7 +153,8 @@ mod tests {
         "https://config.example/".clone_into(&mut cfg.server.url);
         let built = build_serve_config(None, &cfg, PathBuf::from("/cache"));
         assert_eq!(built.cloud_url, "https://config.example");
-        assert_eq!(built.telemetry_url, "https://config.example/v1/telemetry/events");
+        // Telemetry endpoint is Gauge-specific, not derived from the server URL.
+        assert_eq!(built.telemetry_endpoint, mnm_core::config::DEFAULT_TELEMETRY_ENDPOINT);
     }
 
     /// Regression guard for the dispatch wiring (cli.rs:209): the original bug

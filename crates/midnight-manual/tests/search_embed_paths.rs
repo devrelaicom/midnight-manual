@@ -24,11 +24,27 @@ use std::sync::{Arc, Mutex};
 use midnight_manual::commands::search::{run_with_paths, Args, DEFAULT_EMBEDDING_MODEL};
 use mnm_embedding::client::{embed_general, GeneralEmbedSource};
 use mnm_embedding::voyage::InputType;
-use mnm_telemetry::TelemetryClient;
+use mnm_telemetry::{build as build_telemetry, BuildParams};
 use serde_json::json;
 use tempfile::tempdir;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Build a no-op [`mnm_telemetry::Telemetry`] for integration tests.
+fn noop_telemetry() -> mnm_telemetry::Telemetry {
+    build_telemetry(BuildParams {
+        app_version: "0.0.0-test".into(),
+        endpoint: "https://telemetry.disabled.invalid".into(),
+        install_id_path: Some(std::path::PathBuf::from("/nonexistent/mnm-telemetry-id")),
+        config_enabled: false,
+        runtime_enabled: false,
+        flush_args: vec![],
+    })
+}
 
 // ---------------------------------------------------------------------------
 // Helper: build a minimal Args for run_with_paths
@@ -184,8 +200,7 @@ async fn run_with_paths_server_mode_carries_corpus_wire_id() {
         Some(&auth_path),
         None, // config_path (default discovery)
         None, // no BYOK key → server-proxy mode
-        &TelemetryClient::Disabled,
-        "0.0.0-test",
+        &noop_telemetry(),
         false,
     )
     .await
@@ -297,8 +312,7 @@ async fn explicit_embedding_model_override_skips_active_fetch() {
         Some(&auth_path),
         None, // config_path (default discovery)
         None, // no BYOK key
-        &TelemetryClient::Disabled,
-        "0.0.0-test",
+        &noop_telemetry(),
         false,
     )
     .await
@@ -388,8 +402,7 @@ async fn local_rerank_widens_pool_and_requests_score_sort() {
         Some(&auth_path),
         None,             // config_path (default discovery)
         Some("test-key"), // BYOK key → local placement (never reached: empty results)
-        &TelemetryClient::Disabled,
-        "0.0.0-test",
+        &noop_telemetry(),
         false,
     )
     .await
@@ -429,18 +442,9 @@ async fn server_rerank_keeps_limit_and_omits_sort_by() {
     args.limit = 5;
     args.rerank = "server".to_owned(); // server reranks inline; no client over-fetch
 
-    run_with_paths(
-        args,
-        &server.uri(),
-        Some(&auth_path),
-        None,
-        None,
-        &TelemetryClient::Disabled,
-        "0.0.0-test",
-        false,
-    )
-    .await
-    .expect("server-rerank run_with_paths should succeed");
+    run_with_paths(args, &server.uri(), Some(&auth_path), None, None, &noop_telemetry(), false)
+        .await
+        .expect("server-rerank run_with_paths should succeed");
 
     let body = captured.lock().unwrap().clone();
     assert_eq!(

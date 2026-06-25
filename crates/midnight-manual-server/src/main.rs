@@ -166,11 +166,6 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!(addr = %addr, "starting midnight-manual-server");
 
-    // Background: telemetry retention sweep (FR-110 / SC-065). One task per
-    // process — the JoinHandle stays alive for the duration of the server.
-    let _sweep_handle =
-        jobs::telemetry_sweep::spawn(pool.clone(), cfg.telemetry_raw_retention_days);
-
     // Background: full retention sweep (Phases 13/14/15). Three passes
     // per tick — retired sources, aged-out source_versions outside the
     // per-source `retention_count` window, and aborted ingest runs.

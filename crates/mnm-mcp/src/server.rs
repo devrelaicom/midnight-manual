@@ -8,8 +8,13 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use mnm_telemetry::events::{Component, EventPayload, McpToolName, ModelState, Outcome};
-use mnm_telemetry::{Event, TelemetryClient};
+use mnm_telemetry::events::{
+    McpShutdown, McpStartup, McpToolCall, McpToolName, ModelState, Outcome, Rerank,
+};
+use mnm_telemetry::{
+    build as build_telemetry, BuildParams, Flusher, Surface, Telemetry, DEFAULT_FLUSH_TIMEOUT,
+    FLUSH_ARGS,
+};
 use tokio::io::{stdin, stdout, Stdin, Stdout};
 use tracing::{debug, info, warn};
 
@@ -39,10 +44,9 @@ pub struct ServerConfig {
     /// on every cloud request. `None` means the MCP server is running in
     /// anonymous read mode.
     pub bearer_token: Option<String>,
-    /// Resolved telemetry sink URL. Defaults to `{cloud_url}/v1/telemetry/events`.
-    pub telemetry_url: String,
-    /// Config-side master telemetry-enabled flag. The runtime opt-out
-    /// resolver still wins over this (FR-107).
+    /// Resolved Gauge ingest endpoint (base URL; the client appends /v1/logs).
+    pub telemetry_endpoint: String,
+    /// Config-side master telemetry-enabled flag. Runtime opt-out still wins.
     pub telemetry_enabled: bool,
     /// Client-side prompt-injection guarding level (issue #103). Decides, per
     /// returned chunk's source attribution and verification status, whether the
@@ -64,12 +68,11 @@ impl ServerConfig {
     #[must_use]
     pub fn with_defaults(cache_dir: PathBuf) -> Self {
         let cloud_url = mnm_core::config::DEFAULT_SERVER_URL.to_owned();
-        let telemetry_url = format!("{cloud_url}/v1/telemetry/events");
         Self {
             cache_dir,
             cloud_url,
             bearer_token: None,
-            telemetry_url,
+            telemetry_endpoint: mnm_core::config::DEFAULT_TELEMETRY_ENDPOINT.to_owned(),
             telemetry_enabled: true,
             security: mnm_core::injection::SecurityLevel::default(),
         }
@@ -82,7 +85,7 @@ impl ServerConfig {
 struct ServerState {
     cfg: ServerConfig,
     cloud: Arc<CloudClient>,
-    telemetry: Arc<TelemetryClient>,
+    telemetry: Arc<Telemetry>,
     started_at: Arc<Instant>,
     tools_served: Arc<AtomicU32>,
 }
@@ -95,32 +98,36 @@ struct ServerState {
 /// error if the cloud client cannot be built. JSON-RPC and tool-level errors
 /// are translated into wire responses and do NOT bubble up.
 pub async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // FR-107 mechanism #3: honour any previously-set persistent marker
-    // before constructing the telemetry client. Failing to resolve the
-    // marker path (no `HOME`) degrades to "no marker", which is correct.
     let env = mnm_core::config::StdEnv;
-    mnm_telemetry::optout::load_persistent_marker(
-        mnm_core::paths::telemetry_marker_path(&env).as_deref(),
-    );
+    let marker = mnm_core::paths::telemetry_marker_path(&env);
+    let runtime_enabled = !mnm_telemetry::optout::env_disabled(&env)
+        && !marker
+            .as_deref()
+            .is_some_and(mnm_telemetry::optout::marker_present);
+    let telemetry: Telemetry = build_telemetry(BuildParams {
+        app_version: crate::VERSION.to_owned(),
+        endpoint: cfg.telemetry_endpoint.clone(),
+        install_id_path: mnm_core::paths::telemetry_install_id_path(&env),
+        config_enabled: cfg.telemetry_enabled,
+        runtime_enabled,
+        flush_args: FLUSH_ARGS.iter().map(|s| (*s).to_owned()).collect(),
+    });
+    // Background drain every 30s. Kept alive for the session; dropped at
+    // shutdown to stop + join the background thread.
+    let flusher: Option<Flusher> =
+        Flusher::start(&telemetry, std::time::Duration::from_secs(30), 0);
+
     let cloud = CloudClient::new(&cfg.cloud_url, cfg.bearer_token.clone())
         .map_err(|e| format!("build cloud client: {e}"))?;
-    let telemetry = TelemetryClient::boot(&cfg.telemetry_url, cfg.telemetry_enabled)
-        .map_err(|e| format!("build telemetry client: {e}"))?;
     let started_at = Arc::new(Instant::now());
     // Emit `mcp_startup` right away. The `startup_ms` field measures
     // process-start → here; for stdio MCP that's effectively 0 because the
     // event fires before the first JSON-RPC frame.
     let startup_ms = u32::try_from(started_at.elapsed().as_millis()).unwrap_or(u32::MAX);
-    telemetry
-        .emit(Event::new(
-            Component::Mcp,
-            crate::VERSION,
-            EventPayload::McpStartup {
-                startup_ms,
-                model_state: ModelState::Missing,
-            },
-        ))
-        .await;
+    telemetry.emit(&McpStartup {
+        startup_ms,
+        model_state: ModelState::Missing,
+    });
     let state = ServerState {
         cfg,
         cloud: Arc::new(cloud),
@@ -149,13 +156,9 @@ pub async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error + Se
     let tools_served = state.tools_served.load(Ordering::Relaxed);
     state
         .telemetry
-        .emit(Event::new(
-            Component::Mcp,
-            crate::VERSION,
-            EventPayload::McpShutdown { uptime_s, tools_served },
-        ))
-        .await;
-    state.telemetry.flush().await;
+        .emit(&McpShutdown { uptime_s, tools_served });
+    drop(flusher); // stop the background loop + join
+    state.telemetry.flush_blocking(DEFAULT_FLUSH_TIMEOUT); // final drain
     Ok(())
 }
 
@@ -331,43 +334,30 @@ async fn dispatch_tool(id: RequestId, params: ToolCallParams, state: &ServerStat
         // Only the search tools carry rerank facts; the three-mechanism opt-out
         // wraps `emit`, so no extra gating is needed here.
         if let Some(r) = rerank {
-            state
-                .telemetry
-                .emit(Event::new(
-                    Component::Mcp,
-                    crate::VERSION,
-                    EventPayload::Rerank {
-                        placement: r.placement.to_owned(),
-                        model: r.model,
-                        applied: r.applied,
-                        reason: r.reason,
-                        billed_tokens: r.billed_tokens,
-                    },
-                ))
-                .await;
+            state.telemetry.emit(&Rerank {
+                placement: r.placement.to_owned(),
+                model: r.model,
+                applied: r.applied,
+                reason: r.reason,
+                billed_tokens: r.billed_tokens,
+                surface: Surface::Mcp,
+            });
         }
-        state
-            .telemetry
-            .emit(Event::new(
-                Component::Mcp,
-                crate::VERSION,
-                EventPayload::McpToolCall {
-                    tool_name: name,
-                    latency_ms,
-                    result_count: t.result_count,
-                    model_state: ModelState::Missing,
-                    rerank_on,
-                    outcome,
-                    corpus_model: t.corpus_model,
-                    reranker_used: t.reranker_used,
-                    top_confidence: t.top_confidence_bucket.map(str::to_owned),
-                    top_attribution: t.top_attribution,
-                    top_source: t.top_source,
-                    filtered_by_confidence: t.filtered_by_confidence,
-                    deduplicated_count: t.deduplicated_count,
-                },
-            ))
-            .await;
+        state.telemetry.emit(&McpToolCall {
+            tool_name: name,
+            latency_ms,
+            result_count: t.result_count,
+            model_state: ModelState::Missing,
+            rerank_on,
+            outcome,
+            corpus_model: t.corpus_model,
+            reranker_used: t.reranker_used,
+            top_confidence: t.top_confidence_bucket.map(str::to_owned),
+            top_attribution: t.top_attribution,
+            top_source: t.top_source,
+            filtered_by_confidence: t.filtered_by_confidence,
+            deduplicated_count: t.deduplicated_count,
+        });
     }
     response
 }

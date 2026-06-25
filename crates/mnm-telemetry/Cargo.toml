@@ -17,20 +17,10 @@ workspace = true
 integration = []
 
 [dependencies]
-mnm-core      = { workspace = true }
-serde        = { workspace = true }
-serde_json   = { workspace = true }
-jsonschema   = { workspace = true }
-thiserror    = { workspace = true }
-tracing      = { workspace = true }
-tokio        = { workspace = true }
-time         = { workspace = true }
-async-trait  = "0.1"
-reqwest      = { workspace = true }
-url          = { workspace = true }
+mnm-core        = { workspace = true }
+gauge-telemetry = { workspace = true }
+serde           = { workspace = true }
+tracing         = { workspace = true }
 
 [dev-dependencies]
-tempfile           = { workspace = true }
-tracing-subscriber = { workspace = true }
-wiremock           = { workspace = true }
-tokio              = { workspace = true }
+serde_json = { workspace = true }
