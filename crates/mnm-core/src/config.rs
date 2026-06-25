@@ -165,7 +165,7 @@ pub struct CliConfig {
 #[serde(default)]
 pub struct LogConfig {
     /// Logging directive fed to `EnvFilter` (e.g. `info` or `mnm=debug,hyper=warn`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub level: Option<String>,
 }
 
@@ -267,8 +267,6 @@ pub fn resolve_voyage_api_key(
         .or_else(|| cfg.voyage_api_key.clone().filter(|s| !s.is_empty()))
 }
 
-/// Resolve the Voyage request timeout (seconds): flag > `VOYAGE_TIMEOUT_SECS` env > config.
-///
 /// Resolve the Voyage request timeout (seconds): flag > `VOYAGE_TIMEOUT_SECS`
 /// env > `[models].voyage_timeout_secs` config.
 ///
@@ -303,11 +301,13 @@ pub fn resolve_voyage_timeout_secs(
     if let Some(raw) = env.var("VOYAGE_TIMEOUT_SECS") {
         let trimmed = raw.trim();
         if !trimmed.is_empty() {
-            let n = trimmed.parse::<u64>().map_err(|_| ConfigError::InvalidValue {
-                location: "VOYAGE_TIMEOUT_SECS".to_owned(),
-                value: trimmed.to_owned(),
-                expected: "a positive integer (seconds)".to_owned(),
-            })?;
+            let n = trimmed
+                .parse::<u64>()
+                .map_err(|_| ConfigError::InvalidValue {
+                    location: "VOYAGE_TIMEOUT_SECS".to_owned(),
+                    value: trimmed.to_owned(),
+                    expected: "a positive integer (seconds)".to_owned(),
+                })?;
             return nonzero("VOYAGE_TIMEOUT_SECS", n);
         }
     }
@@ -710,7 +710,10 @@ voyage_output_dtype = "float"
 
     #[test]
     fn resolve_voyage_timeout_precedence_and_invalid() {
-        let cfg = ModelsConfig { voyage_timeout_secs: 90, ..Default::default() };
+        let cfg = ModelsConfig {
+            voyage_timeout_secs: 90,
+            ..Default::default()
+        };
         let env = FakeEnv::default().set("VOYAGE_TIMEOUT_SECS", "60");
 
         assert_eq!(resolve_voyage_timeout_secs(Some(45), &cfg, &env).unwrap(), 45);
@@ -731,7 +734,10 @@ voyage_output_dtype = "float"
         assert!(resolve_voyage_timeout_secs(Some(0), &cfg, &empty).is_err());
         let env_zero = FakeEnv::default().set("VOYAGE_TIMEOUT_SECS", "0");
         assert!(resolve_voyage_timeout_secs(None, &cfg, &env_zero).is_err());
-        let zero_cfg = ModelsConfig { voyage_timeout_secs: 0, ..Default::default() };
+        let zero_cfg = ModelsConfig {
+            voyage_timeout_secs: 0,
+            ..Default::default()
+        };
         assert!(resolve_voyage_timeout_secs(None, &zero_cfg, &empty).is_err());
 
         // Absent everywhere -> serde default (120) lives in the config field, so a
@@ -759,19 +765,31 @@ model = "rerank-2.5-lite"
 
     #[test]
     fn resolve_rerank_placement_precedence_auto_and_invalid() {
-        let cfg = RerankConfig { location: Some("off".into()), model: None };
+        let cfg = RerankConfig {
+            location: Some("off".into()),
+            model: None,
+        };
         let env = FakeEnv::default().set("MIDNIGHT_MANUAL_RERANK", "server");
         assert_eq!(
             resolve_rerank_placement(Some("local"), &cfg, &env, false).unwrap(),
             RerankPlacement::Local
         );
-        assert_eq!(resolve_rerank_placement(None, &cfg, &env, true).unwrap(), RerankPlacement::Server);
+        assert_eq!(
+            resolve_rerank_placement(None, &cfg, &env, true).unwrap(),
+            RerankPlacement::Server
+        );
 
         // `auto` defers to key detection (key => Local, no key => Server).
         let empty = RerankConfig::default();
         let no_env = FakeEnv::default();
-        assert_eq!(resolve_rerank_placement(Some("auto"), &empty, &no_env, true).unwrap(), RerankPlacement::Local);
-        assert_eq!(resolve_rerank_placement(None, &empty, &no_env, false).unwrap(), RerankPlacement::Server);
+        assert_eq!(
+            resolve_rerank_placement(Some("auto"), &empty, &no_env, true).unwrap(),
+            RerankPlacement::Local
+        );
+        assert_eq!(
+            resolve_rerank_placement(None, &empty, &no_env, false).unwrap(),
+            RerankPlacement::Server
+        );
 
         // A genuine typo is loud (does not silently pick a placement).
         let err = resolve_rerank_placement(Some("servr"), &empty, &no_env, true).unwrap_err();
@@ -791,7 +809,10 @@ model = "rerank-2.5-lite"
     #[test]
     fn resolve_rerank_model_precedence_and_invalid() {
         use crate::rerank::RerankParam;
-        let cfg = RerankConfig { location: None, model: Some("rerank-2.5-lite".into()) };
+        let cfg = RerankConfig {
+            location: None,
+            model: Some("rerank-2.5-lite".into()),
+        };
         let env = FakeEnv::default().set("MIDNIGHT_MANUAL_RERANK_MODEL", "rerank-2.5");
         assert_eq!(
             resolve_rerank_model(Some("rerank-2.5-lite"), &cfg, &env).unwrap(),
@@ -894,7 +915,10 @@ model = "rerank-2.5-lite"
 
     #[test]
     fn resolve_voyage_base_url_env_over_config() {
-        let cfg = ModelsConfig { voyage_base_url: Some("https://from-config".into()), ..Default::default() };
+        let cfg = ModelsConfig {
+            voyage_base_url: Some("https://from-config".into()),
+            ..Default::default()
+        };
         let env = FakeEnv::default().set("MIDNIGHT_MANUAL_VOYAGE_BASE_URL", "https://from-env");
         assert_eq!(resolve_voyage_base_url(&cfg, &env).as_deref(), Some("https://from-env"));
 
@@ -903,7 +927,10 @@ model = "rerank-2.5-lite"
 
         // Empty env falls through to config; nothing anywhere -> None.
         let env_empty = FakeEnv::default().set("MIDNIGHT_MANUAL_VOYAGE_BASE_URL", "");
-        assert_eq!(resolve_voyage_base_url(&cfg, &env_empty).as_deref(), Some("https://from-config"));
+        assert_eq!(
+            resolve_voyage_base_url(&cfg, &env_empty).as_deref(),
+            Some("https://from-config")
+        );
         assert_eq!(resolve_voyage_base_url(&ModelsConfig::default(), &no_env), None);
     }
 

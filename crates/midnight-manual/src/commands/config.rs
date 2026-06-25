@@ -177,17 +177,19 @@ mod tests {
         // the env var is already resolved before this function is called. Passing
         // the flag value directly mirrors that.
         let env = FakeEnv::default();
-        apply_effective_overrides(&mut cfg, Some("http://from-flag:8080/"), None, false, &env).unwrap();
+        apply_effective_overrides(&mut cfg, Some("http://from-flag:8080/"), None, false, &env)
+            .unwrap();
         assert_eq!(cfg.server.url, "http://from-flag:8080");
     }
 
     #[test]
-    fn server_env_applies_when_no_flag() {
+    fn server_flag_applies_and_trims_trailing_slash() {
         // MIDNIGHT_MANUAL_SERVER is surfaced by clap as server_flag; unit tests
         // pass it directly to mirror what the binary does.
         let mut cfg = Config::default();
         let env = FakeEnv::default();
-        apply_effective_overrides(&mut cfg, Some("http://localhost:8080/"), None, false, &env).unwrap();
+        apply_effective_overrides(&mut cfg, Some("http://localhost:8080/"), None, false, &env)
+            .unwrap();
         assert_eq!(cfg.server.url, "http://localhost:8080");
     }
 
@@ -196,7 +198,8 @@ mod tests {
         let mut cfg = Config::default();
         cfg.server.url = "https://from-config/".into();
         let env = FakeEnv::default();
-        apply_effective_overrides(&mut cfg, Some("https://flag.example/"), None, false, &env).unwrap();
+        apply_effective_overrides(&mut cfg, Some("https://flag.example/"), None, false, &env)
+            .unwrap();
         // Flag wins, trailing slash trimmed — exactly resolve_server_url_from's contract.
         assert_eq!(cfg.server.url, "https://flag.example");
     }
@@ -248,7 +251,8 @@ mod tests {
 
         // A key present (via flag) flips auto placement to local.
         let mut cfg2 = Config::default();
-        apply_effective_overrides(&mut cfg2, None, Some("byok-key"), false, &FakeEnv::default()).unwrap();
+        apply_effective_overrides(&mut cfg2, None, Some("byok-key"), false, &FakeEnv::default())
+            .unwrap();
         assert_eq!(cfg2.rerank.location.as_deref(), Some("local"));
     }
 

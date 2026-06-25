@@ -216,7 +216,6 @@ mod tests {
 
     #[test]
     fn from_str_is_case_insensitive_and_trimmed() {
-        use std::str::FromStr;
         assert_eq!(SecurityLevel::from_str("Strict"), Ok(SecurityLevel::Strict));
         assert_eq!(SecurityLevel::from_str("STRICT"), Ok(SecurityLevel::Strict));
         assert_eq!(SecurityLevel::from_str("  moderate  "), Ok(SecurityLevel::Moderate));
