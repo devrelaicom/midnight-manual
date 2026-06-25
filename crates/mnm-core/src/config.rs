@@ -35,6 +35,9 @@ pub struct Config {
     /// `[security]` section — MCP client injection-guarding level.
     #[serde(default)]
     pub security: SecurityConfig,
+    /// `[log]` section — logging verbosity.
+    #[serde(default)]
+    pub log: LogConfig,
 }
 
 /// Compiled-in production cloud base URL. Single source of truth for the
@@ -155,6 +158,15 @@ pub struct CliConfig {
     /// override. Per D23, this never gates invocation.
     #[serde(default)]
     pub show_admin_cmds: bool,
+}
+
+/// `[log]` — logging verbosity.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LogConfig {
+    /// Logging directive fed to `EnvFilter` (e.g. `info` or `mnm=debug,hyper=warn`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub level: Option<String>,
 }
 
 /// `[security]` — MCP client prompt-injection guarding level (issue #103).
@@ -509,6 +521,24 @@ pub fn resolve_show_admin_cmds(cfg: &CliConfig, env: &impl ConfigEnv) -> bool {
         return matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES");
     }
     cfg.show_admin_cmds
+}
+
+/// Resolve the log-level directive: flag > `RUST_LOG` env > `[log].level` config > `None`.
+///
+/// The caller keeps its built-in default when `None` is returned. Values are
+/// free-form `EnvFilter` directives (e.g. `"info"`, `"mnm=debug,hyper=warn"`)
+/// and are not validated here. Empty values at any layer fall through to the
+/// next source.
+#[must_use]
+pub fn resolve_log_level(
+    flag: Option<&str>,
+    cfg: &LogConfig,
+    env: &impl ConfigEnv,
+) -> Option<String> {
+    flag.map(str::to_owned)
+        .filter(|s| !s.is_empty())
+        .or_else(|| env.var("RUST_LOG").filter(|s| !s.is_empty()))
+        .or_else(|| cfg.level.clone().filter(|s| !s.is_empty()))
 }
 
 /// All the ways config discovery can fail.
@@ -884,6 +914,25 @@ model = "rerank-2.5-lite"
         let m: ModelsConfig = toml::from_str(toml_src).unwrap();
         assert_eq!(m.voyage_base_url.as_deref(), Some("https://proxy.example/v1"));
         assert!(ModelsConfig::default().voyage_base_url.is_none());
+    }
+
+    #[test]
+    fn resolve_log_level_flag_then_env_then_config() {
+        let cfg = LogConfig { level: Some("info".into()) };
+        let env = FakeEnv::default().set("RUST_LOG", "debug");
+        assert_eq!(resolve_log_level(Some("trace"), &cfg, &env).as_deref(), Some("trace"));
+        assert_eq!(resolve_log_level(None, &cfg, &env).as_deref(), Some("debug"));
+        let no_env = FakeEnv::default();
+        assert_eq!(resolve_log_level(None, &cfg, &no_env).as_deref(), Some("info"));
+        assert_eq!(resolve_log_level(None, &LogConfig::default(), &no_env), None);
+    }
+
+    #[test]
+    fn log_config_roundtrips() {
+        let cfg: Config = toml::from_str("[log]\nlevel = \"mnm=debug,hyper=warn\"\n").unwrap();
+        assert_eq!(cfg.log.level.as_deref(), Some("mnm=debug,hyper=warn"));
+        let empty: Config = toml::from_str("").unwrap();
+        assert!(empty.log.level.is_none());
     }
 
     #[test]
