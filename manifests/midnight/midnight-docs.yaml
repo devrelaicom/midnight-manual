@@ -3,7 +3,7 @@ root:
   name: midnight-docs
   provenance:
     attribution: foundation
-    verified: true
+    verified: false
     verified_by: midnight-foundation
     tags: [trust:high]
   children:

@@ -19,6 +19,10 @@ root:
     - "**/CONTRIBUTING.md"
     - "**/SECURITY.md"
   provenance:
-    attribution: partner
+    attribution: community
     verified: false
-    tags: [trust:medium]
+    tags: [trust:low]
+    verification_notes: >-
+      Reclassified from partner/trust:medium to community/trust:low (2026-06-26):
+      a community fork (forked repo), unverified and unaudited by the Midnight
+      Foundation; audit before any production use.

@@ -13,6 +13,6 @@ root:
     - "**/SECURITY.md"
   provenance:
     attribution: foundation
-    verified: true
+    verified: false
     verified_by: midnight-foundation
     tags: [trust:high]

@@ -41,7 +41,9 @@ jobs:
         run: |
           set -uo pipefail
           slugs=$(awk 'NF>=4 && $1 !~ /^#/ {print $1}' "$SOURCES" | sort)
-          yamls=$(find manifests/midnight -maxdepth 1 -name '*.yaml' -exec basename {} .yaml \; | sort)
+          # -maxdepth 2 so categorised manifests in subdirs (e.g. community/) are
+          # counted; slugs are unique across folders so basename comparison holds.
+          yamls=$(find manifests/midnight -maxdepth 2 -name '*.yaml' -exec basename {} .yaml \; | sort)
           if ! diff <(printf '%s\n' "$slugs") <(printf '%s\n' "$yamls") >/dev/null; then
             echo "FAIL: sources.tsv slugs and manifest files disagree (< sources.tsv, > *.yaml):"
             diff <(printf '%s\n' "$slugs") <(printf '%s\n' "$yamls") || true
@@ -109,6 +111,12 @@ jobs:
             repo=$(printf '%s' "$row" | cut -f2)
             branch=$(printf '%s' "$row" | cut -f3)
             man="manifests/midnight/$slug.yaml"
+            # Categorised manifests (e.g. community/) live one level down; fall
+            # back to the first matching <slug>.yaml when absent at the top level.
+            if [ ! -f "$man" ]; then
+              found=$(find manifests/midnight -mindepth 2 -maxdepth 2 -name "$slug.yaml" -print -quit 2>/dev/null)
+              man="${found:-$man}"
+            fi
             clone="/tmp/clones/$slug"
             echo "::group::$slug ($repo@$branch)"
             if ! git clone --depth=1 -b "$branch" "https://github.com/$repo" "$clone" 2>/dev/null; then

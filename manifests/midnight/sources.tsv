@@ -4,11 +4,14 @@
 # The manifests themselves stay path+provenance only; repo/branch/kind live here.
 #
 # Columns (whitespace-separated): slug  repo(owner/name)  branch  kind
-# The manifest file for each row is manifests/midnight/<slug>.yaml and the
-# origin URL is https://github.com/<repo>.
-midnight-ledger	midnightntwrk/midnight-ledger	main	mixed
-midnight-node	midnightntwrk/midnight-node	main	mixed
-midnight-indexer	midnightntwrk/midnight-indexer	main	mixed
+# The manifest file for each row is manifests/midnight/<slug>.yaml — EXCEPT for
+# categorised sources (see the community section below), whose manifest lives in
+# a subdirectory: manifests/midnight/<category>/<slug>.yaml. Consumers resolve a
+# slug by looking for <slug>.yaml at the top level first, then in any one-level
+# subdirectory. The origin URL is https://github.com/<repo>.
+midnight-ledger	midnightntwrk/midnight-ledger	main	code_repo
+midnight-node	midnightntwrk/midnight-node	main	code_repo
+midnight-indexer	midnightntwrk/midnight-indexer	main	code_repo
 midnight-js	midnightntwrk/midnight-js	main	code_repo
 midnight-wallet	midnightntwrk/midnight-wallet	main	code_repo
 midnight-sdk	midnightntwrk/midnight-sdk	main	code_repo
@@ -18,35 +21,68 @@ midnight-docs	midnightntwrk/midnight-docs	main	docs_site
 midnight-improvement-proposals	midnightntwrk/midnight-improvement-proposals	main	docs_site
 midnight-architecture	midnightntwrk/midnight-architecture	main	docs_site
 midnight-awesome-dapps	midnightntwrk/midnight-awesome-dapps	main	docs_site
-example-counter	midnightntwrk/example-counter	main	mixed
-example-bboard	midnightntwrk/example-bboard	main	mixed
-example-battleship	midnightntwrk/example-battleship	main	mixed
-example-hello-world	midnightntwrk/example-hello-world	main	mixed
-example-zkloan	midnightntwrk/example-zkloan	main	mixed
-example-kitties	midnightntwrk/example-kitties	main	mixed
-example-private-party	midnightntwrk/example-private-party	main	mixed
-example-nft-contracts	midnightntwrk/example-nft-contracts	main	mixed
-midnight-wallet-dapp	midnightntwrk/midnight-wallet-dapp	main	mixed
-midnight-leaderboard	midnightntwrk/midnight-leaderboard	main	mixed
-midnight-tip-jar	midnightntwrk/midnight-tip-jar	main	mixed
-midnight-dust-generator	midnightntwrk/midnight-dust-generator	main	mixed
-compact	midnightntwrk/compact	main	docs_site
-create-mn-app	midnightntwrk/create-mn-app	main	mixed
-setup-compact-action	midnightntwrk/setup-compact-action	main	docs_site
-midnight-node-docker	midnightntwrk/midnight-node-docker	main	mixed
+example-counter	midnightntwrk/example-counter	main	code_repo
+example-bboard	midnightntwrk/example-bboard	main	code_repo
+example-battleship	midnightntwrk/example-battleship	main	code_repo
+example-hello-world	midnightntwrk/example-hello-world	main	code_repo
+example-zkloan	midnightntwrk/example-zkloan	main	code_repo
+example-kitties	midnightntwrk/example-kitties	main	code_repo
+example-private-party	midnightntwrk/example-private-party	main	code_repo
+example-nft-contracts	midnightntwrk/example-nft-contracts	main	code_repo
+midnight-wallet-dapp	midnightntwrk/midnight-wallet-dapp	main	code_repo
+midnight-leaderboard	midnightntwrk/midnight-leaderboard	main	code_repo
+midnight-tip-jar	midnightntwrk/midnight-tip-jar	main	code_repo
+midnight-dust-generator	midnightntwrk/midnight-dust-generator	main	code_repo
+compact	LFDT-Minokawa/compact	main	code_repo
+create-mn-app	midnightntwrk/create-mn-app	main	code_repo
+setup-compact-action	midnightntwrk/setup-compact-action	main	code_repo
+midnight-node-docker	midnightntwrk/midnight-node-docker	main	code_repo
 contributor-hub	midnightntwrk/contributor-hub	main	docs_site
 servicedesk	midnightntwrk/servicedesk	main	docs_site
-midnight-reserve-contracts	midnightntwrk/midnight-reserve-contracts	main	mixed
-night-token-distribution	midnightntwrk/night-token-distribution	main	mixed
-openzeppelin-compact-contracts	OpenZeppelin/compact-contracts	main	mixed
+midnight-reserve-contracts	midnightntwrk/midnight-reserve-contracts	main	code_repo
+night-token-distribution	midnightntwrk/night-token-distribution	main	code_repo
+openzeppelin-compact-contracts	OpenZeppelin/compact-contracts	main	code_repo
 openzeppelin-compact-tools	OpenZeppelin/compact-tools	main	code_repo
-openzeppelin-midnight-apps	OpenZeppelin/midnight-apps	main	mixed
+openzeppelin-midnight-apps	OpenZeppelin/midnight-apps	main	code_repo
+bricktowers-midnight-rwa	bricktowers/midnight-rwa	main	code_repo
+bricktowers-midnight-identity	bricktowers/midnight-identity	main	code_repo
+bricktowers-midnight-seabattle	bricktowers/midnight-seabattle	main	code_repo
+midnames-core	midnames/core	main	code_repo
+joacolinares-kyc-midnight	joacolinares/kyc-midnight	main	code_repo
+#
+# ── community sources (manifests/midnight/community/<slug>.yaml) ───────────────
+# Community-contributed third-party repos: attribution: community, verified:
+# false, tags: [trust:low]. Their manifests live under the community/ subfolder,
+# resolved by the slug→subdirectory fallback described in the header above.
 eddalabs-midnight-starter-template	eddalabs/midnight-starter-template	main	mixed
-bricktowers-midnight-rwa	bricktowers/midnight-rwa	main	mixed
-bricktowers-midnight-identity	bricktowers/midnight-identity	main	mixed
-bricktowers-midnight-seabattle	bricktowers/midnight-seabattle	main	mixed
-midnames-core	midnames/core	main	mixed
-joacolinares-kyc-midnight	joacolinares/kyc-midnight	main	mixed
 olanetsoft-learn-compact	Olanetsoft/learn-compact	main	docs_site
 olanetsoft-compact-by-example	Olanetsoft/compact-by-example	main	docs_site
 adavault-midnight-skill	ADAvault/midnight-skill	main	docs_site
+0xfdbu-midnight-unshielded-token	0xfdbu/midnight-unshielded-token	main	code_repo
+0xfdbu-midnight-dapp-connect	0xfdbu/midnight-dapp-connect	main	code_repo
+0xfdbu-midnight-shielded-token	0xfdbu/midnight-shielded-token	main	code_repo
+0xfdbu-midnight-attestation-dapp	0xfdbu/midnight-attestation-dapp	main	code_repo
+rambo-lc-midnight-statrter-pack	RAMBO-LC/Midnight-statrter-pack	main	docs_site
+rambo-lc-mn-voting-dapp	RAMBO-LC/MN-Voting-Dapp	main	code_repo
+paranormal39-agilitycore	paranormal39/AgilityCore	master	code_repo
+paranormal39-midnightunityconnector	paranormal39/MidnightUnityConnector	main	code_repo
+paranormal39-midnight-example-dao	paranormal39/midnight-example-dao	main	code_repo
+paranormal39-laylaa	paranormal39/laylaa	main	code_repo
+paranormal39-votechain	paranormal39/Votechain	master	code_repo
+paranormal39-vaultchain	paranormal39/vaultchain	master	code_repo
+paranormal39-agilitytools	paranormal39/AgilityTools	main	code_repo
+spycrypto-autodiscovery	SpyCrypto/AutoDiscovery	main	code_repo
+spycrypto-nightforce-vault	SpyCrypto/nightforce-vault	main	code_repo
+spycrypto-nightforce-intelligence	SpyCrypto/nightforce-intelligence	main	code_repo
+spycrypto-midnight-juror-zer0	SpyCrypto/midnight-juror-zer0	main	code_repo
+eddalabs-midnight-contracts	eddalabs/midnight-contracts	main	code_repo
+eddalabs-certificate-sandbox	eddalabs/certificate-sandbox	main	code_repo
+eddalabs-bucket-defi-dapp	eddalabs/bucket-defi-dapp	main	code_repo
+kali-decoder-midnight-skills	Kali-Decoder/Midnight-Skills	main	docs_site
+dareu-foundation-team-contract	dareu-foundation-team/contract	main	code_repo
+nstanford5-compact-testbed	nstanford5/compact-testbed	master	code_repo
+nstanford5-compact-hello-world	nstanford5/compact-hello-world	master	code_repo
+nstanford5-example-raffle	nstanford5/example-raffle	master	code_repo
+nstanford5-example-battleship-simple	nstanford5/example-battleship-simple	master	code_repo
+nstanford5-example-private-auction-reserve	nstanford5/example-private-auction-reserve	master	code_repo
+nstanford5-example-private-party	nstanford5/example-private-party	main	code_repo

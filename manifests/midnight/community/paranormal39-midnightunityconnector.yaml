@@ -1,0 +1,39 @@
+manifest_version: 1
+root:
+  name: paranormal39-midnightunityconnector
+  path: .
+  include:
+    - "**/*.compact"
+    - "**/*.ts"
+    - "**/*.tsx"
+    - "**/*.js"
+    - "**/*.jsx"
+    - "**/*.mjs"
+    - "**/*.cjs"
+    - "**/*.rs"
+    - "**/*.md"
+    - "**/*.mdx"
+  exclude:
+    - "**/node_modules/**"
+    - "**/dist/**"
+    - "**/build/**"
+    - "**/target/**"
+    - "**/managed/**"
+    - "**/.git/**"
+    - "**/.github/**"
+    - "**/.next/**"
+    - "**/out/**"
+    - "**/coverage/**"
+    - "**/__snapshots__/**"
+    - "**/.turbo/**"
+    - "**/CODE_OF_CONDUCT.md"
+    - "**/CONTRIBUTING.md"
+    - "**/SECURITY.md"
+  provenance:
+    attribution: community
+    verified: false
+    tags: [trust:low]
+    verification_notes: >-
+      Community-contributed repository; unverified and unaudited by the Midnight
+      Foundation. Indexed for ecosystem breadth; treat code and docs as
+      illustrative, not authoritative, and audit before any production use.

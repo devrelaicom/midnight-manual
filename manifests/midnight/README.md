@@ -6,6 +6,15 @@ each manifest pins whole directories via `path:` + glob `include`/`exclude`.
 Owner and trust live in each manifest's `root.provenance` (which inherits to all
 descendants).
 
+### Layout
+
+Most manifests live at the top level of `manifests/midnight/`. Community-
+contributed third-party sources live in the **`community/`** subfolder (further
+category subfolders may be added later). `sources.tsv` and the ingest tooling
+resolve a slug to `<slug>.yaml` at the top level first, then fall back to a
+one-level subdirectory (`community/<slug>.yaml`). Slugs are unique across
+folders.
+
 ## Provenance / trust model
 
 `attribution` reflects real authorship (`foundation` / `partner` / `third_party`
@@ -32,7 +41,12 @@ mnm ingest run manifests/midnight/midnight-docs.yaml \
 also auto-creates the source on 404 with `--yes`, but explicit `sources create`
 is preferred so `kind`/`origin_url` are set.)
 
-## Index (44 sources)
+## Index (72 sources)
+
+> The top-level table below predates the `community/` reorg and is **not**
+> CI-enforced against `sources.tsv` on the `kind`/owner columns — treat
+> `sources.tsv` as authoritative. Community sources are listed in their own
+> section after it.
 
 | slug | repo | branch | kind | owner | attribution | verified | trust |
 |------|------|--------|------|-------|-------------|----------|-------|
@@ -71,12 +85,51 @@ is preferred so `kind`/`origin_url` are set.)
 | openzeppelin-compact-contracts | OpenZeppelin/compact-contracts | main | mixed | Partner | partner | false | high |
 | openzeppelin-compact-tools | OpenZeppelin/compact-tools | main | code_repo | Partner | partner | false | high |
 | openzeppelin-midnight-apps | OpenZeppelin/midnight-apps | main | mixed | Partner | partner | false | high |
-| eddalabs-midnight-starter-template | eddalabs/midnight-starter-template | main | mixed | Partner | partner | false | medium |
 | bricktowers-midnight-rwa | bricktowers/midnight-rwa | main | mixed | Partner | partner | false | medium |
 | bricktowers-midnight-identity | bricktowers/midnight-identity | main | mixed | Partner | partner | false | medium |
 | bricktowers-midnight-seabattle | bricktowers/midnight-seabattle | main | mixed | Partner | partner | false | medium |
 | midnames-core | midnames/core | main | mixed | Partner | partner | false | medium |
 | joacolinares-kyc-midnight | joacolinares/kyc-midnight | main | mixed | Hackathon Winner | third_party | false | medium |
-| olanetsoft-learn-compact | Olanetsoft/learn-compact | main | docs_site | Other 3rd party | community | false | medium |
-| olanetsoft-compact-by-example | Olanetsoft/compact-by-example | main | docs_site | Other 3rd party | community | false | medium |
-| adavault-midnight-skill | ADAvault/midnight-skill | main | docs_site | Other 3rd party | community | false | low |
+## Community sources (`manifests/midnight/community/`)
+
+Community-contributed third-party repos. All are `attribution: community`,
+`verified: false`, with a `verification_notes` explaining the rating. The 28
+repos added 2026-06-26 index only `.compact` / `.ts` / `.tsx` / `.js` / `.jsx` /
+`.mjs` / `.cjs` / `.rs` / `.md` / `.mdx` (boilerplate Markdown such as
+`SECURITY.md` excluded). The four pre-existing entries (eddalabs, Olanetsoft ×2,
+ADAvault) retain their original per-node scoping.
+
+| slug | repo | branch | kind | owner | attribution | verified | trust |
+|------|------|--------|------|-------|-------------|----------|-------|
+| eddalabs-midnight-starter-template | eddalabs/midnight-starter-template | main | mixed | Community | community | false | low |
+| olanetsoft-learn-compact | Olanetsoft/learn-compact | main | docs_site | Community | community | false | medium |
+| olanetsoft-compact-by-example | Olanetsoft/compact-by-example | main | docs_site | Community | community | false | medium |
+| adavault-midnight-skill | ADAvault/midnight-skill | main | docs_site | Community | community | false | low |
+| 0xfdbu-midnight-unshielded-token | 0xfdbu/midnight-unshielded-token | main | code_repo | Community | community | false | low |
+| 0xfdbu-midnight-dapp-connect | 0xfdbu/midnight-dapp-connect | main | code_repo | Community | community | false | low |
+| 0xfdbu-midnight-shielded-token | 0xfdbu/midnight-shielded-token | main | code_repo | Community | community | false | low |
+| 0xfdbu-midnight-attestation-dapp | 0xfdbu/midnight-attestation-dapp | main | code_repo | Community | community | false | low |
+| rambo-lc-midnight-statrter-pack | RAMBO-LC/Midnight-statrter-pack | main | docs_site | Community | community | false | low |
+| rambo-lc-mn-voting-dapp | RAMBO-LC/MN-Voting-Dapp | main | code_repo | Community | community | false | low |
+| paranormal39-agilitycore | paranormal39/AgilityCore | master | code_repo | Community | community | false | low |
+| paranormal39-midnightunityconnector | paranormal39/MidnightUnityConnector | main | code_repo | Community | community | false | low |
+| paranormal39-midnight-example-dao | paranormal39/midnight-example-dao | main | code_repo | Community | community | false | low |
+| paranormal39-laylaa | paranormal39/laylaa | main | code_repo | Community | community | false | low |
+| paranormal39-votechain | paranormal39/Votechain | master | code_repo | Community | community | false | low |
+| paranormal39-vaultchain | paranormal39/vaultchain | master | code_repo | Community | community | false | low |
+| paranormal39-agilitytools | paranormal39/AgilityTools | main | code_repo | Community | community | false | low |
+| spycrypto-autodiscovery | SpyCrypto/AutoDiscovery | main | code_repo | Community | community | false | low |
+| spycrypto-nightforce-vault | SpyCrypto/nightforce-vault | main | code_repo | Community | community | false | low |
+| spycrypto-nightforce-intelligence | SpyCrypto/nightforce-intelligence | main | code_repo | Community | community | false | low |
+| spycrypto-midnight-juror-zer0 | SpyCrypto/midnight-juror-zer0 | main | code_repo | Community | community | false | low |
+| eddalabs-midnight-contracts | eddalabs/midnight-contracts | main | code_repo | Community | community | false | low |
+| eddalabs-certificate-sandbox | eddalabs/certificate-sandbox | main | code_repo | Community | community | false | low |
+| eddalabs-bucket-defi-dapp | eddalabs/bucket-defi-dapp | main | code_repo | Community | community | false | low |
+| kali-decoder-midnight-skills | Kali-Decoder/Midnight-Skills | main | docs_site | Community | community | false | low |
+| dareu-foundation-team-contract | dareu-foundation-team/contract | main | code_repo | Community | community | false | low |
+| nstanford5-compact-testbed | nstanford5/compact-testbed | master | code_repo | Community | community | false | low |
+| nstanford5-compact-hello-world | nstanford5/compact-hello-world | master | code_repo | Community | community | false | low |
+| nstanford5-example-raffle | nstanford5/example-raffle | master | code_repo | Community | community | false | low |
+| nstanford5-example-battleship-simple | nstanford5/example-battleship-simple | master | code_repo | Community | community | false | low |
+| nstanford5-example-private-auction-reserve | nstanford5/example-private-auction-reserve | master | code_repo | Community | community | false | low |
+| nstanford5-example-private-party | nstanford5/example-private-party | main | code_repo | Community | community | false | low |
