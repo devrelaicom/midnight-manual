@@ -1,0 +1,59 @@
+---
+id: install
+title: Install mnm
+sidebar_position: 2
+---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+# Install mnm
+
+Prebuilt binaries are available for macOS (Apple silicon) and Linux (x86-64 + aarch64, gnu). Windows is served via WSL (it runs the Linux build); **Intel macOS and musl are out of scope.** Building from source requires a [Rust toolchain](https://rustup.rs) (1.91+).
+
+<Tabs>
+  <TabItem value="homebrew" label="Homebrew" default>
+
+```bash
+brew install aaronbassett/tap/midnight-manual
+```
+
+This installs both `midnight-manual` and its short alias `mnm`.
+
+  </TabItem>
+  <TabItem value="shell" label="Shell">
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/devrelaicom/midnight-manual/releases/latest/download/midnight-manual-installer.sh | sh
+```
+
+The shell installer is SHA256-verified and fetches the prebuilt binary for your platform.
+
+  </TabItem>
+  <TabItem value="source" label="From source">
+
+```bash
+git clone https://github.com/devrelaicom/midnight-manual.git
+cd midnight-manual
+cargo build --release -p midnight-manual
+install -m 0755 target/release/mnm ~/.local/bin/mnm
+```
+
+Building from source needs a [Rust toolchain](https://rustup.rs) (1.91+).
+
+  </TabItem>
+</Tabs>
+
+## Verify the install
+
+Once `mnm` is on your `PATH`, check that the hosted corpus is reachable:
+
+```bash
+mnm doctor
+```
+
+`mnm doctor` checks reachability, reports your reranking configuration, and flags anything misconfigured.
+
+## Next steps
+
+With `mnm` installed, [add it to your AI client](/docs/add-to-ai-client) or [run a search from the terminal](/docs/first-search).

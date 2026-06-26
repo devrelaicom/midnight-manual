@@ -1,0 +1,65 @@
+/* ===== Self-hosted fonts (filenames match site/static/fonts/) ===== */
+@font-face{font-family:'Anton';src:url('/fonts/anton-400.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap}
+@font-face{font-family:'Space Grotesk';src:url('/fonts/space-grotesk-400.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap}
+@font-face{font-family:'Space Grotesk';src:url('/fonts/space-grotesk-500.woff2') format('woff2');font-weight:500;font-style:normal;font-display:swap}
+@font-face{font-family:'Space Grotesk';src:url('/fonts/space-grotesk-700.woff2') format('woff2');font-weight:700;font-style:normal;font-display:swap}
+@font-face{font-family:'JetBrains Mono';src:url('/fonts/jetbrains-mono-400.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap}
+@font-face{font-family:'JetBrains Mono';src:url('/fonts/jetbrains-mono-500.woff2') format('woff2');font-weight:500;font-style:normal;font-display:swap}
+
+/* ===== Brand tokens (ported from site/css/styles.css :root) ===== */
+:root{
+  --mm-paper:#F4EFE3; --mm-paper-2:#EDE7D9; --mm-ink:#1F3DF5;
+  --mm-ink-hair:rgba(31,61,245,.20); --mm-graphite:#2A2A28; --mm-graphite-soft:#55524b;
+  --mm-accent:#E5392F; --mm-amber:#F2A33C;
+  --mm-term-bg:#0B1020; --mm-ink-on-dark:#9FB4FF; --mm-paper-on-dark:#ECE7D8;
+  --mm-display:'Anton',Impact,sans-serif;
+  --mm-sans:'Space Grotesk',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
+  --mm-mono:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+
+  /* Layout / animation utilities (ported from site/css/styles.css lines 8–26) */
+  --mm-ink-soft:rgba(31,61,245,.5);
+  --mm-accent-hair:rgba(229,57,47,.28);
+  --mm-radius:8px;
+  --mm-ease:cubic-bezier(.2,.7,.2,1);
+  --mm-maxw:1120px;
+  --mm-pad:clamp(20px,5vw,64px);
+  --mm-section-y:clamp(64px,9vw,116px);
+
+  /* Infima overrides (light) */
+  --ifm-background-color:var(--mm-paper);
+  --ifm-background-surface-color:var(--mm-paper-2);
+  --ifm-color-primary:#1F3DF5;
+  --ifm-color-primary-dark:#152fd0; --ifm-color-primary-darker:#1429c4; --ifm-color-primary-darkest:#1022a1;
+  --ifm-color-primary-light:#3a55f7; --ifm-color-primary-lighter:#4a63f8; --ifm-color-primary-lightest:#7686fb;
+  --ifm-font-color-base:var(--mm-graphite);
+  /* Docs headings use Space Grotesk 700 for readability; Anton is reserved for
+     the homepage display type + h1 (see Step below). */
+  --ifm-heading-font-family:var(--mm-sans);
+  --ifm-heading-font-weight:700;
+  --ifm-font-family-base:var(--mm-sans);
+  --ifm-font-family-monospace:var(--mm-mono);
+  --ifm-navbar-background-color:var(--mm-paper);
+  --ifm-link-color:var(--mm-ink);
+  --ifm-code-background:#EDE7D9; --ifm-code-color:#1F3DF5;
+  --docusaurus-highlighted-code-line-bg: rgba(31,61,245,.08);
+}
+
+/* h1 / page titles keep the Anton display face for brand presence */
+.markdown > h1:first-child, article header h1{font-family:var(--mm-display);font-weight:400;text-transform:uppercase;letter-spacing:-.01em}
+
+/* Inline code chip (scope away from Prism code blocks in <pre>) */
+:not(pre) > code{color:var(--ifm-code-color);background-color:var(--ifm-code-background);border:1px solid var(--mm-ink-hair)}
+
+/* ===== Dark theme (built from the existing -on-dark / term tokens) ===== */
+[data-theme='dark']{
+  --mm-paper:#0B1020; --mm-paper-2:#141a2e; --mm-graphite:#ECE7D8; --mm-graphite-soft:#9aa3bf;
+  --ifm-background-color:#0B1020; --ifm-background-surface-color:#141a2e;
+  --ifm-color-primary:#9FB4FF;
+  --ifm-color-primary-dark:#7d99ff; --ifm-color-primary-darker:#6c8bff; --ifm-color-primary-darkest:#3a64ff;
+  --ifm-color-primary-light:#c1cfff; --ifm-color-primary-lighter:#d2dcff; --ifm-color-primary-lightest:#ffffff;
+  --ifm-font-color-base:#ECE7D8;
+  --ifm-navbar-background-color:#0B1020;
+  --ifm-link-color:#9FB4FF;
+  --ifm-code-background:#141a2e; --ifm-code-color:#9FB4FF;
+  --docusaurus-highlighted-code-line-bg: rgba(159,180,255,.14);
+}

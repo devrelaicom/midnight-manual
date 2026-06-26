@@ -1,0 +1,666 @@
+/* ===================================================================
+   HomeSections.module.css
+   Ported from .superpowers/sdd/port-sources/styles.css (canonical, ~lines 49–240).
+   - var(--foo) → var(--mm-foo) for all brand/layout tokens.
+   - Global BEM class names → camelCase CSS-module locals.
+   - Tab selectors omitted (Task 5 uses Docusaurus <Tabs>).
+   =================================================================== */
+
+/* ============ Layout ============ */
+.container {
+  max-width: var(--mm-maxw);
+  margin-inline: auto;
+  padding-inline: var(--mm-pad);
+}
+
+.section {
+  padding-block: var(--mm-section-y);
+}
+
+.sectionBand {
+  background: var(--mm-paper-2);
+}
+
+.marker {
+  font-family: var(--mm-mono);
+  font-size: 12px;
+  letter-spacing: .16em;
+  text-transform: uppercase;
+  color: var(--mm-ink);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.marker::before {
+  content: "";
+  width: 30px;
+  height: 2px;
+  background: var(--mm-accent);
+}
+
+/* ============ Typography ============ */
+.eyebrow {
+  font-family: var(--mm-mono);
+  font-weight: 500;
+  font-size: 12px;
+  letter-spacing: .16em;
+  text-transform: uppercase;
+  color: var(--mm-ink);
+  margin-bottom: 18px;
+}
+
+.display {
+  font-family: var(--mm-display);
+  font-weight: 400;
+  text-transform: uppercase;
+  line-height: 1.05;
+  letter-spacing: -.01em;
+  color: var(--mm-ink);
+}
+
+.hSection {
+  font-family: var(--mm-display);
+  font-weight: 400;
+  text-transform: uppercase;
+  line-height: 1.05;
+  letter-spacing: -.01em;
+  color: var(--mm-ink);
+  font-size: clamp(34px, 5.4vw, 64px);
+  margin-bottom: 14px;
+}
+
+.subhead {
+  font-size: clamp(16px, 1.6vw, 19px);
+  color: var(--mm-graphite);
+  max-width: 60ch;
+  line-height: 1.6;
+}
+
+.subhead code {
+  font-size: .92em;
+  color: var(--mm-ink);
+}
+
+.lead {
+  font-size: clamp(21px, 2.8vw, 30px);
+  color: var(--mm-graphite);
+  max-width: 34ch;
+  line-height: 1.34;
+  letter-spacing: -.01em;
+}
+
+.lead strong {
+  color: var(--mm-ink);
+  font-weight: 500;
+}
+
+/* ============ Buttons ============ */
+.btnPill {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  font-family: var(--mm-sans);
+  font-weight: 700;
+  font-size: 14px;
+  color: var(--mm-ink);
+  border: 1.5px solid var(--mm-ink);
+  border-radius: 40px;
+  padding: 11px 26px;
+  background: transparent;
+  cursor: pointer;
+  transition: background .18s var(--mm-ease), color .18s var(--mm-ease), transform .18s var(--mm-ease);
+}
+
+.btnPill:hover {
+  background: var(--mm-ink);
+  color: var(--mm-paper);
+  text-decoration: none;
+  transform: translateY(-2px);
+}
+
+.btnPillSolid {
+  background: var(--mm-ink);
+  color: var(--mm-paper);
+}
+
+.btnPillSolid:hover {
+  background: #152fd0;
+}
+
+.btnPillArrow {
+  display: inline-block;
+  transition: transform .2s var(--mm-ease);
+}
+
+.btnPill:hover .btnPillArrow {
+  transform: translateX(4px);
+}
+
+/* ============ Command strip + copy ============ */
+.cmd {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid var(--mm-ink);
+  border-radius: var(--mm-radius);
+  padding: 11px 13px;
+  font-family: var(--mm-mono);
+  font-size: 13px;
+  color: var(--mm-ink);
+  background: transparent;
+  overflow: auto;
+  transition: border-color .2s var(--mm-ease), box-shadow .2s var(--mm-ease);
+}
+
+.cmd:hover {
+  box-shadow: 0 0 0 3px var(--mm-ink-hair);
+}
+
+/* Command-strip code is plain text inside the .cmd box — strip the global
+   inline-code chip (background/border/padding from custom.css `:not(pre) > code`). */
+.cmd code {
+  white-space: nowrap;
+  background: transparent;
+  border: 0;
+  padding: 0;
+}
+
+.cmdBlock {
+  align-items: flex-start;
+}
+
+.cmdBlock code {
+  white-space: pre;
+  line-height: 1.65;
+  background: transparent;
+  border: 0;
+  padding: 0;
+}
+
+.cmdCopy {
+  flex: none;
+  font-family: var(--mm-mono);
+  font-size: 11px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--mm-ink);
+  background: transparent;
+  border: 1px solid var(--mm-ink-hair);
+  border-radius: 5px;
+  padding: 5px 9px;
+  cursor: pointer;
+  transition: background .15s var(--mm-ease), color .15s var(--mm-ease), border-color .15s var(--mm-ease);
+}
+
+.cmdCopy:hover {
+  background: var(--mm-ink);
+  color: var(--mm-paper);
+}
+
+.cmdCopy[data-copied="true"] {
+  background: var(--mm-accent);
+  border-color: var(--mm-accent);
+  color: #fff;
+}
+
+/* ============ Cards / grids ============ */
+.cards {
+  display: grid;
+  gap: 18px;
+}
+
+.grid2 {
+  grid-template-columns: repeat(2, 1fr);
+}
+
+.grid3 {
+  grid-template-columns: repeat(3, 1fr);
+}
+
+.grid4 {
+  grid-template-columns: repeat(4, 1fr);
+}
+
+.card {
+  position: relative;
+  border: 1px solid var(--mm-ink-hair);
+  border-radius: var(--mm-radius);
+  padding: 24px;
+  background: var(--mm-paper);
+  transition: transform .25s var(--mm-ease), border-color .25s var(--mm-ease), box-shadow .25s var(--mm-ease);
+}
+
+.sectionBand .card {
+  background: var(--mm-paper);
+}
+
+.card::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  height: 3px;
+  width: 100%;
+  background: var(--mm-accent);
+  border-radius: var(--mm-radius) var(--mm-radius) 0 0;
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform .3s var(--mm-ease);
+}
+
+.card:hover {
+  transform: translateY(-4px);
+  border-color: var(--mm-ink-soft);
+  box-shadow: 0 14px 30px -18px rgba(31, 61, 245, .5);
+}
+
+.card:hover::before {
+  transform: scaleX(1);
+}
+
+.cardTitle {
+  font-family: var(--mm-display);
+  text-transform: uppercase;
+  color: var(--mm-ink);
+  font-size: 22px;
+  line-height: 1;
+  margin-bottom: 9px;
+  letter-spacing: -.005em;
+}
+
+.cardMeta {
+  font-family: var(--mm-mono);
+  font-size: 11px;
+  color: var(--mm-graphite-soft);
+  letter-spacing: .06em;
+  margin-bottom: 12px;
+  transition: color .25s var(--mm-ease);
+}
+
+.card:hover .cardMeta {
+  color: var(--mm-accent);
+}
+
+.card p {
+  font-size: 14.5px;
+  color: var(--mm-graphite);
+  line-height: 1.6;
+}
+
+.card code {
+  color: var(--mm-ink);
+  font-size: .9em;
+}
+
+/* ============ Hero ============ */
+.hero {
+  padding-block: clamp(32px, 5vw, 64px) var(--mm-section-y);
+}
+
+.heroTop {
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--mm-mono);
+  font-size: 11px;
+  letter-spacing: .14em;
+  color: var(--mm-graphite-soft);
+  border-bottom: 1px solid var(--mm-ink-hair);
+  padding-bottom: 14px;
+  margin-bottom: clamp(28px, 4vw, 44px);
+}
+
+.heroHead {
+  margin-bottom: clamp(30px, 4.5vw, 52px);
+}
+
+.heroTitle {
+  font-size: clamp(44px, 8.6vw, 98px);
+  margin: 0;
+}
+
+.heroRow {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: clamp(32px, 4.5vw, 56px);
+  align-items: start;
+}
+
+.heroRow > * {
+  min-width: 0;
+}
+
+.heroSub {
+  font-size: clamp(16px, 1.8vw, 20px);
+  color: var(--mm-graphite);
+  max-width: 44ch;
+  margin-bottom: 26px;
+  line-height: 1.5;
+}
+
+.heroSub strong {
+  color: var(--mm-ink);
+  font-weight: 500;
+}
+
+.heroCmd {
+  margin-bottom: 22px;
+  max-width: 520px;
+}
+
+.heroCta {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+/* Disclose reveal — a censor bar wipes away to reveal the phrase. */
+.disclose {
+  position: relative;
+  display: inline-block;
+  white-space: nowrap;
+}
+
+.discloseBar {
+  display: none;
+}
+
+:global(.js) .discloseBar {
+  display: block;
+  position: absolute;
+  inset: .04em -.08em .1em;
+  background: var(--mm-graphite);
+  border-radius: 3px;
+  transform-origin: left center;
+  z-index: 1;
+}
+
+:global(.js) .disclose.isRevealed .discloseBar {
+  transform: scaleX(0);
+  transition: transform .6s cubic-bezier(.76, 0, .24, 1);
+}
+
+/* ============ Retrieval demo (signature) ============ */
+.demo {
+  background: var(--mm-term-bg);
+  border: 1px solid rgba(159, 180, 255, .16);
+  border-radius: 12px;
+  overflow: hidden;
+  font-family: var(--mm-mono);
+  box-shadow: 0 30px 60px -28px rgba(11, 16, 32, .7);
+}
+
+.demoBar {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 11px 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, .07);
+}
+
+.demoBar i {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #33384d;
+}
+
+.demoTag {
+  margin-left: 8px;
+  font-size: 11px;
+  letter-spacing: .06em;
+  color: var(--mm-ink-on-dark);
+  opacity: .8;
+}
+
+.demoBody {
+  padding: 16px 18px 20px;
+}
+
+.demoPrompt {
+  font-size: 13px;
+  color: var(--mm-paper-on-dark);
+  line-height: 1.6;
+  margin-bottom: 18px;
+  white-space: normal;
+  word-break: break-word;
+}
+
+.demoSigil {
+  color: #6ee7a8;
+}
+
+.demoCursor {
+  display: none;
+  width: 8px;
+  height: 1.05em;
+  background: var(--mm-accent);
+  vertical-align: -2px;
+  margin-left: 1px;
+}
+
+:global(.js) .demoCursor {
+  display: inline-block;
+  animation: blink 1s steps(1) infinite;
+}
+
+@keyframes blink {
+  50% { opacity: 0; }
+}
+
+.demoResults {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  gap: 15px;
+}
+
+.demoResult {
+  display: grid;
+  gap: 8px;
+}
+
+:global(.js) .demoResult {
+  opacity: 0;
+  transform: translateY(8px);
+}
+
+:global(.js) .demoLoaded .demoResult {
+  opacity: 1;
+  transform: none;
+  transition: opacity .5s var(--mm-ease), transform .5s var(--mm-ease);
+}
+
+:global(.js) .demoLoaded .demoResult:nth-child(2) {
+  transition-delay: .12s;
+}
+
+:global(.js) .demoLoaded .demoResult:nth-child(3) {
+  transition-delay: .24s;
+}
+
+.demoRhead {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  font-size: 12.5px;
+}
+
+.demoPath {
+  flex: 1;
+  min-width: 0;
+  color: var(--mm-paper-on-dark);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.demoScore {
+  flex: none;
+  color: var(--mm-amber);
+}
+
+.demoTrack {
+  height: 3px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, .10);
+  overflow: hidden;
+}
+
+.demoFill {
+  display: block;
+  height: 100%;
+  width: calc(var(--conf, .8) * 100%);
+  background: var(--mm-accent);
+  border-radius: 3px;
+}
+
+:global(.js) .demoFill {
+  width: 0;
+}
+
+:global(.js) .demoLoaded .demoFill {
+  width: calc(var(--conf, .8) * 100%);
+  transition: width .9s var(--mm-ease) .15s;
+}
+
+:global(.js) .demoLoaded .demoResult:nth-child(2) .demoFill {
+  transition-delay: .27s;
+}
+
+:global(.js) .demoLoaded .demoResult:nth-child(3) .demoFill {
+  transition-delay: .39s;
+}
+
+/* Applied by RetrievalDemo (static) and Task 6 (animated) to trigger loaded-state transitions */
+.demoLoaded {
+  /* presence of this class signals the demo has loaded */
+}
+
+.demoChips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.chip {
+  font-size: 10.5px;
+  letter-spacing: .04em;
+  color: var(--mm-ink-on-dark);
+  border: 1px solid rgba(159, 180, 255, .28);
+  border-radius: 40px;
+  padding: 2px 9px;
+}
+
+.chipAccent {
+  background: var(--mm-accent);
+  border-color: var(--mm-accent);
+  color: #fff;
+}
+
+/* ============ Steps (onboarding) ============ */
+.steps {
+  list-style: none;
+  margin: 30px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 30px;
+}
+
+.step {
+  border-top: 2px solid var(--mm-ink);
+  padding-top: 18px;
+  transition: border-color .3s var(--mm-ease);
+}
+
+.step:hover {
+  border-color: var(--mm-accent);
+}
+
+.stepHead {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  margin-bottom: 8px;
+}
+
+.stepN {
+  font-family: var(--mm-mono);
+  font-weight: 500;
+  font-size: 13px;
+  color: var(--mm-accent);
+  letter-spacing: .1em;
+}
+
+.stepTitle {
+  font-family: var(--mm-sans);
+  font-weight: 700;
+  font-size: clamp(18px, 2.2vw, 22px);
+  color: var(--mm-graphite);
+}
+
+.stepTitle code {
+  color: var(--mm-ink);
+  font-size: .92em;
+}
+
+.stepLead {
+  font-size: 15px;
+  color: var(--mm-graphite-soft);
+  max-width: 62ch;
+  margin-bottom: 14px;
+  line-height: 1.55;
+}
+
+.stepLead code {
+  color: var(--mm-ink);
+}
+
+.stepNote {
+  font-size: 13px;
+  color: var(--mm-graphite-soft);
+  margin-top: 11px;
+}
+
+/* ============ Skill list / CTA ============ */
+.skillCtaLabel {
+  font-size: 14px;
+  color: var(--mm-graphite-soft);
+  margin-bottom: 12px;
+}
+
+.skillCtaLabel code {
+  color: var(--mm-ink);
+}
+
+/* ============ Reduced motion ============ */
+@media (prefers-reduced-motion: reduce) {
+  :global(.js) .discloseBar { display: none; }
+  :global(.js) .demoResult { opacity: 1; transform: none; }
+  :global(.js) .demoFill { width: calc(var(--conf, .8) * 100%); }
+  :global(.js) .demoCursor { display: none; }
+  .card::before { display: none; }
+}
+
+/* ============ Responsive ============ */
+@media (max-width: 920px) {
+  .heroRow {
+    grid-template-columns: 1fr;
+    gap: 36px;
+  }
+  .heroTitle {
+    font-size: clamp(44px, 12vw, 80px);
+  }
+  .grid3 { grid-template-columns: 1fr; }
+  .grid2 { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 560px) {
+  .heroTop {
+    flex-direction: column;
+    gap: 6px;
+  }
+}

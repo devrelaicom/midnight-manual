@@ -1,0 +1,8 @@
+# Supply-chain hardening (copied from rover).
+minimumReleaseAge: 4320 # 3 days, in minutes — no newer versions install
+minimumReleaseAgeStrict: false # fall back to newest ≥3-day-old version instead of hard-failing
+strictDepBuilds: true # error on any unreviewed dependency build script
+dangerouslyAllowAllBuilds: false # never auto-run all dependency build scripts
+allowBuilds:
+  '@swc/core': true   # Docusaurus SWC compiler — Rust-based, well-audited
+  "core-js": false # block postinstall — not required by the standard build
