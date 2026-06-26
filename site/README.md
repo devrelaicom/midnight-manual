@@ -1,41 +1,13 @@
-# Website
+# Midnight Manual — docs site
 
-This website is built using [Docusaurus](https://docusaurus.io/), a modern static website generator.
+The Midnight Manual documentation site, built with [Docusaurus](https://docusaurus.io/) and deployed via Netlify.
 
-## Installation
-
-```bash
-yarn
-```
-
-## Local Development
+## Local development
 
 ```bash
-yarn start
+sfw pnpm install
+sfw pnpm start
+sfw pnpm build
 ```
 
-This command starts a local development server and opens up a browser window. Most changes are reflected live without having to restart the server.
-
-## Build
-
-```bash
-yarn build
-```
-
-This command generates static content into the `build` directory and can be served using any static contents hosting service.
-
-## Deployment
-
-Using SSH:
-
-```bash
-USE_SSH=true yarn deploy
-```
-
-Not using SSH:
-
-```bash
-GIT_USER=<Your GitHub username> yarn deploy
-```
-
-If you are using GitHub pages for hosting, this command is a convenient way to build the website and push to the `gh-pages` branch.
+Deploys automatically on merge to `main` via Netlify.

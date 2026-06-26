@@ -40,11 +40,13 @@ export default function GetStarted(): ReactNode {
                 </div>
               </TabItem>
               <TabItem value="source" label="From source">
-                <pre className={`${styles.cmd} ${styles.cmdBlock}`}><code>{`git clone https://github.com/devrelaicom/midnight-manual.git
+                <div className={styles.cmd}>
+                  <pre className={styles.cmdBlock}><code>{`git clone https://github.com/devrelaicom/midnight-manual.git
 cd midnight-manual
 cargo build --release -p midnight-manual
 install -m 0755 target/release/mnm ~/.local/bin/mnm`}</code></pre>
-                <CopyButton text={`git clone https://github.com/devrelaicom/midnight-manual.git\ncd midnight-manual\ncargo build --release -p midnight-manual\ninstall -m 0755 target/release/mnm ~/.local/bin/mnm`} />
+                  <CopyButton text={`git clone https://github.com/devrelaicom/midnight-manual.git\ncd midnight-manual\ncargo build --release -p midnight-manual\ninstall -m 0755 target/release/mnm ~/.local/bin/mnm`} />
+                </div>
                 <p className={styles.stepNote}>
                   Building from source needs a{' '}
                   <a href="https://rustup.rs" rel="noopener">Rust toolchain</a> (1.91+).

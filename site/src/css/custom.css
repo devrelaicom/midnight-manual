@@ -13,7 +13,7 @@
   --mm-accent:#E5392F; --mm-amber:#F2A33C;
   --mm-term-bg:#0B1020; --mm-ink-on-dark:#9FB4FF; --mm-paper-on-dark:#ECE7D8;
   --mm-display:'Anton',Impact,sans-serif;
-  --mm-sans:'Space Grotesk',system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+  --mm-sans:'Space Grotesk',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
   --mm-mono:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
 
   /* Layout / animation utilities (ported from site/css/styles.css lines 8–26) */
@@ -63,7 +63,3 @@
   --ifm-code-background:#141a2e; --ifm-code-color:#9FB4FF;
   --docusaurus-highlighted-code-line-bg: rgba(159,180,255,.14);
 }
-
-/* Accent rule used by the marker/eyebrow motif */
-.mm-marker{font-family:var(--mm-mono);font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:var(--mm-ink);display:flex;align-items:center;gap:12px}
-.mm-marker::before{content:"";width:30px;height:2px;background:var(--mm-accent)}
