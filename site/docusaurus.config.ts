@@ -84,6 +84,7 @@ const config: Config = {
         { to: '/docs/cli/overview', label: 'CLI', position: 'left' },
         { to: '/docs/concepts/confidence', label: 'Concepts', position: 'left' },
         { to: '/docs/self-hosting/when-to-self-host', label: 'Self-hosting', position: 'left' },
+        { to: '/docs/reference/mcp-tools', label: 'Reference', position: 'left' },
         { href: 'https://github.com/devrelaicom/midnight-manual', label: 'GitHub', position: 'right' },
       ],
     },
