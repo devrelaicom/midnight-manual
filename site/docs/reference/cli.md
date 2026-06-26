@@ -50,15 +50,51 @@ Connectivity, authentication, and model readiness check. Exits non-zero when the
 
 Ad-hoc retrieval: `mnm search "query"`.
 
+**Query and output flags**
+
 | Flag | Description |
 |---|---|
 | `query` (positional) | Primary query string. Required unless `--queries-stdin` is set. |
 | `--query` | Additional query texts for multi-query retrieval (HyDE / expansion / step-back). Repeatable. |
 | `--queries-stdin` | Read a JSON document `{"queries": [...]}` from stdin. Mutually exclusive with positional query and `--query`. |
-| `--limit` | Maximum number of results (capped server-side at 100). |
+| `--limit` | Maximum number of results (default 10, capped server-side at 100). |
 | `--embedding-model` | Override the embedding-model wire id. When omitted (`auto`), the corpus's active model is fetched automatically. |
+
+**Retrieval control flags**
+
+| Flag | Description |
+|---|---|
+| `--mode` | Query mode: `hybrid` (default), `vector`, or `fts`. |
+| `--code-mode` | Code-vector fusion mode: `on` (default for hybrid/vector), `off`, or `exclusive` (code vectors replace the general vector list). Incompatible with `--mode fts`. |
 | `--rerank` | Where reranking runs: `auto` (default), `local` (BYOK Voyage), `server`, or `off`. |
-| `--rerank-model` | Voyage rerank model: `rerank-2.5` (default) or `rerank-2.5-lite` (faster, half tokens server-side). |
+| `--rerank-model` | Voyage rerank model: `rerank-2.5` or `rerank-2.5-lite` (faster, half tokens server-side). |
+| `--rerank-instructions` | Natural-language rerank instruction (max 400 chars). Replaces the derived default. Keep terse — instruction tokens multiply by pool size. |
+| `--version-match` | Version-filter semantics: `permissive` (default) biases ranking; `strict` hard-filters. Only meaningful with a version-bearing filter. |
+
+**Granular filter flags**
+
+These narrow the candidate set before ranking. They are mutually exclusive with `--filter-json`.
+
+| Flag | Description |
+|---|---|
+| `--kind` | Restrict to these chunk kinds (`markdown` \| `code` \| `plaintext`). Repeatable. |
+| `--language` | Restrict to these programming languages. Repeatable. |
+| `--exclude-language` | Exclude these languages. Repeatable. |
+| `--tag` | Restrict to these tags. Repeatable. |
+| `--exclude-tag` | Exclude these tags. Repeatable. |
+| `--symbol` | Match symbols as `kind:name` (either side optional, e.g. `circuit:` or `:deployContract`). Repeatable. |
+| `--source` | Restrict to these source slugs. Repeatable. |
+| `--content-type` | Restrict to these content types. Repeatable. |
+| `--attribution` | Restrict to these attributions. Repeatable. |
+| `--no-deprecated` | Exclude deprecated content. |
+| `--verified` | Restrict to verified content. |
+| `--ingested-after` | Only chunks ingested on/after this ISO date (`YYYY-MM-DD`). |
+| `--ingested-before` | Only chunks ingested on/before this ISO date (`YYYY-MM-DD`). |
+| `--min-tokens` | Minimum chunk token count. |
+| `--max-tokens` | Maximum chunk token count. |
+| `--filter-json` | Full filter object as JSON. Mutually exclusive with the granular filter flags above. |
+
+Run `mnm search --help` for the authoritative list.
 
 See [Searching with the CLI](/docs/cli/searching) for usage patterns.
 
