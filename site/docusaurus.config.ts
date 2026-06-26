@@ -80,6 +80,7 @@ const config: Config = {
       title: 'Midnight Manual',
       items: [
         { to: '/docs/intro', label: 'Get started', position: 'left' },
+        { to: '/docs/mcp/how-it-works', label: 'MCP server', position: 'left' },
         { href: 'https://github.com/devrelaicom/midnight-manual', label: 'GitHub', position: 'right' },
       ],
     },
