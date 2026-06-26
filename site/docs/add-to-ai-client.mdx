@@ -1,0 +1,46 @@
+---
+id: add-to-ai-client
+title: Add to your AI client
+sidebar_position: 3
+---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+# Add to your AI client
+
+`mnm mcp serve` speaks MCP (JSON-RPC 2.0) over stdio. One command wires it into your assistant as an MCP tool.
+
+<Tabs>
+  <TabItem value="claude-code" label="Claude Code" default>
+
+```bash
+claude mcp add midnight-manual -- mnm mcp serve
+```
+
+  </TabItem>
+  <TabItem value="codex" label="Codex">
+
+Add to `~/.codex/config.toml`:
+
+```toml
+# ~/.codex/config.toml
+[mcp_servers.midnight-manual]
+command = "mnm"
+args = ["mcp", "serve"]
+```
+
+  </TabItem>
+  <TabItem value="cursor" label="Cursor">
+
+Add to `~/.cursor/mcp.json` (global) or `.cursor/mcp.json` (per-project):
+
+```json
+// ~/.cursor/mcp.json
+{ "mcpServers": { "midnight-manual": { "command": "mnm", "args": ["mcp", "serve"] } } }
+```
+
+  </TabItem>
+</Tabs>
+
+Restart your client, then ask a Midnight question. Your assistant will reach for the `search` tool, pull back grounded passages, and cite the source it used.
