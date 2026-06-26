@@ -28,7 +28,12 @@ const config: Config = {
   projectName: 'midnight-manual',
 
   onBrokenLinks: 'throw',
-  onBrokenMarkdownLinks: 'throw',
+
+  markdown: {
+    hooks: {
+      onBrokenMarkdownLinks: 'throw',
+    },
+  },
 
   i18n: {
     defaultLocale: 'en',
