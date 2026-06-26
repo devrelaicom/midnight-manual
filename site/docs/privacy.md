@@ -65,7 +65,7 @@ When telemetry is enabled, events are written at emit time to a crash-safe on-di
 
 The promises above are enforced by a continuous test suite in `crates/mnm-telemetry/src/canary.rs`. Each event type is checked by asserting it carries no forbidden substrings from the canary set — the assertion runs at the per-event level. Integration tests inject local query probes and assert they do not appear in logs or responses. **Any match fails the build.**
 
-The canary set is sourced from the Gauge `FORBIDDEN_SUBSTRINGS` constant, which includes `"@"` as a probe prefix — any string constructed as `"@" + some_token` will be caught by `find_first_match` before the event is emitted.
+The canary set is sourced from the Gauge `FORBIDDEN_SUBSTRINGS` constant, which includes `"@"` as a probe prefix — any string constructed as `"@" + some_token` will be caught by the canary test, which fails the build before it ships.
 
 ## Query text and the corpus
 
