@@ -56,6 +56,23 @@ const config: Config = {
     ],
   ],
 
+  themes: [
+    ['@easyops-cn/docusaurus-search-local', { hashed: true, indexBlog: false }],
+  ],
+
+  plugins: [
+    ['@signalwire/docusaurus-plugin-llms-txt', {
+      content: {
+        enableMarkdownFiles: true,
+        enableLlmsFullTxt: false,
+        includeDocs: true,
+        includeBlog: false,
+        includePages: false,
+        excludeRoutes: ['/search'],
+      },
+    }],
+  ],
+
   themeConfig: {
     image: 'img/og.png',
     colorMode: { defaultMode: 'light', respectPrefersColorScheme: true },
