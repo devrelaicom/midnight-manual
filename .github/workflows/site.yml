@@ -16,6 +16,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
+        with:
+          # `uses:` steps don't honor `defaults.run.working-directory`, so point
+          # action-setup at site/package.json to read its `packageManager` field.
+          package_json_file: site/package.json
       - uses: actions/setup-node@v4
         with:
           node-version-file: site/.nvmrc
