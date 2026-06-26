@@ -5,7 +5,7 @@ sidebar_label: Embeddings
 
 # Embeddings and third-party processing
 
-Telemetry is the easy half of the privacy story — it carries no content at all. Embedding is the harder half, because a search query *is* content, and turning it into a vector means a model has to read it. This page documents exactly where your text goes.
+Telemetry is the easy half of the privacy story: it carries no content at all. Embedding is the harder half, because a search query *is* content, and turning it into a vector means a model has to read it. This page documents exactly where your text goes.
 
 Source: README `## Embeddings & third-party processing` section.
 
@@ -13,7 +13,7 @@ Source: README `## Embeddings & third-party processing` section.
 
 ## The corpus is public
 
-The indexed corpus is built from **public Midnight repositories** — the docs site and open-source code. Nothing private is in it, and nothing you search reveals anything to other users. What follows is only about where *your query text* travels on its way to a vector.
+The indexed corpus is built from **public Midnight repositories**: the docs site and open-source code. Nothing private is in it, and nothing you search reveals anything to other users. What follows is only about where *your query text* travels on its way to a vector.
 
 ---
 
@@ -23,10 +23,10 @@ Query embedding uses VoyageAI's contextualized `voyage-context-3` model (1024-di
 
 | Path | When it applies | What text reaches Voyage |
 |---|---|---|
-| **BYOK** (bring your own key) | A Voyage key is configured | Your client embeds directly against **your own** Voyage account — query text is sent to Voyage under your account. |
+| **BYOK** (bring your own key) | A Voyage key is configured | Your client embeds directly against **your own** Voyage account; query text is sent to Voyage under your account. |
 | **Server-proxy** | No Voyage key configured | Your client POSTs raw query text to the hosted server's `/v1/embeddings`, which calls Voyage under the **operator's** platform account. Your query text reaches Voyage under their account. |
 
-Either way the query text reaches Voyage; the only question is *whose* Voyage account processes it. There is no path that embeds entirely on your machine — the embedder is remote by design.
+Either way the query text reaches Voyage; the only question is *whose* Voyage account processes it. There is no path that embeds entirely on your machine; the embedder is remote by design.
 
 The server records only **token counts** against a **subject key** (the client IP or your SSO user id) for budget accounting. It never logs or persists the submitted query text.
 
@@ -34,7 +34,7 @@ The server records only **token counts** against a **subject key** (the client I
 
 ## Server-side reranking
 
-When server-side reranking is enabled (the default), the search query — plus any `rerank_instructions` — and the text of candidate result chunks are sent to VoyageAI's rerank API. This is the same third-party exposure class as the embeddings proxy. To opt out:
+When server-side reranking is enabled (the default), the search query (plus any `rerank_instructions`) and the text of candidate result chunks are sent to VoyageAI's rerank API. This is the same third-party exposure class as the embeddings proxy. To opt out:
 
 - Send `rerank: false` in `advanced_search` (MCP tool)
 - Pass `--rerank off` on the CLI
@@ -66,7 +66,7 @@ Precedence is the standard **flag › env › config**.
 
 ## Reranking — placement and models
 
-Reranking is a VoyageAI call. When it runs (on by default), the query, any `rerank_instructions`, and the candidate passages reach Voyage — the same third-party exposure class as embedding. Where the call originates depends on your placement:
+Reranking is a VoyageAI call. When it runs (on by default), the query, any `rerank_instructions`, and the candidate passages reach Voyage; this is the same third-party exposure class as embedding. Where the call originates depends on your placement:
 
 | Placement | When `auto` picks it | What happens |
 |---|---|---|

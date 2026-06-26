@@ -5,7 +5,7 @@ sidebar_label: Configuration
 
 # Configuration reference
 
-Configuration resolves in a clear precedence order: **command-line flag › environment variable › config file › compiled-in default**. You can override anything at any layer without touching the others.
+Configuration resolves in a fixed precedence order: **command-line flag › environment variable › config file › compiled-in default**. You can override anything at any layer without touching the others.
 
 Source: README `## Configuration` section.
 
@@ -95,7 +95,7 @@ show_admin_cmds = false
 
 | Variable | Description |
 |---|---|
-| `MIDNIGHT_MANUAL_SERVER` | Corpus URL — same effect as `--server`. |
+| `MIDNIGHT_MANUAL_SERVER` | Corpus URL, same effect as `--server`. |
 | `MIDNIGHT_MANUAL_CONFIG` | Config file path. |
 | `MIDNIGHT_MANUAL_DISABLE_TELEMETRY` | Set to `1` to opt out of telemetry. |
 | `MIDNIGHT_MANUAL_GAUGE_ENDPOINT` | Override the Gauge telemetry endpoint (default `https://gauge-telemetry.fly.dev`). |

@@ -6,9 +6,9 @@ description: What the midnight-advanced-search skill teaches, how to install it 
 
 # The Advanced Search skill
 
-The MCP server gives your assistant the power tools — hybrid retrieval, reranking, trust scoring, chunk navigation. The **`midnight-advanced-search` skill** teaches it the technique: how to combine those tools like a seasoned researcher instead of firing one naive query and hoping.
+The MCP server gives your assistant hybrid retrieval, reranking, trust scoring, and chunk navigation. The **`midnight-advanced-search` skill** teaches the technique: how to combine those tools like a seasoned researcher instead of firing one naive query and hoping.
 
-It is a persistent, auto-loaded Agent Skill (`SKILL.md`). Once installed, your agent reaches for the right retrieval pattern on its own — no prompting required.
+It is a persistent, auto-loaded Agent Skill (`SKILL.md`). Once installed, your agent reaches for the right retrieval pattern on its own, no prompting required.
 
 ## What the skill teaches
 
@@ -24,7 +24,7 @@ It is a persistent, auto-loaded Agent Skill (`SKILL.md`). Once installed, your a
 | **Trust-weighted selection** | Ranks and prunes on each result's `trust_score` and `confidence_factors` (attribution, verification, freshness, version-match). | Authoritative, version-matched sources rise; stale or deprecated ones sink. |
 | **Cross-source comparison** | Pulls from multiple sources and surfaces disagreement instead of silently picking one. | Compensates for the deliberate absence of automatic contradiction detection. |
 
-Worked examples for every pattern — the exact query array, the resulting `advanced_search` call, and the token cost — are folded into the bundled skill file.
+Worked examples for every pattern (the exact query array, the resulting `advanced_search` call, and the token cost) are folded into the bundled skill file.
 
 ## Install in one step
 

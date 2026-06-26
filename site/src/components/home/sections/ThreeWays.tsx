@@ -11,17 +11,17 @@ export default function ThreeWays(): ReactNode {
           <div className={styles.card}>
             <p className={styles.cardMeta}>// IN YOUR AI CLIENT</p>
             <p className={styles.cardTitle}>As an MCP tool</p>
-            <p>Drop one command into Claude Code, Codex, or Cursor — your assistant gains grounded search, navigation, and citations.</p>
+            <p>Drop one command into Claude Code, Codex, or Cursor, and your assistant gains grounded search with citations.</p>
           </div>
           <div className={styles.card}>
             <p className={styles.cardMeta}>// IN YOUR TERMINAL</p>
             <p className={styles.cardTitle}>As a CLI</p>
-            <p>Search the corpus, read results in context, and manage settings with <code>mnm</code>. Add <code>--json</code> to anything to script it.</p>
+            <p>Search the corpus and read results in context with <code>mnm</code>. Add <code>--json</code> to anything to script it.</p>
           </div>
           <div className={styles.card}>
             <p className={styles.cardMeta}>// HOSTED FOR YOU</p>
             <p className={styles.cardTitle}>No server to run</p>
-            <p>The indexed corpus is hosted by default — most people never run a server. It&rsquo;s built in, so search works the moment you install.</p>
+            <p>The indexed corpus is hosted by default, so most people never run a server. Search works the moment you install.</p>
           </div>
         </div>
       </div>

@@ -15,10 +15,10 @@ Self-hosting exists for teams who need control that the hosted instance cannot g
 The hosted instance is the right choice if:
 
 - You are working with the public Midnight corpus (docs, SDKs, example repos, partner code).
-- You want zero infrastructure to maintain — no Postgres, no Fly.io, no VoyageAI API key to manage.
+- You want zero infrastructure to maintain: no Postgres, no Fly.io, no VoyageAI API key to manage.
 - You are comfortable with the hosted rate limits and the standard [tiered access](/docs/mcp/rate-limits) model (anonymous, GitHub-OAuth uplift, admin).
 
-The hosted server is `midnight-manual-server` — a single self-contained binary — running on Fly.io against Fly Managed Postgres with the `pgvector` extension. It uses dual VoyageAI embeddings (`voyage-context-3` for general chunks, `voyage-code-3` for code) and inline reranking. The API surface, rate-limit tiers, and corpus contents are the same whether you hit it via MCP or the CLI.
+The hosted server is `midnight-manual-server`, a single self-contained binary, running on Fly.io against Fly Managed Postgres with the `pgvector` extension. It uses dual VoyageAI embeddings (`voyage-context-3` for general chunks, `voyage-code-3` for code) and inline reranking. The API surface, rate-limit tiers, and corpus contents are the same whether you hit it via MCP or the CLI.
 
 ## When self-hosting makes sense
 
@@ -35,11 +35,11 @@ The hosted server is `midnight-manual-server` — a single self-contained binary
 The server requires:
 
 - **PostgreSQL 16** with the `pgvector` extension (HNSW index for vector search, GIN index for full-text).
-- A **VoyageAI API key** for embedding and reranking (or BYOK from the CLI side — without a server key, `/v1/embeddings` returns 503 and reranking degrades to RRF order).
+- A **VoyageAI API key** for embedding and reranking, or BYOK from the CLI side. Without a server key, `/v1/embeddings` returns 503 and reranking degrades to RRF order.
 - A **JWT signing secret** (`MIDNIGHT_MANUAL_JWT_SECRET`, HS256, ≥ 32 bytes).
 - A **user store** TOML listing your admin principals and their Ed25519 public keys.
 
-The binary runs automatic migrations at boot (`MIDNIGHT_MANUAL_AUTO_MIGRATE=true`), exposes `/healthz` (liveness) and `/readyz` (readiness), and propagates request IDs on every response. There is no embedded UI — the server is an API only.
+The binary runs automatic migrations at boot (`MIDNIGHT_MANUAL_AUTO_MIGRATE=true`), exposes `/healthz` (liveness) and `/readyz` (readiness), and propagates request IDs on every response. There is no embedded UI; the server is an API only.
 
 See [Cloud server & deploy](./cloud-server.md) for the complete provisioning runbook.
 

@@ -6,7 +6,7 @@ description: How Midnight Manual manages admin principals — Ed25519 keypairs, 
 
 # Users & access
 
-Midnight Manual uses **Ed25519 challenge-response** for admin authentication — no passwords, no shared secrets at rest, just public keys in a TOML store. Principals are managed with three CLI commands: `mnm keys`, `mnm users`, and `mnm login`.
+Midnight Manual authenticates admins with **Ed25519 challenge-response**. There are no passwords and no shared secrets at rest, only public keys in a TOML store. Three CLI commands manage the principals: `mnm keys`, `mnm users`, and `mnm login`.
 
 Admin commands are hidden by default. Reveal them with:
 
@@ -47,7 +47,7 @@ Two roles:
 | `admin` | Full surface including `/v1/admin/*` (source CRUD, rate-limit and token-limit management, user management). |
 | `writer` | Ingest writes and all read endpoints. Cannot reach `/v1/admin/*` beyond ingest. |
 
-The store is the authority for `user_id → public_key + role` lookups. The server loads it at boot from the environment variable and never mutates it at runtime. Updating the roster is a "edit local file → redeploy" flow (the CLI prints a deploy-warning after every mutation as a reminder).
+The store is the authority for `user_id → public_key + role` lookups. The server loads it at boot from the environment variable and never mutates it at runtime. Updating the roster means editing the local file and redeploying; the CLI prints a deploy-warning after every mutation as a reminder.
 
 ## Generating a keypair
 
@@ -70,7 +70,7 @@ Useful flags:
 | Flag | Description |
 |---|---|
 | `--dry-run` | Print the intended write path and public key without touching the filesystem. |
-| `--force` | Overwrite an existing `<user_id>.private`. Refused by default — the CLI will not silently rotate a live key. |
+| `--force` | Overwrite an existing `<user_id>.private`. Refused by default; the CLI will not silently rotate a live key. |
 
 ## Managing users
 
@@ -121,13 +121,13 @@ mnm login --user-id alice
 
 `mnm login` runs the Ed25519 challenge-response handshake:
 
-1. Loads the local signing key from `<config_home>/midnight-manual/keys/<user_id>.private` (chmod-checked on Unix — fails if the file is group- or world-readable).
-2. `POST /v1/auth/challenge {user_id}` → `{challenge_id, nonce_b64}`.
+1. Loads the local signing key from `<config_home>/midnight-manual/keys/<user_id>.private` (chmod-checked on Unix: the load fails if the file is group- or world-readable).
+2. `POST /v1/auth/challenge {user_id}` -> `{challenge_id, nonce_b64}`.
 3. Decodes the nonce, signs it with the local key, base64-encodes the signature.
-4. `POST /v1/auth/verify {challenge_id, signature_b64}` → `{token, user_id, expires_at}`.
+4. `POST /v1/auth/verify {challenge_id, signature_b64}` -> `{token, user_id, expires_at}`.
 5. Persists `{token, expires_at}` to `<config_home>/midnight-manual/auth.toml` under `[admin]` with mode `0o600`.
 
-The token is an HS256 JWT carrying the role and an auth tier. It is never logged or printed — `--json` output carries `user_id` and `expires_at` but not the token bytes.
+The token is an HS256 JWT carrying the role and an auth tier. It is never logged or printed; `--json` output carries `user_id` and `expires_at` but not the token bytes.
 
 ```bash
 mnm login --user-id alice
@@ -137,11 +137,11 @@ mnm login --user-id alice
 mnm login --user-id alice --dry-run
 ```
 
-Subsequent CLI commands that need admin access (ingest run, versions rollback, ratelimits add, …) read the token from `auth.toml` automatically. If the token is missing or expired, the command exits with a clear `run mnm login --user-id <id>` error before any network call.
+Subsequent CLI commands that need admin access (ingest run, versions rollback, ratelimits add, and others) read the token from `auth.toml` automatically. If the token is missing or expired, the command exits with a clear `run mnm login --user-id <id>` error before any network call.
 
 ## GitHub OAuth read-uplift
 
-GitHub OAuth is a separate concept from the Ed25519 admin flow. Members of the configured GitHub org can exchange an OAuth flow for a **read-uplift** JWT that bumps their rate-limit tier (see the MCP rate-limits page). A read-uplift token carries no role and can never gain write access — the tier guard runs before the role guard.
+GitHub OAuth is separate from the Ed25519 admin flow. Members of the configured GitHub org can exchange an OAuth flow for a **read-uplift** JWT that bumps their rate-limit tier (see the MCP rate-limits page). A read-uplift token carries no role and can never gain write access; the tier guard runs before the role guard.
 
 The OAuth endpoints (`/v1/auth/github/*`) are configured server-side via `MIDNIGHT_MANUAL_GITHUB_*` secrets; they do not appear in `users.toml`.
 

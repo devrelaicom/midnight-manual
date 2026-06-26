@@ -6,7 +6,7 @@ description: Architecture and full provisioning runbook for midnight-manual-serv
 
 # Cloud server & deploy
 
-`midnight-manual-server` is the corpus host. Most people never run it — they use the hosted instance. But it is a single self-contained binary if you want your own.
+`midnight-manual-server` is the corpus host. Most people never run it; they use the hosted instance. It is a single self-contained binary if you want your own.
 
 ## Architecture
 
@@ -15,7 +15,7 @@ description: Architecture and full provisioning runbook for midnight-manual-serv
 - **Auth:** Ed25519 challenge-response for admin principals; GitHub OAuth for read-uplift tokens; HS256 JWTs signed with `MIDNIGHT_MANUAL_JWT_SECRET`.
 - **Tiered rate limiting.** Anonymous traffic is limited per-IP. Signing in via GitHub OAuth raises the limit for 30 days. Admins can add per-CIDR overrides. A tier guard runs before the role guard, so a read-uplift token can never gain write access.
 - **Health endpoints:** `/healthz` (liveness) and `/readyz` (readiness after the DB pool and model registry are loaded). Request-ID propagation on every request for traceability.
-- **Ships small.** Multi-stage Docker build onto `gcr.io/distroless/cc-debian12` (no shell, no toolchain), built for `linux/amd64` and `linux/arm64`. Server deploys are always operator-run — not wired into CI.
+- **Small image.** Multi-stage Docker build onto `gcr.io/distroless/cc-debian12` (no shell, no toolchain), built for `linux/amd64` and `linux/arm64`. Server deploys are always operator-run, not wired into CI.
 
 ## Running locally against Postgres
 
@@ -66,7 +66,7 @@ flyctl mpg create \
     --pgvector
 ```
 
-Attach the cluster to the app — this sets `DATABASE_URL` automatically:
+Attach the cluster to the app, which sets `DATABASE_URL` automatically:
 
 ```bash
 flyctl mpg list
@@ -138,7 +138,7 @@ flyctl secrets set VOYAGE_API_KEY=<voyage-platform-key> \
 
 Without `VOYAGE_API_KEY`, `/v1/embeddings` returns **503** and inline reranking degrades to RRF order. The rest of the server still boots and serves reads.
 
-Before pointing real traffic at the proxy, enable **zero-retention** on the Voyage account whose key the server uses — training disabled, no data retention. Non-BYOK callers' query text flows through this account, so zero-retention is what keeps query text from being retained upstream.
+Before pointing real traffic at the proxy, enable **zero-retention** on the Voyage account whose key the server uses: training disabled, no data retention. Non-BYOK callers' query text flows through this account, so zero-retention is what keeps it from being retained upstream.
 
 ### 7. Deploy
 
@@ -147,7 +147,7 @@ flyctl deploy --app midnight-manual
 flyctl logs --app midnight-manual
 ```
 
-Expected boot sequence in the logs: "resolved active embedding model" → "starting midnight-manual-server" → migrations applied → listener bound on `:8080`.
+Expected boot sequence in the logs: "resolved active embedding model" -> "starting midnight-manual-server" -> migrations applied -> listener bound on `:8080`.
 
 ### 8. Smoke test
 
@@ -202,7 +202,7 @@ The following variables configure server behaviour. Secrets should be set via `f
 | `503` on `/v1/auth/github/*` | Any of the four `MIDNIGHT_MANUAL_GITHUB_*` secrets missing. |
 | `409 embedding_model_mismatch` from a CLI | Client embedding-model id does not match the active corpus model. Run `mnm models pull` and retry. |
 | `relation "chunk" does not exist` in logs | `pgvector` extension missing or `MIDNIGHT_MANUAL_AUTO_MIGRATE=false` and migrations not applied. |
-| `failed to resolve active embedding model` at boot | `embedding_model` table empty — migration `0006_seed_embedding_model.sql` did not apply. |
+| `failed to resolve active embedding model` at boot | `embedding_model` table empty: migration `0006_seed_embedding_model.sql` did not apply. |
 
 ## Related pages
 

@@ -10,15 +10,15 @@ export default function Privacy(): ReactNode {
         <div className={`${styles.cards} ${styles.grid3}`} style={{marginTop: '26px'}}>
           <div className={styles.card}>
             <p className={styles.cardTitle}>Never logged</p>
-            <p>Searching runs against the hosted corpus, which records only counts — never your query text or the passages you read.</p>
+            <p>Searching runs against the hosted corpus, which records only counts, never your query text or the passages you read.</p>
           </div>
           <div className={styles.card}>
             <p className={styles.cardTitle}>Opt out anytime</p>
-            <p>Anonymous usage stats carry no queries, content, or paths. Turn them off with an env var, a config flag, or <code>mnm telemetry disable</code>.</p>
+            <p>Anonymous usage stats carry no query text or document content. Turn them off with an env var, a config flag, or <code>mnm telemetry disable</code>.</p>
           </div>
           <div className={styles.card}>
             <p className={styles.cardTitle}>Leak-tested</p>
-            <p>A continuous test pushes fake secrets through every path that touches your text — any leak fails the build before it ships.</p>
+            <p>A continuous test pushes fake secrets through every path that touches your text; any leak fails the build before it ships.</p>
           </div>
         </div>
       </div>

@@ -139,7 +139,7 @@ Show where a chunk sits in its source's structure: the chain of containing nodes
 
 ### `get_document`
 
-Fetch a document's metadata plus an ordered skeleton of its chunks (ids, positions, token counts — no bodies). Use to size up a document before reading it with `get_document_chunks`.
+Fetch a document's metadata plus an ordered skeleton of its chunks (ids, positions, token counts, no bodies). Use to size up a document before reading it with `get_document_chunks`.
 
 **Input parameters**
 
@@ -147,7 +147,7 @@ Fetch a document's metadata plus an ordered skeleton of its chunks (ids, positio
 |---|---|---|
 | `id` | UUID string (required) | Document id. |
 
-**Output** — document metadata with chunk skeleton (ids and positions, no bodies).
+**Output** — document metadata with chunk skeleton (ids, positions, and token counts; no bodies).
 
 ---
 
@@ -223,7 +223,7 @@ Diagnose the retrieval setup: cloud reachability, authentication and rate-limit 
 
 ### `install_search_skill`
 
-Install (or update) the `midnight-advanced-search` skill — a retrieval playbook teaching effective corpus search patterns — into the user's AI harness(es). Use when search results are poor or the user asks for better search guidance.
+Install (or update) the `midnight-advanced-search` skill, a retrieval playbook teaching effective corpus search patterns, into the user's AI harness(es). Use when search results are poor or the user asks for better search guidance.
 
 **Input parameters**
 

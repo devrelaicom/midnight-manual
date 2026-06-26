@@ -6,7 +6,7 @@ description: How to use mnm ingest plan and mnm ingest run to get content into y
 
 # Running an ingest
 
-An ingest needs two things: a **manifest** (what to ingest and how to attribute it) and a **source root** (where the files live). With those in place, `mnm ingest run` does everything else — walks, chunks, embeds, uploads, and finalizes atomically.
+An ingest needs two things: a **manifest** (what to ingest and how to attribute it) and a **source root** (where the files live). With those in place, `mnm ingest run` handles the rest. It walks the tree, chunks each file, embeds the chunks, uploads them in batches, and finalizes the new version atomically.
 
 Admin commands are hidden by default. Reveal them with:
 
@@ -16,11 +16,11 @@ export MIDNIGHT_MANUAL_SHOW_ADMIN_CMDS=1
 
 ## Embedding and BYOK
 
-Ingestion embeds every chunk through VoyageAI. For bulk runs, set `VOYAGE_API_KEY` to embed directly against your own account (BYOK); otherwise embedding is proxied by the server and counts against its token budget. Large batches can take tens of seconds — widen the per-request timeout with `--voyage-timeout-secs <N>` (env `VOYAGE_TIMEOUT_SECS`, default 120).
+Ingestion embeds every chunk through VoyageAI. For bulk runs, set `VOYAGE_API_KEY` to embed directly against your own account (BYOK); otherwise embedding is proxied by the server and counts against its token budget. Large batches can take tens of seconds. Widen the per-request timeout with `--voyage-timeout-secs <N>` (env `VOYAGE_TIMEOUT_SECS`, default 120).
 
 ## mnm ingest plan
 
-`ingest plan` walks the source tree and builds the ingest plan locally, without contacting the server for writes. It shows how many files would be chunked, how many are new versus carried from the previous version, and how many would be deleted — all without uploading anything.
+`ingest plan` walks the source tree and builds the ingest plan locally, without contacting the server for writes. It shows how many files would be chunked, how many are new versus carried from the previous version, and how many would be deleted, all without uploading anything.
 
 ```bash
 mnm ingest plan hierarchy.yaml --source-slug my-source
@@ -47,7 +47,7 @@ plan for source `my-source` (rev abc1234):
     deleted      0 documents
 ```
 
-Plan output is conservative: it over-reports new documents for code sources (because it has no code-model flag) and degrades to an all-new classification if it cannot reach the server. That makes it safe to act on — it never under-reports.
+Plan output is conservative: it over-reports new documents for code sources (because it has no code-model flag) and degrades to an all-new classification if it cannot reach the server. That makes it safe to act on; it never under-reports.
 
 ## mnm ingest run
 
@@ -97,11 +97,11 @@ mnm ingest run hierarchy.yaml \
   --source-root ./midnight-docs
 ```
 
-The CLI chunks every file, embeds each chunk through VoyageAI, uploads in batches, and finalizes the new version — atomically promoting it live when the run completes.
+The CLI chunks every file, embeds each chunk through VoyageAI, uploads the chunks in batches, and finalizes the new version, promoting it live atomically once the run completes.
 
 ### Example B — ingest a code repo without hand-writing a manifest
 
-For source repos you do not need to author a manifest by hand — let `mnm manifest generate` walk the tree (honouring `.gitignore`) and build the manifest for you, then ingest it:
+For source repos you do not need to author a manifest by hand. Let `mnm manifest generate` walk the tree (honouring `.gitignore`) and build the manifest for you, then ingest it:
 
 ```bash
 # OpenZeppelin's Compact contracts
@@ -123,7 +123,7 @@ mnm ingest run kitties.yaml \
     --source-root ./example-kitties
 ```
 
-The `.compact`, `.ts`, and `.tsx` files are chunked with full symbol awareness, so a search for a specific circuit or contract lands on exactly that definition — attributed back to the OpenZeppelin or Midnight source it came from.
+The `.compact`, `.ts`, and `.tsx` files are chunked with full symbol awareness, so a search for a specific circuit or contract lands on exactly that definition, attributed back to the OpenZeppelin or Midnight source it came from.
 
 ## What the output tells you
 
@@ -133,7 +133,7 @@ A successful run prints something like:
 finalized revision 3 (demoted revision 2); +8 new, 34 carried
 ```
 
-`new` is documents added for the first time or whose content changed. `carried` is documents whose content hash matched the prior version — chunks were re-linked, not re-embedded.
+`new` is documents added for the first time or whose content changed. `carried` is documents whose content hash matched the prior version; their chunks were re-linked, not re-embedded.
 
 If any documents conflicted (the server refused to carry or insert them), they appear in the summary and are logged at `WARN` level. The run still finalizes if conflicts are all injection rejections; it aborts if any conflict cannot be resolved.
 

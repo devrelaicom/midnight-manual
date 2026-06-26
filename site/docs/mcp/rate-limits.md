@@ -6,13 +6,13 @@ description: Tiers, the uplift mechanism, and how to boost limits for hackathons
 
 # Rate limits
 
-The hosted corpus is open and anonymous — no key required to search. Rate limiting keeps it fast and fair for everyone.
+The hosted corpus is open and anonymous; no key is required to search. Rate limiting keeps it fast and fair for everyone.
 
 Limits are enforced by a per-request **token bucket**: each tier gets a refill rate in requests per second, and the bucket holds one second's worth of burst. Every response carries `x-ratelimit-limit`, `x-ratelimit-remaining`, and `x-ratelimit-reset`. Exceeding your budget returns `429 Too Many Requests` with a `Retry-After` header.
 
 ## Tiers
 
-Your tier is resolved per request in this order: **CIDR override → admin → read-uplift → anonymous**. You are charged against the matching bucket.
+Your tier is resolved per request in this order: **CIDR override -> admin -> read-uplift -> anonymous**. You are charged against the matching bucket.
 
 | Tier | How you get it | Limit | Keyed by |
 |---|---|---|---|
@@ -27,7 +27,7 @@ Your tier is resolved per request in this order: **CIDR override → admin → r
 
 ## The uplift mechanism
 
-Anything beyond casual use should grab the free read-uplift — a **6× lift** (10 → 60 req/s) at no cost:
+Anything beyond casual use should grab the free read-uplift: a **6× lift** (10 -> 60 req/s) at no cost:
 
 ```bash
 mnm auth github      # opens GitHub OAuth; mints a 30-day read-uplift token
@@ -36,11 +36,11 @@ mnm auth status      # show the active token and its expiry
 
 The token is a 30-day JWT (configurable 1–90 days) stored in your local auth file. The CLI and MCP server send it automatically with every request.
 
-A read-uplift token **only raises your rate limit**. It can never write to the corpus — the tier guard runs before the role check — so it is safe to mint freely. The 30-day life also outlasts a long-running session; an admin token's one-hour window would not.
+A read-uplift token **only raises your rate limit**. It can never write to the corpus; the tier guard runs before the role check, so it is safe to mint freely. The 30-day life also outlasts a long-running session; an admin token's one-hour window would not.
 
 ## Boosting limits for hackathons and events
 
-Running a workshop where a room full of people share an IP or NAT range? An admin can grant a **per-CIDR override** that lifts everyone behind that network block for a fixed window — no per-attendee signup required:
+When a room of attendees shares one IP or NAT range, an admin can grant a **per-CIDR override** that lifts everyone behind that network block for a fixed window, with no per-attendee signup:
 
 ```bash
 # Lift an entire venue's network to 200 req/s for the weekend
@@ -51,7 +51,7 @@ mnm ratelimits extend <id> --ttl 24h   # give it more time
 mnm ratelimits remove <id>             # revoke early
 ```
 
-Overrides are time-boxed — they expire on their `--ttl`. The server refreshes its override cache every ~30 seconds, so grants and revocations take effect promptly. This is the recommended path for events: far simpler than minting tokens for every participant.
+Overrides are time-boxed; they expire on their `--ttl`. The server refreshes its override cache every ~30 seconds, so grants and revocations take effect promptly. This is the recommended path for events: far simpler than minting tokens for every participant.
 
 ## Self-hosting
 

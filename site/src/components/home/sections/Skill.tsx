@@ -23,7 +23,7 @@ export default function Skill(): ReactNode {
           </div>
           <div className={styles.card}>
             <p className={styles.cardTitle}>Cross-checks sources</p>
-            <p>When sources disagree it surfaces the conflict rather than quietly picking one.</p>
+            <p>When sources disagree it surfaces the conflict rather than picking one for you.</p>
           </div>
           <div className={styles.card}>
             <p className={styles.cardTitle}>Weighs the evidence</p>

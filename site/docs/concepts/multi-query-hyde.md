@@ -6,7 +6,7 @@ description: How advanced_search fuses multiple query formulations with RRF to i
 
 # Multi-query & HyDE
 
-A single query rarely captures all the ways a corpus might express the answer you want. `advanced_search` accepts an array of queries and fuses them — using the same [Reciprocal Rank Fusion](./hybrid-retrieval.md) mechanism — into a single ranked result list. The technique unlocks two powerful patterns: **multi-query retrieval** and **HyDE** (hypothetical document embeddings).
+A single query rarely captures all the ways a corpus might phrase the answer you want. `advanced_search` accepts an array of queries and fuses them into one ranked result list, using the same [Reciprocal Rank Fusion](./hybrid-retrieval.md) mechanism. This supports two patterns: **multi-query retrieval** and **HyDE** (hypothetical document embeddings).
 
 ## How multi-query works
 
@@ -17,11 +17,11 @@ A single query rarely captures all the ways a corpus might express the answer yo
 3. De-duplicates hits that appear in multiple lists (they earn a higher fused score from multiple lists rather than appearing twice).
 4. Returns a unified ranked result with diagnostics showing which queries contributed.
 
-The rate-limit cost is `max(1, N)` distinct queries — so a two-query call costs two query credits, not one. This is by design: the server does real work per formulation and bills it honestly.
+The rate-limit cost is `max(1, N)` distinct queries, so a two-query call costs two query credits, not one. This is deliberate: the server does real work per formulation and bills for it.
 
 ## HyDE: hypothetical document embeddings
 
-The core insight behind HyDE is this: embedding a *hypothetical answer* to your question often retrieves better results than embedding the question itself.
+HyDE works because embedding a hypothetical answer to your question often retrieves better results than embedding the question itself.
 
 Questions and answers live in different linguistic registers. A question ("how do I check authorization in a Compact circuit?") may embed poorly against a passage that directly answers it ("the `ownPublicKey()` function returns the caller's public key; compare it against a stored authorized key"). A hypothetical answer written in the same register as the documentation embeds far better.
 
@@ -40,7 +40,7 @@ The literal query catches any passage that uses those exact words. The hypotheti
 
 ## Step-back rephrasing
 
-A step-back rephrase moves from the specific to the general. If your literal query is about a specific error message, a step-back asks about the underlying concept — increasing the chance of finding background documentation that explains it.
+A step-back rephrase moves from the specific to the general. If your literal query targets a specific error message, a step-back asks about the underlying concept, which raises the chance of finding background documentation that explains it.
 
 **Example: specific query + step-back**
 
@@ -57,18 +57,18 @@ The specific query finds the exact passage if it exists. The step-back finds the
 
 ## Reading the diagnostics
 
-Every `advanced_search` response includes `search_metadata.per_query` diagnostics — one entry per formulation, showing how many candidates each query contributed and their score distribution. Each result also carries `scores.matched_queries`, an array of indices indicating which of your queries matched this result.
+Every `advanced_search` response includes `search_metadata.per_query` diagnostics, one entry per formulation, showing how many candidates each query contributed and their score distribution. Each result also carries `scores.matched_queries`, an array of indices marking which of your queries matched it.
 
 Use these diagnostics to see whether all your formulations are pulling their weight. A formulation with zero matches can be revised or dropped. A formulation that matches but ranks lower than you expected may point to a corpus gap.
 
 ## When to use multi-query
 
-Multi-query is most useful when:
+Reach for multi-query on a few specific shapes of question:
 
-- **You're unsure how the corpus phrases the concept.** Send both the user's words and the documentation's words.
-- **You have a narrow literal question and a broad contextual one.** Pair them to catch both exact hits and surrounding context.
-- **You want to boost recall before reranking.** More candidates entering the RRF pool means more chances for the reranker ([`rerank-2.5`](./models.md)) to surface the right passage.
-- **You're using the [Advanced Search skill](../mcp/advanced-search-skill.md).** The skill bundles these techniques into a reusable retrieval playbook for your AI client.
+- You're unsure how the corpus phrases a concept. Send both the user's words and the documentation's likely words.
+- You have a narrow literal question and a broad contextual one. Pair them to catch the exact hit and its surrounding context.
+- You want more recall before reranking. More candidates in the RRF pool gives the reranker ([`rerank-2.5`](./models.md)) more chances to surface the right passage.
+- You're working through the [Advanced Search skill](../mcp/advanced-search-skill.md), which bundles these techniques into a reusable retrieval playbook for your AI client.
 
 A single well-formed query is often enough. Multi-query pays off on hard questions where coverage matters.
 

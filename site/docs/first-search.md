@@ -17,8 +17,8 @@ mnm search "how do I mint a shielded token?"
 `mnm search` returns ranked, source-attributed results straight away. Each result includes:
 
 - A **confidence score** so you know how well the passage matches your query.
-- A **provenance breakdown** — a one-line summary of where the result came from and why it was ranked where it was.
-- The **source path** — the exact doc or source file the passage was pulled from.
+- A **provenance breakdown**: a one-line summary of where the result came from and why it ranked where it did.
+- The **source path**: the exact doc or source file the passage came from.
 
 Both embedding and reranking run through VoyageAI, proxied by the hosted server, so no API key is needed and no local model is downloaded. Reranking is on by default (`rerank-2.5`); pass `--rerank off` for lowest latency.
 

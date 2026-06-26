@@ -6,9 +6,9 @@ description: How Midnight Manual blends source trust with retrieval relevance to
 
 # Confidence = trust × relevance
 
-Most retrieval systems return a relevance score and stop there. Midnight Manual goes further: every result multiplies relevance by a **trust score** derived from where the content came from, how recently it was written, and whether it matches the version you care about.
+Most retrieval systems return a relevance score and stop there. Midnight Manual multiplies relevance by a **trust score** built from where the content came from, how recently it was written, and whether it matches the version you care about.
 
-The formula is intentionally explicit. Your AI assistant receives the per-factor breakdown with every hit, so it can explain *why* a passage ranked where it did — without a second round-trip.
+The formula is explicit on purpose. Your AI assistant receives the per-factor breakdown with every hit, so it can explain why a passage ranked where it did, with no second round-trip.
 
 ## The trust factors
 
@@ -16,19 +16,19 @@ Trust is a composite of five independent signals:
 
 ### Attribution tier
 
-Who published the content?
+Who published the content? Five tiers, each weighted differently:
 
-- **Foundation** — produced directly by the Midnight Network Foundation; highest trust.
-- **Partner** — produced by an accredited ecosystem partner.
-- **Third-party** — independent developer or community project.
-- **Community** — informal or crowdsourced contribution.
-- **Unknown** — provenance could not be established.
+- **Foundation**: produced directly by the Midnight Network Foundation; highest trust.
+- **Partner**: produced by an accredited ecosystem partner.
+- **Third-party**: independent developer or community project.
+- **Community**: informal or crowdsourced contribution.
+- **Unknown**: provenance could not be established.
 
-Each tier carries a different weight in the trust calculation. Foundation-authored content starts with a significant advantage; unknown-provenance content starts penalized.
+Foundation-authored content starts with a significant advantage; unknown-provenance content starts penalized.
 
 ### Verification status
 
-Has a human reviewed and vouched for the content? Verified content earns a boost; unverified content does not. The verification chain records *who* verified (Foundation, partner, or community member), so the boost is proportional to the verifier's authority.
+Has a human reviewed and vouched for the content? Verified content earns a boost; unverified content does not. The verification chain records who did the verifying (Foundation, partner, or community member), so the boost is proportional to the verifier's authority.
 
 ### Freshness
 
@@ -47,19 +47,19 @@ This is the sharpest factor. The corpus tracks which Compact language version, S
 - A **breaking mismatch** is excluded entirely.
 - In `strict` mode, only version-satisfying content passes at all.
 
-Version targets are extracted automatically at ingest — from `pragma language_version` in Compact files and from `package.json` / `Cargo.toml` manifests — so the corpus carries version metadata without any manual tagging.
+Version targets are extracted automatically at ingest (from `pragma language_version` in Compact files and from `package.json` / `Cargo.toml` manifests), so the corpus carries version metadata without manual tagging.
 
 ## Why the breakdown matters
 
-The confidence score is not a black box. Each result carries the factor breakdown, so:
+Nothing about the confidence score is hidden. Each result carries the factor breakdown, so:
 
 - An assistant can say "this is Foundation-authored, recently verified, and matches the SDK version you specified" rather than just "here is a result."
-- A downstream tool can filter on individual trust signals — for example, showing only verified content for a security-sensitive query.
+- A downstream tool can filter on individual trust signals (showing only verified content for a security-sensitive query, for example).
 - You can tune the weights without a rebuild: the scoring policy is loaded from a data file at runtime.
 
 ## How it interacts with retrieval
 
-Confidence does not replace the retrieval score — it multiplies it. A passage with high semantic relevance but zero trust (say, unverified community content from two years ago on a deprecated API) will rank behind a passage that is moderately relevant but Foundation-authored, recent, and version-matched.
+Confidence does not replace the retrieval score; it multiplies it. A passage with high semantic relevance but zero trust (say, unverified community content from two years ago on a deprecated API) ranks behind a passage that is moderately relevant but Foundation-authored, recent, and version-matched.
 
 The reranker ([`rerank-2.5`](./models.md)) sees the original candidates; the confidence multiplier is applied after reranking to produce the final order. This keeps the two signals orthogonal: the reranker optimizes for semantic fit; confidence adjusts for provenance.
 

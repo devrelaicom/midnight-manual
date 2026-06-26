@@ -68,7 +68,7 @@ mnm documents show <doc-id> --json
 
 ### `mnm documents chunks <doc-id>`
 
-Render a windowed slice of the document's chunks — useful for reading long documents section by section.
+Render a windowed slice of the document's chunks, for reading long documents section by section.
 
 ```bash
 mnm documents chunks <doc-id>                      # default: first 20 chunks

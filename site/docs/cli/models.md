@@ -6,9 +6,9 @@ description: mnm models — inspect the corpus's active embedding model and unde
 
 # Models
 
-`mnm models` lets you inspect the corpus's embedding model and prime the local cache directory. Both the embedder and the reranker run remotely on VoyageAI — **nothing is downloaded, run, or cached on your machine** (no Python, no ONNX, no model files, no GPU).
+`mnm models` lets you inspect the corpus's embedding model and prime the local cache directory. Both the embedder and the reranker run remotely on VoyageAI. **Nothing is downloaded, run, or cached on your machine** (no Python, no ONNX, no model files, no GPU).
 
-## The model landscape
+## What runs where
 
 | Role | Model | Where it runs | Notes |
 |---|---|---|---|
@@ -16,11 +16,11 @@ description: mnm models — inspect the corpus's active embedding model and unde
 | Code embedder | `voyage-code-3` | VoyageAI (remote) | A second vector on code chunks. At query time `code_mode` (`on`/`off`/`exclusive`) decides whether this code-vector list joins the RRF fusion. Forced `off` for `mode=fts`. |
 | Reranker | `rerank-2.5` (or `rerank-2.5-lite`) | VoyageAI (remote) | Used when reranking is requested (on by default). `rerank-2.5-lite` is lower latency and billed at half tokens server-side. |
 
-The corpus advertises its active embedding model as `name@revision` (e.g. `voyage-context-3@1`). If the corpus rolls the model forward, clients are told to re-embed against the new model rather than silently returning mis-scored results.
+The corpus advertises its active embedding model as `name@revision` (e.g. `voyage-context-3@1`). If the corpus rolls the model forward, clients are told to re-embed against the new model rather than return mis-scored results.
 
 ## `mnm models pull`
 
-Ensures the local model-cache directory exists. Because both models are remote VoyageAI, nothing is fetched — this subcommand only primes the directory.
+Ensures the local model-cache directory exists. Because both models are remote VoyageAI, nothing is fetched; this subcommand only primes the directory.
 
 ```bash
 mnm models pull

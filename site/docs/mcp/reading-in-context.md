@@ -6,11 +6,11 @@ description: The seven tools for walking from a search hit to its surrounding te
 
 # Reading a hit in context
 
-A search result is a **chunk** — a slice of a document. These tools let your assistant pull exactly as much surrounding context as it needs, instead of dumping whole files into the context window.
+A search result is a **chunk**, a slice of a document. These tools let your assistant pull exactly as much surrounding context as it needs, instead of dumping whole files into the context window.
 
 The typical flow is:
 
-1. Search → get `chunk_id` values in results
+1. Search -> get `chunk_id` values in results
 2. `get_chunks` — read the full text behind those ids
 3. `get_chunk_neighbors` or `get_chunk_next`/`get_chunk_prev` — expand outward if the hit needs more context
 4. `get_chunk_parents` — find which document and section a chunk belongs to
@@ -28,7 +28,7 @@ get_chunks(ids)
 |---|---|
 | `ids` | Array of 1–20 chunk UUIDs (from search results or other chunk tools). One id = a one-element array. |
 
-Do not fetch chunks one at a time — batch the top hits into a single call.
+Do not fetch chunks one at a time; batch the top hits into a single call.
 
 ## `get_chunk_next` and `get_chunk_prev` — walk in reading order
 
@@ -48,7 +48,7 @@ Use `get_chunk_next` to continue reading past the end of a chunk you already hav
 
 ## `get_chunk_neighbors` — both sides in one call
 
-Fetch a chunk plus `count` neighbours on each side — `prev` + the chunk + `next` — in one round-trip.
+Fetch a chunk plus `count` neighbours on each side (`prev` + the chunk + `next`) in one round-trip.
 
 ```
 get_chunk_neighbors(id, count?)
@@ -63,7 +63,7 @@ Use this when a search hit needs surrounding context to make sense. It saves two
 
 ## `get_chunk_parents` — orient a chunk in its source
 
-Walk the parent chain from a chunk up to the source-version root — document, folders, source.
+Walk the parent chain from a chunk up to the source-version root: document, folders, source.
 
 ```
 get_chunk_parents(id)
@@ -77,7 +77,7 @@ The response is a chain of parent nodes, each with `id`, `name`, `kind`, and (fo
 
 ## `get_document` — document overview
 
-Fetch a document's metadata plus an ordered skeleton of its chunks: id, chunk position, and token count — no chunk bodies.
+Fetch a document's metadata plus an ordered skeleton of its chunks: id, chunk position, and token count, but no chunk bodies.
 
 ```
 get_document(id)

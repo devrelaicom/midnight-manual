@@ -42,7 +42,7 @@ Diagnostic report covering auth state, corpus ingest summary, telemetry configur
 
 ### `status`
 
-Connectivity, authentication, and model readiness check. Exits non-zero when the cloud is unreachable, making it scriptable as a health probe.
+Connectivity, authentication, and model readiness check. Exits non-zero when the cloud is unreachable, so you can script it as a health probe.
 
 ---
 
@@ -68,7 +68,7 @@ Ad-hoc retrieval: `mnm search "query"`.
 | `--code-mode` | Code-vector fusion mode: `on` (default for hybrid/vector), `off`, or `exclusive` (code vectors replace the general vector list). Incompatible with `--mode fts`. |
 | `--rerank` | Where reranking runs: `auto` (default), `local` (BYOK Voyage), `server`, or `off`. |
 | `--rerank-model` | Voyage rerank model: `rerank-2.5` or `rerank-2.5-lite` (faster, half tokens server-side). |
-| `--rerank-instructions` | Natural-language rerank instruction (max 400 chars). Replaces the derived default. Keep terse — instruction tokens multiply by pool size. |
+| `--rerank-instructions` | Natural-language rerank instruction (max 400 chars). Replaces the derived default. Keep it terse; instruction tokens multiply by pool size. |
 | `--version-match` | Version-filter semantics: `permissive` (default) biases ranking; `strict` hard-filters. Only meaningful with a version-bearing filter. |
 
 **Granular filter flags**
@@ -116,7 +116,7 @@ Source registry inspection.
 | `show [slug]` | Show one source's metadata by slug (anonymous read). |
 | `create` | Register a new source (admin; requires admin bearer). |
 | `update` | Update an existing source (admin). |
-| `retire` | Retire a source — soft-delete, not reversible via the CLI (admin). |
+| `retire` | Retire a source: soft-delete, not reversible via the CLI (admin). |
 | `list-all` | List every source including retired ones (admin). |
 
 ---
@@ -130,7 +130,7 @@ Source-version inspection.
 | `list <slug>` | List all source versions for a slug (anonymous read). |
 | `show <slug> <revision>` | Show one source version by revision (anonymous read). |
 | `promote <slug> --revision N` | Promote a historical version back to active (admin). |
-| `rollback <slug>` | Roll back to the most recent prior active version — convenience wrapper around `promote` (admin). |
+| `rollback <slug>` | Roll back to the most recent prior active version, a convenience wrapper around `promote` (admin). |
 | `retire <slug> --revision N` | Retire a single historical version (admin). The active revision is rejected; promote another version first. |
 
 ---
@@ -147,7 +147,7 @@ Show the resolved configuration.
 
 ### `mcp`
 
-MCP server and related tooling — the subcommand AI clients invoke.
+MCP server and related tooling: the subcommand AI clients invoke.
 
 | Subcommand | Description |
 |---|---|
@@ -221,7 +221,7 @@ Inspect corpus documents.
 
 ### `manifest`
 
-Manifest authoring and validation (local only — no network calls).
+Manifest authoring and validation (local only, no network calls).
 
 | Subcommand | Description |
 |---|---|

@@ -50,7 +50,7 @@ mnm skills remove --harness claude-code
 
 ## `mnm telemetry` — opt out of usage tracking
 
-Telemetry is opt-out and carries no query content, chunk content, tokens, filesystem paths, or environment values. Seven event types are collected — all coarse scalars and closed enums (command name, duration, outcome). See the README's Telemetry & Privacy section for the complete field list.
+Telemetry is opt-out and carries no query content, chunk content, tokens, filesystem paths, or environment values. Seven event types are collected, all coarse scalars and closed enums (command name, duration, outcome). See the README's Telemetry & Privacy section for the complete field list.
 
 ### Opting out
 

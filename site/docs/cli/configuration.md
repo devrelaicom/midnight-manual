@@ -6,7 +6,7 @@ description: The mnm config file, environment variables, and config show --effec
 
 # Configuration
 
-Configuration resolves in a clear precedence order: **command-line flag › environment variable › config file › compiled-in default**. You can override any setting at any layer without touching the others.
+Configuration resolves in a clear precedence order: **command-line flag > environment variable > config file > compiled-in default**. You can override any setting at any layer without touching the others.
 
 ## Config file
 
@@ -16,7 +16,7 @@ The config file is TOML. `mnm` discovers it via:
 2. `$XDG_CONFIG_HOME/midnight-manual/config.toml`
 3. `$HOME/.config/midnight-manual/config.toml`
 
-A missing file is fine — compiled-in defaults apply throughout.
+A missing file is fine; compiled-in defaults apply throughout.
 
 ```toml
 [server]
@@ -40,7 +40,7 @@ enabled = true
 show_admin_cmds = false
 ```
 
-The full key reference lives in a Reference section of this site (not yet published — check back soon).
+The full key reference lives in a Reference section of this site, not yet published.
 
 ## Key environment variables
 
@@ -51,7 +51,7 @@ The full key reference lives in a Reference section of this site (not yet publis
 | `MIDNIGHT_MANUAL_DISABLE_TELEMETRY` | Opt out of telemetry for every invocation. |
 | `MIDNIGHT_MANUAL_GAUGE_ENDPOINT` | Override the Gauge telemetry endpoint. |
 | `MIDNIGHT_MANUAL_SHOW_ADMIN_CMDS` | Reveal admin subcommands in `--help`. |
-| `VOYAGE_API_KEY` | Your Voyage key for BYOK embedding and reranking. Unset → proxied by the hosted server. |
+| `VOYAGE_API_KEY` | Your Voyage key for BYOK embedding and reranking. Unset -> proxied by the hosted server. |
 | `VOYAGE_TIMEOUT_SECS` | Per-request timeout (seconds) for Voyage embed calls (default 120). |
 | `MIDNIGHT_MANUAL_RERANK` | Rerank placement: `auto` \| `local` \| `server` \| `off`. |
 | `MIDNIGHT_MANUAL_RERANK_MODEL` | Voyage rerank model: `rerank-2.5` \| `rerank-2.5-lite`. |
@@ -59,7 +59,7 @@ The full key reference lives in a Reference section of this site (not yet publis
 
 ## `mnm config show`
 
-`mnm config show` prints the resolved configuration — the config file merged with compiled-in defaults. It does not show runtime overrides from flags or env vars.
+`mnm config show` prints the resolved configuration: the config file merged with compiled-in defaults. It does not show runtime overrides from flags or env vars.
 
 ```bash
 mnm config show
@@ -77,15 +77,15 @@ mnm config show --effective --json
 
 What `--effective` resolves:
 
-- `server.url` — the actual URL after `--server` / `MIDNIGHT_MANUAL_SERVER` is applied, with any trailing slash trimmed.
-- `models.voyage_api_key` — shows `****` if a key is effective (from flag, env, or config), `null` if absent. The real value is never printed.
-- `models.voyage_timeout_secs` — resolved from `VOYAGE_TIMEOUT_SECS` env or config.
-- `rerank.location` — `auto` is resolved to the concrete placement (`local` when a Voyage key is present, `server` otherwise).
-- `rerank.model` — the actual model that would be used.
-- `models.cache_dir` — the resolved local cache directory path.
-- `telemetry.enabled` — `false` if `--no-telemetry` was passed.
+- `server.url`: the actual URL after `--server` / `MIDNIGHT_MANUAL_SERVER` is applied, with any trailing slash trimmed.
+- `models.voyage_api_key`: shows `****` if a key is effective (from flag, env, or config), `null` if absent. The real value is never printed.
+- `models.voyage_timeout_secs`: resolved from `VOYAGE_TIMEOUT_SECS` env or config.
+- `rerank.location`: `auto` is resolved to the concrete placement (`local` when a Voyage key is present, `server` otherwise).
+- `rerank.model`: the actual model that would be used.
+- `models.cache_dir`: the resolved local cache directory path.
+- `telemetry.enabled`: `false` if `--no-telemetry` was passed.
 
-The `--effective` output is annotated with a comment noting that it is not a copy-paste config file — it reflects runtime decisions that config files cannot express (like `auto` rerank placement being expanded to `local` or `server`).
+The `--effective` output is annotated with a comment noting that it is not a copy-paste config file. It reflects runtime decisions that config files cannot express, like `auto` rerank placement expanding to `local` or `server`.
 
 ## Precedence summary
 

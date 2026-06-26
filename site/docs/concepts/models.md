@@ -6,7 +6,7 @@ description: The VoyageAI embedding and reranking models used by Midnight Manual
 
 # Models
 
-Everything runs remotely on VoyageAI — **nothing is downloaded, run, or cached on your machine**. No Python, no ONNX, no model files, no GPU. The CLI starts fast because there is nothing local to load.
+Everything runs remotely on VoyageAI: **nothing is downloaded, run, or cached on your machine**. No Python, no ONNX, no model files, no GPU. The CLI starts fast because there is nothing local to load.
 
 ## The three models
 
@@ -18,7 +18,7 @@ Everything runs remotely on VoyageAI — **nothing is downloaded, run, or cached
 
 ### Dual contextualized embeddings
 
-General corpus chunks use `voyage-context-3`. Code chunks get an additional `voyage-code-3` vector. Both ranked lists fuse via [RRF](./hybrid-retrieval.md), gated per request by `code_mode`. The `models.cache_dir` config setting only governs a (now-empty) cache directory — nothing is fetched there.
+General corpus chunks use `voyage-context-3`. Code chunks get an additional `voyage-code-3` vector. Both ranked lists fuse via [RRF](./hybrid-retrieval.md), gated per request by `code_mode`. The `models.cache_dir` config setting only governs a (now-empty) cache directory; nothing is fetched there.
 
 ### Version-aware embedding
 
@@ -26,7 +26,7 @@ The corpus advertises its active embedding model as `name@revision` (for example
 
 ## Reranking: placement and models
 
-Reranking is a VoyageAI call. When it runs — on by default — the query, any `rerank_instructions`, and the candidate passages reach Voyage. Where the call originates depends on your placement:
+Reranking is a VoyageAI call. When it runs (on by default), the query, any `rerank_instructions`, and the candidate passages reach Voyage. Where the call originates depends on your placement:
 
 | `--rerank` | When `auto` picks it | What happens |
 |---|---|---|
@@ -40,7 +40,7 @@ On any rerank failure the server **degrades gracefully to RRF order and flags th
 
 ## Bringing your own key (BYOK)
 
-With a `VOYAGE_API_KEY` configured, your client embeds queries and reranks results directly against your own Voyage account — bypassing the server's token budget for both operations. Set it any of these ways:
+With a `VOYAGE_API_KEY` configured, your client embeds queries and reranks results directly against your own Voyage account, bypassing the server's token budget for both operations. Set it any of these ways:
 
 ```bash
 export VOYAGE_API_KEY=…                  # environment variable
@@ -53,9 +53,9 @@ mnm search "…" --voyage-api-key …        # per-invocation flag
 voyage_api_key = "…"
 ```
 
-Precedence is the standard **flag › env › config** ladder.
+Precedence is the standard ladder: flag beats env beats config.
 
-BYOK embedding applies during ingest too. For bulk runs, setting `VOYAGE_API_KEY` routes embedding through your own Voyage account rather than consuming the server's token budget. See the ingestion documentation (currently Self-hosting and Reference sections, not yet published) for bulk ingest guidance.
+BYOK embedding applies during ingest too. For bulk runs, setting `VOYAGE_API_KEY` routes embedding through your own Voyage account rather than consuming the server's token budget. See [Running an ingest](/docs/self-hosting/running-an-ingest) for bulk ingest guidance.
 
 ## Inspecting the active model
 
@@ -64,7 +64,7 @@ mnm models active    # shows which embedding model the corpus is on
 mnm models pull      # ensures the model-cache directory exists (nothing is fetched)
 ```
 
-`mnm models pull` is a no-op for the remote-only embedding setup — it just creates the cache directory. Its presence makes the command safe to run in CI pipelines without changes.
+`mnm models pull` is a no-op for the remote-only embedding setup; it just creates the cache directory. Its presence keeps the command safe to run in CI pipelines without changes.
 
 ## Config reference
 

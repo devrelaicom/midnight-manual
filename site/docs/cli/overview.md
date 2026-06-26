@@ -6,7 +6,7 @@ description: The mnm CLI command map, global flags, and scripting with --json.
 
 # CLI overview
 
-`midnight-manual` / `mnm` is the command-line interface to the Midnight Manual corpus. Its design is noun-first: pick a noun (what you want to operate on), then a verb (what to do with it). Add `--json` to any command and you get machine-readable output on stdout — the same data, just formatted for scripts instead of terminals.
+`midnight-manual` / `mnm` is the command-line interface to the Midnight Manual corpus. Its design is noun-first: pick a noun (what you want to operate on), then a verb (what to do with it). Add `--json` to any command and you get machine-readable output on stdout: the same data, formatted for scripts instead of terminals.
 
 ## Command map
 
@@ -33,7 +33,7 @@ Admin subcommands (`keys`, `users`, `ingest`, `ratelimits`, `tokenlimits`, `logi
 
 ## Global flags
 
-Every subcommand inherits these flags — pass them before or after the subcommand name.
+Every subcommand inherits these flags; pass them before or after the subcommand name.
 
 | Flag | Purpose |
 |---|---|
@@ -46,7 +46,7 @@ Every subcommand inherits these flags — pass them before or after the subcomma
 
 ## Scripting with `--json`
 
-Adding `--json` makes any command emit newline-delimited JSON to stdout. This is stable across versions — the JSON shape is the contract, not the human-readable formatting.
+Adding `--json` makes any command emit newline-delimited JSON to stdout. The JSON shape is the stable contract; the human-readable formatting can change between versions.
 
 ```bash
 # Search and feed results into jq
@@ -61,12 +61,12 @@ echo "corpus is on $model"
 mnm config show --json | jq '.config.server'
 ```
 
-The `--json` flag is global — it works on every subcommand, including `mnm telemetry status --json`, `mnm doctor --json`, and `mnm models pull --json`.
+The `--json` flag is global; it works on every subcommand, including `mnm telemetry status --json`, `mnm doctor --json`, and `mnm models pull --json`.
 
 ## Next steps
 
-- [Searching](./searching.md) — `mnm search` flags and filter options.
-- [Reading content](./reading.md) — navigating chunks and reading documents window by window.
-- [Models](./models.md) — what runs remotely and how to inspect it.
-- [Configuration](./configuration.md) — config file, env vars, and `mnm config show --effective`.
-- [Skills and telemetry](./skills-telemetry.md) — installing the advanced-search skill and opting out of telemetry.
+- [Searching](./searching.md): `mnm search` flags and filter options.
+- [Reading content](./reading.md): navigating chunks and reading documents window by window.
+- [Models](./models.md): what runs remotely and how to inspect it.
+- [Configuration](./configuration.md): config file, env vars, and `mnm config show --effective`.
+- [Skills and telemetry](./skills-telemetry.md): installing the advanced-search skill and opting out of telemetry.

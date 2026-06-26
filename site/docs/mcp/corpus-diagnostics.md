@@ -6,7 +6,7 @@ description: The status, list_sources, and facets tools for inspecting the corpu
 
 # Corpus and diagnostics
 
-Four tools let you inspect what's in the corpus and whether the service is operating correctly.
+Three tools let you inspect what's in the corpus and whether the service is operating correctly.
 
 ## `status` — diagnose the retrieval setup
 
@@ -73,9 +73,9 @@ Open-set facets you can drill into with `facet=`:
 
 ### Three-level discovery pattern
 
-1. Call `facets()` (no arguments) — get the overview of all available filter dimensions and their approximate value counts
-2. Call `facets(facet="source_slug")` — page through all source slugs in the corpus
-3. Call `facets(facet="language_target", within="compact")` — drill into version constraints for a specific language target
+1. Call `facets()` with no arguments for the overview of all filter dimensions and their approximate value counts
+2. Call `facets(facet="source_slug")` to page through every source slug in the corpus
+3. Call `facets(facet="language_target", within="compact")` to drill into version constraints for a specific language target
 
 Use the values you discover as inputs to `advanced_search` `filters`.
 

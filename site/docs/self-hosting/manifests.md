@@ -69,7 +69,7 @@ root:
       path: sdks/
 ```
 
-Each `path:` entry auto-discovers every supported file under that directory (honouring `.gitignore`). Provenance at the `root` level is inherited by all five children — you only need to declare it once.
+Each `path:` entry auto-discovers every supported file under that directory (honouring `.gitignore`). Provenance at the `root` level is inherited by all five children; you only need to declare it once.
 
 For a code repo with mixed content you can scope includes per node:
 
@@ -103,7 +103,7 @@ mnm manifest init -o my-source.yaml       # custom output path
 mnm manifest init -o hierarchy.yaml --force  # overwrite existing
 ```
 
-The generated file has `manifest_version: 1`, a `root` node with a placeholder name, and commented-out examples for `published_url` and `children`. It is a valid manifest you can ingest immediately (it walks zero files) — edit it before running an ingest.
+The generated file has `manifest_version: 1`, a `root` node with a placeholder name, and commented-out examples for `published_url` and `children`. It is a valid manifest you can ingest immediately (it walks zero files); edit it before running an ingest.
 
 ### mnm manifest generate
 
@@ -147,14 +147,14 @@ Key flags:
 
 ### mnm manifest check
 
-Validates a manifest locally — schema, paths, file existence — without contacting the server:
+Validates a manifest locally (schema, paths, file existence) without contacting the server:
 
 ```bash
 mnm manifest check hierarchy.yaml
 mnm manifest check my-source.yaml --sitemap https://example.com/sitemap.xml
 ```
 
-`check` is the right step before committing a manifest or running an ingest. It catches malformed YAML, missing `manifest_version`, invalid `path`/`file` references, and — when `--sitemap` is provided — mismatched URLs.
+`check` is the right step before committing a manifest or running an ingest. It catches malformed YAML, missing `manifest_version`, invalid `path`/`file` references, and (when `--sitemap` is provided) mismatched URLs.
 
 ## Two authoring workflows
 

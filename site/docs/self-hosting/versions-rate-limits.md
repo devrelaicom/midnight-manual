@@ -41,7 +41,7 @@ Prints each revision with its status and whether it is active:
   rev 3      active   (active)
 ```
 
-`mnm versions list` is an anonymous read — no login token required.
+`mnm versions list` is an anonymous read and needs no login token.
 
 ### Showing one version
 
@@ -61,7 +61,7 @@ mnm versions rollback midnight-docs
 
 Requires an admin token (`mnm login` first).
 
-If no prior inactive version exists — the slug has only one active `source_version` — the command exits with an error rather than attempting a no-op.
+If no prior inactive version exists (the slug has only one active `source_version`), the command exits with an error rather than attempting a no-op.
 
 ### Promoting a specific revision
 
@@ -75,7 +75,7 @@ The named revision must currently be in `inactive` state. Requires an admin toke
 
 ### Retiring a version
 
-`retire` marks a version for cleanup by the background sweep job. The active revision cannot be retired — promote another version first:
+`retire` marks a version for cleanup by the background sweep job. The active revision cannot be retired; promote another version first:
 
 ```bash
 mnm versions retire old-source --revision 3
@@ -85,7 +85,7 @@ A background sweep job retires stale and aborted versions on a grace window, so 
 
 ## Rate-limit overrides
 
-The server applies tiered rate limiting per IP: anonymous traffic is limited per-IP; signing in via GitHub OAuth (a 30-day read-uplift token) raises the limit; admins have a much higher ceiling. Per-CIDR overrides let you raise or lower limits for specific network blocks — for example, to accommodate a hackathon, a CI cluster, or a misbehaving client.
+The server applies tiered rate limiting: anonymous traffic is limited per IP; signing in via GitHub OAuth (a 30-day read-uplift token) raises the limit; admins have a much higher ceiling. Per-CIDR overrides raise or lower limits for specific network blocks: a hackathon, a CI cluster, or a misbehaving client.
 
 All `ratelimits` subcommands require an admin token.
 

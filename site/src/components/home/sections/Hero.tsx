@@ -25,8 +25,8 @@ export default function Hero(): ReactNode {
         <div className={styles.heroRow}>
           <div>
             <p className={styles.heroSub}>
-              Private, current search over the real Midnight docs and source — right inside your AI
-              assistant. <strong>Cited answers, not confident guesses.</strong>
+              Private, current search over the real Midnight docs and source, right inside your AI
+              assistant. <strong>Every answer cites its source.</strong>
             </p>
             <div className={`${styles.cmd} ${styles.heroCmd}`}>
               <code>brew install aaronbassett/tap/midnight-manual</code>

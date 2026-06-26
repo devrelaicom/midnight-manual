@@ -6,7 +6,7 @@ description: mnm search — query modes, filters, reranking, and machine-readabl
 
 # Searching with `mnm search`
 
-`mnm search` runs an ad-hoc retrieval against the hosted corpus. It supports the same retrieval modes and filter knobs as the [MCP search tools](../mcp/searching.md), and pairs naturally with `--json` for scripting.
+`mnm search` runs an ad-hoc retrieval against the hosted corpus. It supports the same retrieval modes and filter knobs as the [MCP search tools](../mcp/searching.md), and works with `--json` for scripting.
 
 ## Basic usage
 
@@ -45,7 +45,7 @@ Use the granular filter flags to restrict results by corpus metadata:
 | `--exclude-language <lang>` | Repeatable; exclude these languages. |
 | `--tag <tag>` | Repeatable; restrict to these tags. |
 | `--exclude-tag <tag>` | Repeatable; exclude these tags. |
-| `--symbol <kind:name>` | Repeatable; match symbols as `kind:name` — either side optional (e.g. `circuit:` or `:deployContract`). |
+| `--symbol <kind:name>` | Repeatable; match symbols as `kind:name`, either side optional (e.g. `circuit:` or `:deployContract`). |
 | `--source <slug>` | Repeatable; restrict to these source slugs. |
 | `--content-type <type>` | Repeatable. |
 | `--attribution <tier>` | Repeatable. |
@@ -75,9 +75,9 @@ echo '{"queries":["Compact ledger types","Compact ADT counter"]}' \
 
 ## Reranking
 
-By default, reranking runs automatically: `--rerank auto` picks local BYOK reranking when a Voyage key is present (`VOYAGE_API_KEY` or `--voyage-api-key`), and falls back to server-side reranking otherwise. Both paths use VoyageAI — the only difference is whose account is billed.
+By default, reranking runs automatically: `--rerank auto` picks local BYOK reranking when a Voyage key is present (`VOYAGE_API_KEY` or `--voyage-api-key`), and falls back to server-side reranking otherwise. Both paths use VoyageAI; the only difference is whose account is billed.
 
-- `--rerank off` skips reranking and returns results in RRF order — lowest latency.
+- `--rerank off` skips reranking and returns results in RRF order, the lowest-latency path.
 - `--rerank local` requires a Voyage key and is rejected with an error if one is absent.
 - `--rerank-model rerank-2.5-lite` is faster and billed at half tokens server-side.
 

@@ -11,8 +11,8 @@ export default function GetStarted(): ReactNode {
         <p className={styles.marker}>Get started</p>
         <h2 className={styles.hSection}>Up and running<br />in three steps</h2>
         <p className={styles.subhead}>
-          No database, no API key, no account. Install the <code>mnm</code> command, point your AI
-          client at it, and ask.
+          No database, no API key, no account. Install the <code>mnm</code> command, then point your
+          AI client at it and ask.
         </p>
 
         <ol className={styles.steps}>
@@ -23,8 +23,8 @@ export default function GetStarted(): ReactNode {
               <h3 className={styles.stepTitle}>Install <code>mnm</code></h3>
             </div>
             <p className={styles.stepLead}>
-              Prebuilt binaries for macOS &amp; Linux — no Rust toolchain required. (Windows runs
-              the Linux build via WSL.)
+              Prebuilt binaries for macOS &amp; Linux. No Rust toolchain required. (Windows runs the
+              Linux build via WSL.)
             </p>
             <Tabs groupId="install">
               <TabItem value="brew" label="Homebrew" default>
@@ -93,8 +93,8 @@ args = ["mcp", "serve"]`}</code></pre>
               <h3 className={styles.stepTitle}>Ask anything Midnight</h3>
             </div>
             <p className={styles.stepLead}>
-              Restart your client and ask a Midnight question — it reaches for search and answers
-              with cited sources. Prefer the terminal?
+              Restart your client and ask a Midnight question; it reaches for search and answers with
+              cited sources. Prefer the terminal?
             </p>
             <div className={styles.cmd}>
               <code>{'mnm search "how do I mint a shielded token?"'}</code>
