@@ -32,6 +32,7 @@
   --ifm-navbar-background-color:var(--mm-paper);
   --ifm-link-color:var(--mm-ink);
   --ifm-code-background:#EDE7D9; --ifm-code-color:#1F3DF5;
+  --docusaurus-highlighted-code-line-bg: rgba(31,61,245,.08);
 }
 
 /* h1 / page titles keep the Anton display face for brand presence */
@@ -39,6 +40,20 @@
 
 /* Inline code chip (scope away from Prism code blocks in <pre>) */
 :not(pre) > code{color:var(--ifm-code-color);background-color:var(--ifm-code-background);border:1px solid var(--mm-ink-hair)}
+
+/* ===== Dark theme (built from the existing -on-dark / term tokens) ===== */
+[data-theme='dark']{
+  --mm-paper:#0B1020; --mm-paper-2:#141a2e; --mm-graphite:#ECE7D8; --mm-graphite-soft:#9aa3bf;
+  --ifm-background-color:#0B1020; --ifm-background-surface-color:#141a2e;
+  --ifm-color-primary:#9FB4FF;
+  --ifm-color-primary-dark:#7d99ff; --ifm-color-primary-darker:#6c8bff; --ifm-color-primary-darkest:#3a64ff;
+  --ifm-color-primary-light:#c1cfff; --ifm-color-primary-lighter:#d2dcff; --ifm-color-primary-lightest:#ffffff;
+  --ifm-font-color-base:#ECE7D8;
+  --ifm-navbar-background-color:#0B1020;
+  --ifm-link-color:#9FB4FF;
+  --ifm-code-background:#141a2e; --ifm-code-color:#9FB4FF;
+  --docusaurus-highlighted-code-line-bg: rgba(159,180,255,.14);
+}
 
 /* Accent rule used by the marker/eyebrow motif */
 .mm-marker{font-family:var(--mm-mono);font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:var(--mm-ink);display:flex;align-items:center;gap:12px}
