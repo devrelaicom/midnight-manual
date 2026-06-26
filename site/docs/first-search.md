@@ -16,7 +16,7 @@ mnm search "how do I mint a shielded token?"
 
 `mnm search` returns ranked, source-attributed results straight away. Each result includes:
 
-- A **confidence score** so you know how well the passage matches your query.
+- A **confidence score** for how closely the passage matches your query.
 - A **provenance breakdown**: a one-line summary of where the result came from and why it ranked where it did.
 - The **source path**: the exact doc or source file the passage came from.
 
@@ -24,5 +24,5 @@ Both embedding and reranking run through VoyageAI, proxied by the hosted server,
 
 ## Next steps
 
-- [Add mnm to your AI client](/docs/add-to-ai-client) to give your assistant live Midnight search in every conversation.
+- [Add mnm to your AI client](/docs/add-to-ai-client) to expose the same search to your assistant.
 - Not installed yet? See [Install mnm](/docs/install).

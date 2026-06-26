@@ -6,7 +6,7 @@ description: How Midnight Manual fuses lexical and semantic candidate lists with
 
 # Hybrid retrieval & RRF
 
-No single retrieval mode is best for every query. A pure keyword search misses paraphrases and conceptual synonyms. A pure vector search misses exact identifiers, function names, and error codes. Midnight Manual runs both in parallel and fuses the results, giving you the precision of lexical matching and the recall of semantic search in one ranked list.
+No single retrieval mode is best for every query. A pure keyword search misses paraphrases and conceptual synonyms. A pure vector search misses exact identifiers, function names, and error codes. Midnight Manual runs both in parallel and fuses the results, so exact-term hits and conceptual hits land in one ranked list.
 
 ## Two candidate lists
 

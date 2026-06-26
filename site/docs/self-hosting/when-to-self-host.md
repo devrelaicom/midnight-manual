@@ -6,16 +6,16 @@ description: How the hosted Midnight Manual instance compares to running your ow
 
 # When to self-host
 
-Most people never need to run `midnight-manual-server` themselves. The hosted instance at `https://midnight-manual.midnightntwrk.expert` carries the full Midnight corpus, exposes all MCP and CLI endpoints, and handles rate limiting, embeddings, and corpus management for you.
+Most people never need to run `midnight-manual-server` themselves. The hosted instance at `https://midnight-manual.midnightntwrk.expert` carries the full Midnight corpus, serves every MCP and CLI endpoint, and runs rate limiting, embeddings, and corpus management.
 
 Self-hosting exists for teams who need control that the hosted instance cannot give them: private corpora, air-gapped environments, or specific SLA/data-residency requirements.
 
 ## The hosted instance
 
-The hosted instance is the right choice if:
+Use the hosted instance if:
 
 - You are working with the public Midnight corpus (docs, SDKs, example repos, partner code).
-- You want zero infrastructure to maintain: no Postgres, no Fly.io, no VoyageAI API key to manage.
+- You do not want to run Postgres, deploy to Fly.io, or manage a VoyageAI API key.
 - You are comfortable with the hosted rate limits and the standard [tiered access](/docs/mcp/rate-limits) model (anonymous, GitHub-OAuth uplift, admin).
 
 The hosted server is `midnight-manual-server`, a single self-contained binary, running on Fly.io against Fly Managed Postgres with the `pgvector` extension. It uses dual VoyageAI embeddings (`voyage-context-3` for general chunks, `voyage-code-3` for code) and inline reranking. The API surface, rate-limit tiers, and corpus contents are the same whether you hit it via MCP or the CLI.

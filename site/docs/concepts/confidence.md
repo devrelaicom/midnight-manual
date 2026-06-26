@@ -1,14 +1,14 @@
 ---
 title: Confidence = trust × relevance
 sidebar_label: Confidence scoring
-description: How Midnight Manual blends source trust with retrieval relevance to produce a score your assistant can reason about out loud.
+description: How Midnight Manual blends source trust with retrieval relevance into a confidence score, and the per-factor breakdown it returns.
 ---
 
 # Confidence = trust × relevance
 
-Most retrieval systems return a relevance score and stop there. Midnight Manual multiplies relevance by a **trust score** built from where the content came from, how recently it was written, and whether it matches the version you care about.
+The confidence score multiplies retrieval relevance by a **trust score** built from where the content came from, how recently it was written, and whether it matches the version you target.
 
-The formula is explicit on purpose. Your AI assistant receives the per-factor breakdown with every hit, so it can explain why a passage ranked where it did, with no second round-trip.
+The formula is explicit. Every hit carries its per-factor breakdown, so your AI assistant can explain why a passage ranked where it did without a second round-trip.
 
 ## The trust factors
 
@@ -40,7 +40,7 @@ Content explicitly marked deprecated is **down-weighted** rather than hidden. It
 
 ### Version match
 
-This is the sharpest factor. The corpus tracks which Compact language version, SDK version, or component version each chunk belongs to. At query time:
+Version match is the only factor that can exclude a chunk outright; the others only adjust its weight. The corpus tracks which Compact language version, SDK version, or component version each chunk belongs to. At query time:
 
 - Content that **satisfies** your target version is boosted.
 - A **near-miss** (adjacent version) is penalized in proportion to how far off it is.
@@ -49,7 +49,7 @@ This is the sharpest factor. The corpus tracks which Compact language version, S
 
 Version targets are extracted automatically at ingest (from `pragma language_version` in Compact files and from `package.json` / `Cargo.toml` manifests), so the corpus carries version metadata without manual tagging.
 
-## Why the breakdown matters
+## The factor breakdown
 
 Nothing about the confidence score is hidden. Each result carries the factor breakdown, so:
 

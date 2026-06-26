@@ -10,7 +10,7 @@ The MCP server exposes two search tools: `search` for quick lookups and `advance
 
 ## `search` — the simple surface
 
-`search` is the 90% tool. It takes a single query string, always reranks, and applies no filters.
+`search` covers the common case. It takes a single query string, always reranks, and applies no filters.
 
 ```
 search(query, mode?, code_mode?, limit?)

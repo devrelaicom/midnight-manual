@@ -8,7 +8,7 @@ description: mnm skills add — install the advanced-search skill; mnm telemetry
 
 ## `mnm skills` — install the advanced-search skill
 
-The advanced-search skill teaches your AI harness how to query the Midnight Manual corpus intelligently: multi-query expansion, HyDE, step-back prompting, filter construction, and trust-weighted result selection. Installing it once means you don't have to spell out retrieval strategies in every conversation.
+The advanced-search skill teaches your AI harness how to query the Midnight Manual corpus: multi-query expansion, HyDE, step-back prompting, filter construction, and trust-weighted result selection. Install it once and you won't have to spell out retrieval strategies in each conversation.
 
 ### `mnm skills add`
 

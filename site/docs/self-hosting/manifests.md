@@ -8,7 +8,7 @@ description: What a hierarchy.yaml manifest is, how to author one, and how to us
 
 A manifest (`hierarchy.yaml`) is a YAML file that tells the ingestion pipeline what to ingest, how to organise it into a hierarchy, and what provenance to record for each node. Every ingest run needs one.
 
-You can write manifests by hand (for complete control), generate them from globs and an optional sitemap (for third-party repos), or start from an empty template. All three workflows produce the same file format.
+You can write manifests by hand, generate them from globs and an optional sitemap (for third-party repos), or start from an empty template. All three workflows produce the same file format.
 
 ## Manifest schema
 

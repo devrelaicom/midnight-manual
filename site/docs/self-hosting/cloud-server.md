@@ -15,7 +15,7 @@ description: Architecture and full provisioning runbook for midnight-manual-serv
 - **Auth:** Ed25519 challenge-response for admin principals; GitHub OAuth for read-uplift tokens; HS256 JWTs signed with `MIDNIGHT_MANUAL_JWT_SECRET`.
 - **Tiered rate limiting.** Anonymous traffic is limited per-IP. Signing in via GitHub OAuth raises the limit for 30 days. Admins can add per-CIDR overrides. A tier guard runs before the role guard, so a read-uplift token can never gain write access.
 - **Health endpoints:** `/healthz` (liveness) and `/readyz` (readiness after the DB pool and model registry are loaded). Request-ID propagation on every request for traceability.
-- **Small image.** Multi-stage Docker build onto `gcr.io/distroless/cc-debian12` (no shell, no toolchain), built for `linux/amd64` and `linux/arm64`. Server deploys are always operator-run, not wired into CI.
+- **Image:** Multi-stage Docker build onto `gcr.io/distroless/cc-debian12` (no shell, no toolchain), built for `linux/amd64` and `linux/arm64`. Server deploys are always operator-run, not wired into CI.
 
 ## Running locally against Postgres
 

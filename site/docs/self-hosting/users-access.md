@@ -6,7 +6,7 @@ description: How Midnight Manual manages admin principals — Ed25519 keypairs, 
 
 # Users & access
 
-Midnight Manual authenticates admins with **Ed25519 challenge-response**. There are no passwords and no shared secrets at rest, only public keys in a TOML store. Three CLI commands manage the principals: `mnm keys`, `mnm users`, and `mnm login`.
+Midnight Manual authenticates admins with **Ed25519 challenge-response**. The user store holds public keys only; each principal keeps its private key on the machine that generated it. Three CLI commands manage principals: `mnm keys`, `mnm users`, and `mnm login`.
 
 Admin commands are hidden by default. Reveal them with:
 

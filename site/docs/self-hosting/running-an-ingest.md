@@ -123,7 +123,7 @@ mnm ingest run kitties.yaml \
     --source-root ./example-kitties
 ```
 
-The `.compact`, `.ts`, and `.tsx` files are chunked with full symbol awareness, so a search for a specific circuit or contract lands on exactly that definition, attributed back to the OpenZeppelin or Midnight source it came from.
+The `.compact`, `.ts`, and `.tsx` files are chunked with symbol awareness: each circuit or contract becomes its own chunk at its definition boundary.
 
 ## What the output tells you
 

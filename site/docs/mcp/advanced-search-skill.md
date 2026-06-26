@@ -1,14 +1,14 @@
 ---
 title: Advanced Search skill
 sidebar_label: Advanced Search skill
-description: What the midnight-advanced-search skill teaches, how to install it in one step, and which AI harnesses it supports.
+description: What the midnight-advanced-search skill teaches, how to install it, and which AI harnesses it supports.
 ---
 
 # The Advanced Search skill
 
-The MCP server gives your assistant hybrid retrieval, reranking, trust scoring, and chunk navigation. The **`midnight-advanced-search` skill** teaches the technique: how to combine those tools like a seasoned researcher instead of firing one naive query and hoping.
+The MCP server gives a client hybrid retrieval, reranking, trust scoring, and chunk navigation. The **`midnight-advanced-search` skill** teaches the technique for combining those tools: when to expand a query, how to filter by facet, how to read a hit in context, and how to weigh results by trust.
 
-It is a persistent, auto-loaded Agent Skill (`SKILL.md`). Once installed, your agent reaches for the right retrieval pattern on its own, no prompting required.
+It is a persistent, auto-loaded Agent Skill (`SKILL.md`). Once installed, the agent applies these patterns without being prompted for them.
 
 ## What the skill teaches
 
@@ -18,17 +18,17 @@ It is a persistent, auto-loaded Agent Skill (`SKILL.md`). Once installed, your a
 | **Multi-query** | Generates 2–3 paraphrases varying vocabulary and breadth, plus the original, fused in a single `advanced_search` call. Cost: the distinct query count. | Beats synonym mismatch between your phrasing and the corpus's. |
 | **Step-back** | Pairs the specific question (a raw error, say) with a more abstract framing. Cost: 2 queries. | Rescues over-specific questions and raw error messages. |
 | **Lexical anchoring** | Sends exact identifiers and error codes verbatim so the full-text half of hybrid search nails exact matches. | Catches the precise symbol, flag, or error the vector half would blur. |
-| **Symbol-aware code search** | Scopes by `package` and `language`, uses `code_mode=exclusive`, navigates hits by their `symbol_path`. | Lands on the named circuit, contract, or function — not an arbitrary window. |
+| **Symbol-aware code search** | Scopes by `package` and `language`, uses `code_mode=exclusive`, navigates hits by their `symbol_path`. | Lands on the named circuit, contract, or function instead of an arbitrary window. |
 | **Version-matched retrieval** | Uses `version_satisfies` (a concrete version or semver range) with `version_match` `permissive`/`strict`, matched against versions extracted from Compact pragmas and package manifests. | Avoids answers pinned to the wrong Compact or SDK version. |
-| **Retrieve-read-retrieve** | Broad first pass → read hits with `get_chunk_next` / `get_chunk_parents` → refine with newly-learned terms → search again. | Converges on precise answers the way a human researcher iterates. |
+| **Retrieve-read-retrieve** | Broad first pass → read hits with `get_chunk_next` / `get_chunk_parents` → refine with newly-learned terms → search again. | Converges on a precise answer by refining on what the first pass returns. |
 | **Trust-weighted selection** | Ranks and prunes on each result's `trust_score` and `confidence_factors` (attribution, verification, freshness, version-match). | Authoritative, version-matched sources rise; stale or deprecated ones sink. |
 | **Cross-source comparison** | Pulls from multiple sources and surfaces disagreement instead of silently picking one. | Compensates for the deliberate absence of automatic contradiction detection. |
 
 Worked examples for every pattern (the exact query array, the resulting `advanced_search` call, and the token cost) are folded into the bundled skill file.
 
-## Install in one step
+## Install with your assistant
 
-The easiest way is to ask your assistant to install it. The MCP server exposes an **`install_search_skill`** tool that writes the `SKILL.md` into every harness it detects and reports the per-harness reload step:
+Ask your assistant to install it. The MCP server exposes an **`install_search_skill`** tool that writes the `SKILL.md` into every harness it detects and reports the per-harness reload step:
 
 > "Install the midnight-advanced-search skill."
 

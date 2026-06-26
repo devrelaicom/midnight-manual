@@ -6,7 +6,7 @@ description: The VoyageAI embedding and reranking models used by Midnight Manual
 
 # Models
 
-Everything runs remotely on VoyageAI: **nothing is downloaded, run, or cached on your machine**. No Python, no ONNX, no model files, no GPU. The CLI starts fast because there is nothing local to load.
+Everything runs remotely on VoyageAI: **nothing is downloaded, run, or cached on your machine**. No Python, no ONNX, no model files, no GPU. There is nothing local to load at startup.
 
 ## The three models
 

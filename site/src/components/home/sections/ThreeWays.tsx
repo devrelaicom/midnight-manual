@@ -6,7 +6,7 @@ export default function ThreeWays(): ReactNode {
     <section className={styles.section} id="ways">
       <div className={styles.container}>
         <p className={styles.marker}>One install, three ways in</p>
-        <h2 className={styles.hSection}>However you<br />like to work</h2>
+        <h2 className={styles.hSection}>In your AI client<br />or your terminal</h2>
         <div className={`${styles.cards} ${styles.grid3}`} style={{marginTop: '26px'}}>
           <div className={styles.card}>
             <p className={styles.cardMeta}>// IN YOUR AI CLIENT</p>

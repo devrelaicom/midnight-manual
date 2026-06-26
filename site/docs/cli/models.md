@@ -6,7 +6,7 @@ description: mnm models — inspect the corpus's active embedding model and unde
 
 # Models
 
-`mnm models` lets you inspect the corpus's embedding model and prime the local cache directory. Both the embedder and the reranker run remotely on VoyageAI. **Nothing is downloaded, run, or cached on your machine** (no Python, no ONNX, no model files, no GPU).
+`mnm models` lets you inspect the corpus's embedding model and prime the local cache directory. Both the embedder and the reranker run remotely on VoyageAI. Nothing is downloaded, run, or cached on your machine (no Python, no ONNX, no model files, no GPU).
 
 ## What runs where
 

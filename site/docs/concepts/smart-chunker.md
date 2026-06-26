@@ -1,7 +1,7 @@
 ---
 title: The smart chunker
 sidebar_label: Smart chunker
-description: How Midnight Manual splits Markdown and source code into semantically-bounded, attributable chunks â€” and why it matters for retrieval quality.
+description: How Midnight Manual splits Markdown and source code into semantically-bounded, attributable chunks.
 ---
 
 # The smart chunker
@@ -35,7 +35,7 @@ Every code chunk records a structured **`symbol_path`**, such as `impl Widget â€
 
 Grammars are organized into Cargo-feature tiers (`core-grammars`, `markup-grammars`, `extended-grammars`, `all-grammars`), so a lean build stays small.
 
-### Compact is a first-class citizen
+### Compact symbol awareness
 
 Midnight's smart-contract language gets full symbol awareness: circuits, ledger declarations, witnesses, and contracts each become their own semantically-bounded, attributable chunk. That comes from the [`compactp`](https://crates.io/crates/compactp_parser) parser (a default-on feature) rather than tree-sitter, because Compact's grammar predates general tree-sitter support.
 
@@ -43,7 +43,7 @@ Midnight's smart-contract language gets full symbol awareness: circuits, ledger 
 
 When a grammar is absent or a language is unrecognized, the chunker falls back to a **token-budgeted, non-overlapping line-window chunker**: it grows line-by-line to approximately 90% of the token budget, then starts a new window. The file is still ingestible and searchable; it just won't have symbol paths. An absent grammar never aborts an ingest run.
 
-## The details that matter
+## Implementation details
 
 ### Token-budgeted chunks
 
@@ -65,7 +65,7 @@ This means a standard Midnight project ingests cleanly without any manifest conf
 
 Walking up from each file, the chunker attaches **package membership**: the name of the nearest Rust crate (`Cargo.toml` `[package]`, workspace roots skipped) or npm package (`package.json` `.name`). Search results can be filtered and attributed by package, so "find the `deployContract` function in `@midnight-ntwrk/midnight-js-contracts`" actually works.
 
-### Never fails the run for one bad file
+### Per-file failure isolation
 
 A badly malformed source file falls back to line-window chunking and is flagged in the ingest report rather than aborting the whole run. Chunks that fail to embed (for any reason) land in an `embed_failed` state and are skipped by readers, so navigation has clean gaps, never broken links.
 

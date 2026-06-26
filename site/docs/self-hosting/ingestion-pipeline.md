@@ -6,7 +6,7 @@ description: How content moves from a manifest through chunking, embedding, and 
 
 # Ingestion pipeline
 
-Getting content into the corpus is one resumable flow that promotes into the live corpus atomically. The orchestrator is pure: it never touches the database directly, which keeps ingestion predictable and testable.
+Getting content into the corpus is one resumable flow that promotes atomically. The orchestrator is pure: it never touches the database directly.
 
 ```
 manifest ─▶ .gitignore-aware walk ─▶ per-file chunker ─▶ VoyageAI embed ─▶ versioned corpus ─▶ promote
@@ -36,7 +36,7 @@ Embedding is the slow step. For bulk runs, set `VOYAGE_API_KEY` to embed directl
 
 **5. Finalize -> promote.** A single `finalize` call flips the version from `building` to `active` and demotes the previous version to `inactive` in one transaction. Readers never see a half-built corpus.
 
-## What makes it reliable
+## How a run behaves
 
 **Versioned, atomic promotion.** Each run builds an isolated `source_version` and promotes it in a single transaction, so rollback is one command: `mnm versions rollback <slug>`.
 
@@ -44,11 +44,11 @@ Embedding is the slow step. For bulk runs, set `VOYAGE_API_KEY` to embed directl
 
 **Per-file dispatch.** A `README.md` next to a `lib.rs` next to a `Cargo.toml` each routes to the right chunker automatically, by extension. No manual routing configuration needed.
 
-**Resilient.** Any chunk that fails to embed lands in an `embed_failed` state and is skipped by readers, so search shows clean gaps rather than broken results.
+**Embed failures are isolated.** Any chunk that fails to embed lands in an `embed_failed` state and is skipped by readers, so search shows clean gaps instead of broken results.
 
 **Abort on failure.** If anything goes wrong between the start of an upload and finalization, the CLI calls the `abort` endpoint so the in-progress `source_version` is marked dead and does not block the next attempt.
 
-**Observable.** Each run emits an `ingest_complete` telemetry event with documents added, updated, and skipped, plus duration. Counts only, never content.
+**Telemetry.** Each run emits an `ingest_complete` telemetry event with documents added, updated, and skipped, plus duration. Counts only, never content.
 
 ## Related pages
 
