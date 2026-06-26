@@ -13,6 +13,7 @@ const sidebars: SidebarsConfig = {
       items: ['self-hosting/when-to-self-host','self-hosting/manifests','self-hosting/ingestion-pipeline','self-hosting/running-an-ingest','self-hosting/users-access','self-hosting/versions-rate-limits','self-hosting/cloud-server'] },
     { type: 'category', label: 'Reference', collapsed: false,
       items: ['reference/mcp-tools','reference/cli','reference/configuration','reference/embeddings'] },
+    'privacy',
   ],
 };
 
