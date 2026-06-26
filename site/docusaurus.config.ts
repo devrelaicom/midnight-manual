@@ -11,31 +11,25 @@ const config: Config = {
     { tagName: 'link', attributes: { rel: 'preload', href: '/fonts/space-grotesk-700.woff2', as: 'font', type: 'font/woff2', crossorigin: 'anonymous' } },
     { tagName: 'link', attributes: { rel: 'preload', href: '/fonts/jetbrains-mono-400.woff2', as: 'font', type: 'font/woff2', crossorigin: 'anonymous' } },
   ],
-  title: 'My Site',
-  tagline: 'Dinosaurs are cool',
-  favicon: 'img/favicon.ico',
+  title: 'Midnight Manual',
+  tagline: 'Ask your docs, not your model.',
+  favicon: 'img/favicon.svg',
 
   // Future flags, see https://docusaurus.io/docs/api/docusaurus-config#future
   future: {
     v4: true, // Improve compatibility with the upcoming Docusaurus v4
   },
 
-  // Set the production url of your site here
-  url: 'https://your-docusaurus-site.example.com',
-  // Set the /<baseUrl>/ pathname under which your site is served
-  // For GitHub pages deployment, it is often '/<projectName>/'
+  url: 'https://manual.midnightntwrk.expert',
   baseUrl: '/',
+  trailingSlash: false,
 
-  // GitHub pages deployment config.
-  // If you aren't using GitHub pages, you don't need these.
-  organizationName: 'facebook', // Usually your GitHub org/user name.
-  projectName: 'docusaurus', // Usually your repo name.
+  organizationName: 'devrelaicom',
+  projectName: 'midnight-manual',
 
   onBrokenLinks: 'throw',
+  onBrokenMarkdownLinks: 'throw',
 
-  // Even if you don't use internationalization, you can use this field to set
-  // useful metadata like html lang. For example, if your site is Chinese, you
-  // may want to replace "en" with "zh-Hans".
   i18n: {
     defaultLocale: 'en',
     locales: ['en'],
@@ -47,10 +41,7 @@ const config: Config = {
       {
         docs: {
           sidebarPath: './sidebars.ts',
-          // Please change this to your repo.
-          // Remove this to remove the "edit this page" links.
-          editUrl:
-            'https://github.com/facebook/docusaurus/tree/main/packages/create-docusaurus/templates/shared/',
+          editUrl: 'https://github.com/devrelaicom/midnight-manual/tree/main/site/',
         },
         blog: false,
         theme: {
@@ -61,27 +52,13 @@ const config: Config = {
   ],
 
   themeConfig: {
-    // Replace with your project's social card
-    image: 'img/docusaurus-social-card.jpg',
+    image: 'img/og.png',
     colorMode: { defaultMode: 'light', respectPrefersColorScheme: true },
     navbar: {
-      title: 'My Site',
-      logo: {
-        alt: 'My Site Logo',
-        src: 'img/logo.svg',
-      },
+      title: 'Midnight Manual',
       items: [
-        {
-          type: 'docSidebar',
-          sidebarId: 'tutorialSidebar',
-          position: 'left',
-          label: 'Tutorial',
-        },
-        {
-          href: 'https://github.com/facebook/docusaurus',
-          label: 'GitHub',
-          position: 'right',
-        },
+        { to: '/docs/intro', label: 'Get started', position: 'left' },
+        { href: 'https://github.com/devrelaicom/midnight-manual', label: 'GitHub', position: 'right' },
       ],
     },
     footer: {
@@ -90,40 +67,18 @@ const config: Config = {
         {
           title: 'Docs',
           items: [
-            {
-              label: 'Tutorial',
-              to: '/docs/intro',
-            },
-          ],
-        },
-        {
-          title: 'Community',
-          items: [
-            {
-              label: 'Stack Overflow',
-              href: 'https://stackoverflow.com/questions/tagged/docusaurus',
-            },
-            {
-              label: 'Discord',
-              href: 'https://discordapp.com/invite/docusaurus',
-            },
-            {
-              label: 'X',
-              href: 'https://x.com/docusaurus',
-            },
+            { label: 'Introduction', to: '/docs/intro' },
           ],
         },
         {
           title: 'More',
           items: [
-            {
-              label: 'GitHub',
-              href: 'https://github.com/facebook/docusaurus',
-            },
+            { label: 'GitHub', href: 'https://github.com/devrelaicom/midnight-manual' },
+            { label: 'llms.txt', to: 'pathname:///llms.txt' },
           ],
         },
       ],
-      copyright: `Copyright © ${new Date().getFullYear()} My Project, Inc. Built with Docusaurus.`,
+      copyright: 'Apache-2.0 OR MIT · Midnight Manual',
     },
     prism: {
       theme: prismThemes.github,
