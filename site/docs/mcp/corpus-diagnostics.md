@@ -1,7 +1,7 @@
 ---
 title: Corpus and diagnostics
 sidebar_label: Corpus & diagnostics
-description: The status, list_sources, facets, and facet tools for inspecting the corpus and checking service health.
+description: The status, list_sources, and facets tools for inspecting the corpus and checking service health.
 ---
 
 # Corpus and diagnostics
