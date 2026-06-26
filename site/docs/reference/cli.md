@@ -127,11 +127,11 @@ Source-version inspection.
 
 | Subcommand | Description |
 |---|---|
-| `list [slug]` | List all source versions for a slug (anonymous read). |
-| `show [slug] [revision]` | Show one source version by revision (anonymous read). |
-| `promote [slug]` | Promote a historical version back to active (admin). |
-| `rollback [slug]` | Roll back to the most recent prior active version — convenience wrapper around `promote` (admin). |
-| `retire [slug]` | Retire a single historical version (admin). The active revision is rejected; promote another version first. |
+| `list <slug>` | List all source versions for a slug (anonymous read). |
+| `show <slug> <revision>` | Show one source version by revision (anonymous read). |
+| `promote <slug> --revision N` | Promote a historical version back to active (admin). |
+| `rollback <slug>` | Roll back to the most recent prior active version — convenience wrapper around `promote` (admin). |
+| `retire <slug> --revision N` | Retire a single historical version (admin). The active revision is rejected; promote another version first. |
 
 ---
 
@@ -166,7 +166,7 @@ Local model management and corpus-side model information.
 | `pull` | Ensure the local model-cache directory exists. Both the embedder and reranker are remote VoyageAI, so nothing is downloaded. Accepts `--cache-dir` to override the cache location. |
 | `active` | Show the corpus's currently active embedding model. |
 | `status` | _(Admin; hidden by default)_ List sources still on an older embedding model. |
-| `reembed` | _(Admin; hidden by default)_ Re-ingest every source not yet on the target embedding model. |
+| `migrate` | _(Admin; hidden by default)_ Re-ingest every source not yet on the target embedding model. |
 
 ---
 
@@ -226,8 +226,8 @@ Manifest authoring and validation (local only — no network calls).
 | Subcommand | Description |
 |---|---|
 | `init` | Write an empty starter manifest with comments. |
-| `populate` | Populate a `hierarchy.yaml` from globs and an optional sitemap. |
-| `validate` | Validate a manifest locally: schema, paths, file existence. |
+| `generate` | Populate a `hierarchy.yaml` from globs and an optional sitemap. |
+| `check` | Validate a manifest locally: schema, paths, file existence. |
 
 See [Authoring manifests](/docs/self-hosting/manifests).
 
@@ -239,7 +239,7 @@ Install, inspect, or remove the `midnight-advanced-search` skill.
 
 | Subcommand | Description |
 |---|---|
-| `install` | Install (or update) the advanced-search skill. |
+| `add` | Install (or update) the advanced-search skill. |
 | `status` | Show where the skill is installed and whether it's current. |
 | `remove` | Remove the advanced-search skill. |
 
