@@ -9,6 +9,8 @@ const sidebars: SidebarsConfig = {
       items: ['cli/overview','cli/searching','cli/reading','cli/models','cli/configuration','cli/skills-telemetry'] },
     { type: 'category', label: 'Concepts', collapsed: false,
       items: ['concepts/confidence','concepts/hybrid-retrieval','concepts/multi-query-hyde','concepts/smart-chunker','concepts/models'] },
+    { type: 'category', label: 'Self-hosting & operations', collapsed: true,
+      items: ['self-hosting/when-to-self-host','self-hosting/manifests','self-hosting/ingestion-pipeline','self-hosting/running-an-ingest','self-hosting/users-access','self-hosting/versions-rate-limits','self-hosting/cloud-server'] },
   ],
 };
 
