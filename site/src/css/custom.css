@@ -16,6 +16,15 @@
   --mm-sans:'Space Grotesk',system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
   --mm-mono:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
 
+  /* Layout / animation utilities (ported from site/css/styles.css lines 8–26) */
+  --mm-ink-soft:rgba(31,61,245,.5);
+  --mm-accent-hair:rgba(229,57,47,.28);
+  --mm-radius:8px;
+  --mm-ease:cubic-bezier(.2,.7,.2,1);
+  --mm-maxw:1120px;
+  --mm-pad:clamp(20px,5vw,64px);
+  --mm-section-y:clamp(64px,9vw,116px);
+
   /* Infima overrides (light) */
   --ifm-background-color:var(--mm-paper);
   --ifm-background-surface-color:var(--mm-paper-2);
