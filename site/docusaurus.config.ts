@@ -5,6 +5,12 @@ import type * as Preset from '@docusaurus/preset-classic';
 // This runs in Node.js - Don't use client-side code here (browser APIs, JSX...)
 
 const config: Config = {
+  headTags: [
+    { tagName: 'link', attributes: { rel: 'preload', href: '/fonts/anton-400.woff2', as: 'font', type: 'font/woff2', crossorigin: 'anonymous' } },
+    { tagName: 'link', attributes: { rel: 'preload', href: '/fonts/space-grotesk-400.woff2', as: 'font', type: 'font/woff2', crossorigin: 'anonymous' } },
+    { tagName: 'link', attributes: { rel: 'preload', href: '/fonts/space-grotesk-700.woff2', as: 'font', type: 'font/woff2', crossorigin: 'anonymous' } },
+    { tagName: 'link', attributes: { rel: 'preload', href: '/fonts/jetbrains-mono-400.woff2', as: 'font', type: 'font/woff2', crossorigin: 'anonymous' } },
+  ],
   title: 'My Site',
   tagline: 'Dinosaurs are cool',
   favicon: 'img/favicon.ico',

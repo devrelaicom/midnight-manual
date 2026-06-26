@@ -1,30 +1,45 @@
-/**
- * Any CSS included here will be global. The classic template
- * bundles Infima by default. Infima is a CSS framework designed to
- * work well for content-centric websites.
- */
+/* ===== Self-hosted fonts (filenames match site/static/fonts/) ===== */
+@font-face{font-family:'Anton';src:url('/fonts/anton-400.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap}
+@font-face{font-family:'Space Grotesk';src:url('/fonts/space-grotesk-400.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap}
+@font-face{font-family:'Space Grotesk';src:url('/fonts/space-grotesk-500.woff2') format('woff2');font-weight:500;font-style:normal;font-display:swap}
+@font-face{font-family:'Space Grotesk';src:url('/fonts/space-grotesk-700.woff2') format('woff2');font-weight:700;font-style:normal;font-display:swap}
+@font-face{font-family:'JetBrains Mono';src:url('/fonts/jetbrains-mono-400.woff2') format('woff2');font-weight:400;font-style:normal;font-display:swap}
+@font-face{font-family:'JetBrains Mono';src:url('/fonts/jetbrains-mono-500.woff2') format('woff2');font-weight:500;font-style:normal;font-display:swap}
 
-/* You can override the default Infima variables here. */
-:root {
-  --ifm-color-primary: #2e8555;
-  --ifm-color-primary-dark: #29784c;
-  --ifm-color-primary-darker: #277148;
-  --ifm-color-primary-darkest: #205d3b;
-  --ifm-color-primary-light: #33925d;
-  --ifm-color-primary-lighter: #359962;
-  --ifm-color-primary-lightest: #3cad6e;
-  --ifm-code-font-size: 95%;
-  --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.1);
+/* ===== Brand tokens (ported from site/css/styles.css :root) ===== */
+:root{
+  --mm-paper:#F4EFE3; --mm-paper-2:#EDE7D9; --mm-ink:#1F3DF5;
+  --mm-ink-hair:rgba(31,61,245,.20); --mm-graphite:#2A2A28; --mm-graphite-soft:#55524b;
+  --mm-accent:#E5392F; --mm-amber:#F2A33C;
+  --mm-term-bg:#0B1020; --mm-ink-on-dark:#9FB4FF; --mm-paper-on-dark:#ECE7D8;
+  --mm-display:'Anton',Impact,sans-serif;
+  --mm-sans:'Space Grotesk',system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+  --mm-mono:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+
+  /* Infima overrides (light) */
+  --ifm-background-color:var(--mm-paper);
+  --ifm-background-surface-color:var(--mm-paper-2);
+  --ifm-color-primary:#1F3DF5;
+  --ifm-color-primary-dark:#152fd0; --ifm-color-primary-darker:#1429c4; --ifm-color-primary-darkest:#1022a1;
+  --ifm-color-primary-light:#3a55f7; --ifm-color-primary-lighter:#4a63f8; --ifm-color-primary-lightest:#7686fb;
+  --ifm-font-color-base:var(--mm-graphite);
+  /* Docs headings use Space Grotesk 700 for readability; Anton is reserved for
+     the homepage display type + h1 (see Step below). */
+  --ifm-heading-font-family:var(--mm-sans);
+  --ifm-heading-font-weight:700;
+  --ifm-font-family-base:var(--mm-sans);
+  --ifm-font-family-monospace:var(--mm-mono);
+  --ifm-navbar-background-color:var(--mm-paper);
+  --ifm-link-color:var(--mm-ink);
+  --ifm-code-background:#EDE7D9; --ifm-code-color:#1F3DF5;
 }
 
-/* For readability concerns, you should choose a lighter palette in dark mode. */
-[data-theme='dark'] {
-  --ifm-color-primary: #25c2a0;
-  --ifm-color-primary-dark: #21af90;
-  --ifm-color-primary-darker: #1fa588;
-  --ifm-color-primary-darkest: #1a8870;
-  --ifm-color-primary-light: #29d5b0;
-  --ifm-color-primary-lighter: #32d8b4;
-  --ifm-color-primary-lightest: #4fddbf;
-  --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.3);
-}
+/* h1 / page titles keep the Anton display face for brand presence */
+.markdown > h1:first-child, article header h1{font-family:var(--mm-display);font-weight:400;text-transform:uppercase;letter-spacing:-.01em}
+
+/* Inline code chip (scope away from Prism code blocks in <pre>) */
+:not(pre) > code{color:var(--ifm-code-color);background-color:var(--ifm-code-background);border:1px solid var(--mm-ink-hair)}
+
+/* Accent rule used by the marker/eyebrow motif */
+.mm-marker{font-family:var(--mm-mono);font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:var(--mm-ink);display:flex;align-items:center;gap:12px}
+.mm-marker::before{content:"";width:30px;height:2px;background:var(--mm-accent)}
