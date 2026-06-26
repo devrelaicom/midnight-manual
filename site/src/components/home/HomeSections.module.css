@@ -55,7 +55,7 @@
   font-family: var(--mm-display);
   font-weight: 400;
   text-transform: uppercase;
-  line-height: .9;
+  line-height: 1.05;
   letter-spacing: -.01em;
   color: var(--mm-ink);
 }
@@ -64,7 +64,7 @@
   font-family: var(--mm-display);
   font-weight: 400;
   text-transform: uppercase;
-  line-height: .9;
+  line-height: 1.05;
   letter-spacing: -.01em;
   color: var(--mm-ink);
   font-size: clamp(34px, 5.4vw, 64px);
@@ -159,8 +159,13 @@
   box-shadow: 0 0 0 3px var(--mm-ink-hair);
 }
 
+/* Command-strip code is plain text inside the .cmd box — strip the global
+   inline-code chip (background/border/padding from custom.css `:not(pre) > code`). */
 .cmd code {
   white-space: nowrap;
+  background: transparent;
+  border: 0;
+  padding: 0;
 }
 
 .cmdBlock {
@@ -170,6 +175,9 @@
 .cmdBlock code {
   white-space: pre;
   line-height: 1.65;
+  background: transparent;
+  border: 0;
+  padding: 0;
 }
 
 .cmdCopy {
