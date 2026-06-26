@@ -1,11 +1,1 @@
-/* Page-level wrappers for the homepage — component styles live in HomeSections.module.css */
-
-.pageWrap {
-  max-width: var(--mm-maxw);
-  margin-inline: auto;
-  padding-inline: var(--mm-pad);
-}
-
-.sectionSpacing {
-  padding-block: var(--mm-section-y);
-}
+/* Page-level styles for the homepage — layout and spacing live in HomeSections.module.css */

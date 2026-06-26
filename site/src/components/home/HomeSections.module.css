@@ -7,6 +7,12 @@
    =================================================================== */
 
 /* ============ Layout ============ */
+.container {
+  max-width: var(--mm-maxw);
+  margin-inline: auto;
+  padding-inline: var(--mm-pad);
+}
+
 .section {
   padding-block: var(--mm-section-y);
 }
@@ -519,6 +525,11 @@
 
 :global(.js) .demoLoaded .demoResult:nth-child(3) .demoFill {
   transition-delay: .39s;
+}
+
+/* Applied by RetrievalDemo (static) and Task 6 (animated) to trigger loaded-state transitions */
+.demoLoaded {
+  /* presence of this class signals the demo has loaded */
 }
 
 .demoChips {
