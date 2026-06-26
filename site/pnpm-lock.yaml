@@ -18,19 +18,19 @@ importers:
         specifier: 3.10.1
         version: 3.10.1(@algolia/client-search@5.55.0)(@docusaurus/faster@3.10.1(@docusaurus/types@3.10.1(@swc/core@1.15.43)(postcss@8.5.15)(react-dom@19.2.7(react@19.2.7))(react@19.2.7))(postcss@8.5.15))(@mdx-js/react@3.1.1(@types/react@19.2.17)(react@19.2.7))(@rspack/core@1.7.12)(@swc/core@1.15.43)(@types/react@19.2.17)(postcss@8.5.15)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(search-insights@2.17.3)(typescript@6.0.3)
       '@mdx-js/react':
-        specifier: ^3.0.0
+        specifier: 3.1.1
         version: 3.1.1(@types/react@19.2.17)(react@19.2.7)
       clsx:
-        specifier: ^2.0.0
+        specifier: 2.1.1
         version: 2.1.1
       prism-react-renderer:
-        specifier: ^2.3.0
+        specifier: 2.4.1
         version: 2.4.1(react@19.2.7)
       react:
-        specifier: ^19.0.0
+        specifier: 19.2.7
         version: 19.2.7
       react-dom:
-        specifier: ^19.0.0
+        specifier: 19.2.7
         version: 19.2.7(react@19.2.7)
     devDependencies:
       '@docusaurus/module-type-aliases':
@@ -43,10 +43,10 @@ importers:
         specifier: 3.10.1
         version: 3.10.1(@swc/core@1.15.43)(postcss@8.5.15)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       '@types/react':
-        specifier: ^19.0.0
+        specifier: 19.2.17
         version: 19.2.17
       typescript:
-        specifier: ~6.0.2
+        specifier: 6.0.3
         version: 6.0.3
 
 packages:
