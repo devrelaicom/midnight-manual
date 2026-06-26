@@ -7,6 +7,8 @@ const sidebars: SidebarsConfig = {
       items: ['mcp/how-it-works','mcp/searching','mcp/reading-in-context','mcp/corpus-diagnostics','mcp/advanced-search-skill','mcp/rate-limits'] },
     { type: 'category', label: 'Using the CLI', collapsed: false,
       items: ['cli/overview','cli/searching','cli/reading','cli/models','cli/configuration','cli/skills-telemetry'] },
+    { type: 'category', label: 'Concepts', collapsed: false,
+      items: ['concepts/confidence','concepts/hybrid-retrieval','concepts/multi-query-hyde','concepts/smart-chunker','concepts/models'] },
   ],
 };
 
