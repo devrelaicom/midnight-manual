@@ -45,9 +45,6 @@ model    = "rerank-2.5"               # rerank-2.5 (default) | rerank-2.5-lite
 [telemetry]
 enabled  = true
 # endpoint = "https://gauge-telemetry.fly.dev"  # optional — override the Gauge endpoint
-
-[cli]
-show_admin_cmds = false
 ```
 
 ---
@@ -83,12 +80,6 @@ show_admin_cmds = false
 | `enabled` | `true` | Telemetry opt-in. Set `false` to disable. Equivalent to `MIDNIGHT_MANUAL_DISABLE_TELEMETRY=1`. |
 | `endpoint` | `https://gauge-telemetry.fly.dev` | Gauge telemetry endpoint override. |
 
-### `[cli]`
-
-| Key | Default | Description |
-|---|---|---|
-| `show_admin_cmds` | `false` | Reveal admin subcommands in `--help` output. Equivalent to `MIDNIGHT_MANUAL_SHOW_ADMIN_CMDS=1`. |
-
 ---
 
 ## Environment variables
@@ -99,14 +90,13 @@ show_admin_cmds = false
 | `MIDNIGHT_MANUAL_CONFIG` | Config file path. |
 | `MIDNIGHT_MANUAL_DISABLE_TELEMETRY` | Set to `1` to opt out of telemetry. |
 | `MIDNIGHT_MANUAL_GAUGE_ENDPOINT` | Override the Gauge telemetry endpoint (default `https://gauge-telemetry.fly.dev`). |
-| `MIDNIGHT_MANUAL_SHOW_ADMIN_CMDS` | Set to `1` to reveal admin subcommands in `--help`. |
 | `VOYAGE_API_KEY` | Your Voyage key for BYOK embedding and reranking. Unset means embedding and reranking are proxied by the hosted server. |
 | `VOYAGE_TIMEOUT_SECS` | Per-request timeout in seconds for Voyage embedding calls (default `120`). Flag form: `--voyage-timeout-secs`. |
 | `MIDNIGHT_MANUAL_RERANK` | Rerank placement: `auto` \| `local` \| `server` \| `off`. Same as `--rerank`. |
 | `MIDNIGHT_MANUAL_RERANK_MODEL` | Voyage rerank model: `rerank-2.5` \| `rerank-2.5-lite`. Same as `--rerank-model`. |
 | `RUST_LOG` | Log verbosity (`error`, `warn`, `info`, `debug`, `trace`). Same as `--log-level`. |
-| `MIDNIGHT_MANUAL_USER_STORE` | Server-side: path to the local user store (operator use). |
-| `MIDNIGHT_MANUAL_JWT_SECRET` | Server-side: JWT signing secret (operator use). |
+
+Operator-only settings (admin command visibility, the server-side user store, and the JWT signing secret) are documented in [Operator & admin reference](/docs/self-hosting/operator-reference).
 
 ---
 

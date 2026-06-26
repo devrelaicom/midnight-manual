@@ -6,7 +6,7 @@ description: The mnm config file, environment variables, and config show --effec
 
 # Configuration
 
-Configuration resolves in a clear precedence order: **command-line flag > environment variable > config file > compiled-in default**. You can override any setting at any layer without touching the others.
+Configuration resolves in this precedence order: **command-line flag > environment variable > config file > compiled-in default**. You can override any setting at any layer without touching the others.
 
 ## Config file
 
@@ -35,9 +35,6 @@ model    = "rerank-2.5"  # rerank-2.5 (default) | rerank-2.5-lite
 [telemetry]
 enabled = true
 # endpoint = "https://gauge-telemetry.fly.dev"  # optional — override the Gauge endpoint
-
-[cli]
-show_admin_cmds = false
 ```
 
 The full key reference lives in a Reference section of this site, not yet published.
@@ -50,7 +47,6 @@ The full key reference lives in a Reference section of this site, not yet publis
 | `MIDNIGHT_MANUAL_CONFIG` | Config file path (same as `--config`). |
 | `MIDNIGHT_MANUAL_DISABLE_TELEMETRY` | Opt out of telemetry for every invocation. |
 | `MIDNIGHT_MANUAL_GAUGE_ENDPOINT` | Override the Gauge telemetry endpoint. |
-| `MIDNIGHT_MANUAL_SHOW_ADMIN_CMDS` | Reveal admin subcommands in `--help`. |
 | `VOYAGE_API_KEY` | Your Voyage key for BYOK embedding and reranking. Unset -> proxied by the hosted server. |
 | `VOYAGE_TIMEOUT_SECS` | Per-request timeout (seconds) for Voyage embed calls (default 120). |
 | `MIDNIGHT_MANUAL_RERANK` | Rerank placement: `auto` \| `local` \| `server` \| `off`. |

@@ -81,7 +81,7 @@ The named revision must currently be in `inactive` state. Requires an admin toke
 mnm versions retire old-source --revision 3
 ```
 
-A background sweep job retires stale and aborted versions on a grace window, so the corpus stays tidy without manual cleanup. Retirement is a one-way operation.
+A background sweep job retires stale and aborted versions after a grace window. Retirement is a one-way operation.
 
 ## Rate-limit overrides
 
@@ -133,6 +133,17 @@ mnm ratelimits remove <uuid> --yes   # skip the confirmation
 ```
 
 Removal is interactive by default. Pass `--yes` for scripts and non-interactive environments (the command refuses without it when stdin is not a terminal).
+
+### Tuning the limits
+
+The per-tier refill rates, and the subsystem itself, are set by environment variable on the server. The defaults match the tiers the hosted instance serves: 10 req/s anonymous, 60 req/s read-uplift, 1000 req/s admin.
+
+| Variable | Controls |
+|---|---|
+| `MIDNIGHT_MANUAL_RATE_LIMIT_ANONYMOUS_RPS` | Anonymous tier refill rate |
+| `MIDNIGHT_MANUAL_RATE_LIMIT_UPLIFT_RPS` | Read-uplift tier refill rate |
+| `MIDNIGHT_MANUAL_RATE_LIMIT_ADMIN_RPS` | Admin tier refill rate |
+| `MIDNIGHT_MANUAL_RATE_LIMIT_ENABLED` | Toggle the whole subsystem |
 
 ## Token-limit knobs
 

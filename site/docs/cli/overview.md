@@ -29,7 +29,7 @@ mnm status                             connectivity, auth & model readiness
 mnm version                            build metadata
 ```
 
-Admin subcommands (`keys`, `users`, `ingest`, `ratelimits`, `tokenlimits`, `login`) are hidden from `--help` by default to keep the surface clean for everyday users. They are always invocable by name; reveal them in `--help` output with `MIDNIGHT_MANUAL_SHOW_ADMIN_CMDS=1` or `cli.show_admin_cmds = true` in the config file.
+The CLI also carries operator commands for running your own server; they are hidden from `--help` by default and documented in [Self-hosting & operations](/docs/self-hosting/when-to-self-host).
 
 ## Global flags
 

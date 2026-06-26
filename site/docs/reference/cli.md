@@ -5,7 +5,7 @@ sidebar_label: CLI
 
 # CLI reference
 
-The `mnm` CLI (also installed as `midnight-manual`) is the command-line interface to the Midnight Manual corpus. This page documents the full subcommand tree, sourced from `crates/midnight-manual/src/cli.rs` and `crates/midnight-manual/src/commands/`.
+The `mnm` CLI (also installed as `midnight-manual`) is the command-line interface to the Midnight Manual corpus. This page documents the everyday subcommand tree, sourced from `crates/midnight-manual/src/cli.rs` and `crates/midnight-manual/src/commands/`. Operator and admin commands for running your own server are documented in [Operator & admin reference](/docs/self-hosting/operator-reference).
 
 ## Global flags
 
@@ -114,10 +114,8 @@ Source registry inspection.
 |---|---|
 | `list` | List active sources from the cloud (anonymous read). |
 | `show [slug]` | Show one source's metadata by slug (anonymous read). |
-| `create` | Register a new source (admin; requires admin bearer). |
-| `update` | Update an existing source (admin). |
-| `retire` | Retire a source: soft-delete, not reversible via the CLI (admin). |
-| `list-all` | List every source including retired ones (admin). |
+
+Admin operations (`create`, `update`, `retire`, `list-all`) are in [Operator & admin reference](/docs/self-hosting/operator-reference).
 
 ---
 
@@ -129,9 +127,8 @@ Source-version inspection.
 |---|---|
 | `list <slug>` | List all source versions for a slug (anonymous read). |
 | `show <slug> <revision>` | Show one source version by revision (anonymous read). |
-| `promote <slug> --revision N` | Promote a historical version back to active (admin). |
-| `rollback <slug>` | Roll back to the most recent prior active version, a convenience wrapper around `promote` (admin). |
-| `retire <slug> --revision N` | Retire a single historical version (admin). The active revision is rejected; promote another version first. |
+
+Admin operations (`promote`, `rollback`, `retire`) are in [Operator & admin reference](/docs/self-hosting/operator-reference).
 
 ---
 
@@ -165,8 +162,8 @@ Local model management and corpus-side model information.
 |---|---|
 | `pull` | Ensure the local model-cache directory exists. Both the embedder and reranker are remote VoyageAI, so nothing is downloaded. Accepts `--cache-dir` to override the cache location. |
 | `active` | Show the corpus's currently active embedding model. |
-| `status` | _(Admin; hidden by default)_ List sources still on an older embedding model. |
-| `migrate` | _(Admin; hidden by default)_ Re-ingest every source not yet on the target embedding model. |
+
+Admin operations (`status`, `migrate`) are in [Operator & admin reference](/docs/self-hosting/operator-reference).
 
 ---
 
@@ -177,8 +174,8 @@ GitHub OAuth read-uplift flow and local auth-file inspection.
 | Subcommand | Description |
 |---|---|
 | `github` | Run the GitHub OAuth read-uplift flow. Flags: `--no-browser` (print the URL instead of opening it), `--dry-run` (don't persist the token), `--timeout [secs]` (listener bind timeout; default 300). |
-| `status` | Show the state of both tokens (admin + read-uplift). |
-| `logout` | Remove the read-uplift token from `auth.toml`. Admin tokens are untouched. |
+| `status` | Show the state of your read-uplift token. |
+| `logout` | Remove the read-uplift token from `auth.toml`. |
 
 ---
 
@@ -245,69 +242,6 @@ Install, inspect, or remove the `midnight-advanced-search` skill.
 
 ---
 
-## Admin-only subcommands
+## Operator & admin commands
 
-The following subcommands are **hidden from `--help` by default**. Set `MIDNIGHT_MANUAL_SHOW_ADMIN_CMDS=1` (or `cli.show_admin_cmds = true` in `config.toml`) to surface them. They still run when called by name regardless of visibility.
-
-### `keys`
-
-Ed25519 keypair management.
-
-| Subcommand | Description |
-|---|---|
-| `generate` | Generate a new keypair, persist the private half locally, print the public half in `users.toml` wire form. |
-
-### `login`
-
-Admin login via challenge-response.
-
-### `users`
-
-Local user-store CRUD.
-
-| Subcommand | Description |
-|---|---|
-| `list` | List users in the local user store. |
-| `show [id]` | Show one user by id. |
-| `add` | Add a new user. |
-| `update` | Update an existing user's role, public key, or note. |
-| `remove` | Remove a user from the local store. |
-
-### `admin`
-
-Admin tooling group: prompt-injection detector warmup and ad-hoc scoring.
-
-### `ingest`
-
-Run an admin ingest from a manifest.
-
-| Subcommand | Description |
-|---|---|
-| `plan` | Compute the ingest plan locally without starting a server-side run. |
-| `run` | Execute an ingest against the cloud server. |
-
-See [Running an ingest](/docs/self-hosting/running-an-ingest).
-
-### `ratelimits`
-
-Per-CIDR rate-limit override CRUD.
-
-| Subcommand | Description |
-|---|---|
-| `add` | Create a new per-CIDR override. |
-| `list` | List overrides still in effect. |
-| `extend [id]` | Extend an existing override's TTL. |
-| `remove [id]` | Remove an override. |
-
-### `tokenlimits`
-
-Per-CIDR or per-user embedding token-limit override CRUD.
-
-| Subcommand | Description |
-|---|---|
-| `add` | Create a new per-CIDR or per-user override. |
-| `list` | List overrides still in effect. |
-| `extend [id]` | Extend an existing override's TTL. |
-| `remove [id]` | Remove an override. |
-
-See [Versions and rate limits](/docs/self-hosting/versions-rate-limits).
+Server-side commands (`keys`, `login`, `users`, `admin`, `ingest`, `ratelimits`, `tokenlimits`) are hidden from `--help` by default and documented in [Operator & admin reference](/docs/self-hosting/operator-reference).
