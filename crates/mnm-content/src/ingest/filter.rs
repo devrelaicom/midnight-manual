@@ -264,7 +264,10 @@ impl FileFilter {
         builder.git_ignore(self.opts.respect_gitignore);
         builder.git_exclude(self.opts.respect_gitignore);
         builder.ignore(self.opts.respect_gitignore);
-        builder.parents(self.opts.respect_gitignore);
+        // Determinism: only the in-tree .gitignore counts — never the machine
+        // global (`core.excludesFile`) or parent-directory ignore files.
+        builder.git_global(false);
+        builder.parents(false);
         // Apply .gitignore rules even when no `.git` directory is present
         // (e.g. in subdirectories or temporary trees used during testing).
         builder.require_git(false);
@@ -397,6 +400,40 @@ mod tests {
         ] {
             assert!(f.allows(p), "{p} should be kept");
         }
+    }
+
+    #[test]
+    fn gitignore_is_repo_local_not_parent_or_global() {
+        let outer = tempfile::tempdir().unwrap();
+        // Parent-level .gitignore that would (wrongly) hide parent_ignored.rs.
+        std::fs::write(outer.path().join(".gitignore"), "parent_ignored.rs\n").unwrap();
+        let repo = outer.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(repo.join(".gitignore"), "repo_ignored.rs\n").unwrap();
+        std::fs::write(repo.join("keep.rs"), "x").unwrap();
+        std::fs::write(repo.join("repo_ignored.rs"), "x").unwrap();
+        std::fs::write(repo.join("parent_ignored.rs"), "x").unwrap();
+
+        let f = FileFilter::new(FilterOptions {
+            includes: vec![],
+            excludes: vec![],
+            respect_gitignore: true,
+            default_ignore_list: true,
+            skip_hidden: true,
+        });
+        let mut got: Vec<String> = f
+            .walk(&repo)
+            .iter()
+            .map(|p| {
+                p.strip_prefix(&repo)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        got.sort();
+        // repo's own .gitignore is honoured; the PARENT's is not.
+        assert_eq!(got, vec!["keep.rs", "parent_ignored.rs"]);
     }
 
     #[test]
