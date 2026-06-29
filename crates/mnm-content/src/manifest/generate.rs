@@ -94,6 +94,8 @@ fn collect_files(opts: &GenerateOptions) -> Vec<PathBuf> {
         excludes: opts.exclude.clone(),
         respect_gitignore: true,
         default_ignore_list: true,
+        skip_hidden: false,
+        require_known_kind: false,
     });
 
     // `FileFilter::walk` returns absolute paths; strip the base prefix to

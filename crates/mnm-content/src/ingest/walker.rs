@@ -21,6 +21,7 @@ use time::OffsetDateTime;
 
 use crate::chunk::DEFAULT_MAX_FILE_BYTES;
 use crate::frontmatter::{split as split_frontmatter, FrontmatterSplit};
+use crate::manifest::resolve::FilterRunOptions;
 use crate::manifest::Manifest;
 
 /// How many leading bytes the binary sniffer inspects for a NUL byte. Mirrors
@@ -149,8 +150,9 @@ pub fn walk(
     manifest: &Manifest,
     base: &Path,
     max_file_bytes: u64,
+    opts: FilterRunOptions,
 ) -> Result<WalkOutcome, WalkError> {
-    let leaves = crate::manifest::resolve::resolve(manifest, base);
+    let leaves = crate::manifest::resolve::resolve(manifest, base, opts);
     let mut documents: Vec<WalkedDocument> = Vec::with_capacity(leaves.len());
     let mut skipped: Vec<SkippedFile> = Vec::new();
     for leaf in leaves {
@@ -224,6 +226,7 @@ pub struct Walker {
     manifest: Manifest,
     base: PathBuf,
     max_file_bytes: u64,
+    filter_opts: FilterRunOptions,
 }
 
 impl Walker {
@@ -235,6 +238,7 @@ impl Walker {
             manifest,
             base,
             max_file_bytes: DEFAULT_MAX_FILE_BYTES,
+            filter_opts: FilterRunOptions::HERMETIC,
         }
     }
 
@@ -245,13 +249,26 @@ impl Walker {
         self
     }
 
+    /// Override the filter run options used during `path:` discovery.
+    #[must_use]
+    pub const fn with_filter_options(mut self, opts: FilterRunOptions) -> Self {
+        self.filter_opts = opts;
+        self
+    }
+
+    /// Return the current filter run options.
+    #[must_use]
+    pub const fn filter_options(&self) -> FilterRunOptions {
+        self.filter_opts
+    }
+
     /// Perform the walk and return the [`WalkOutcome`].
     ///
     /// # Errors
     ///
     /// See [`walk`].
     pub fn walk(&self) -> Result<WalkOutcome, WalkError> {
-        walk(&self.manifest, &self.base, self.max_file_bytes)
+        walk(&self.manifest, &self.base, self.max_file_bytes, self.filter_opts)
     }
 }
 
@@ -453,5 +470,20 @@ root:
         let docs = walker.walk().unwrap().documents;
         let paths: Vec<_> = docs.iter().map(|d| d.rel_path.clone()).collect();
         assert_eq!(paths, vec![PathBuf::from("docs/a.md"), PathBuf::from("docs/sub/b.md")]);
+    }
+
+    #[test]
+    fn walker_defaults_to_hermetic_filter_options() {
+        use crate::manifest::resolve::FilterRunOptions;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), "x").unwrap();
+        let m = Manifest::parse("manifest_version: 1\nroot:\n  name: r\n  path: .\n").unwrap();
+        let w = Walker::new(m, dir.path().to_path_buf());
+        assert_eq!(w.filter_options(), FilterRunOptions::HERMETIC);
+        let w2 = w.with_filter_options(FilterRunOptions {
+            respect_gitignore: true,
+            default_ignore_list: false,
+        });
+        assert!(w2.filter_options().respect_gitignore);
     }
 }

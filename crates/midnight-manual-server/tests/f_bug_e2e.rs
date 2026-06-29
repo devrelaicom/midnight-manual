@@ -333,7 +333,7 @@ async fn document_metadata_persists_to_postgres_through_full_ingest() {
         chunk_tokens: 400,
         include: vec![],
         exclude: vec![],
-        no_respect_gitignore: false,
+        respect_gitignore: false,
         disable_default_ignore_list: false,
         max_file_size: 10 * 1024 * 1024,
         unsafe_no_global_limit: false,
