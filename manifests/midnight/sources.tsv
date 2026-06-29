@@ -5,10 +5,10 @@
 #
 # Columns (whitespace-separated): slug  repo(owner/name)  branch  kind
 # The manifest file for each row is manifests/midnight/<slug>.yaml — EXCEPT for
-# categorised sources (see the community section below), whose manifest lives in
-# a subdirectory: manifests/midnight/<category>/<slug>.yaml. Consumers resolve a
-# slug by looking for <slug>.yaml at the top level first, then in any one-level
-# subdirectory. The origin URL is https://github.com/<repo>.
+# categorised sources (see the partner/community sections below), whose manifest
+# lives in a subdirectory: manifests/midnight/<category>/<slug>.yaml. Consumers
+# resolve a slug by looking for <slug>.yaml at the top level first, then in any
+# one-level subdirectory. The origin URL is https://github.com/<repo>.
 midnight-ledger	midnightntwrk/midnight-ledger	main	code_repo
 midnight-node	midnightntwrk/midnight-node	main	code_repo
 midnight-indexer	midnightntwrk/midnight-indexer	main	code_repo
@@ -41,6 +41,13 @@ contributor-hub	midnightntwrk/contributor-hub	main	docs_site
 servicedesk	midnightntwrk/servicedesk	main	docs_site
 midnight-reserve-contracts	midnightntwrk/midnight-reserve-contracts	main	code_repo
 night-token-distribution	midnightntwrk/night-token-distribution	main	code_repo
+joacolinares-kyc-midnight	joacolinares/kyc-midnight	main	code_repo
+#
+# ── partner sources (manifests/midnight/partner/<slug>.yaml) ──────────────────
+# Formal partner orgs: attribution: partner, verified: false. OpenZeppelin is
+# tags: [trust:high]; bricktowers/midnames-core are tags: [trust:medium]; the
+# repos added 2026-06-26 are trust:medium. Manifests live under partner/,
+# resolved by the slug→subdirectory fallback described in the header above.
 openzeppelin-compact-contracts	OpenZeppelin/compact-contracts	main	code_repo
 openzeppelin-compact-tools	OpenZeppelin/compact-tools	main	code_repo
 openzeppelin-midnight-apps	OpenZeppelin/midnight-apps	main	code_repo
@@ -48,7 +55,16 @@ bricktowers-midnight-rwa	bricktowers/midnight-rwa	main	code_repo
 bricktowers-midnight-identity	bricktowers/midnight-identity	main	code_repo
 bricktowers-midnight-seabattle	bricktowers/midnight-seabattle	main	code_repo
 midnames-core	midnames/core	main	code_repo
-joacolinares-kyc-midnight	joacolinares/kyc-midnight	main	code_repo
+webisoftsoftware-1am-starter-template	webisoftSoftware/1AM-starter-template	main	code_repo
+webisoftsoftware-split-prove	webisoftSoftware/split-prove	main	code_repo
+webisoftsoftware-1am-midnight-skill	webisoftSoftware/1AM-Midnight-Skill	main	docs_site
+midnames-passport-circuits	midnames/passport-circuits	main	code_repo
+midnames-docs	midnames/docs	main	docs_site
+midnames-sdk	midnames/sdk	main	code_repo
+midnames-vc-examples	midnames/vc-examples	main	code_repo
+midnames-deploy-receive-test	midnames/deploy-receive-test	main	code_repo
+midnames-did	midnames/did	main	code_repo
+midnames-did-frontend	midnames/did-frontend	main	code_repo
 #
 # ── community sources (manifests/midnight/community/<slug>.yaml) ───────────────
 # Community-contributed third-party repos: attribution: community, verified:

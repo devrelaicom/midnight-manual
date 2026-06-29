@@ -8,12 +8,12 @@ descendants).
 
 ### Layout
 
-Most manifests live at the top level of `manifests/midnight/`. Community-
-contributed third-party sources live in the **`community/`** subfolder (further
-category subfolders may be added later). `sources.tsv` and the ingest tooling
-resolve a slug to `<slug>.yaml` at the top level first, then fall back to a
-one-level subdirectory (`community/<slug>.yaml`). Slugs are unique across
-folders.
+Most manifests live at the top level of `manifests/midnight/`. Categorised
+third-party sources live in subfolders — **`partner/`** (formal partner orgs)
+and **`community/`** (community-contributed) so far; more may be added later.
+`sources.tsv` and the ingest tooling resolve a slug to `<slug>.yaml` at the top
+level first, then fall back to a one-level subdirectory (`partner/<slug>.yaml`,
+`community/<slug>.yaml`). Slugs are unique across folders.
 
 ## Provenance / trust model
 
@@ -41,12 +41,12 @@ mnm ingest run manifests/midnight/midnight-docs.yaml \
 also auto-creates the source on 404 with `--yes`, but explicit `sources create`
 is preferred so `kind`/`origin_url` are set.)
 
-## Index (72 sources)
+## Index (82 sources)
 
-> The top-level table below predates the `community/` reorg and is **not**
+> The top-level table below predates the subfolder reorg and is **not**
 > CI-enforced against `sources.tsv` on the `kind`/owner columns — treat
-> `sources.tsv` as authoritative. Community sources are listed in their own
-> section after it.
+> `sources.tsv` as authoritative. Partner and community sources are listed in
+> their own sections after it.
 
 | slug | repo | branch | kind | owner | attribution | verified | trust |
 |------|------|--------|------|-------|-------------|----------|-------|
@@ -82,6 +82,19 @@ is preferred so `kind`/`origin_url` are set.)
 | servicedesk | midnightntwrk/servicedesk | main | docs_site | Foundation | foundation | true | high |
 | midnight-reserve-contracts | midnightntwrk/midnight-reserve-contracts | main | mixed | Foundation | foundation | true | high |
 | night-token-distribution | midnightntwrk/night-token-distribution | main | mixed | Foundation | foundation | true | high |
+| joacolinares-kyc-midnight | joacolinares/kyc-midnight | main | mixed | Hackathon Winner | third_party | false | medium |
+
+## Partner sources (`manifests/midnight/partner/`)
+
+Formal partner-org repos. All are `attribution: partner`, `verified: false`.
+OpenZeppelin is `trust:high`; bricktowers and midnames-core are `trust:medium`.
+The 10 repos added 2026-06-26 are `trust:medium` and index only `.compact` /
+`.ts` / `.tsx` / `.js` / `.jsx` / `.mjs` / `.cjs` / `.rs` / `.md` / `.mdx`
+(boilerplate Markdown such as `SECURITY.md` excluded); the 7 pre-existing
+entries retain their original exclude-only scoping.
+
+| slug | repo | branch | kind | owner | attribution | verified | trust |
+|------|------|--------|------|-------|-------------|----------|-------|
 | openzeppelin-compact-contracts | OpenZeppelin/compact-contracts | main | mixed | Partner | partner | false | high |
 | openzeppelin-compact-tools | OpenZeppelin/compact-tools | main | code_repo | Partner | partner | false | high |
 | openzeppelin-midnight-apps | OpenZeppelin/midnight-apps | main | mixed | Partner | partner | false | high |
@@ -89,7 +102,17 @@ is preferred so `kind`/`origin_url` are set.)
 | bricktowers-midnight-identity | bricktowers/midnight-identity | main | mixed | Partner | partner | false | medium |
 | bricktowers-midnight-seabattle | bricktowers/midnight-seabattle | main | mixed | Partner | partner | false | medium |
 | midnames-core | midnames/core | main | mixed | Partner | partner | false | medium |
-| joacolinares-kyc-midnight | joacolinares/kyc-midnight | main | mixed | Hackathon Winner | third_party | false | medium |
+| webisoftsoftware-1am-starter-template | webisoftSoftware/1AM-starter-template | main | code_repo | Partner | partner | false | medium |
+| webisoftsoftware-split-prove | webisoftSoftware/split-prove | main | code_repo | Partner | partner | false | medium |
+| webisoftsoftware-1am-midnight-skill | webisoftSoftware/1AM-Midnight-Skill | main | docs_site | Partner | partner | false | medium |
+| midnames-passport-circuits | midnames/passport-circuits | main | code_repo | Partner | partner | false | medium |
+| midnames-docs | midnames/docs | main | docs_site | Partner | partner | false | medium |
+| midnames-sdk | midnames/sdk | main | code_repo | Partner | partner | false | medium |
+| midnames-vc-examples | midnames/vc-examples | main | code_repo | Partner | partner | false | medium |
+| midnames-deploy-receive-test | midnames/deploy-receive-test | main | code_repo | Partner | partner | false | medium |
+| midnames-did | midnames/did | main | code_repo | Partner | partner | false | medium |
+| midnames-did-frontend | midnames/did-frontend | main | code_repo | Partner | partner | false | medium |
+
 ## Community sources (`manifests/midnight/community/`)
 
 Community-contributed third-party repos. All are `attribution: community`,
