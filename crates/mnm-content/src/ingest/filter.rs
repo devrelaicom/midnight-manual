@@ -259,20 +259,9 @@ impl FileFilter {
         true
     }
 
-    /// Enumerate all files under `root` that pass this filter.
-    ///
-    /// The walk is built on [`ignore::WalkBuilder`] which handles gitignore
-    /// files, `.git/info/exclude`, and parent-directory ignore files when
-    /// [`FilterOptions::respect_gitignore`] is `true`.
-    ///
-    /// On top of the `ignore`-crate layer, every candidate path is also
-    /// tested against [`FileFilter::allows`] so that the `.git`-component,
-    /// default-skip-list, exclude, and include rules are enforced.
-    ///
-    /// Returns a `Vec<PathBuf>` rather than `impl Iterator<Item = PathBuf>`
-    /// to avoid lifetime complications with the closure capturing `self`.
-    #[must_use]
-    pub fn walk(&self, root: &Path) -> Vec<PathBuf> {
+    /// Build the `ignore` walker for `root` with this filter's hidden/gitignore/
+    /// pruning settings applied.
+    fn configure_builder(&self, root: &Path) -> ignore::WalkBuilder {
         let mut builder = ignore::WalkBuilder::new(root);
         // Honour the caller's hidden-file preference.
         builder.hidden(self.opts.skip_hidden);
@@ -308,9 +297,26 @@ impl FileFilter {
             }
             true
         });
+        builder
+    }
 
+    /// Enumerate all files under `root` that pass this filter.
+    ///
+    /// The walk is built on [`ignore::WalkBuilder`] which handles gitignore
+    /// files, `.git/info/exclude`, and parent-directory ignore files when
+    /// [`FilterOptions::respect_gitignore`] is `true`.
+    ///
+    /// On top of the `ignore`-crate layer, every candidate path is also
+    /// tested against [`FileFilter::allows`] so that the `.git`-component,
+    /// default-skip-list, exclude, and include rules are enforced.
+    ///
+    /// Returns a `Vec<PathBuf>` of **absolute** paths rather than
+    /// `impl Iterator<Item = PathBuf>` to avoid lifetime complications with
+    /// the closure capturing `self`.
+    #[must_use]
+    pub fn walk(&self, root: &Path) -> Vec<PathBuf> {
         let mut out = Vec::new();
-        for entry in builder.build() {
+        for entry in self.configure_builder(root).build() {
             let Ok(entry) = entry else { continue };
             // Skip directories; we only care about files.
             if entry.file_type().is_none_or(|ft| !ft.is_file()) {
@@ -329,6 +335,35 @@ impl FileFilter {
                 out.push(path.to_path_buf());
             }
         }
+        out
+    }
+
+    /// Enumerate files under `base/subdir`, returning paths **relative to
+    /// `base`** (so manifest `include`/`exclude` globs keep their
+    /// source-root-relative meaning).
+    #[must_use]
+    pub fn walk_subtree(&self, base: &Path, subdir: &Path) -> Vec<PathBuf> {
+        let walk_root = base.join(subdir);
+        let mut out = Vec::new();
+        for entry in self.configure_builder(&walk_root).build() {
+            let Ok(entry) = entry else { continue };
+            if entry.file_type().is_none_or(|ft| !ft.is_file()) {
+                continue;
+            }
+            // Strip `base` (not `walk_root`) so the returned path is
+            // base-relative (e.g. `prerelease/top.md`), matching the
+            // source-root-relative semantics expected by include/exclude globs.
+            let Ok(rel) = entry.path().strip_prefix(base) else {
+                continue;
+            };
+            let rel_str = rel
+                .to_string_lossy()
+                .replace(std::path::MAIN_SEPARATOR, "/");
+            if self.allows(&rel_str) {
+                out.push(PathBuf::from(rel_str));
+            }
+        }
+        out.sort();
         out
     }
 }
@@ -525,6 +560,36 @@ mod tests {
         assert!(
             !got2.iter().any(|p| p.starts_with("node_modules/")),
             "node_modules pruned regardless"
+        );
+    }
+
+    #[test]
+    fn walk_subtree_returns_base_relative_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = dir.path();
+        std::fs::create_dir_all(b.join("prerelease/sub")).unwrap();
+        std::fs::write(b.join("prerelease/top.md"), "x").unwrap();
+        std::fs::write(b.join("prerelease/sub/deep.md"), "x").unwrap();
+        std::fs::write(b.join("other.md"), "x").unwrap(); // outside the subtree
+
+        let f = FileFilter::new(FilterOptions {
+            includes: vec![],
+            excludes: vec![],
+            respect_gitignore: false,
+            default_ignore_list: true,
+            skip_hidden: true,
+            require_known_kind: true,
+        });
+        let mut got: Vec<String> = f
+            .walk_subtree(b, std::path::Path::new("prerelease"))
+            .iter()
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .collect();
+        got.sort();
+        assert_eq!(
+            got,
+            vec!["prerelease/sub/deep.md", "prerelease/top.md"],
+            "paths are base-relative and confined to the subtree"
         );
     }
 }
