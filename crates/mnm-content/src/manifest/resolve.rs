@@ -473,6 +473,56 @@ root:
     }
 
     #[test]
+    fn golden_walk_documents_the_deltas() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = dir.path();
+        for p in [
+            "src/lib.rs",
+            "compiler/main.scm",
+            "README.md",
+            "docs/guide.md",
+            "package.json",
+            "Cargo.toml", // kept config (signal)
+            "vendor/lib.rs",
+            "build/out.js",
+            "coverage/c.js",
+            "managed/Contract.ts",
+            "ui/__snapshots__/s.ts",
+            "api_pb.ts",
+            "app.min.js",
+            "package-lock.json",
+            "pnpm-lock.yaml", // lockfiles
+            "CONTRIBUTING.md",
+            "SECURITY.md", // boilerplate
+            ".eslintrc.json",
+            "notes.weirdext", // hidden / unknown
+            "node_modules/dep.js",
+        ] {
+            let abs = b.join(p);
+            std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+            std::fs::write(abs, "x").unwrap();
+        }
+        let m = Manifest::parse("manifest_version: 1\nroot:\n  name: r\n  path: .\n").unwrap();
+        let mut got: Vec<String> = resolve(&m, b, FilterRunOptions::default())
+            .iter()
+            .map(|l| l.rel_path.to_string_lossy().replace('\\', "/"))
+            .collect();
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                "Cargo.toml",
+                "README.md",
+                "compiler/main.scm",
+                "docs/guide.md",
+                "package.json",
+                "src/lib.rs",
+            ],
+            "ingest indexes source + docs + kept-config only"
+        );
+    }
+
+    #[test]
     fn no_extract_inherits_and_leaf_overrides() {
         let dir = tempfile::tempdir().unwrap();
         let base = dir.path();
