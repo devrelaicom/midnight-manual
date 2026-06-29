@@ -54,6 +54,10 @@ pub struct FilterOptions {
     /// `vendor`, or `dist`; filenames matching `*.min.js`, `*.bundle.js`, or
     /// `*_pb.ts`.
     pub default_ignore_list: bool,
+
+    /// Skip dotfiles and dot-directories (e.g. `.env`, `.github/`).
+    /// `true` for ingest; `false` for generate (which relies on gitignore).
+    pub skip_hidden: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -254,8 +258,8 @@ impl FileFilter {
     #[must_use]
     pub fn walk(&self, root: &Path) -> Vec<PathBuf> {
         let mut builder = ignore::WalkBuilder::new(root);
-        // Do not auto-skip hidden files — we control .git ourselves.
-        builder.hidden(false);
+        // Honour the caller's hidden-file preference.
+        builder.hidden(self.opts.skip_hidden);
         // Wire gitignore layers to the `respect_gitignore` option.
         builder.git_ignore(self.opts.respect_gitignore);
         builder.git_exclude(self.opts.respect_gitignore);
@@ -264,6 +268,27 @@ impl FileFilter {
         // Apply .gitignore rules even when no `.git` directory is present
         // (e.g. in subdirectories or temporary trees used during testing).
         builder.require_git(false);
+        // Prune noise directories so we never descend into them (perf + parity
+        // with the old walkdir pruning). `.git` is always pruned; the rest only
+        // when the default ignore list is active. Never prune the walk root
+        // itself (depth 0).
+        let prune_defaults = self.opts.default_ignore_list;
+        builder.filter_entry(move |e| {
+            if e.depth() == 0 {
+                return true;
+            }
+            let name = e.file_name().to_string_lossy();
+            if name == ".git" {
+                return false;
+            }
+            if prune_defaults
+                && e.file_type().is_some_and(|ft| ft.is_dir())
+                && DEFAULT_SKIP_COMPONENTS.contains(&name.as_ref())
+            {
+                return false;
+            }
+            true
+        });
 
         let mut out = Vec::new();
         for entry in builder.build() {
@@ -304,6 +329,7 @@ mod tests {
             excludes: vec!["generated_*.rs".into()],
             respect_gitignore: true,
             default_ignore_list: true,
+            skip_hidden: true,
         });
         assert!(f.allows("src/lib.rs"));
         assert!(!f.allows("src/generated_x.rs")); // exclude beats include
@@ -319,6 +345,7 @@ mod tests {
             excludes: vec![],
             respect_gitignore: false,
             default_ignore_list: false,
+            skip_hidden: true,
         });
         assert!(f.allows("node_modules/pkg/x.rs"));
         assert!(!f.allows(".git/config")); // .git still excluded
@@ -331,6 +358,7 @@ mod tests {
             excludes: vec![],
             respect_gitignore: false,
             default_ignore_list: true,
+            skip_hidden: true,
         });
         // New noise dirs
         for p in [
@@ -369,5 +397,46 @@ mod tests {
         ] {
             assert!(f.allows(p), "{p} should be kept");
         }
+    }
+
+    #[test]
+    fn walk_honours_skip_hidden_and_prunes_node_modules() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = dir.path();
+        std::fs::write(b.join("keep.rs"), "fn a(){}").unwrap();
+        std::fs::write(b.join(".hidden.rs"), "fn h(){}").unwrap();
+        std::fs::create_dir_all(b.join("node_modules/pkg")).unwrap();
+        std::fs::write(b.join("node_modules/pkg/dep.js"), "x").unwrap();
+
+        let opts = |skip_hidden| FilterOptions {
+            includes: vec![],
+            excludes: vec![],
+            respect_gitignore: false,
+            default_ignore_list: true,
+            skip_hidden,
+        };
+        let names = |paths: Vec<std::path::PathBuf>, base: &std::path::Path| {
+            let mut v: Vec<String> = paths
+                .iter()
+                .map(|p| {
+                    p.strip_prefix(base)
+                        .unwrap()
+                        .to_string_lossy()
+                        .replace('\\', "/")
+                })
+                .collect();
+            v.sort();
+            v
+        };
+
+        let got = names(FileFilter::new(opts(true)).walk(b), b);
+        assert_eq!(got, vec!["keep.rs"], "skip_hidden=true drops .hidden.rs and node_modules");
+
+        let got2 = names(FileFilter::new(opts(false)).walk(b), b);
+        assert!(got2.contains(&".hidden.rs".to_string()), "skip_hidden=false keeps hidden");
+        assert!(
+            !got2.iter().any(|p| p.starts_with("node_modules/")),
+            "node_modules pruned regardless"
+        );
     }
 }
