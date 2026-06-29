@@ -14,6 +14,31 @@ use serde_json;
 
 use super::Manifest;
 
+/// Run-level toggles that flow into file discovery. Defaults are hermetic:
+/// gitignore off, default skip-list on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FilterRunOptions {
+    /// When `true`, honour `.gitignore` rules during `path:` discovery.
+    pub respect_gitignore: bool,
+    /// When `true`, apply the built-in directory skip-list (`node_modules`,
+    /// `.git`, `target`, `dist`) during `path:` discovery.
+    pub default_ignore_list: bool,
+}
+
+impl FilterRunOptions {
+    /// Hermetic defaults: gitignore off, default skip-list on.
+    pub const HERMETIC: Self = Self {
+        respect_gitignore: false,
+        default_ignore_list: true,
+    };
+}
+
+impl Default for FilterRunOptions {
+    fn default() -> Self {
+        Self::HERMETIC
+    }
+}
+
 /// One leaf produced by walking the manifest, with inheritance applied.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedLeaf {
@@ -40,10 +65,10 @@ pub struct ResolvedLeaf {
 /// resolved. For `path:` nodes the resolver enumerates files under
 /// `base/<path>` using walkdir + globset.
 #[must_use]
-pub fn resolve(manifest: &Manifest, base: &Path) -> Vec<ResolvedLeaf> {
+pub fn resolve(manifest: &Manifest, base: &Path, opts: FilterRunOptions) -> Vec<ResolvedLeaf> {
     let mut out = Vec::new();
     let empty = serde_json::Map::new();
-    walk(base, &manifest.root, None, &empty, false, &mut out);
+    walk(base, &manifest.root, None, &empty, false, opts, &mut out);
     out.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
     out
 }
@@ -54,6 +79,7 @@ fn walk(
     parent_url: Option<&str>,
     parent_prov: &serde_json::Map<String, serde_json::Value>,
     parent_no_extract: bool,
+    opts: FilterRunOptions,
     out: &mut Vec<ResolvedLeaf>,
 ) {
     let merged_prov = merge_prov(parent_prov, node.provenance.as_ref());
@@ -108,7 +134,9 @@ fn walk(
     // directory and emit a leaf for each one that is not already covered by an
     // explicit `file:` child.
     if let Some(path) = &node.path {
-        for rel in discover_under_path(base, path, &node.include, &node.exclude, &explicit_files) {
+        for rel in
+            discover_under_path(base, path, &node.include, &node.exclude, &explicit_files, opts)
+        {
             let url = compose_url(inherited_url, &rel);
             let prov_override = serde_json::from_value::<Provenance>(serde_json::Value::Object(
                 merged_prov.clone(),
@@ -127,7 +155,7 @@ fn walk(
     }
 
     for child in &node.children {
-        walk(base, child, inherited_url, &merged_prov, inherited_no_extract, out);
+        walk(base, child, inherited_url, &merged_prov, inherited_no_extract, opts, out);
     }
 }
 
@@ -153,6 +181,7 @@ fn discover_under_path(
     include: &[String],
     exclude: &[String],
     explicit_files: &std::collections::HashSet<PathBuf>,
+    _opts: FilterRunOptions,
 ) -> Vec<PathBuf> {
     let abs = base.join(rel_dir);
     if !abs.is_dir() {
@@ -280,7 +309,7 @@ root:
     - file: dir/b.md
 ";
         let m = Manifest::parse(body).unwrap();
-        let leaves = resolve(&m, Path::new("."));
+        let leaves = resolve(&m, Path::new("."), FilterRunOptions::default());
         let paths: Vec<_> = leaves.iter().map(|l| l.rel_path.clone()).collect();
         assert_eq!(paths, vec![PathBuf::from("a.md"), PathBuf::from("dir/b.md")]);
         assert_eq!(leaves[0].kind, DocumentKind::Markdown);
@@ -310,7 +339,7 @@ root:
         - file: tls.md
 ";
         let m = Manifest::parse(body).unwrap();
-        let leaves = resolve(&m, Path::new("."));
+        let leaves = resolve(&m, Path::new("."), FilterRunOptions::default());
         let by_path: std::collections::HashMap<PathBuf, String> = leaves
             .iter()
             .map(|l| (l.rel_path.clone(), l.published_url.clone().unwrap()))
@@ -330,7 +359,7 @@ root:
       published_url: https://docs.example.com/elsewhere/sign-in/
 ";
         let m = Manifest::parse(body).unwrap();
-        let leaves = resolve(&m, Path::new("."));
+        let leaves = resolve(&m, Path::new("."), FilterRunOptions::default());
         assert_eq!(
             leaves[0].published_url.as_deref(),
             Some("https://docs.example.com/elsewhere/sign-in/")
@@ -354,7 +383,7 @@ root:
       published_url: ""
 "#;
         let m = Manifest::parse(body).unwrap();
-        let leaves = resolve(&m, Path::new("."));
+        let leaves = resolve(&m, Path::new("."), FilterRunOptions::default());
         assert_eq!(leaves[0].published_url, None);
     }
 
@@ -371,7 +400,7 @@ root:
     - file: a.md
 ";
         let m = Manifest::parse(body).unwrap();
-        let leaves = resolve(&m, Path::new("."));
+        let leaves = resolve(&m, Path::new("."), FilterRunOptions::default());
         let p = &leaves[0].provenance_override;
         assert_eq!(p.attribution, mnm_core::provenance::Attribution::Foundation);
         assert!(p.verified);
@@ -392,7 +421,7 @@ root:
         verified: false
 ";
         let m = Manifest::parse(body).unwrap();
-        let leaves = resolve(&m, Path::new("."));
+        let leaves = resolve(&m, Path::new("."), FilterRunOptions::default());
         let p = &leaves[0].provenance_override;
         // Inherited attribution stays.
         assert_eq!(p.attribution, mnm_core::provenance::Attribution::Foundation);
@@ -417,7 +446,7 @@ root:
   exclude: ["**/*.draft.md"]
 "#;
         let m = Manifest::parse(body).unwrap();
-        let leaves = resolve(&m, base);
+        let leaves = resolve(&m, base, FilterRunOptions::default());
         let paths: Vec<_> = leaves.iter().map(|l| l.rel_path.clone()).collect();
         assert_eq!(paths, vec![PathBuf::from("docs/a.md"), PathBuf::from("docs/sub/b.md"),]);
         // Inherited URL prefix is joined with each discovered file's stem.
@@ -442,7 +471,7 @@ root:
       published_url: https://override.example.com/special/
 ";
         let m = Manifest::parse(body).unwrap();
-        let leaves = resolve(&m, base);
+        let leaves = resolve(&m, base, FilterRunOptions::default());
         assert_eq!(leaves.len(), 1);
         assert_eq!(
             leaves[0].published_url.as_deref(),
@@ -468,7 +497,7 @@ root:
       no_extract: false
 ";
         let m = Manifest::parse(yaml).unwrap();
-        let leaves = resolve(&m, base);
+        let leaves = resolve(&m, base, FilterRunOptions::default());
         let by_path: std::collections::HashMap<PathBuf, bool> = leaves
             .iter()
             .map(|l| (l.rel_path.clone(), l.no_extract))
