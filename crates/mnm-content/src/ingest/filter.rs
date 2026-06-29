@@ -28,6 +28,7 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 
 /// Configuration for [`FileFilter`].
 #[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)] // Four independent feature-gate flags; a state machine would be less clear.
 pub struct FilterOptions {
     /// Glob patterns for paths that should be included.
     ///
@@ -58,6 +59,10 @@ pub struct FilterOptions {
     /// Skip dotfiles and dot-directories (e.g. `.env`, `.github/`).
     /// `true` for ingest; `false` for generate (which relies on gitignore).
     pub skip_hidden: bool,
+
+    /// Drop files whose extension is not a recognised language, UNLESS an
+    /// `include` glob matches. `true` for ingest; `false` for generate.
+    pub require_known_kind: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -238,6 +243,17 @@ impl FileFilter {
         }
 
         // ----------------------------------------------------------------
+        // Step 5b — Known-kind gate (ingest). Only when no include whitelist
+        // is in effect: an explicit include is itself the intent signal.
+        // ----------------------------------------------------------------
+        if self.opts.require_known_kind
+            && self.opts.includes.is_empty()
+            && crate::language::from_path(std::path::Path::new(rel_path)).is_none()
+        {
+            return false;
+        }
+
+        // ----------------------------------------------------------------
         // Step 6 — Default: included.
         // ----------------------------------------------------------------
         true
@@ -333,6 +349,7 @@ mod tests {
             respect_gitignore: true,
             default_ignore_list: true,
             skip_hidden: true,
+            require_known_kind: false,
         });
         assert!(f.allows("src/lib.rs"));
         assert!(!f.allows("src/generated_x.rs")); // exclude beats include
@@ -349,6 +366,7 @@ mod tests {
             respect_gitignore: false,
             default_ignore_list: false,
             skip_hidden: true,
+            require_known_kind: false,
         });
         assert!(f.allows("node_modules/pkg/x.rs"));
         assert!(!f.allows(".git/config")); // .git still excluded
@@ -362,6 +380,7 @@ mod tests {
             respect_gitignore: false,
             default_ignore_list: true,
             skip_hidden: true,
+            require_known_kind: false,
         });
         // New noise dirs
         for p in [
@@ -420,6 +439,7 @@ mod tests {
             respect_gitignore: true,
             default_ignore_list: true,
             skip_hidden: true,
+            require_known_kind: false,
         });
         let mut got: Vec<String> = f
             .walk(&repo)
@@ -437,6 +457,36 @@ mod tests {
     }
 
     #[test]
+    fn require_known_kind_drops_unknown_unless_included() {
+        let base = FilterOptions {
+            includes: vec![],
+            excludes: vec![],
+            respect_gitignore: false,
+            default_ignore_list: true,
+            skip_hidden: true,
+            require_known_kind: true,
+        };
+        let f = FileFilter::new(base.clone());
+        assert!(f.allows("src/lib.rs"), "known kind kept");
+        assert!(f.allows("data.json"), "json is a known kind, kept");
+        assert!(!f.allows("notes.weirdext"), "unknown kind dropped");
+
+        // Explicit include bypasses the gate.
+        let f2 = FileFilter::new(FilterOptions {
+            includes: vec!["**/*.weirdext".into()],
+            ..base.clone()
+        });
+        assert!(f2.allows("notes.weirdext"), "include bypasses known-kind gate");
+
+        // Disabled gate keeps unknown.
+        let f3 = FileFilter::new(FilterOptions {
+            require_known_kind: false,
+            ..base
+        });
+        assert!(f3.allows("notes.weirdext"), "gate off keeps unknown");
+    }
+
+    #[test]
     fn walk_honours_skip_hidden_and_prunes_node_modules() {
         let dir = tempfile::tempdir().unwrap();
         let b = dir.path();
@@ -451,6 +501,7 @@ mod tests {
             respect_gitignore: false,
             default_ignore_list: true,
             skip_hidden,
+            require_known_kind: false,
         };
         let names = |paths: Vec<std::path::PathBuf>, base: &std::path::Path| {
             let mut v: Vec<String> = paths
