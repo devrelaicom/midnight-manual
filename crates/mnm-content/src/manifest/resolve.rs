@@ -63,7 +63,7 @@ pub struct ResolvedLeaf {
 ///
 /// `base` is the on-disk root from which relative paths in the manifest are
 /// resolved. For `path:` nodes the resolver enumerates files under
-/// `base/<path>` using walkdir + globset.
+/// `base/<path>` using [`crate::ingest::filter::FileFilter`].
 #[must_use]
 pub fn resolve(manifest: &Manifest, base: &Path, opts: FilterRunOptions) -> Vec<ResolvedLeaf> {
     let mut out = Vec::new();
@@ -163,16 +163,10 @@ fn walk(
 // path: discovery helpers
 // ---------------------------------------------------------------------------
 
-/// Directories that are always skipped during `path:` discovery.
-const DEFAULT_IGNORE_DIRS: &[&str] = &["node_modules", ".git", "target", "dist"];
-
-/// Walk `base/rel_dir` recursively and return all files that:
-/// - are not hidden (no leading `.`),
-/// - are not inside a `DEFAULT_IGNORE_DIRS` directory,
-/// - have a known `DocumentKind` (or match an explicit include glob),
-/// - match any `include` globs (if provided),
-/// - do NOT match any `exclude` globs,
-/// - are not in `explicit_files` (already declared as `file:` children).
+/// Walk `base/rel_dir` recursively and return all files that pass the unified
+/// [`crate::ingest::filter::FileFilter`] semantics (ingest defaults: hidden
+/// files and the default skip-list excluded, unknown file kinds dropped unless
+/// an explicit include glob matches).
 ///
 /// Returned paths are relative to `base` and sorted lexicographically.
 fn discover_under_path(
@@ -181,76 +175,24 @@ fn discover_under_path(
     include: &[String],
     exclude: &[String],
     explicit_files: &std::collections::HashSet<PathBuf>,
-    _opts: FilterRunOptions,
+    opts: FilterRunOptions,
 ) -> Vec<PathBuf> {
-    let abs = base.join(rel_dir);
-    if !abs.is_dir() {
-        return Vec::new();
-    }
-    let include_set = build_globs(include);
-    let exclude_set = build_globs(exclude);
-
-    let mut out = Vec::new();
-    for entry in walkdir::WalkDir::new(&abs)
+    use crate::ingest::filter::{FileFilter, FilterOptions};
+    let filter = FileFilter::new(FilterOptions {
+        includes: include.to_vec(),
+        excludes: exclude.to_vec(),
+        respect_gitignore: opts.respect_gitignore,
+        default_ignore_list: opts.default_ignore_list,
+        skip_hidden: true,
+        require_known_kind: true,
+    });
+    let mut out: Vec<PathBuf> = filter
+        .walk_subtree(base, rel_dir)
         .into_iter()
-        .filter_entry(|e| {
-            let name = e.file_name().to_string_lossy();
-            // Skip hidden entries.
-            if name.starts_with('.') {
-                return false;
-            }
-            // Skip known ignore directories.
-            if e.file_type().is_dir() && DEFAULT_IGNORE_DIRS.contains(&name.as_ref()) {
-                return false;
-            }
-            true
-        })
-        .flatten()
-    {
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let rel = match entry.path().strip_prefix(base) {
-            Ok(p) => p.to_path_buf(),
-            Err(_) => continue,
-        };
-        // Skip files already covered by explicit `file:` children.
-        if explicit_files.contains(&rel) {
-            continue;
-        }
-        // Default include = files whose extension maps to a known DocumentKind.
-        if include_set.is_none() && crate::language::from_path(&rel).is_none() {
-            continue;
-        }
-        if let Some(set) = &include_set {
-            if !set.is_match(&rel) {
-                continue;
-            }
-        }
-        if let Some(set) = &exclude_set {
-            if set.is_match(&rel) {
-                continue;
-            }
-        }
-        out.push(rel);
-    }
+        .filter(|rel| !explicit_files.contains(rel))
+        .collect();
     out.sort();
     out
-}
-
-/// Build a `GlobSet` from a list of patterns. Returns `None` when the list is
-/// empty (callers interpret `None` as "no filter").
-fn build_globs(patterns: &[String]) -> Option<globset::GlobSet> {
-    if patterns.is_empty() {
-        return None;
-    }
-    let mut builder = globset::GlobSetBuilder::new();
-    for p in patterns {
-        if let Ok(g) = globset::Glob::new(p) {
-            builder.add(g);
-        }
-    }
-    builder.build().ok()
 }
 
 /// Compose the file's final `published_url` from an inherited prefix.
@@ -477,6 +419,57 @@ root:
             leaves[0].published_url.as_deref(),
             Some("https://override.example.com/special/")
         );
+    }
+
+    #[test]
+    fn discover_matches_unified_filter_semantics() {
+        use crate::ingest::filter::{FileFilter, FilterOptions};
+        let dir = tempfile::tempdir().unwrap();
+        let b = dir.path();
+        for p in [
+            "keep.rs",
+            "notes.weirdext",
+            ".hidden.md",
+            "node_modules/dep.js",
+            "vendor/v.rs",
+            "build/o.js",
+            "package-lock.json",
+            "package.json",
+            "SECURITY.md",
+        ] {
+            let abs = b.join(p);
+            std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+            std::fs::write(abs, "x").unwrap();
+        }
+        let m = Manifest::parse("manifest_version: 1\nroot:\n  name: r\n  path: .\n").unwrap();
+        let leaves = resolve(&m, b, FilterRunOptions::default());
+        let mut got: Vec<String> = leaves
+            .iter()
+            .map(|l| l.rel_path.to_string_lossy().replace('\\', "/"))
+            .collect();
+        got.sort();
+        assert_eq!(
+            got,
+            vec!["keep.rs", "package.json"],
+            "drops unknown/hidden/node_modules/vendor/build/lockfile/SECURITY; keeps source + package.json"
+        );
+
+        // Cross-check: identical to FileFilter::walk_subtree with ingest defaults.
+        let filter = FileFilter::new(FilterOptions {
+            includes: vec![],
+            excludes: vec![],
+            respect_gitignore: false,
+            default_ignore_list: true,
+            skip_hidden: true,
+            require_known_kind: true,
+        });
+        let mut direct: Vec<String> = filter
+            .walk_subtree(b, std::path::Path::new("."))
+            .iter()
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .collect();
+        direct.sort();
+        assert_eq!(direct, got);
     }
 
     #[test]
