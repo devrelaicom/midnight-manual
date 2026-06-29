@@ -2,23 +2,13 @@ manifest_version: 1
 root:
   name: midnight-indexer
   path: .
-  include: ["*.md"]
   exclude:
-    - "**/CODE_OF_CONDUCT.md"
-    - "**/CONTRIBUTING.md"
-    - "**/SECURITY.md"
-    - "indexer-api/**"
-    - "docs/**"
-    - "indexer-tests/**"
+    # Static test data / fixture dumps (blocks.json, transactions.json, …).
+    - "qa/tests/data/**"
+    # Test-run evidence artifacts (md/xml golden output).
+    - "qa/tests/evidence/**"
   provenance:
     attribution: foundation
     verified: true
     verified_by: midnight-foundation
     tags: [trust:high]
-  children:
-    - name: indexer-api
-      path: indexer-api/
-    - name: docs
-      path: docs/
-    - name: indexer-tests
-      path: indexer-tests/

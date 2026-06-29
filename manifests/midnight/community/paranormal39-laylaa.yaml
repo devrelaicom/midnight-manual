@@ -2,33 +2,9 @@ manifest_version: 1
 root:
   name: paranormal39-laylaa
   path: .
-  include:
-    - "**/*.compact"
-    - "**/*.ts"
-    - "**/*.tsx"
-    - "**/*.js"
-    - "**/*.jsx"
-    - "**/*.mjs"
-    - "**/*.cjs"
-    - "**/*.rs"
-    - "**/*.md"
-    - "**/*.mdx"
   exclude:
-    - "**/node_modules/**"
-    - "**/dist/**"
-    - "**/build/**"
-    - "**/target/**"
-    - "**/managed/**"
-    - "**/.git/**"
-    - "**/.github/**"
-    - "**/.next/**"
-    - "**/out/**"
-    - "**/coverage/**"
-    - "**/__snapshots__/**"
-    - "**/.turbo/**"
-    - "**/CODE_OF_CONDUCT.md"
-    - "**/CONTRIBUTING.md"
-    - "**/SECURITY.md"
+    # Runtime user-upload blobs (NFT metadata dumps), not source.
+    - "packages/xaman-backend/uploads/**"
   provenance:
     attribution: community
     verified: false

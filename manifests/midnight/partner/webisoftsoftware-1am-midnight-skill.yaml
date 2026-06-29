@@ -2,33 +2,9 @@ manifest_version: 1
 root:
   name: webisoftsoftware-1am-midnight-skill
   path: .
-  include:
-    - "**/*.compact"
-    - "**/*.ts"
-    - "**/*.tsx"
-    - "**/*.js"
-    - "**/*.jsx"
-    - "**/*.mjs"
-    - "**/*.cjs"
-    - "**/*.rs"
-    - "**/*.md"
-    - "**/*.mdx"
   exclude:
-    - "**/node_modules/**"
-    - "**/dist/**"
-    - "**/build/**"
-    - "**/target/**"
-    - "**/managed/**"
-    - "**/.git/**"
-    - "**/.github/**"
-    - "**/.next/**"
-    - "**/out/**"
-    - "**/coverage/**"
-    - "**/__snapshots__/**"
-    - "**/.turbo/**"
-    - "**/CODE_OF_CONDUCT.md"
-    - "**/CONTRIBUTING.md"
-    - "**/SECURITY.md"
+    # Nested copy that duplicates the root SKILL.md + references/ byte-for-byte.
+    - "1am-midnight-skill/**"
   provenance:
     attribution: partner
     verified: false

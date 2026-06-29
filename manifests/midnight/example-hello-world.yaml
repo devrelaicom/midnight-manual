@@ -2,11 +2,6 @@ manifest_version: 1
 root:
   name: example-hello-world
   path: .
-  include: ["**/*.md"]
-  exclude:
-    - "**/CODE_OF_CONDUCT.md"
-    - "**/CONTRIBUTING.md"
-    - "**/SECURITY.md"
   provenance:
     attribution: foundation
     verified: false

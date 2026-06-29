@@ -7,12 +7,15 @@ root:
     verified_by: midnight-foundation
     tags: [trust:high]
   children:
+    # Content directories only. Excludes the Docusaurus app (src/, plugins/,
+    # packages/, static/, scripts/, site-config .js) and the
+    # main_versioned_docs/version-* snapshots that duplicate docs/.
+    - name: intro
+      file: Introduction.md
     - name: docs
       path: docs/
     - name: blog
       path: blog/
-    - name: academy
-      path: academy/
     - name: api-reference
       path: api-reference/
     - name: sdks

@@ -2,33 +2,8 @@ manifest_version: 1
 root:
   name: rambo-lc-midnight-statrter-pack
   path: .
-  include:
-    - "**/*.compact"
-    - "**/*.ts"
-    - "**/*.tsx"
-    - "**/*.js"
-    - "**/*.jsx"
-    - "**/*.mjs"
-    - "**/*.cjs"
-    - "**/*.rs"
-    - "**/*.md"
-    - "**/*.mdx"
-  exclude:
-    - "**/node_modules/**"
-    - "**/dist/**"
-    - "**/build/**"
-    - "**/target/**"
-    - "**/managed/**"
-    - "**/.git/**"
-    - "**/.github/**"
-    - "**/.next/**"
-    - "**/out/**"
-    - "**/coverage/**"
-    - "**/__snapshots__/**"
-    - "**/.turbo/**"
-    - "**/CODE_OF_CONDUCT.md"
-    - "**/CONTRIBUTING.md"
-    - "**/SECURITY.md"
+  # Repo body lives in hidden .claude/ and .agents/ skill-pack dirs (auto-skipped
+  # by the walker). Visible signal is just README.md + contracts/hello-world.compact.
   provenance:
     attribution: community
     verified: false

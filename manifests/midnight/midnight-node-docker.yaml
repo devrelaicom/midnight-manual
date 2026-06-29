@@ -3,21 +3,10 @@ root:
   name: midnight-node-docker
   path: .
   exclude:
-    - "**/node_modules/**"
-    - "**/dist/**"
-    - "**/build/**"
-    - "**/target/**"
-    - "**/managed/**"
-    - "**/.git/**"
-    - "**/.github/**"
-    - "**/.next/**"
-    - "**/out/**"
-    - "**/coverage/**"
-    - "**/__snapshots__/**"
-    - "**/.turbo/**"
-    - "**/CODE_OF_CONDUCT.md"
-    - "**/CONTRIBUTING.md"
-    - "**/SECURITY.md"
+    # Cardano genesis blobs (protocol-parameter data dumps, not setup docs).
+    # Readable stack config (config.json/topology.json/pc-chain-config.json),
+    # compose files, and scripts are kept.
+    - "**/*-genesis.json"
   provenance:
     attribution: foundation
     verified: false

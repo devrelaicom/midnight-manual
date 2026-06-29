@@ -3,21 +3,18 @@ root:
   name: compact
   path: .
   exclude:
-    - "**/node_modules/**"
-    - "**/dist/**"
-    - "**/build/**"
-    - "**/target/**"
-    - "**/managed/**"
-    - "**/.git/**"
-    - "**/.github/**"
-    - "**/.next/**"
-    - "**/out/**"
-    - "**/coverage/**"
-    - "**/__snapshots__/**"
-    - "**/.turbo/**"
-    - "**/CODE_OF_CONDUCT.md"
-    - "**/CONTRIBUTING.md"
-    - "**/SECURITY.md"
+    # Compiler/CLI test corpus and golden-output fixtures (not source/docs).
+    - "tools/compact/output/**"
+    - "test-center/**"
+    - "test-src-maps/**"
+    - "debug-test/**"
+    - "srcMaps/**"
+    - "_sources/**"
+    # Built spec HTML + low-signal meeting notes.
+    - "specification/html/**"
+    - "meetings/**"
+    # Editor plugin packaging (not language source/docs).
+    - "editor-support/**"
   provenance:
     attribution: foundation
     verified: true

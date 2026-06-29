@@ -2,33 +2,6 @@ manifest_version: 1
 root:
   name: midnames-sdk
   path: .
-  include:
-    - "**/*.compact"
-    - "**/*.ts"
-    - "**/*.tsx"
-    - "**/*.js"
-    - "**/*.jsx"
-    - "**/*.mjs"
-    - "**/*.cjs"
-    - "**/*.rs"
-    - "**/*.md"
-    - "**/*.mdx"
-  exclude:
-    - "**/node_modules/**"
-    - "**/dist/**"
-    - "**/build/**"
-    - "**/target/**"
-    - "**/managed/**"
-    - "**/.git/**"
-    - "**/.github/**"
-    - "**/.next/**"
-    - "**/out/**"
-    - "**/coverage/**"
-    - "**/__snapshots__/**"
-    - "**/.turbo/**"
-    - "**/CODE_OF_CONDUCT.md"
-    - "**/CONTRIBUTING.md"
-    - "**/SECURITY.md"
   provenance:
     attribution: partner
     verified: false

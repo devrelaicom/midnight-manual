@@ -2,33 +2,10 @@ manifest_version: 1
 root:
   name: eddalabs-certificate-sandbox
   path: .
-  include:
-    - "**/*.compact"
-    - "**/*.ts"
-    - "**/*.tsx"
-    - "**/*.js"
-    - "**/*.jsx"
-    - "**/*.mjs"
-    - "**/*.cjs"
-    - "**/*.rs"
-    - "**/*.md"
-    - "**/*.mdx"
   exclude:
-    - "**/node_modules/**"
-    - "**/dist/**"
-    - "**/build/**"
-    - "**/target/**"
-    - "**/managed/**"
-    - "**/.git/**"
-    - "**/.github/**"
-    - "**/.next/**"
-    - "**/out/**"
-    - "**/coverage/**"
-    - "**/__snapshots__/**"
-    - "**/.turbo/**"
-    - "**/CODE_OF_CONDUCT.md"
-    - "**/CONTRIBUTING.md"
-    - "**/SECURITY.md"
+    # Debug/golden-output dumps from tx-failure investigations (error stacks,
+    # unproven-tx blobs, balance snapshots). The docs/*.md reports are kept.
+    - "docs/*-artifacts/**"
   provenance:
     attribution: community
     verified: false
