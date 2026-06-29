@@ -1,10 +1,17 @@
 # Default Midnight ingestion manifests
 
 Directory-level `hierarchy.yaml` manifests for the default Midnight corpus
-(`midnight-manual`). One file per source repo; **no individual-file leaves** —
-each manifest pins whole directories via `path:` + glob `include`/`exclude`.
-Owner and trust live in each manifest's `root.provenance` (which inherits to all
+(`midnight-manual`). One file per source repo. Each manifest describes what to
+ingest via a `root` node with a `path:` directory walk and optional glob
+`include`/`exclude` lists (and, for some sources, child `path:` nodes). Owner and
+trust live in each manifest's `root.provenance` (which inherits to all
 descendants).
+
+These manifests are designed for the unified `FileFilter` walker, which already
+auto-skips generated/vendored/build directories, hidden dot-files, lockfiles,
+boilerplate Markdown (`CODE_OF_CONDUCT.md` / `CONTRIBUTING.md` / `SECURITY.md`),
+and any file whose extension is not a recognised language — so manifests stay
+lean and only encode repo-specific signal/noise decisions.
 
 ### Layout
 
@@ -43,65 +50,65 @@ is preferred so `kind`/`origin_url` are set.)
 
 ## Index (82 sources)
 
-> The top-level table below predates the subfolder reorg and is **not**
-> CI-enforced against `sources.tsv` on the `kind`/owner columns — treat
-> `sources.tsv` as authoritative. Partner and community sources are listed in
-> their own sections after it.
+> This index is generated from `sources.tsv` (slug / repo / branch / kind) and
+> each manifest's `root.provenance` (attribution / verified / trust). It is **not**
+> CI-enforced — `sources.tsv` is authoritative; regenerate the tables if they
+> drift. Partner and community sources are listed in their own sections below.
 
 | slug | repo | branch | kind | owner | attribution | verified | trust |
 |------|------|--------|------|-------|-------------|----------|-------|
-| midnight-ledger | midnightntwrk/midnight-ledger | main | mixed | Foundation | foundation | true | high |
-| midnight-node | midnightntwrk/midnight-node | main | mixed | Foundation | foundation | true | high |
-| midnight-indexer | midnightntwrk/midnight-indexer | main | mixed | Foundation | foundation | true | high |
+| midnight-ledger | midnightntwrk/midnight-ledger | main | code_repo | Foundation | foundation | true | high |
+| midnight-node | midnightntwrk/midnight-node | main | code_repo | Foundation | foundation | true | high |
+| midnight-indexer | midnightntwrk/midnight-indexer | main | code_repo | Foundation | foundation | true | high |
 | midnight-js | midnightntwrk/midnight-js | main | code_repo | Foundation | foundation | true | high |
 | midnight-wallet | midnightntwrk/midnight-wallet | main | code_repo | Foundation | foundation | true | high |
 | midnight-sdk | midnightntwrk/midnight-sdk | main | code_repo | Foundation | foundation | true | high |
 | midnight-dapp-connector-api | midnightntwrk/midnight-dapp-connector-api | main | code_repo | Foundation | foundation | true | high |
-| midnight-local-dev | midnightntwrk/midnight-local-dev | main | code_repo | Foundation | foundation | true | high |
-| midnight-docs | midnightntwrk/midnight-docs | main | docs_site | Foundation | foundation | true | high |
+| midnight-local-dev | midnightntwrk/midnight-local-dev | main | code_repo | Foundation | foundation | false | high |
+| midnight-docs | midnightntwrk/midnight-docs | main | docs_site | Foundation | foundation | false | high |
 | midnight-improvement-proposals | midnightntwrk/midnight-improvement-proposals | main | docs_site | Foundation | foundation | true | high |
 | midnight-architecture | midnightntwrk/midnight-architecture | main | docs_site | Foundation | foundation | true | high |
-| midnight-awesome-dapps | midnightntwrk/midnight-awesome-dapps | main | docs_site | Foundation | foundation | true | high |
-| example-counter | midnightntwrk/example-counter | main | mixed | Foundation | foundation | true | high |
-| example-bboard | midnightntwrk/example-bboard | main | mixed | Foundation | foundation | true | high |
-| example-battleship | midnightntwrk/example-battleship | main | mixed | Foundation | foundation | true | high |
-| example-hello-world | midnightntwrk/example-hello-world | main | mixed | Foundation | foundation | true | high |
-| example-zkloan | midnightntwrk/example-zkloan | main | mixed | Foundation | foundation | true | high |
-| example-kitties | midnightntwrk/example-kitties | main | mixed | Foundation | foundation | true | high |
-| example-private-party | midnightntwrk/example-private-party | main | mixed | Foundation | foundation | true | high |
-| example-nft-contracts | midnightntwrk/example-nft-contracts | main | mixed | Foundation | foundation | true | high |
-| midnight-wallet-dapp | midnightntwrk/midnight-wallet-dapp | main | mixed | Foundation | foundation | true | high |
-| midnight-leaderboard | midnightntwrk/midnight-leaderboard | main | mixed | Foundation | foundation | true | high |
-| midnight-tip-jar | midnightntwrk/midnight-tip-jar | main | mixed | Foundation | foundation | true | high |
-| midnight-dust-generator | midnightntwrk/midnight-dust-generator | main | mixed | Foundation | foundation | true | high |
-| compact | midnightntwrk/compact | main | docs_site | Foundation | foundation | true | high |
-| create-mn-app | midnightntwrk/create-mn-app | main | mixed | Foundation | foundation | true | high |
-| setup-compact-action | midnightntwrk/setup-compact-action | main | docs_site | Foundation | foundation | true | high |
-| midnight-node-docker | midnightntwrk/midnight-node-docker | main | mixed | Foundation | foundation | true | high |
+| midnight-awesome-dapps | midnightntwrk/midnight-awesome-dapps | main | docs_site | Foundation | foundation | false | high |
+| example-counter | midnightntwrk/example-counter | main | code_repo | Foundation | foundation | false | high |
+| example-bboard | midnightntwrk/example-bboard | main | code_repo | Foundation | foundation | false | high |
+| example-battleship | midnightntwrk/example-battleship | main | code_repo | Foundation | foundation | false | high |
+| example-hello-world | midnightntwrk/example-hello-world | main | code_repo | Foundation | foundation | false | high |
+| example-zkloan | midnightntwrk/example-zkloan | main | code_repo | Foundation | foundation | false | high |
+| example-kitties | midnightntwrk/example-kitties | main | code_repo | Foundation | foundation | false | high |
+| example-private-party | midnightntwrk/example-private-party | main | code_repo | Foundation | foundation | false | high |
+| example-nft-contracts | midnightntwrk/example-nft-contracts | main | code_repo | Foundation | foundation | false | high |
+| midnight-wallet-dapp | midnightntwrk/midnight-wallet-dapp | main | code_repo | Foundation | foundation | false | high |
+| midnight-leaderboard | midnightntwrk/midnight-leaderboard | main | code_repo | Foundation | foundation | false | high |
+| midnight-tip-jar | midnightntwrk/midnight-tip-jar | main | code_repo | Foundation | foundation | false | high |
+| midnight-dust-generator | midnightntwrk/midnight-dust-generator | main | code_repo | Foundation | foundation | false | high |
+| compact | LFDT-Minokawa/compact | main | code_repo | Foundation | foundation | true | high |
+| create-mn-app | midnightntwrk/create-mn-app | main | code_repo | Foundation | foundation | true | high |
+| setup-compact-action | midnightntwrk/setup-compact-action | main | code_repo | Foundation | foundation | true | high |
+| midnight-node-docker | midnightntwrk/midnight-node-docker | main | code_repo | Foundation | foundation | false | high |
 | contributor-hub | midnightntwrk/contributor-hub | main | docs_site | Foundation | foundation | true | high |
-| servicedesk | midnightntwrk/servicedesk | main | docs_site | Foundation | foundation | true | high |
-| midnight-reserve-contracts | midnightntwrk/midnight-reserve-contracts | main | mixed | Foundation | foundation | true | high |
-| night-token-distribution | midnightntwrk/night-token-distribution | main | mixed | Foundation | foundation | true | high |
-| joacolinares-kyc-midnight | joacolinares/kyc-midnight | main | mixed | Hackathon Winner | third_party | false | medium |
+| servicedesk | midnightntwrk/servicedesk | main | docs_site | Foundation | foundation | false | high |
+| midnight-reserve-contracts | midnightntwrk/midnight-reserve-contracts | main | code_repo | Foundation | foundation | true | high |
+| night-token-distribution | midnightntwrk/night-token-distribution | main | code_repo | Foundation | foundation | true | high |
+| joacolinares-kyc-midnight | joacolinares/kyc-midnight | ramaJoaco | code_repo | Hackathon Winner | third_party | false | medium |
 
 ## Partner sources (`manifests/midnight/partner/`)
 
 Formal partner-org repos. All are `attribution: partner`, `verified: false`.
-OpenZeppelin is `trust:high`; bricktowers and midnames-core are `trust:medium`.
-The 10 repos added 2026-06-26 are `trust:medium` and index only `.compact` /
-`.ts` / `.tsx` / `.js` / `.jsx` / `.mjs` / `.cjs` / `.rs` / `.md` / `.mdx`
-(boilerplate Markdown such as `SECURITY.md` excluded); the 7 pre-existing
-entries retain their original exclude-only scoping.
+OpenZeppelin is `trust:high`; the rest are `trust:medium`. Manifests walk the
+whole repo (`path: .`, minus the walker's default skips) with targeted excludes
+for repo-specific noise (vendored submodules, animation/data blobs, duplicate
+trees); docs-only repos (`midnames-docs`, `webisoftsoftware-1am-midnight-skill`)
+are scoped to their content directories.
 
 | slug | repo | branch | kind | owner | attribution | verified | trust |
 |------|------|--------|------|-------|-------------|----------|-------|
-| openzeppelin-compact-contracts | OpenZeppelin/compact-contracts | main | mixed | Partner | partner | false | high |
+| openzeppelin-compact-contracts | OpenZeppelin/compact-contracts | main | code_repo | Partner | partner | false | high |
 | openzeppelin-compact-tools | OpenZeppelin/compact-tools | main | code_repo | Partner | partner | false | high |
-| openzeppelin-midnight-apps | OpenZeppelin/midnight-apps | main | mixed | Partner | partner | false | high |
-| bricktowers-midnight-rwa | bricktowers/midnight-rwa | main | mixed | Partner | partner | false | medium |
-| bricktowers-midnight-identity | bricktowers/midnight-identity | main | mixed | Partner | partner | false | medium |
-| bricktowers-midnight-seabattle | bricktowers/midnight-seabattle | main | mixed | Partner | partner | false | medium |
-| midnames-core | midnames/core | main | mixed | Partner | partner | false | medium |
+| openzeppelin-midnight-apps | OpenZeppelin/midnight-apps | main | code_repo | Partner | partner | false | high |
+| bricktowers-midnight-rwa | bricktowers/midnight-rwa | main | code_repo | Partner | partner | false | medium |
+| bricktowers-midnight-identity | bricktowers/midnight-identity | main | code_repo | Partner | partner | false | medium |
+| bricktowers-midnight-seabattle | bricktowers/midnight-seabattle | main | code_repo | Partner | partner | false | medium |
+| midnames-core | midnames/core | main | code_repo | Partner | partner | false | medium |
 | webisoftsoftware-1am-starter-template | webisoftSoftware/1AM-starter-template | main | code_repo | Partner | partner | false | medium |
 | webisoftsoftware-split-prove | webisoftSoftware/split-prove | main | code_repo | Partner | partner | false | medium |
 | webisoftsoftware-1am-midnight-skill | webisoftSoftware/1AM-Midnight-Skill | main | docs_site | Partner | partner | false | medium |
@@ -116,11 +123,11 @@ entries retain their original exclude-only scoping.
 ## Community sources (`manifests/midnight/community/`)
 
 Community-contributed third-party repos. All are `attribution: community`,
-`verified: false`, with a `verification_notes` explaining the rating. The 28
-repos added 2026-06-26 index only `.compact` / `.ts` / `.tsx` / `.js` / `.jsx` /
-`.mjs` / `.cjs` / `.rs` / `.md` / `.mdx` (boilerplate Markdown such as
-`SECURITY.md` excluded). The four pre-existing entries (eddalabs, Olanetsoft ×2,
-ADAvault) retain their original per-node scoping.
+`verified: false`, each with a `verification_notes` explaining the rating
+(mostly `trust:low`; the Olanetsoft tutorial repos are `trust:medium`). Manifests
+walk the whole repo (`path: .`, minus default skips) with targeted excludes for
+code repos, and `**/*.md` / `**/*.mdx` or content-directory scoping for
+docs/skill repos.
 
 | slug | repo | branch | kind | owner | attribution | verified | trust |
 |------|------|--------|------|-------|-------------|----------|-------|
