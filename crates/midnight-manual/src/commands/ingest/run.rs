@@ -177,11 +177,11 @@ pub struct Args {
     #[arg(long)]
     pub exclude: Vec<String>,
 
-    /// Disable .gitignore/.ignore filtering.
-    ///
-    /// Fed into file-list filtering when directory discovery is used (follow-up).
+    /// Honour the repo's own .gitignore / .git/info/exclude during discovery
+    /// (off by default — ingest is hermetic). Never reads the machine-global
+    /// or parent-directory ignore files.
     #[arg(long)]
-    pub no_respect_gitignore: bool,
+    pub respect_gitignore: bool,
 
     /// Disable the built-in default skip list (node_modules, target, …).
     ///
@@ -393,7 +393,11 @@ async fn run_inner(
     }
 
     let walker = Walker::new(manifest, source_root.clone())
-        .with_max_file_bytes(chunker_config.max_file_bytes);
+        .with_max_file_bytes(chunker_config.max_file_bytes)
+        .with_filter_options(mnm_content::manifest::resolve::FilterRunOptions {
+            respect_gitignore: args.respect_gitignore,
+            default_ignore_list: !args.disable_default_ignore_list,
+        });
     let outcome = walker.walk().context("walk source tree")?;
     for skip in &outcome.skipped {
         tracing::warn!(
@@ -2357,7 +2361,7 @@ mod tests {
             "*.rs",
             "--exclude",
             "gen_*",
-            "--no-respect-gitignore",
+            "--respect-gitignore",
             "--disable-default-ignore-list",
             "--max-file-size",
             "1048576",
@@ -2368,7 +2372,7 @@ mod tests {
         assert_eq!(args.chunk_tokens, 256);
         assert_eq!(args.include, vec!["*.rs".to_string()]);
         assert_eq!(args.exclude, vec!["gen_*".to_string()]);
-        assert!(args.no_respect_gitignore);
+        assert!(args.respect_gitignore);
         assert!(args.disable_default_ignore_list);
         assert_eq!(args.max_file_size, 1_048_576);
     }

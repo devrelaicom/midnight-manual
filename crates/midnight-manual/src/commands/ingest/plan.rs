@@ -34,6 +34,14 @@ pub struct Args {
     #[arg(long)]
     pub base: Option<PathBuf>,
 
+    /// Honour the repo's own .gitignore during discovery (off by default).
+    #[arg(long)]
+    pub respect_gitignore: bool,
+
+    /// Disable the built-in default skip list (node_modules, target, …).
+    #[arg(long)]
+    pub disable_default_ignore_list: bool,
+
     /// Emit a single-line JSON object instead of the human-readable summary.
     #[arg(long)]
     pub json: bool,
@@ -72,7 +80,12 @@ pub async fn run(args: Args, server: Option<&str>, _json: bool) -> Result<()> {
     // `ingest plan` has no --max-file-size flag, so the walker uses its default
     // ceiling (DEFAULT_MAX_FILE_BYTES); skipped files are warned, mirroring the
     // resilient behavior of `ingest run`.
-    let w = Walker::new(manifest.clone(), base.clone());
+    let w = Walker::new(manifest.clone(), base.clone()).with_filter_options(
+        mnm_content::manifest::resolve::FilterRunOptions {
+            respect_gitignore: args.respect_gitignore,
+            default_ignore_list: !args.disable_default_ignore_list,
+        },
+    );
     let outcome = w.walk().context("walk source tree")?;
     for skip in &outcome.skipped {
         tracing::warn!(

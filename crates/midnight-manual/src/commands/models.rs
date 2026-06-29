@@ -488,7 +488,7 @@ async fn ingest_source(
         chunk_tokens: 1024,
         include: Vec::new(),
         exclude: Vec::new(),
-        no_respect_gitignore: false,
+        respect_gitignore: false,
         disable_default_ignore_list: false,
         max_file_size: 10 * 1024 * 1024,
         // Migrate does NOT expose the global-cap opt-out.
