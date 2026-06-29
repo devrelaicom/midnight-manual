@@ -45,7 +45,11 @@ pub async fn run(args: Args) -> Result<()> {
 
     if !args.sitemap.is_empty() {
         let sitemap_urls = super::generate::load_sitemaps(&args.sitemap).await?;
-        let leaves = mnm_content::manifest::resolve::resolve(&manifest, &base);
+        let leaves = mnm_content::manifest::resolve::resolve(
+            &manifest,
+            &base,
+            mnm_content::manifest::resolve::FilterRunOptions::default(),
+        );
         let matched = leaves
             .iter()
             .filter(|l| {
