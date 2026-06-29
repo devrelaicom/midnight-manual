@@ -34,11 +34,15 @@ pub struct Args {
     #[arg(long)]
     pub base: Option<PathBuf>,
 
-    /// Honour the repo's own .gitignore during discovery (off by default).
+    /// Honour the repo's own .gitignore / .git/info/exclude during discovery
+    /// (off by default — ingest is hermetic). Never reads the machine-global
+    /// (core.excludesFile) or parent-directory ignore files.
     #[arg(long)]
     pub respect_gitignore: bool,
 
-    /// Disable the built-in default skip list (node_modules, target, …).
+    /// Disable the built-in default skip-list (node_modules, target, vendor, dist,
+    /// build, out, coverage, managed, __snapshots__, lockfiles, minified/generated,
+    /// boilerplate .md) so those files are walked during discovery.
     #[arg(long)]
     pub disable_default_ignore_list: bool,
 

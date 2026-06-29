@@ -20,8 +20,8 @@ use super::Manifest;
 pub struct FilterRunOptions {
     /// When `true`, honour `.gitignore` rules during `path:` discovery.
     pub respect_gitignore: bool,
-    /// When `true`, apply the built-in directory skip-list (`node_modules`,
-    /// `.git`, `target`, `dist`) during `path:` discovery.
+    /// When `true`, apply the built-in default skip-list (see `FileFilter` /
+    /// `DEFAULT_SKIP_COMPONENTS`) during `path:` discovery.
     pub default_ignore_list: bool,
 }
 

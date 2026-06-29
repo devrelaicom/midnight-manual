@@ -9,13 +9,20 @@
 //! 1. **`.git/` component** — always excluded, not disableable.
 //! 2. **Default skip list** (when [`FilterOptions::default_ignore_list`] is
 //!    `true`) — directory components `node_modules`, `target`, `vendor`,
-//!    `dist`; filename globs `*.min.js`, `*.bundle.js`, `*_pb.ts`.
+//!    `dist`, `build`, `out`, `coverage`, `managed`, `__snapshots__`;
+//!    filename globs `*.min.js`, `*.bundle.js`, `*_pb.ts`, `*_pb.js`,
+//!    `*.pb.go`, `package-lock.json`, `npm-shrinkwrap.json`,
+//!    `pnpm-lock.yaml`, `CODE_OF_CONDUCT.md`, `CONTRIBUTING.md`,
+//!    `SECURITY.md`.
 //! 3. *(gitignore layer)* — applied by `walk` via the `ignore` crate; not
 //!    consulted by the pure [`FileFilter::allows`] function.
 //! 4. **Excludes** — any path matching one of [`FilterOptions::excludes`] is
 //!    excluded (exclude beats include).
 //! 5. **Includes whitelist** — when [`FilterOptions::includes`] is non-empty,
 //!    a path must match at least one include glob or it is excluded.
+//!    5b. **Known-kind gate** — when `require_known_kind` is `true` and the
+//!    include whitelist is empty, a file whose extension is not a recognised
+//!    language is excluded (an explicit include bypasses this).
 //! 6. **Default** — included.
 
 use std::path::{Path, PathBuf};
@@ -49,11 +56,8 @@ pub struct FilterOptions {
     /// Has no effect on the pure [`FileFilter::allows`] function.
     pub respect_gitignore: bool,
 
-    /// Whether to apply the built-in default skip list.
-    ///
-    /// Default skips: any path component equal to `node_modules`, `target`,
-    /// `vendor`, or `dist`; filenames matching `*.min.js`, `*.bundle.js`, or
-    /// `*_pb.ts`.
+    /// Apply the built-in default skip-list (see the module-level docs /
+    /// `DEFAULT_SKIP_COMPONENTS` + the default filename globs).
     pub default_ignore_list: bool,
 
     /// Skip dotfiles and dot-directories (e.g. `.env`, `.github/`).
@@ -341,6 +345,10 @@ impl FileFilter {
     /// Enumerate files under `base/subdir`, returning paths **relative to
     /// `base`** (so manifest `include`/`exclude` globs keep their
     /// source-root-relative meaning).
+    ///
+    /// The supplied walk root (depth 0) is not subject to the hidden-file
+    /// filter, so a `path:` pointing at a dot-directory would be descended
+    /// into.
     #[must_use]
     pub fn walk_subtree(&self, base: &Path, subdir: &Path) -> Vec<PathBuf> {
         let walk_root = base.join(subdir);

@@ -2885,7 +2885,6 @@ dependencies = [
  "tree-sitter-yaml",
  "url",
  "uuid",
- "walkdir",
 ]
 
 [[package]]
