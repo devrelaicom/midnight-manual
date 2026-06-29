@@ -62,7 +62,17 @@ pub struct FilterOptions {
 
 /// Directory components that are always skipped when
 /// [`FilterOptions::default_ignore_list`] is `true`.
-static DEFAULT_SKIP_COMPONENTS: &[&str] = &["node_modules", "target", "vendor", "dist"];
+static DEFAULT_SKIP_COMPONENTS: &[&str] = &[
+    "node_modules",
+    "target",
+    "vendor",
+    "dist",
+    "build",
+    "out",
+    "coverage",
+    "managed",
+    "__snapshots__",
+];
 
 /// A compiled file filter ready for repeated use.
 ///
@@ -120,6 +130,14 @@ impl FileFilter {
             "*.min.js".to_owned(),
             "*.bundle.js".to_owned(),
             "*_pb.ts".to_owned(),
+            "*_pb.js".to_owned(),
+            "*.pb.go".to_owned(),
+            "package-lock.json".to_owned(),
+            "npm-shrinkwrap.json".to_owned(),
+            "pnpm-lock.yaml".to_owned(),
+            "CODE_OF_CONDUCT.md".to_owned(),
+            "CONTRIBUTING.md".to_owned(),
+            "SECURITY.md".to_owned(),
         ]);
         Self {
             opts,
@@ -304,5 +322,52 @@ mod tests {
         });
         assert!(f.allows("node_modules/pkg/x.rs"));
         assert!(!f.allows(".git/config")); // .git still excluded
+    }
+
+    #[test]
+    fn default_skip_list_covers_noise_dirs_files_and_boilerplate() {
+        let f = FileFilter::new(FilterOptions {
+            includes: vec![],
+            excludes: vec![],
+            respect_gitignore: false,
+            default_ignore_list: true,
+        });
+        // New noise dirs
+        for p in [
+            "vendor/x.rs",
+            "build/x.js",
+            "out/x.js",
+            "coverage/x.js",
+            "managed/Contract.ts",
+            "pkg/__snapshots__/a.snap.ts",
+        ] {
+            assert!(!f.allows(p), "{p} should be skipped");
+        }
+        // Lockfiles that masquerade as known kinds
+        for p in [
+            "package-lock.json",
+            "a/npm-shrinkwrap.json",
+            "b/pnpm-lock.yaml",
+        ] {
+            assert!(!f.allows(p), "{p} should be skipped");
+        }
+        // Generated
+        for p in ["api_pb.ts", "api_pb.js", "api.pb.go"] {
+            assert!(!f.allows(p), "{p} should be skipped");
+        }
+        // Boilerplate docs at any depth
+        for p in ["CODE_OF_CONDUCT.md", "CONTRIBUTING.md", "sub/SECURITY.md"] {
+            assert!(!f.allows(p), "{p} should be skipped");
+        }
+        // Kept (signal)
+        for p in [
+            "package.json",
+            "tsconfig.json",
+            "Cargo.toml",
+            "src/lib.rs",
+            "README.md",
+        ] {
+            assert!(f.allows(p), "{p} should be kept");
+        }
     }
 }
