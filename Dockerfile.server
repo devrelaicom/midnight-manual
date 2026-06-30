@@ -4,8 +4,8 @@
 # Pinned to workspace MSRV (Cargo.toml [workspace.package].rust-version). Bump
 # both together — a stale image tag will fail on any transitive dep that
 # raised its own MSRV past the image's compiler (cargo-platform / time /
-# image / etc. have done this multiple times in the 1.83 → 1.91 window).
-FROM rust:1.91-bookworm AS builder
+# gauge-events / etc. have done this multiple times in the 1.83 → 1.93 window).
+FROM rust:1.93-bookworm AS builder
 
 WORKDIR /app
 
