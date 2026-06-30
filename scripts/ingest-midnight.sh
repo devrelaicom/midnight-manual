@@ -2,7 +2,8 @@
 #
 # ingest-midnight.sh — manually ingest the default Midnight corpus.
 #
-# Builds `mnm` from source (release), then loops over the source list in
+# Builds `mnm` from source (release, with all tree-sitter grammars), then loops
+# over the source list in
 # manifests/midnight/sources.tsv: shallow-clones each repo into /tmp, registers
 # the source, and runs `mnm ingest run` against a fresh checkout. Per-manifest
 # failures are reported and skipped — the loop never aborts on them.
@@ -258,8 +259,13 @@ if [ -n "$MNM_BIN" ]; then
   [ -x "$MNM" ] || { echo "error: --mnm-binary '$MNM' is not an executable" >&2; exit 1; }
   built_line="using: $MNM"
 else
-  printf '%sbuilding mnm (cargo build --release -p midnight-manual --bin mnm)…%s\n' "$DIM" "$NC"
-  if ! cargo build --release -p midnight-manual --bin mnm; then
+  # Build with ALL tree-sitter grammars (not just the default core set) so code
+  # chunking covers every language present across the corpus repos. The `mnm`
+  # binary links only `mnm-content`'s core grammars by default; `all-grammars`
+  # adds markup (toml/yaml/html/xml) + extended (go/python/solidity) + the rest
+  # (swift/ruby/kotlin/c#/haskell/java). compact + core grammars stay enabled.
+  printf '%sbuilding mnm (cargo build --release -p midnight-manual --bin mnm --features mnm-content/all-grammars)…%s\n' "$DIM" "$NC"
+  if ! cargo build --release -p midnight-manual --bin mnm --features mnm-content/all-grammars; then
     echo "error: cargo build failed" >&2; exit 1
   fi
   MNM="./target/release/mnm"
@@ -287,7 +293,17 @@ printf 'server: %s\n\n' "$SERVER_URL"
 readyz_or_exit "$SERVER_URL"
 
 # ── 3. login (refresh admin token) ────────────────────────────────────────────
-if ! "$MNM" "${SERVER_ARGS[@]+"${SERVER_ARGS[@]}"}" login --user-id "$USER_ID" >/dev/null 2>"$TMP/login.err"; then
+# The admin token has a fixed TTL that a full corpus run easily outlives, so we
+# refresh it before EACH source (see the loop below) instead of once up front —
+# otherwise the tail of a long run fails with "admin token expired" / 401 once
+# the single startup token lapses. `mnm login` is a cheap keypair-signed
+# exchange. This first call doubles as a preflight: a bad keypair or unknown
+# user fails fast here, before any cloning or ingestion.
+login_refresh() {
+  "$MNM" "${SERVER_ARGS[@]+"${SERVER_ARGS[@]}"}" login --user-id "$USER_ID" \
+    >/dev/null 2>"$TMP/login.err"
+}
+if ! login_refresh; then
   echo "${RED}login failed:${NC} $(tail -n 5 "$TMP/login.err" | grep -v '^[[:space:]]*$' | tail -1)" >&2
   echo "  (need a local keypair for '$USER_ID' and a matching user on the server)" >&2
   exit 1
@@ -337,6 +353,18 @@ for row in "${rows[@]}"; do
 
   if [ ! -f "$man" ]; then
     printf '%s%s %s%s failed • manifest %s not found\n' "$RED" "$XMARK" "$repo" "$NC" "$man"
+    FAILED=$((FAILED+1)); continue
+  fi
+
+  # Refresh the admin token before each source: a full corpus run outlives the
+  # token TTL, so without this every source whose ingest starts after expiry
+  # fails with "admin token expired" / 401. Login is cheap relative to an
+  # ingest; refreshing here keeps each source within a fresh token's lifetime.
+  # A failed refresh fails just this source (the run continues to the next).
+  if ! login_refresh; then
+    why="$(tail -n 5 "$TMP/login.err" | grep -v '^[[:space:]]*$' | tail -1)"
+    printf '%s%s %s%s failed • token refresh (mnm login): %s\n' \
+      "$RED" "$XMARK" "$repo" "$NC" "${why:-mnm login failed}"
     FAILED=$((FAILED+1)); continue
   fi
 

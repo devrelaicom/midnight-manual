@@ -516,7 +516,16 @@ async fn run_inner(
             .add_walked_document(&ctx)
             .with_context(|| format!("plan add {}", doc.rel_path.display()))?;
     }
-    let plan = builder.finalize();
+    let mut plan = builder.finalize();
+
+    // Drop new documents whose estimated upload payload alone exceeds the
+    // server's body limit — they can never be uploaded (a single oversized doc
+    // 413s after the batch split bottoms out, aborting the whole run). Done here
+    // (before embedding) so it also saves the wasted Voyage tokens, and before
+    // the dry-run branch so plan-preview and run agree. Surfaced in the report's
+    // skipped files; counted out of every downstream total via the plan trim.
+    let oversize_skips =
+        drop_oversize_documents(&mut plan, mnm_core::limits::MAX_INGEST_BODY_BYTES);
 
     let docs_with_language_targets = plan
         .new_documents
@@ -542,7 +551,7 @@ async fn run_inner(
     if args.dry_run {
         let finished_at = OffsetDateTime::now_utc();
         let sel = ReportSelection::new(json, args.report_file.as_deref());
-        let report = assemble_report(
+        let mut report = assemble_report(
             "ingest run",
             &args.source_slug,
             "dry_run",
@@ -558,6 +567,7 @@ async fn run_inner(
             Vec::new(),
             0,
         );
+        report.skipped_files.extend(oversize_skips.iter().cloned());
         emit_report(&report, &sel, args.report_file.as_deref(), || {
             format_dry_run(
                 &args.source_slug,
@@ -872,18 +882,25 @@ async fn run_inner(
                 }
             }
         }
-        // SAFETY FLOOR: if anything is still conflicted after the retry, we cannot
-        // produce a complete version. Abort rather than finalize a lossy one.
-        if !conflicts.is_empty() {
+        // SAFETY FLOOR: an ACCIDENTAL drop after the retry means the version
+        // would be silently incomplete — abort rather than finalize a lossy one.
+        // Intentional drops (injection rejections, oversize-upload skips) are
+        // expected; they are subtracted from the finalize expectation below, so
+        // they don't count here.
+        let blocking: Vec<&mnm_core::ingest::UploadConflict> = conflicts
+            .iter()
+            .filter(|c| !is_intentional_drop(c))
+            .collect();
+        if !blocking.is_empty() {
             abort_run(&client, server_url, &args.source_slug, start.ingest_run_id, &token).await;
-            for c in &conflicts {
+            for c in &blocking {
                 tracing::error!(path = %c.path, reason = %c.reason, "unresolved upload conflict after retry");
             }
             return Err(anyhow!(
                 "aborted run {}: {} document(s) still conflicted after re-embed retry; \
                  refusing to finalize an incomplete version",
                 start.ingest_run_id,
-                conflicts.len(),
+                blocking.len(),
             ));
         }
     }
@@ -906,18 +923,16 @@ async fn run_inner(
     // carried. The server's finalize guard refuses to activate (and aborts) if
     // the persisted count differs, so a silently-dropped doc can never ship.
     //
-    // Prompt-injection drops (issue #103) are INTENTIONAL: the server scans
-    // ingested docs and refuses any it flags. Those rejected docs were counted
-    // in new/carried but are deliberately not persisted, so we subtract them
-    // from the expectation — otherwise the first flagged doc would trip the
-    // backstop and abort the whole run. Accidental drops (failed inserts) are
-    // still caught, since they are not injection rejections.
-    let injection_dropped = conflicts
-        .iter()
-        .filter(|c| c.is_injection_rejection())
-        .count();
+    // INTENTIONAL drops were counted in new/carried but deliberately not
+    // persisted, so we subtract them from the expectation — otherwise the first
+    // one would trip the backstop and abort the whole run. Two kinds: prompt-
+    // injection rejections (issue #103, the server refuses flagged docs) and
+    // oversize-upload skips (a single document still over the body limit after
+    // splitting; see `upload_documents_with_split`). Accidental drops (failed
+    // inserts) are still caught, since they are not intentional.
+    let intentional_dropped = conflicts.iter().filter(|c| is_intentional_drop(c)).count();
     let expected_total =
-        i64::try_from((new_count + carried_count).saturating_sub(injection_dropped))
+        i64::try_from((new_count + carried_count).saturating_sub(intentional_dropped))
             .unwrap_or(i64::MAX);
     let finalize: FinalizeResult = match post_json(
         &client,
@@ -966,7 +981,7 @@ async fn run_inner(
         conflicts,
     };
 
-    let report = assemble_report(
+    let mut report = assemble_report(
         "ingest run",
         &args.source_slug,
         "finalized",
@@ -982,6 +997,7 @@ async fn run_inner(
         Vec::new(),
         stats.total_tokens,
     );
+    report.skipped_files.extend(oversize_skips.iter().cloned());
 
     let success_out = SuccessOutput {
         action: "ingest",
@@ -1047,7 +1063,9 @@ fn translate_upload_error(
     run_id: Uuid,
 ) -> anyhow::Error {
     let msg = e.to_string();
-    if msg.contains("413") {
+    // Canonical 413 phrase, not bare "413" — the message embeds the run UUID
+    // (see `is_payload_too_large` for why a stray "413" hex run would misfire).
+    if msg.contains("Payload Too Large") {
         let mib = mnm_core::limits::MAX_INGEST_BODY_BYTES / (1024 * 1024);
         return e.context(format!(
             "batch {batch} still exceeded the server's {mib} MiB body limit after \
@@ -1260,11 +1278,9 @@ async fn embed_batch(
         for take in plan {
             let req_groups: Vec<Vec<String>> =
                 cursor.by_ref().take(take).map(|(texts, _)| texts).collect();
-            let out = mnm_embedding::client::embed_general_groups(req_groups, general)
-                .await
-                .map_err(|e| anyhow!("embed context groups via Voyage: {e}"))?;
-            tokens = tokens.saturating_add(out.total_tokens);
-            general_vectors.extend(out.groups.into_iter().flatten());
+            let (vecs, toks) = embed_groups_with_split(req_groups, general).await?;
+            tokens = tokens.saturating_add(toks);
+            general_vectors.extend(vecs);
         }
         attach_embeddings(docs, general_vectors)?;
     }
@@ -1301,6 +1317,91 @@ async fn embed_batch(
         }
     }
     Ok(tokens)
+}
+
+/// True for Voyage's "input exceeds the 32 000-token context window" rejection.
+///
+/// Our context groups are sized with a `bge-base-en-v1.5` BPE counter, which
+/// undercounts voyage-context-3's own tokenizer for code-dense text, so a group
+/// we sized under the grouping budget can still overflow at the model. This is a
+/// 400 that no amount of waiting fixes — the remedy is to split the group, which
+/// [`embed_groups_with_split`] does — so it must be told apart from retryable
+/// statuses.
+fn is_context_window_error(e: &mnm_embedding::voyage::VoyageError) -> bool {
+    use mnm_embedding::voyage::VoyageError;
+    matches!(
+        e,
+        VoyageError::Status { status: 400, body }
+            if body.contains("context window") || body.contains("too many tokens")
+    )
+}
+
+/// Embed a batch of context groups, retry-splitting any that Voyage rejects for
+/// exceeding the 32 000-token window. Returns the per-chunk vectors (flattened
+/// in `req_groups` order) plus the Voyage tokens consumed.
+///
+/// On the happy path this is one request. On a context-window rejection it
+/// cannot tell which group overflowed (the error only carries a batch index),
+/// so it re-embeds each group on its own — splitting any that still overflow —
+/// and reassembles the vectors in order.
+///
+/// Scope: this backstop fires on the **BYOK** path, where Voyage's raw 400 is
+/// visible. On the server-proxy path the server rewrites the overflow into a
+/// 502/413 that [`is_context_window_error`] does not match, so server-proxy
+/// ingest relies on the (now 80%) grouping headroom alone; a server-side
+/// retry-split is the durable closure there (tracked follow-up).
+async fn embed_groups_with_split(
+    req_groups: Vec<Vec<String>>,
+    src: GeneralEmbedSource<'_>,
+) -> Result<(Vec<Vec<f32>>, u64)> {
+    match mnm_embedding::client::embed_general_groups(&req_groups, src).await {
+        Ok(out) => Ok((out.groups.into_iter().flatten().collect(), out.total_tokens)),
+        Err(e) if is_context_window_error(&e) => {
+            tracing::warn!(
+                groups = req_groups.len(),
+                "a context group exceeded Voyage's 32K-token window (our BPE count \
+                 undercounts the model's tokenizer); re-embedding each group, splitting overflows",
+            );
+            let mut vectors = Vec::new();
+            let mut tokens = 0u64;
+            for group in req_groups {
+                let (v, t) = embed_one_group_splitting(group, src).await?;
+                vectors.extend(v);
+                tokens = tokens.saturating_add(t);
+            }
+            Ok((vectors, tokens))
+        }
+        Err(e) => Err(anyhow!("embed context groups via Voyage: {e}")),
+    }
+}
+
+/// Embed a single context group, halving it and recursing whenever Voyage
+/// rejects it for exceeding the 32 000-token window. A single chunk is ≤1024
+/// tokens so it can never alone overflow, which guarantees termination.
+async fn embed_one_group_splitting(
+    group: Vec<String>,
+    src: GeneralEmbedSource<'_>,
+) -> Result<(Vec<Vec<f32>>, u64)> {
+    match mnm_embedding::client::embed_general_groups(std::slice::from_ref(&group), src).await {
+        Ok(out) => Ok((out.groups.into_iter().flatten().collect(), out.total_tokens)),
+        Err(e) if is_context_window_error(&e) && group.len() > 1 => {
+            // The guard guarantees len >= 2, so floor(len/2) is already >= 1;
+            // `.max(1)` is purely defensive. Both halves are strictly shorter
+            // than `group`, so the recursion makes progress and terminates.
+            let mid = (group.len() / 2).max(1);
+            tracing::warn!(
+                chunks = group.len(),
+                "splitting an oversized context group and re-embedding its halves",
+            );
+            let (mut vectors, t1) =
+                Box::pin(embed_one_group_splitting(group[..mid].to_vec(), src)).await?;
+            let (right, t2) =
+                Box::pin(embed_one_group_splitting(group[mid..].to_vec(), src)).await?;
+            vectors.extend(right);
+            Ok((vectors, t1.saturating_add(t2)))
+        }
+        Err(e) => Err(anyhow!("embed context group via Voyage after split: {e}")),
+    }
 }
 
 /// Pack context groups into Voyage requests bounded by ≤1 000 input groups,
@@ -1480,19 +1581,94 @@ mod plan_group_batches_tests {
 /// twice — they may also carry a `code_embedding` (dual embeddings, D1); when
 /// code embeddings are opted out this merely over-estimates, which the packer
 /// tolerates by design. Intentionally approximate.
-fn estimated_upload_bytes(doc: &DocumentUpload) -> usize {
-    let vectors_per_chunk = if doc.kind == DocumentKind::Code { 2 } else { 1 };
+/// Estimated JSON upload size for one document: per-doc overhead + path + per
+/// chunk (content + overhead + its embedding vectors). Code documents carry two
+/// vectors per chunk (general + code), everything else one. Shared by the batch
+/// packer ([`pack_upload_batches`]) and the oversize-document drop
+/// ([`drop_oversize_documents`]) so the two estimates can never disagree.
+fn est_doc_bytes(
+    path_len: usize,
+    is_code: bool,
+    chunk_content_lens: impl Iterator<Item = usize>,
+) -> usize {
+    let vectors_per_chunk = if is_code { 2 } else { 1 };
     EST_PER_DOC_OVERHEAD
-        + doc.path.len()
-        + doc
-            .chunks
-            .iter()
-            .map(|c| {
-                c.content.len()
-                    + EST_PER_CHUNK_OVERHEAD
+        + path_len
+        + chunk_content_lens
+            .map(|n| {
+                n + EST_PER_CHUNK_OVERHEAD
                     + vectors_per_chunk * EST_EMBED_DIM * EST_BYTES_PER_EMBED_FLOAT
             })
             .sum::<usize>()
+}
+
+fn estimated_upload_bytes(doc: &DocumentUpload) -> usize {
+    est_doc_bytes(
+        doc.path.len(),
+        doc.kind == DocumentKind::Code,
+        doc.chunks.iter().map(|c| c.content.len()),
+    )
+}
+
+/// [`estimated_upload_bytes`] computed from a planned document (before it is
+/// turned into a [`DocumentUpload`]). Used by [`drop_oversize_documents`] to
+/// decide, before embedding, whether a document can ever be uploaded.
+fn estimated_planned_upload_bytes(d: &mnm_content::ingest::PlannedDocument) -> usize {
+    est_doc_bytes(
+        d.path.as_os_str().len(),
+        d.kind == DocumentKind::Code,
+        d.chunks.iter().map(|c| c.content.len()),
+    )
+}
+
+/// Remove new documents whose estimated upload payload alone exceeds `limit`
+/// (the server's body limit) and return them as report skips.
+///
+/// Such a document can never be uploaded: once the batch split bottoms out at
+/// this single document the server still returns 413, which aborts the whole
+/// run. The estimate is available before embedding, so dropping here also avoids
+/// spending Voyage tokens on a document that can never land. Trimming
+/// `plan.new_documents` (and re-syncing `stats`) keeps every downstream count —
+/// `expected_document_total`, the report stats, the document list — consistent,
+/// mirroring the empty-document drop in the planner. The size estimate is an
+/// upload concern (embedding vector count + JSON shape), so unlike the empty-doc
+/// drop it lives here in the CLI rather than the planner.
+fn drop_oversize_documents(
+    plan: &mut mnm_content::ingest::IngestPlan,
+    limit: usize,
+) -> Vec<super::report::ReportSkip> {
+    const MIB: usize = 1024 * 1024;
+    let mut skips = Vec::new();
+    let mut kept = Vec::with_capacity(plan.new_documents.len());
+    for d in std::mem::take(&mut plan.new_documents) {
+        let est = estimated_planned_upload_bytes(&d);
+        if est > limit {
+            tracing::warn!(
+                path = %d.path.display(),
+                estimated_bytes = est,
+                limit,
+                chunks = d.chunks.len(),
+                "document upload payload exceeds the body limit; skipping (too large to ingest in one request)",
+            );
+            skips.push(super::report::ReportSkip {
+                path: d.path.display().to_string(),
+                reason: format!(
+                    "upload too large: ~{} MiB ({} chunks + embeddings) exceeds the {} MiB request limit",
+                    // Round the (over-limit) estimate UP so it never prints "~25
+                    // MiB exceeds the 25 MiB limit" for a doc just over the line.
+                    est.div_ceil(MIB),
+                    d.chunks.len(),
+                    limit / MIB,
+                ),
+            });
+        } else {
+            kept.push(d);
+        }
+    }
+    plan.new_documents = kept;
+    plan.stats.documents_added = plan.new_documents.len();
+    plan.stats.chunks_emitted = plan.new_documents.iter().map(|d| d.chunks.len()).sum();
+    skips
 }
 
 /// Greedily pack documents into upload batches bounded by BOTH a document-count
@@ -1525,10 +1701,11 @@ fn pack_upload_batches(
 /// PUT one already-embedded batch. On HTTP 413 (payload too large), split the
 /// documents into two approximate halves and retry each RECURSIVELY: every half
 /// re-attempts a single PUT and, on a further 413, splits again — bottoming out
-/// at one document per request. A lone document that still 413s propagates its
-/// error (the `documents.len() > 1` guard is the floor that stops the recursion
-/// and surfaces the actionable single-doc message). `batch_index` /
-/// `batch_count` are informational (server logs only).
+/// at one document per request. A lone document that STILL 413s is genuinely too
+/// large to upload, so it is skipped: the response carries it as an
+/// `OVERSIZE_UPLOAD_REASON` conflict (an intentional drop, subtracted from the
+/// finalize expectation) and the run continues rather than aborting the whole
+/// source. `batch_index` / `batch_count` are informational (server logs only).
 async fn upload_documents_with_split(
     client: &reqwest::Client,
     url: &str,
@@ -1546,6 +1723,33 @@ async fn upload_documents_with_split(
     };
     match put_json::<_, UploadDocumentsResponse>(client, url, token, &body).await {
         Ok(r) => Ok(r),
+        Err(e) if is_payload_too_large(&e) && body.documents.len() == 1 => {
+            // The split bottomed out at a single document that STILL exceeds the
+            // body limit — its content + embeddings is genuinely too large and the
+            // pre-emptive estimate drop missed it. It can never be uploaded, so
+            // skip it as an intentional conflict instead of aborting the whole
+            // source. Synthesized client-side: the server never accepted it; the
+            // conflict is subtracted from the finalize expectation (it is an
+            // intentional drop) and surfaced in the report's conflict list.
+            let mib = mnm_core::limits::MAX_INGEST_BODY_BYTES / (1024 * 1024);
+            let doc = body.documents.into_iter().next().expect("len == 1");
+            tracing::warn!(
+                path = %doc.path,
+                "document still exceeded the {mib} MiB body limit after splitting to a single \
+                 doc; skipping it (run continues)",
+            );
+            Ok(UploadDocumentsResponse {
+                accepted: 0,
+                carried: 0,
+                conflicts: vec![mnm_core::ingest::UploadConflict::plain(
+                    doc.path,
+                    format!(
+                        "{OVERSIZE_UPLOAD_REASON}: a single document still exceeded the {mib} MiB \
+                         body limit after splitting"
+                    ),
+                )],
+            })
+        }
         Err(e) if is_payload_too_large(&e) && body.documents.len() > 1 => {
             let docs = body.documents; // recover & split (put_json only borrowed `body`)
             let mid = docs.len() / 2; // >= 1 because len > 1
@@ -1601,7 +1805,29 @@ fn merge_split_responses(
 }
 
 fn is_payload_too_large(e: &anyhow::Error) -> bool {
-    e.to_string().contains("413")
+    // Match the canonical 413 reason phrase, NOT the bare "413". The error string
+    // embeds the run UUID, and ~0.5% of v4 UUIDs contain the hex substring "413",
+    // which would misclassify an unrelated 5xx as payload-too-large — and at the
+    // single-document split floor that now means a SILENT skip + a green finalize
+    // (the count is decremented to match), defeating the completeness guarantee.
+    // `StatusCode` renders 413 as "413 Payload Too Large", so a real 413 always
+    // matches and a stray UUID hex digit-run cannot.
+    e.to_string().contains("Payload Too Large")
+}
+
+/// Stable reason prefix for the conflict the CLI synthesizes when a single
+/// document still exceeds the upload body limit after the batch split bottoms
+/// out (see [`upload_documents_with_split`]).
+const OVERSIZE_UPLOAD_REASON: &str = "upload too large";
+
+/// True for a conflict that represents an INTENTIONAL drop — a document the
+/// pipeline deliberately did not persist: a prompt-injection rejection, or a
+/// single document still over the body limit after splitting. These are
+/// subtracted from the finalize expectation and tolerated by the completeness
+/// safety floor. Everything else (e.g. a failed insert) is an *accidental* drop
+/// that must still abort the run.
+fn is_intentional_drop(c: &mnm_core::ingest::UploadConflict) -> bool {
+    c.is_injection_rejection() || c.reason.starts_with(OVERSIZE_UPLOAD_REASON)
 }
 
 async fn post_json<I: Serialize + Sync, O: for<'de> Deserialize<'de>>(
@@ -2170,8 +2396,13 @@ pub(super) fn assemble_report(
         }))
         .collect();
 
+    // Skipped files come from two stages: the walker (non-regular / oversize /
+    // binary / non-UTF-8) and the planner (`skipped_empty`: new docs that
+    // chunked to nothing). Both use the shared `SkippedFile` shape, so they
+    // surface together in the report.
     let skipped_files: Vec<ReportSkip> = walk_skipped
         .iter()
+        .chain(plan.skipped_empty.iter())
         .map(|s| ReportSkip {
             path: s.rel_path.display().to_string(),
             reason: s.reason.to_string(),
@@ -3195,6 +3426,194 @@ mod tests {
             token_count: 2,
             package: None,
         }
+    }
+
+    /// A `PlannedDocument` with `n_chunks` chunks of `chunk_len` bytes each, of
+    /// the given kind (kind drives the 1 vs 2 embeddings-per-chunk estimate).
+    fn doc_with_chunks(
+        path: &str,
+        kind: DocumentKind,
+        n_chunks: u32,
+        chunk_len: usize,
+    ) -> mnm_content::ingest::PlannedDocument {
+        use mnm_content::ingest::PlannedChunk;
+        mnm_content::ingest::PlannedDocument {
+            kind,
+            chunks: (0..n_chunks)
+                .map(|i| PlannedChunk {
+                    content: "x".repeat(chunk_len),
+                    heading_path: vec![],
+                    symbol_path: vec![],
+                    chunk_index: i,
+                    total_chunks: n_chunks,
+                    start_byte: 0,
+                    end_byte: 0,
+                    content_hash: String::new(),
+                    token_count: 0,
+                })
+                .collect(),
+            ..sample_planned_new(path)
+        }
+    }
+
+    /// An `IngestPlan` holding `new_documents` (no carried/deleted), with stats
+    /// derived from the documents — the same shape `finalize()` produces.
+    fn plan_with(
+        new_documents: Vec<mnm_content::ingest::PlannedDocument>,
+    ) -> mnm_content::ingest::IngestPlan {
+        let chunks_emitted = new_documents.iter().map(|d| d.chunks.len()).sum();
+        let documents_added = new_documents.len();
+        mnm_content::ingest::IngestPlan {
+            source_slug: "s".into(),
+            source_kind: mnm_core::types::SourceKind::DocsSite,
+            target_revision: "rev".into(),
+            new_documents,
+            carried_documents: vec![],
+            deleted_documents: vec![],
+            skipped_empty: vec![],
+            stats: mnm_content::ingest::IngestStats {
+                documents_added,
+                documents_carried: 0,
+                documents_deleted: 0,
+                chunks_emitted,
+            },
+        }
+    }
+
+    #[test]
+    fn drop_oversize_documents_removes_unuploadable_docs() {
+        // A code doc with several sizeable chunks (two embeddings each) blows the
+        // limit; a small markdown doc stays.
+        let mut plan = plan_with(vec![
+            doc_with_chunks("big.rs", DocumentKind::Code, 6, 200),
+            doc_with_chunks("small.md", DocumentKind::Markdown, 1, 11),
+        ]);
+
+        let skips = drop_oversize_documents(&mut plan, 50_000);
+
+        assert_eq!(plan.new_documents.len(), 1);
+        assert_eq!(plan.new_documents[0].path, std::path::PathBuf::from("small.md"));
+        // Stats are re-synced to the trimmed set, so expected_total stays right.
+        assert_eq!(plan.stats.documents_added, 1);
+        assert_eq!(plan.stats.chunks_emitted, 1);
+        // The dropped doc is surfaced as a skip with its path + a payload reason.
+        assert_eq!(skips.len(), 1);
+        assert_eq!(skips[0].path, "big.rs");
+        assert!(skips[0].reason.contains("upload too large"), "reason: {}", skips[0].reason);
+    }
+
+    #[test]
+    fn drop_oversize_is_driven_by_the_code_double_embedding() {
+        // Identical chunk shape; only the kind differs. A code doc carries TWO
+        // embeddings per chunk vs one for markdown, so at a limit BETWEEN their
+        // estimates the code doc drops and the markdown doc is kept. Pins that
+        // the `is_code` factor — not raw content size — drives the decision.
+        let md = doc_with_chunks("same.md", DocumentKind::Markdown, 6, 200);
+        let code = doc_with_chunks("same.rs", DocumentKind::Code, 6, 200);
+        let md_est = estimated_planned_upload_bytes(&md);
+        let code_est = estimated_planned_upload_bytes(&code);
+        assert!(code_est > md_est, "code must estimate larger: {code_est} vs {md_est}");
+        let limit = md_est.midpoint(code_est);
+
+        let mut plan = plan_with(vec![md, code]);
+        let skips = drop_oversize_documents(&mut plan, limit);
+
+        assert_eq!(skips.len(), 1);
+        assert_eq!(skips[0].path, "same.rs");
+        assert_eq!(plan.new_documents.len(), 1);
+        assert_eq!(plan.new_documents[0].path, std::path::PathBuf::from("same.md"));
+    }
+
+    #[test]
+    fn drop_oversize_uses_strict_greater_than_at_the_boundary() {
+        // `est == limit` is kept (mirrors the server accepting a body of exactly
+        // the limit); `est > limit` is dropped.
+        let doc = doc_with_chunks("b.md", DocumentKind::Markdown, 1, 940);
+        let est = estimated_planned_upload_bytes(&doc);
+
+        let mut at_limit = plan_with(vec![doc.clone()]);
+        assert!(
+            drop_oversize_documents(&mut at_limit, est).is_empty(),
+            "est == limit must be kept",
+        );
+        assert_eq!(at_limit.new_documents.len(), 1);
+
+        let mut over = plan_with(vec![doc]);
+        assert_eq!(drop_oversize_documents(&mut over, est - 1).len(), 1, "est > limit must drop",);
+        assert!(over.new_documents.is_empty());
+    }
+
+    #[test]
+    fn drop_oversize_documents_keeps_everything_under_limit() {
+        let mut plan = plan_with(vec![sample_planned_new("a.md"), sample_planned_new("b.md")]);
+        let skips = drop_oversize_documents(&mut plan, mnm_core::limits::MAX_INGEST_BODY_BYTES);
+        assert!(skips.is_empty());
+        assert_eq!(plan.new_documents.len(), 2);
+    }
+
+    #[test]
+    fn context_window_error_is_detected_only_for_the_32k_rejection() {
+        use mnm_embedding::voyage::VoyageError;
+        // The actual Voyage rejection → split-and-retry.
+        let over = VoyageError::Status {
+            status: 400,
+            body: "{\"detail\":\"The example at index 15 in your batch has too many tokens \
+                   and does not fit into the model's context window of 32000 tokens.\"}"
+                .into(),
+        };
+        assert!(is_context_window_error(&over));
+
+        // A different 400 (e.g. unsupported model) is NOT a context-window case.
+        let other_400 = VoyageError::Status {
+            status: 400,
+            body: "Model voyage-code-3 is not supported.".into(),
+        };
+        assert!(!is_context_window_error(&other_400));
+
+        // A 429 must be treated as retryable, never as a split — even if its body
+        // happens to contain the trigger words (status gates the match).
+        let rate = VoyageError::Status {
+            status: 429,
+            body: "too many tokens".into(),
+        };
+        assert!(!is_context_window_error(&rate));
+
+        assert!(!is_context_window_error(&VoyageError::Http("connection reset".into())));
+    }
+
+    #[test]
+    fn intentional_drops_are_distinguished_from_accidental_ones() {
+        use mnm_core::ingest::{
+            UploadConflict, PROMPT_INJECTION_REASON, PROMPT_INJECTION_UNAVAILABLE_REASON,
+        };
+        // Oversize-upload skip (synthesized at the split floor) is intentional —
+        // it is subtracted from the finalize expectation and tolerated by the
+        // safety floor. This is the round trip with the synthesized reason.
+        let oversize = UploadConflict::plain(
+            "big.rs",
+            format!(
+                "{OVERSIZE_UPLOAD_REASON}: a single document still exceeded the 25 MiB body \
+                 limit after splitting"
+            ),
+        );
+        assert!(is_intentional_drop(&oversize));
+        // Injection rejection is intentional too — both the flagged case and the
+        // fail-closed (scan-unavailable) case, matching `is_injection_rejection`.
+        assert!(is_intentional_drop(&UploadConflict::plain("x.md", PROMPT_INJECTION_REASON)));
+        assert!(is_intentional_drop(&UploadConflict::plain(
+            "w.md",
+            format!("{PROMPT_INJECTION_UNAVAILABLE_REASON} (fail-closed)"),
+        )));
+        // Accidental drops (failed insert, duplicate path) must NOT be treated as
+        // intentional — they have to abort the run, not silently vanish.
+        assert!(!is_intentional_drop(&UploadConflict::plain(
+            "y.md",
+            "insert failed: db connection reset",
+        )));
+        assert!(!is_intentional_drop(&UploadConflict::plain(
+            "z.md",
+            "duplicate path in this batch",
+        )));
     }
 
     /// A `CarriedUploadInput` (carried-doc path): freshly-walked metadata, NO
