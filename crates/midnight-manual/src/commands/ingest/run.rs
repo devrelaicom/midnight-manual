@@ -1271,11 +1271,9 @@ async fn embed_batch(
         for take in plan {
             let req_groups: Vec<Vec<String>> =
                 cursor.by_ref().take(take).map(|(texts, _)| texts).collect();
-            let out = mnm_embedding::client::embed_general_groups(req_groups, general)
-                .await
-                .map_err(|e| anyhow!("embed context groups via Voyage: {e}"))?;
-            tokens = tokens.saturating_add(out.total_tokens);
-            general_vectors.extend(out.groups.into_iter().flatten());
+            let (vecs, toks) = embed_groups_with_split(req_groups, general).await?;
+            tokens = tokens.saturating_add(toks);
+            general_vectors.extend(vecs);
         }
         attach_embeddings(docs, general_vectors)?;
     }
@@ -1312,6 +1310,91 @@ async fn embed_batch(
         }
     }
     Ok(tokens)
+}
+
+/// True for Voyage's "input exceeds the 32 000-token context window" rejection.
+///
+/// Our context groups are sized with a `bge-base-en-v1.5` BPE counter, which
+/// undercounts voyage-context-3's own tokenizer for code-dense text, so a group
+/// we sized under the grouping budget can still overflow at the model. This is a
+/// 400 that no amount of waiting fixes — the remedy is to split the group, which
+/// [`embed_groups_with_split`] does — so it must be told apart from retryable
+/// statuses.
+fn is_context_window_error(e: &mnm_embedding::voyage::VoyageError) -> bool {
+    use mnm_embedding::voyage::VoyageError;
+    matches!(
+        e,
+        VoyageError::Status { status: 400, body }
+            if body.contains("context window") || body.contains("too many tokens")
+    )
+}
+
+/// Embed a batch of context groups, retry-splitting any that Voyage rejects for
+/// exceeding the 32 000-token window. Returns the per-chunk vectors (flattened
+/// in `req_groups` order) plus the Voyage tokens consumed.
+///
+/// On the happy path this is one request. On a context-window rejection it
+/// cannot tell which group overflowed (the error only carries a batch index),
+/// so it re-embeds each group on its own — splitting any that still overflow —
+/// and reassembles the vectors in order.
+///
+/// Scope: this backstop fires on the **BYOK** path, where Voyage's raw 400 is
+/// visible. On the server-proxy path the server rewrites the overflow into a
+/// 502/413 that [`is_context_window_error`] does not match, so server-proxy
+/// ingest relies on the (now 80%) grouping headroom alone; a server-side
+/// retry-split is the durable closure there (tracked follow-up).
+async fn embed_groups_with_split(
+    req_groups: Vec<Vec<String>>,
+    src: GeneralEmbedSource<'_>,
+) -> Result<(Vec<Vec<f32>>, u64)> {
+    match mnm_embedding::client::embed_general_groups(&req_groups, src).await {
+        Ok(out) => Ok((out.groups.into_iter().flatten().collect(), out.total_tokens)),
+        Err(e) if is_context_window_error(&e) => {
+            tracing::warn!(
+                groups = req_groups.len(),
+                "a context group exceeded Voyage's 32K-token window (our BPE count \
+                 undercounts the model's tokenizer); re-embedding each group, splitting overflows",
+            );
+            let mut vectors = Vec::new();
+            let mut tokens = 0u64;
+            for group in req_groups {
+                let (v, t) = embed_one_group_splitting(group, src).await?;
+                vectors.extend(v);
+                tokens = tokens.saturating_add(t);
+            }
+            Ok((vectors, tokens))
+        }
+        Err(e) => Err(anyhow!("embed context groups via Voyage: {e}")),
+    }
+}
+
+/// Embed a single context group, halving it and recursing whenever Voyage
+/// rejects it for exceeding the 32 000-token window. A single chunk is ≤1024
+/// tokens so it can never alone overflow, which guarantees termination.
+async fn embed_one_group_splitting(
+    group: Vec<String>,
+    src: GeneralEmbedSource<'_>,
+) -> Result<(Vec<Vec<f32>>, u64)> {
+    match mnm_embedding::client::embed_general_groups(std::slice::from_ref(&group), src).await {
+        Ok(out) => Ok((out.groups.into_iter().flatten().collect(), out.total_tokens)),
+        Err(e) if is_context_window_error(&e) && group.len() > 1 => {
+            // The guard guarantees len >= 2, so floor(len/2) is already >= 1;
+            // `.max(1)` is purely defensive. Both halves are strictly shorter
+            // than `group`, so the recursion makes progress and terminates.
+            let mid = (group.len() / 2).max(1);
+            tracing::warn!(
+                chunks = group.len(),
+                "splitting an oversized context group and re-embedding its halves",
+            );
+            let (mut vectors, t1) =
+                Box::pin(embed_one_group_splitting(group[..mid].to_vec(), src)).await?;
+            let (right, t2) =
+                Box::pin(embed_one_group_splitting(group[mid..].to_vec(), src)).await?;
+            vectors.extend(right);
+            Ok((vectors, t1.saturating_add(t2)))
+        }
+        Err(e) => Err(anyhow!("embed context group via Voyage after split: {e}")),
+    }
 }
 
 /// Pack context groups into Voyage requests bounded by ≤1 000 input groups,
@@ -3409,6 +3492,36 @@ mod tests {
         let skips = drop_oversize_documents(&mut plan, mnm_core::limits::MAX_INGEST_BODY_BYTES);
         assert!(skips.is_empty());
         assert_eq!(plan.new_documents.len(), 2);
+    }
+
+    #[test]
+    fn context_window_error_is_detected_only_for_the_32k_rejection() {
+        use mnm_embedding::voyage::VoyageError;
+        // The actual Voyage rejection → split-and-retry.
+        let over = VoyageError::Status {
+            status: 400,
+            body: "{\"detail\":\"The example at index 15 in your batch has too many tokens \
+                   and does not fit into the model's context window of 32000 tokens.\"}"
+                .into(),
+        };
+        assert!(is_context_window_error(&over));
+
+        // A different 400 (e.g. unsupported model) is NOT a context-window case.
+        let other_400 = VoyageError::Status {
+            status: 400,
+            body: "Model voyage-code-3 is not supported.".into(),
+        };
+        assert!(!is_context_window_error(&other_400));
+
+        // A 429 must be treated as retryable, never as a split — even if its body
+        // happens to contain the trigger words (status gates the match).
+        let rate = VoyageError::Status {
+            status: 429,
+            body: "too many tokens".into(),
+        };
+        assert!(!is_context_window_error(&rate));
+
+        assert!(!is_context_window_error(&VoyageError::Http("connection reset".into())));
     }
 
     /// A `CarriedUploadInput` (carried-doc path): freshly-walked metadata, NO

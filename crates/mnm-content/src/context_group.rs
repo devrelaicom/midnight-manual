@@ -1,22 +1,32 @@
 //! Balanced context-group splitting (spec §6, D8).
 //!
 //! voyage-context-3 accepts ≤32 000 tokens per inner list (one document's
-//! chunks embedded together). Documents over 90% of that limit are split into
+//! chunks embedded together). Documents over 80% of that limit are split into
 //! the minimum number of contiguous, roughly-equal-token groups. Grouping only
 //! changes what context Voyage sees — chunk rows are unaffected.
 //!
-//! Token counts here are OUR BPE counts (`crate::tokens`), not Voyage's
-//! tokenizer; the 10% headroom (28 800 vs 32 000) absorbs the divergence.
+//! Token counts here are OUR BPE counts (`crate::tokens`, a `bge-base-en-v1.5`
+//! `WordPiece` vocabulary), NOT voyage-context-3's tokenizer, which counts more
+//! tokens for code-dense text. The 20% headroom (25 600 vs 32 000) absorbs the
+//! common divergence; the ingest CLI additionally retry-splits any group Voyage
+//! still rejects as >32 000, so a worse-than-expected divergence degrades to a
+//! finer split rather than a failed run.
 
 use std::ops::Range;
 
 /// Voyage's per-document (inner list) token limit for contextualized embeddings.
 pub const VOYAGE_CONTEXT_DOC_TOKEN_LIMIT: u32 = 32_000;
 
-/// The grouping budget: 90% of the Voyage per-document limit.
+/// The grouping budget: 80% of the Voyage per-document limit.
+///
+/// The headroom (vs the full 32 000) absorbs the divergence between our BPE
+/// token counts and voyage-context-3's own tokenizer. It was 90% (28 800), but
+/// code-dense documents tokenize denser under Voyage than under our
+/// `bge-base-en-v1.5` counter and overran the 10% margin; 80% (25 600) widens
+/// it, and the ingest CLI retry-splits anything Voyage still rejects.
 #[must_use]
 pub const fn context_group_limit() -> u32 {
-    VOYAGE_CONTEXT_DOC_TOKEN_LIMIT / 10 * 9
+    VOYAGE_CONTEXT_DOC_TOKEN_LIMIT / 10 * 8
 }
 
 /// Partition one document's contiguous chunk sequence into context groups.

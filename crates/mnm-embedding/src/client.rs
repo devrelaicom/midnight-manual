@@ -208,7 +208,7 @@ pub async fn embed_general(
 /// Returns the last [`VoyageError`] if every attempt fails, or immediately on a
 /// non-retryable error.
 pub async fn embed_general_groups(
-    groups: Vec<Vec<String>>,
+    groups: &[Vec<String>],
     src: GeneralEmbedSource<'_>,
 ) -> Result<EmbeddedGroups, VoyageError> {
     let sizes: Vec<usize> = groups.iter().map(Vec::len).collect();
@@ -217,7 +217,7 @@ pub async fn embed_general_groups(
         attempt += 1;
         let result = match src {
             GeneralEmbedSource::Byok(e) => e
-                .embed_groups(groups.clone(), InputType::Document)
+                .embed_groups(groups.to_vec(), InputType::Document)
                 .await
                 .map(|o| EmbeddedGroups {
                     groups: o.groups,
@@ -388,7 +388,7 @@ mod tests {
             .mount(&server)
             .await;
         let out = embed_general_groups(
-            vec![vec!["a".into(), "b".into()], vec!["c".into()]],
+            &[vec!["a".into(), "b".into()], vec!["c".into()]],
             GeneralEmbedSource::Server {
                 base_url: &server.uri(),
                 bearer: None,

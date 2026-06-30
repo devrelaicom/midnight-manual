@@ -228,7 +228,7 @@ async fn embeddings(
         );
     }
     // Per-group budget (general/nested): ≈ tokens via the ~4-bytes/token
-    // estimate; the 90% headroom on the real Voyage limit absorbs the
+    // estimate; the 20% headroom on the real Voyage limit absorbs the
     // estimate's slack.
     if let EmbeddingsInput::Nested(groups) = &req.input {
         for (i, g) in groups.iter().enumerate() {
@@ -406,11 +406,13 @@ async fn embeddings(
     .into_response()
 }
 
-/// 90% of voyage-context-3's 32K per-document (inner list) token limit.
-/// Mirrors `mnm_content::context_group::context_group_limit`; inlined so
-/// midnight-manual-server does not grow an mnm-content dependency for one constant.
+/// 80% of voyage-context-3's 32K per-document (inner list) token limit.
+/// Mirrors the budget in `mnm_content::context_group::context_group_limit` (kept
+/// in lockstep; inlined so midnight-manual-server does not grow an mnm-content
+/// dependency for one constant). This is a coarse `char_estimate` pre-filter, so
+/// it is intentionally looser than the client's BPE-token sizing.
 const fn context_group_limit() -> u32 {
-    32_000 / 10 * 9
+    32_000 / 10 * 8
 }
 
 /// Resolve whether this request bypasses the site-wide global token cap.
