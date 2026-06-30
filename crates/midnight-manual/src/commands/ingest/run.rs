@@ -516,7 +516,16 @@ async fn run_inner(
             .add_walked_document(&ctx)
             .with_context(|| format!("plan add {}", doc.rel_path.display()))?;
     }
-    let plan = builder.finalize();
+    let mut plan = builder.finalize();
+
+    // Drop new documents whose estimated upload payload alone exceeds the
+    // server's body limit — they can never be uploaded (a single oversized doc
+    // 413s after the batch split bottoms out, aborting the whole run). Done here
+    // (before embedding) so it also saves the wasted Voyage tokens, and before
+    // the dry-run branch so plan-preview and run agree. Surfaced in the report's
+    // skipped files; counted out of every downstream total via the plan trim.
+    let oversize_skips =
+        drop_oversize_documents(&mut plan, mnm_core::limits::MAX_INGEST_BODY_BYTES);
 
     let docs_with_language_targets = plan
         .new_documents
@@ -542,7 +551,7 @@ async fn run_inner(
     if args.dry_run {
         let finished_at = OffsetDateTime::now_utc();
         let sel = ReportSelection::new(json, args.report_file.as_deref());
-        let report = assemble_report(
+        let mut report = assemble_report(
             "ingest run",
             &args.source_slug,
             "dry_run",
@@ -558,6 +567,7 @@ async fn run_inner(
             Vec::new(),
             0,
         );
+        report.skipped_files.extend(oversize_skips.iter().cloned());
         emit_report(&report, &sel, args.report_file.as_deref(), || {
             format_dry_run(
                 &args.source_slug,
@@ -966,7 +976,7 @@ async fn run_inner(
         conflicts,
     };
 
-    let report = assemble_report(
+    let mut report = assemble_report(
         "ingest run",
         &args.source_slug,
         "finalized",
@@ -982,6 +992,7 @@ async fn run_inner(
         Vec::new(),
         stats.total_tokens,
     );
+    report.skipped_files.extend(oversize_skips.iter().cloned());
 
     let success_out = SuccessOutput {
         action: "ingest",
@@ -1480,19 +1491,94 @@ mod plan_group_batches_tests {
 /// twice — they may also carry a `code_embedding` (dual embeddings, D1); when
 /// code embeddings are opted out this merely over-estimates, which the packer
 /// tolerates by design. Intentionally approximate.
-fn estimated_upload_bytes(doc: &DocumentUpload) -> usize {
-    let vectors_per_chunk = if doc.kind == DocumentKind::Code { 2 } else { 1 };
+/// Estimated JSON upload size for one document: per-doc overhead + path + per
+/// chunk (content + overhead + its embedding vectors). Code documents carry two
+/// vectors per chunk (general + code), everything else one. Shared by the batch
+/// packer ([`pack_upload_batches`]) and the oversize-document drop
+/// ([`drop_oversize_documents`]) so the two estimates can never disagree.
+fn est_doc_bytes(
+    path_len: usize,
+    is_code: bool,
+    chunk_content_lens: impl Iterator<Item = usize>,
+) -> usize {
+    let vectors_per_chunk = if is_code { 2 } else { 1 };
     EST_PER_DOC_OVERHEAD
-        + doc.path.len()
-        + doc
-            .chunks
-            .iter()
-            .map(|c| {
-                c.content.len()
-                    + EST_PER_CHUNK_OVERHEAD
+        + path_len
+        + chunk_content_lens
+            .map(|n| {
+                n + EST_PER_CHUNK_OVERHEAD
                     + vectors_per_chunk * EST_EMBED_DIM * EST_BYTES_PER_EMBED_FLOAT
             })
             .sum::<usize>()
+}
+
+fn estimated_upload_bytes(doc: &DocumentUpload) -> usize {
+    est_doc_bytes(
+        doc.path.len(),
+        doc.kind == DocumentKind::Code,
+        doc.chunks.iter().map(|c| c.content.len()),
+    )
+}
+
+/// [`estimated_upload_bytes`] computed from a planned document (before it is
+/// turned into a [`DocumentUpload`]). Used by [`drop_oversize_documents`] to
+/// decide, before embedding, whether a document can ever be uploaded.
+fn estimated_planned_upload_bytes(d: &mnm_content::ingest::PlannedDocument) -> usize {
+    est_doc_bytes(
+        d.path.as_os_str().len(),
+        d.kind == DocumentKind::Code,
+        d.chunks.iter().map(|c| c.content.len()),
+    )
+}
+
+/// Remove new documents whose estimated upload payload alone exceeds `limit`
+/// (the server's body limit) and return them as report skips.
+///
+/// Such a document can never be uploaded: once the batch split bottoms out at
+/// this single document the server still returns 413, which aborts the whole
+/// run. The estimate is available before embedding, so dropping here also avoids
+/// spending Voyage tokens on a document that can never land. Trimming
+/// `plan.new_documents` (and re-syncing `stats`) keeps every downstream count —
+/// `expected_document_total`, the report stats, the document list — consistent,
+/// mirroring the empty-document drop in the planner. The size estimate is an
+/// upload concern (embedding vector count + JSON shape), so unlike the empty-doc
+/// drop it lives here in the CLI rather than the planner.
+fn drop_oversize_documents(
+    plan: &mut mnm_content::ingest::IngestPlan,
+    limit: usize,
+) -> Vec<super::report::ReportSkip> {
+    const MIB: usize = 1024 * 1024;
+    let mut skips = Vec::new();
+    let mut kept = Vec::with_capacity(plan.new_documents.len());
+    for d in std::mem::take(&mut plan.new_documents) {
+        let est = estimated_planned_upload_bytes(&d);
+        if est > limit {
+            tracing::warn!(
+                path = %d.path.display(),
+                estimated_bytes = est,
+                limit,
+                chunks = d.chunks.len(),
+                "document upload payload exceeds the body limit; skipping (too large to ingest in one request)",
+            );
+            skips.push(super::report::ReportSkip {
+                path: d.path.display().to_string(),
+                reason: format!(
+                    "upload too large: ~{} MiB ({} chunks + embeddings) exceeds the {} MiB request limit",
+                    // Round the (over-limit) estimate UP so it never prints "~25
+                    // MiB exceeds the 25 MiB limit" for a doc just over the line.
+                    est.div_ceil(MIB),
+                    d.chunks.len(),
+                    limit / MIB,
+                ),
+            });
+        } else {
+            kept.push(d);
+        }
+    }
+    plan.new_documents = kept;
+    plan.stats.documents_added = plan.new_documents.len();
+    plan.stats.chunks_emitted = plan.new_documents.iter().map(|d| d.chunks.len()).sum();
+    skips
 }
 
 /// Greedily pack documents into upload batches bounded by BOTH a document-count
@@ -3200,6 +3286,129 @@ mod tests {
             token_count: 2,
             package: None,
         }
+    }
+
+    /// A `PlannedDocument` with `n_chunks` chunks of `chunk_len` bytes each, of
+    /// the given kind (kind drives the 1 vs 2 embeddings-per-chunk estimate).
+    fn doc_with_chunks(
+        path: &str,
+        kind: DocumentKind,
+        n_chunks: u32,
+        chunk_len: usize,
+    ) -> mnm_content::ingest::PlannedDocument {
+        use mnm_content::ingest::PlannedChunk;
+        mnm_content::ingest::PlannedDocument {
+            kind,
+            chunks: (0..n_chunks)
+                .map(|i| PlannedChunk {
+                    content: "x".repeat(chunk_len),
+                    heading_path: vec![],
+                    symbol_path: vec![],
+                    chunk_index: i,
+                    total_chunks: n_chunks,
+                    start_byte: 0,
+                    end_byte: 0,
+                    content_hash: String::new(),
+                    token_count: 0,
+                })
+                .collect(),
+            ..sample_planned_new(path)
+        }
+    }
+
+    /// An `IngestPlan` holding `new_documents` (no carried/deleted), with stats
+    /// derived from the documents — the same shape `finalize()` produces.
+    fn plan_with(
+        new_documents: Vec<mnm_content::ingest::PlannedDocument>,
+    ) -> mnm_content::ingest::IngestPlan {
+        let chunks_emitted = new_documents.iter().map(|d| d.chunks.len()).sum();
+        let documents_added = new_documents.len();
+        mnm_content::ingest::IngestPlan {
+            source_slug: "s".into(),
+            source_kind: mnm_core::types::SourceKind::DocsSite,
+            target_revision: "rev".into(),
+            new_documents,
+            carried_documents: vec![],
+            deleted_documents: vec![],
+            skipped_empty: vec![],
+            stats: mnm_content::ingest::IngestStats {
+                documents_added,
+                documents_carried: 0,
+                documents_deleted: 0,
+                chunks_emitted,
+            },
+        }
+    }
+
+    #[test]
+    fn drop_oversize_documents_removes_unuploadable_docs() {
+        // A code doc with several sizeable chunks (two embeddings each) blows the
+        // limit; a small markdown doc stays.
+        let mut plan = plan_with(vec![
+            doc_with_chunks("big.rs", DocumentKind::Code, 6, 200),
+            doc_with_chunks("small.md", DocumentKind::Markdown, 1, 11),
+        ]);
+
+        let skips = drop_oversize_documents(&mut plan, 50_000);
+
+        assert_eq!(plan.new_documents.len(), 1);
+        assert_eq!(plan.new_documents[0].path, std::path::PathBuf::from("small.md"));
+        // Stats are re-synced to the trimmed set, so expected_total stays right.
+        assert_eq!(plan.stats.documents_added, 1);
+        assert_eq!(plan.stats.chunks_emitted, 1);
+        // The dropped doc is surfaced as a skip with its path + a payload reason.
+        assert_eq!(skips.len(), 1);
+        assert_eq!(skips[0].path, "big.rs");
+        assert!(skips[0].reason.contains("upload too large"), "reason: {}", skips[0].reason);
+    }
+
+    #[test]
+    fn drop_oversize_is_driven_by_the_code_double_embedding() {
+        // Identical chunk shape; only the kind differs. A code doc carries TWO
+        // embeddings per chunk vs one for markdown, so at a limit BETWEEN their
+        // estimates the code doc drops and the markdown doc is kept. Pins that
+        // the `is_code` factor — not raw content size — drives the decision.
+        let md = doc_with_chunks("same.md", DocumentKind::Markdown, 6, 200);
+        let code = doc_with_chunks("same.rs", DocumentKind::Code, 6, 200);
+        let md_est = estimated_planned_upload_bytes(&md);
+        let code_est = estimated_planned_upload_bytes(&code);
+        assert!(code_est > md_est, "code must estimate larger: {code_est} vs {md_est}");
+        let limit = md_est.midpoint(code_est);
+
+        let mut plan = plan_with(vec![md, code]);
+        let skips = drop_oversize_documents(&mut plan, limit);
+
+        assert_eq!(skips.len(), 1);
+        assert_eq!(skips[0].path, "same.rs");
+        assert_eq!(plan.new_documents.len(), 1);
+        assert_eq!(plan.new_documents[0].path, std::path::PathBuf::from("same.md"));
+    }
+
+    #[test]
+    fn drop_oversize_uses_strict_greater_than_at_the_boundary() {
+        // `est == limit` is kept (mirrors the server accepting a body of exactly
+        // the limit); `est > limit` is dropped.
+        let doc = doc_with_chunks("b.md", DocumentKind::Markdown, 1, 940);
+        let est = estimated_planned_upload_bytes(&doc);
+
+        let mut at_limit = plan_with(vec![doc.clone()]);
+        assert!(
+            drop_oversize_documents(&mut at_limit, est).is_empty(),
+            "est == limit must be kept",
+        );
+        assert_eq!(at_limit.new_documents.len(), 1);
+
+        let mut over = plan_with(vec![doc]);
+        assert_eq!(drop_oversize_documents(&mut over, est - 1).len(), 1, "est > limit must drop",);
+        assert!(over.new_documents.is_empty());
+    }
+
+    #[test]
+    fn drop_oversize_documents_keeps_everything_under_limit() {
+        let mut plan = plan_with(vec![sample_planned_new("a.md"), sample_planned_new("b.md")]);
+        let skips = drop_oversize_documents(&mut plan, mnm_core::limits::MAX_INGEST_BODY_BYTES);
+        assert!(skips.is_empty());
+        assert_eq!(plan.new_documents.len(), 2);
     }
 
     /// A `CarriedUploadInput` (carried-doc path): freshly-walked metadata, NO
