@@ -28,6 +28,8 @@ cargo run --release -p midnight-manual-server
 
 The server runs automatic migrations at boot when `MIDNIGHT_MANUAL_AUTO_MIGRATE=true` (the default in `fly.toml`). Migrations live in `crates/mnm-store/migrations/`.
 
+For prerequisites and the full list of binaries and Cargo features, see [Building from source](./building-from-source.md).
+
 ## Fly.io provisioning runbook
 
 The `fly.toml` at the repo root configures the app for Fly.io deployment. Primary region is `lhr` (London). The server image is built from `Dockerfile.server`.
