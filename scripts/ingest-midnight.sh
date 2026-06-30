@@ -293,7 +293,17 @@ printf 'server: %s\n\n' "$SERVER_URL"
 readyz_or_exit "$SERVER_URL"
 
 # ── 3. login (refresh admin token) ────────────────────────────────────────────
-if ! "$MNM" "${SERVER_ARGS[@]+"${SERVER_ARGS[@]}"}" login --user-id "$USER_ID" >/dev/null 2>"$TMP/login.err"; then
+# The admin token has a fixed TTL that a full corpus run easily outlives, so we
+# refresh it before EACH source (see the loop below) instead of once up front —
+# otherwise the tail of a long run fails with "admin token expired" / 401 once
+# the single startup token lapses. `mnm login` is a cheap keypair-signed
+# exchange. This first call doubles as a preflight: a bad keypair or unknown
+# user fails fast here, before any cloning or ingestion.
+login_refresh() {
+  "$MNM" "${SERVER_ARGS[@]+"${SERVER_ARGS[@]}"}" login --user-id "$USER_ID" \
+    >/dev/null 2>"$TMP/login.err"
+}
+if ! login_refresh; then
   echo "${RED}login failed:${NC} $(tail -n 5 "$TMP/login.err" | grep -v '^[[:space:]]*$' | tail -1)" >&2
   echo "  (need a local keypair for '$USER_ID' and a matching user on the server)" >&2
   exit 1
@@ -343,6 +353,18 @@ for row in "${rows[@]}"; do
 
   if [ ! -f "$man" ]; then
     printf '%s%s %s%s failed • manifest %s not found\n' "$RED" "$XMARK" "$repo" "$NC" "$man"
+    FAILED=$((FAILED+1)); continue
+  fi
+
+  # Refresh the admin token before each source: a full corpus run outlives the
+  # token TTL, so without this every source whose ingest starts after expiry
+  # fails with "admin token expired" / 401. Login is cheap relative to an
+  # ingest; refreshing here keeps each source within a fresh token's lifetime.
+  # A failed refresh fails just this source (the run continues to the next).
+  if ! login_refresh; then
+    why="$(tail -n 5 "$TMP/login.err" | grep -v '^[[:space:]]*$' | tail -1)"
+    printf '%s%s %s%s failed • token refresh (mnm login): %s\n' \
+      "$RED" "$XMARK" "$repo" "$NC" "${why:-mnm login failed}"
     FAILED=$((FAILED+1)); continue
   fi
 
