@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0](https://github.com/devrelaicom/midnight-manual/compare/v0.7.0...v0.8.0) - 2026-06-30
+
+### Fixed
+
+- ingestion correctness (zero-chunk, oversize, 32K context groups) + token refresh + Docker deploy ([#128](https://github.com/devrelaicom/midnight-manual/pull/128))
+
 ## [0.7.0](https://github.com/devrelaicom/midnight-manual/compare/v0.6.1...v0.7.0) - 2026-06-30
 
 ### Fixed
