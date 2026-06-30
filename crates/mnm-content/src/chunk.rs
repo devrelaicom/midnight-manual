@@ -96,6 +96,15 @@ pub trait Chunker {
 /// per-language code chunker and is ignored for markdown/plaintext. A parser
 /// failure inside any chunker is recovered internally (line-window fallback),
 /// so this never errors and an empty/whitespace body yields no chunks.
+///
+/// This also upholds the "never panics" half of the contract: a chunker (or a
+/// dependency it calls) that `panic!`s — rather than returning `Err` — is
+/// caught by a [`std::panic::catch_unwind`] boundary and degraded to the
+/// line-window fallback (issue #121). This convenience wrapper logs a
+/// *file-less* warning on a caught panic; callers that hold the source path
+/// (the ingest planner and the CLI carried/re-embed paths) use
+/// [`chunk_document_guarded`] instead so the warning names the file — and so the
+/// planner can honour `--strict`.
 #[must_use]
 pub fn chunk_document(
     kind: DocumentKind,
@@ -103,6 +112,45 @@ pub fn chunk_document(
     body: &str,
     cfg: &ChunkerConfig,
 ) -> Vec<Chunk> {
+    let (chunks, panicked) = chunk_document_guarded(kind, ext, body, cfg);
+    if let Some(reason) = panicked {
+        tracing::warn!(reason = %reason, "chunker panicked; fell back to line-window");
+    }
+    chunks
+}
+
+/// [`chunk_document`] with the caught-panic reason surfaced to the caller.
+///
+/// Returns the chunks plus `Some(reason)` when a chunker panic was caught (and
+/// the body was re-chunked with the line-window fallback), or `None` on the
+/// normal path. The ingest planner uses this so it can emit a per-file warning
+/// by default or fail the run under `--strict`; everyone else can use the
+/// simpler [`chunk_document`].
+///
+/// The caught panic's default hook still prints the upstream "thread '…'
+/// panicked at …" line to stderr before we recover, which is intentionally left
+/// intact so the offending dependency/site can be pinned and reported upstream.
+#[must_use]
+pub fn chunk_document_guarded(
+    kind: DocumentKind,
+    ext: &str,
+    body: &str,
+    cfg: &ChunkerConfig,
+) -> (Vec<Chunk>, Option<String>) {
+    guard(body, cfg, || dispatch_chunk(kind, ext, body, cfg))
+}
+
+/// Kind → chunker dispatch, no panic boundary. Callers route through
+/// [`chunk_document`] / [`chunk_document_guarded`], never this directly, so the
+/// boundary can never be bypassed.
+fn dispatch_chunk(kind: DocumentKind, ext: &str, body: &str, cfg: &ChunkerConfig) -> Vec<Chunk> {
+    // Test-only seam: a deterministic way to exercise the panic boundary and the
+    // planner's degrade/strict branches without depending on a specific
+    // dependency bug (which would stop reproducing the day the dependency is
+    // fixed). Never compiled into shipped binaries.
+    #[cfg(test)]
+    assert!(body != PANIC_SENTINEL, "dispatch_chunk test sentinel panic");
+
     match kind {
         DocumentKind::Markdown => crate::markdown::MarkdownChunker
             .chunk(body, cfg)
@@ -117,6 +165,40 @@ pub fn chunk_document(
             .chunk(body, cfg)
             .unwrap_or_default(),
     }
+}
+
+/// Body that makes [`dispatch_chunk`] panic, for tests of the panic boundary.
+#[cfg(test)]
+pub(crate) const PANIC_SENTINEL: &str = "__mnm_chunk_panic_sentinel__";
+
+/// Run `chunk` inside a panic boundary. On a caught unwind, re-chunk `body` with
+/// the line-window fallback and return the panic's message so the caller can
+/// warn or fail. The line-window chunker is pure string slicing and does not
+/// itself panic, so the fallback is safe to run outside the boundary.
+fn guard(
+    body: &str,
+    cfg: &ChunkerConfig,
+    chunk: impl FnOnce() -> Vec<Chunk>,
+) -> (Vec<Chunk>, Option<String>) {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(chunk)) {
+        Ok(chunks) => (chunks, None),
+        Err(payload) => {
+            let reason = panic_reason(payload.as_ref());
+            let fallback = crate::code::line_window::LineWindowChunker
+                .chunk(body, cfg)
+                .unwrap_or_default();
+            (fallback, Some(reason))
+        }
+    }
+}
+
+/// Best-effort human-readable message from a caught panic payload.
+fn panic_reason(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|s| (*s).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "non-string panic payload".to_owned())
 }
 
 #[cfg(test)]
@@ -134,5 +216,64 @@ mod tests {
     fn coalesce_target_is_90_pct_of_max_tokens() {
         // 921 == 1024 * 9 / 10 (integer division).
         assert_eq!(coalesce_target(&ChunkerConfig::default()), 921);
+    }
+
+    #[test]
+    fn guarded_chunk_reports_no_panic_on_the_normal_path() {
+        let (chunks, panicked) = chunk_document_guarded(
+            DocumentKind::Markdown,
+            "md",
+            "# Title\n\nSome body text.",
+            &ChunkerConfig::default(),
+        );
+        assert!(panicked.is_none(), "no panic expected on well-formed input");
+        assert!(!chunks.is_empty());
+        assert!(chunks.iter().all(|c| !c.fallback_used));
+    }
+
+    #[test]
+    fn guard_catches_a_panic_and_degrades_to_line_window() {
+        let cfg = ChunkerConfig::default();
+        let body = "line one\nline two\nline three";
+        // A chunker that panics instead of returning Err (mirrors a dependency
+        // like pulldown-cmark blowing up on adversarial input — issue #121).
+        let (chunks, panicked) = guard(body, &cfg, || panic!("boom from a chunker"));
+
+        let reason = panicked.expect("the panic must be caught and reported, not propagated");
+        assert!(
+            reason.contains("boom from a chunker"),
+            "reason should carry the panic message: {reason}",
+        );
+        // Recovered: non-empty body still yields chunks, all flagged as fallback.
+        assert!(!chunks.is_empty());
+        assert!(chunks.iter().all(|c| c.fallback_used));
+    }
+
+    #[test]
+    fn guard_passes_through_chunks_when_no_panic() {
+        let cfg = ChunkerConfig::default();
+        let (chunks, panicked) = guard("anything", &cfg, Vec::new);
+        assert!(panicked.is_none());
+        assert!(chunks.is_empty());
+    }
+
+    #[test]
+    fn panic_reason_handles_string_and_non_string_payloads() {
+        let cfg = ChunkerConfig::default();
+        // A formatted `panic!` produces a `String` payload (not `&'static str`).
+        let (_, panicked) = guard("body", &cfg, || panic!("{}", String::from("owned message")));
+        assert_eq!(panicked.as_deref(), Some("owned message"));
+        // A non-string payload falls back to a fixed label.
+        let (_, panicked) = guard("body", &cfg, || std::panic::panic_any(42u8));
+        assert_eq!(panicked.as_deref(), Some("non-string panic payload"));
+    }
+
+    #[test]
+    fn chunk_document_recovers_from_the_panic_sentinel() {
+        // The public, path-less entry point also survives a chunker panic.
+        let chunks =
+            chunk_document(DocumentKind::Markdown, "md", PANIC_SENTINEL, &ChunkerConfig::default());
+        // PANIC_SENTINEL is non-empty, so the line-window fallback emits chunks.
+        assert!(chunks.iter().all(|c| c.fallback_used));
     }
 }

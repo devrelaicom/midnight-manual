@@ -189,6 +189,12 @@ pub struct Args {
     #[arg(long)]
     pub disable_default_ignore_list: bool,
 
+    /// Fail the whole run if a chunker panics while planning a new or changed
+    /// file, instead of degrading that file to the line-window fallback with a
+    /// warning (issue #121).
+    #[arg(long)]
+    pub strict: bool,
+
     /// Skip files larger than this many bytes.
     #[arg(long, default_value_t = mnm_content::chunk::DEFAULT_MAX_FILE_BYTES)]
     pub max_file_size: u64,
@@ -488,7 +494,8 @@ async fn run_inner(
         .unwrap_or_else(|| super::infer_revision(&source_root));
 
     let mut builder = PlanBuilder::new(&args.source_slug, SourceKind::DocsSite, &revision, prior)
-        .with_chunker_config(chunker_config);
+        .with_chunker_config(chunker_config)
+        .with_strict(args.strict);
     for doc in &walked_docs {
         let extracted = if doc.resolved.no_extract {
             Provenance::default()
@@ -1762,7 +1769,7 @@ fn build_carried_upload(d: &CarriedUploadInput) -> DocumentUpload {
 ///
 /// The metadata is computed exactly as [`mnm_content::ingest::PlanBuilder`]
 /// computes it for new documents — same hash, same chunker dispatch
-/// ([`mnm_content::chunk::chunk_document`]) for the token total, same provenance
+/// ([`mnm_content::chunk::chunk_document_guarded`]) for the token total, same provenance
 /// merge ([`mnm_content::ingest::merge_provenance`]), same `source_base_url`
 /// fallback — so a document's persisted metadata is identical whether it lands
 /// as new or carried. Carried docs are NOT re-embedded; the chunker runs only
@@ -1800,11 +1807,19 @@ fn build_carried_inputs(
                 build_extracted(source_root, &w.rel_path, &w.content, kind)
             };
             let ext = w.rel_path.extension().and_then(|e| e.to_str()).unwrap_or("");
-            let token_count: u32 =
-                mnm_content::chunk::chunk_document(kind, ext, &w.split.body, &chunker_config)
-                    .iter()
-                    .map(|ch| mnm_content::tokens::count(&ch.content))
-                    .sum();
+            let (chunks, panicked) =
+                mnm_content::chunk::chunk_document_guarded(kind, ext, &w.split.body, &chunker_config);
+            if let Some(reason) = panicked {
+                tracing::warn!(
+                    path = %w.rel_path.display(),
+                    reason = %reason,
+                    "chunker panicked recovering carried-doc token total; fell back to line-window",
+                );
+            }
+            let token_count: u32 = chunks
+                .iter()
+                .map(|ch| mnm_content::tokens::count(&ch.content))
+                .sum();
             let source_url = w.resolved.source_url.clone().or_else(|| {
                 source_base_url.map(|base| {
                     let base = base.trim_end_matches('/');
@@ -1872,8 +1887,19 @@ fn build_reembed_uploads(
                 .extension()
                 .and_then(|e| e.to_str())
                 .unwrap_or("");
-            let raw_chunks =
-                mnm_content::chunk::chunk_document(meta.kind, ext, &w.split.body, &chunker_config);
+            let (raw_chunks, panicked) = mnm_content::chunk::chunk_document_guarded(
+                meta.kind,
+                ext,
+                &w.split.body,
+                &chunker_config,
+            );
+            if let Some(reason) = panicked {
+                tracing::warn!(
+                    path = %w.rel_path.display(),
+                    reason = %reason,
+                    "chunker panicked re-chunking for re-embed; fell back to line-window",
+                );
+            }
             let total_chunks = i32::try_from(raw_chunks.len()).unwrap_or(i32::MAX);
             let chunks: Vec<ChunkUpload> = raw_chunks
                 .into_iter()

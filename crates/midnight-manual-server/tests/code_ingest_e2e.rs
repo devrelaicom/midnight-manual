@@ -320,6 +320,7 @@ async fn code_ingest_smoke_persists_symbol_paths_and_packages() {
         exclude: vec![],
         respect_gitignore: false,
         disable_default_ignore_list: false,
+        strict: false,
         max_file_size: 10 * 1024 * 1024,
         unsafe_no_global_limit: false,
         no_code_embeddings: false,

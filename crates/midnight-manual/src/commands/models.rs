@@ -490,6 +490,9 @@ async fn ingest_source(
         exclude: Vec::new(),
         respect_gitignore: false,
         disable_default_ignore_list: false,
+        // Migrate re-ingests already-validated content; degrade a chunker panic
+        // to the line-window fallback rather than aborting the whole migration.
+        strict: false,
         max_file_size: 10 * 1024 * 1024,
         // Migrate does NOT expose the global-cap opt-out.
         unsafe_no_global_limit: false,
