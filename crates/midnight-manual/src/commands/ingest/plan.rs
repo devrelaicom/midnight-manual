@@ -12,6 +12,7 @@ use time::OffsetDateTime;
 
 /// Args for `mnm ingest plan`.
 #[derive(Debug, ClapArgs)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct Args {
     /// Path to the `hierarchy.yaml` manifest.
     pub manifest: PathBuf,
@@ -45,6 +46,12 @@ pub struct Args {
     /// boilerplate .md) so those files are walked during discovery.
     #[arg(long)]
     pub disable_default_ignore_list: bool,
+
+    /// Fail the whole plan if a chunker panics while planning a new or changed
+    /// file, instead of degrading that file to the line-window fallback with a
+    /// warning (issue #121).
+    #[arg(long)]
+    pub strict: bool,
 
     /// Emit a single-line JSON object instead of the human-readable summary.
     #[arg(long)]
@@ -143,7 +150,8 @@ pub async fn run(args: Args, server: Option<&str>, _json: bool) -> Result<()> {
         .clone()
         .unwrap_or_else(|| super::infer_revision(&base));
 
-    let mut b = PlanBuilder::new(&args.source_slug, SourceKind::DocsSite, &revision, prior);
+    let mut b = PlanBuilder::new(&args.source_slug, SourceKind::DocsSite, &revision, prior)
+        .with_strict(args.strict);
     for doc in walked {
         let ctx = WalkContext {
             path: doc.rel_path.clone(),

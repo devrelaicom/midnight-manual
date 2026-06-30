@@ -167,6 +167,18 @@ pub enum IngestError {
     /// against it as a defence-in-depth measure.
     #[error("duplicate path fed to PlanBuilder: {0}")]
     DuplicatePath(PathBuf),
+
+    /// A chunker (or a dependency such as `pulldown-cmark`) panicked while
+    /// chunking this file. Only surfaced under strict mode; the default path
+    /// degrades the file to the line-window fallback with a warning and the run
+    /// continues (issue #121).
+    #[error("chunker panicked on {disp}: {reason}", disp = .path.display())]
+    ChunkPanic {
+        /// Repo-relative path of the file whose chunking panicked.
+        path: PathBuf,
+        /// The caught panic's message.
+        reason: String,
+    },
 }
 
 /// A bundle of all data for a single walked document, passed to
@@ -201,6 +213,9 @@ pub struct PlanBuilder {
     source_kind: SourceKind,
     target_revision: String,
     chunker_config: ChunkerConfig,
+    /// When `true`, a caught chunker panic fails the run instead of degrading
+    /// the offending file to the line-window fallback (issue #121).
+    strict: bool,
     prior_by_path: HashMap<PathBuf, PriorDocument>,
     seen_paths: HashSet<PathBuf>,
     new_documents: Vec<PlannedDocument>,
@@ -226,6 +241,7 @@ impl PlanBuilder {
             source_kind,
             target_revision: target_revision.into(),
             chunker_config: ChunkerConfig::default(),
+            strict: false,
             prior_by_path,
             seen_paths: HashSet::new(),
             new_documents: Vec::new(),
@@ -237,6 +253,16 @@ impl PlanBuilder {
     #[must_use]
     pub const fn with_chunker_config(mut self, cfg: ChunkerConfig) -> Self {
         self.chunker_config = cfg;
+        self
+    }
+
+    /// Enable strict mode (defaults to off). In strict mode a chunker panic on
+    /// any file fails the whole run via [`IngestError::ChunkPanic`] instead of
+    /// degrading that one file to the line-window fallback with a warning.
+    /// Mirrors the `--strict` flag on `mnm ingest plan` / `mnm ingest run`.
+    #[must_use]
+    pub const fn with_strict(mut self, strict: bool) -> Self {
+        self.strict = strict;
         self
     }
 
@@ -273,12 +299,29 @@ impl PlanBuilder {
             .extension()
             .and_then(|e| e.to_str())
             .unwrap_or("");
-        let chunks: Vec<crate::chunk::Chunk> = crate::chunk::chunk_document(
+        let (chunks, panicked) = crate::chunk::chunk_document_guarded(
             walked.kind,
             ext,
             &walked.split.body,
             &self.chunker_config,
         );
+        if let Some(reason) = panicked {
+            // A chunker (or a dependency it calls) panicked rather than returning
+            // Err. The boundary already recovered the body via the line-window
+            // fallback (issue #121). Under strict mode that is a run failure;
+            // by default it degrades this one file and the run continues.
+            if self.strict {
+                return Err(IngestError::ChunkPanic {
+                    path: walked.path.clone(),
+                    reason,
+                });
+            }
+            tracing::warn!(
+                path = %walked.path.display(),
+                reason = %reason,
+                "chunker panicked; file degraded to line-window fallback (run continues)",
+            );
+        }
         let total = u32::try_from(chunks.len()).unwrap_or(u32::MAX);
         let planned_chunks: Vec<PlannedChunk> = chunks
             .into_iter()
@@ -659,6 +702,60 @@ mod tests {
         };
         let err = b.add_walked_document(&ctx).unwrap_err();
         assert!(matches!(err, IngestError::DuplicatePath(_)));
+    }
+
+    /// Feed one document whose body makes the chunker panic, returning the
+    /// builder's result so the caller can assert degrade-vs-fail behavior.
+    fn feed_panicking(builder: &mut PlanBuilder, path: &str) -> Result<(), IngestError> {
+        let body = crate::chunk::PANIC_SENTINEL;
+        let split = split_frontmatter(body);
+        let leaf = crate::manifest::resolve::ResolvedLeaf {
+            rel_path: PathBuf::from(path),
+            kind: DocumentKind::Markdown,
+            name: None,
+            published_url: None,
+            source_url: None,
+            provenance_override: Provenance::default(),
+            no_extract: false,
+        };
+        let ctx = WalkContext {
+            path: PathBuf::from(path),
+            kind: DocumentKind::Markdown,
+            content: body,
+            split: &split,
+            resolved: &leaf,
+            extracted: Provenance::default(),
+            source_modified_at: None,
+            package: None,
+        };
+        builder.add_walked_document(&ctx)
+    }
+
+    #[test]
+    fn chunker_panic_degrades_to_line_window_by_default() {
+        // Regression for issue #121: a chunker panic on one file must not abort
+        // the run. The file is planned via the line-window fallback instead.
+        let mut b = empty_builder();
+        let r = feed_panicking(&mut b, "boom.md");
+        assert!(r.is_ok(), "default mode must absorb a chunker panic, not abort");
+
+        let plan = b.finalize();
+        assert_eq!(plan.new_documents.len(), 1);
+        let doc = &plan.new_documents[0];
+        assert_eq!(doc.path, PathBuf::from("boom.md"));
+        // The sentinel body is non-empty, so the fallback emitted chunks.
+        assert!(!doc.chunks.is_empty());
+        assert_eq!(plan.stats.documents_added, 1);
+    }
+
+    #[test]
+    fn chunker_panic_is_a_run_failure_under_strict() {
+        // Under --strict the same panic is a hard, file-attributed failure.
+        let mut b = empty_builder().with_strict(true);
+        let err = feed_panicking(&mut b, "boom.md").unwrap_err();
+        assert!(matches!(err, IngestError::ChunkPanic { .. }));
+        let msg = err.to_string();
+        assert!(msg.contains("boom.md"), "strict error must name the offending file: {msg}",);
     }
 
     #[test]
