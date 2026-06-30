@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0](https://github.com/devrelaicom/midnight-manual/compare/v0.6.1...v0.7.0) - 2026-06-30
+
+### Fixed
+
+- *(ingest)* wrap chunking in a panic boundary so one bad file can't abort the run ([#125](https://github.com/devrelaicom/midnight-manual/pull/125))
+
 ## [0.6.0](https://github.com/devrelaicom/midnight-manual/compare/v0.5.0...v0.6.0) - 2026-06-29
 
 ### Other
