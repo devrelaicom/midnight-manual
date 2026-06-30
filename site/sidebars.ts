@@ -10,7 +10,7 @@ const sidebars: SidebarsConfig = {
     { type: 'category', label: 'Concepts', collapsed: false,
       items: ['concepts/confidence','concepts/hybrid-retrieval','concepts/multi-query-hyde','concepts/smart-chunker','concepts/models'] },
     { type: 'category', label: 'Self-hosting & operations', collapsed: true,
-      items: ['self-hosting/when-to-self-host','self-hosting/manifests','self-hosting/ingestion-pipeline','self-hosting/running-an-ingest','self-hosting/users-access','self-hosting/versions-rate-limits','self-hosting/cloud-server','self-hosting/operator-reference'] },
+      items: ['self-hosting/when-to-self-host','self-hosting/building-from-source','self-hosting/manifests','self-hosting/ingestion-pipeline','self-hosting/running-an-ingest','self-hosting/users-access','self-hosting/versions-rate-limits','self-hosting/cloud-server','self-hosting/operator-reference'] },
     { type: 'category', label: 'Reference', collapsed: false,
       items: ['reference/mcp-tools','reference/cli','reference/configuration','reference/embeddings'] },
     'privacy',
