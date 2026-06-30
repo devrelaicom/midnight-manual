@@ -2,7 +2,8 @@
 #
 # ingest-midnight.sh — manually ingest the default Midnight corpus.
 #
-# Builds `mnm` from source (release), then loops over the source list in
+# Builds `mnm` from source (release, with all tree-sitter grammars), then loops
+# over the source list in
 # manifests/midnight/sources.tsv: shallow-clones each repo into /tmp, registers
 # the source, and runs `mnm ingest run` against a fresh checkout. Per-manifest
 # failures are reported and skipped — the loop never aborts on them.
@@ -258,8 +259,13 @@ if [ -n "$MNM_BIN" ]; then
   [ -x "$MNM" ] || { echo "error: --mnm-binary '$MNM' is not an executable" >&2; exit 1; }
   built_line="using: $MNM"
 else
-  printf '%sbuilding mnm (cargo build --release -p midnight-manual --bin mnm)…%s\n' "$DIM" "$NC"
-  if ! cargo build --release -p midnight-manual --bin mnm; then
+  # Build with ALL tree-sitter grammars (not just the default core set) so code
+  # chunking covers every language present across the corpus repos. The `mnm`
+  # binary links only `mnm-content`'s core grammars by default; `all-grammars`
+  # adds markup (toml/yaml/html/xml) + extended (go/python/solidity) + the rest
+  # (swift/ruby/kotlin/c#/haskell/java). compact + core grammars stay enabled.
+  printf '%sbuilding mnm (cargo build --release -p midnight-manual --bin mnm --features mnm-content/all-grammars)…%s\n' "$DIM" "$NC"
+  if ! cargo build --release -p midnight-manual --bin mnm --features mnm-content/all-grammars; then
     echo "error: cargo build failed" >&2; exit 1
   fi
   MNM="./target/release/mnm"
