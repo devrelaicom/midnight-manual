@@ -1,0 +1,15 @@
+manifest_version: 1
+root:
+  name: nstanford5-example-raffle
+  path: .
+  exclude:
+    # Backup copy of an older raffle variant (duplicate source).
+    - "backup/**"
+  provenance:
+    attribution: community
+    verified: false
+    tags: [trust:low]
+    verification_notes: >-
+      Community-contributed repository; unverified and unaudited by the Midnight
+      Foundation. Indexed for ecosystem breadth; treat code and docs as
+      illustrative, not authoritative, and audit before any production use.

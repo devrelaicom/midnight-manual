@@ -1,0 +1,11 @@
+manifest_version: 1
+root:
+  name: webisoftsoftware-split-prove
+  path: .
+  exclude:
+    # Vendored midnight-ledger submodule — duplicates the foundation ledger repo.
+    - "deps/**"
+  provenance:
+    attribution: partner
+    verified: false
+    tags: [trust:medium]

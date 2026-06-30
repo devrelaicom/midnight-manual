@@ -1,0 +1,11 @@
+manifest_version: 1
+root:
+  name: bricktowers-midnight-rwa
+  path: .
+  exclude:
+    # Lottie animation keyframe data (generated blob, not source/docs).
+    - "rwa-ui/src/brick_towers_lottie.json"
+  provenance:
+    attribution: partner
+    verified: false
+    tags: [trust:medium]

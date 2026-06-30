@@ -6,6 +6,11 @@ root:
     verified: false
     tags: [trust:medium]
   children:
+    # Content only: book/src (mdBook lessons) + exercises/ and examples/
+    # (runnable Compact + prose). Drops book/static, book/theme, scripts/, and
+    # netlify/site config — mdBook chrome, not signal.
+    - name: intro
+      file: README.md
     - name: book
       path: book/src/
       provenance:

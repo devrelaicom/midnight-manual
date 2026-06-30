@@ -1,0 +1,14 @@
+manifest_version: 1
+root:
+  name: rambo-lc-mn-voting-dapp
+  path: .
+  # Repo body lives in hidden .claude/ and .agents/ skill-pack dirs (auto-skipped
+  # by the walker). Visible signal is just README.md + contracts/hello-world.compact.
+  provenance:
+    attribution: community
+    verified: false
+    tags: [trust:low]
+    verification_notes: >-
+      Community-contributed repository; unverified and unaudited by the Midnight
+      Foundation. Indexed for ecosystem breadth; treat code and docs as
+      illustrative, not authoritative, and audit before any production use.

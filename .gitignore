@@ -67,3 +67,6 @@ site/img/draft/
 
 # stray local compiled test artifacts
 /test_constfn_call*
+
+# Node dependencies (regenerable; never commit)
+node_modules/

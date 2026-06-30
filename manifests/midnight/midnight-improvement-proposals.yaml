@@ -2,22 +2,9 @@ manifest_version: 1
 root:
   name: midnight-improvement-proposals
   path: .
-  exclude:
-    - "**/node_modules/**"
-    - "**/dist/**"
-    - "**/build/**"
-    - "**/target/**"
-    - "**/managed/**"
-    - "**/.git/**"
-    - "**/.github/**"
-    - "**/.next/**"
-    - "**/out/**"
-    - "**/coverage/**"
-    - "**/__snapshots__/**"
-    - "**/.turbo/**"
-    - "**/CODE_OF_CONDUCT.md"
-    - "**/CONTRIBUTING.md"
-    - "**/SECURITY.md"
+  # Pure-markdown proposals repo (mips/, mps/, deployments/) with no site app
+  # chrome — admit the prose only; CI/renovate config is not signal.
+  include: ["**/*.md", "**/*.mdx"]
   provenance:
     attribution: foundation
     verified: true

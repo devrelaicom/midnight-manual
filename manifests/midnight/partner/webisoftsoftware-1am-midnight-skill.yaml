@@ -1,0 +1,11 @@
+manifest_version: 1
+root:
+  name: webisoftsoftware-1am-midnight-skill
+  path: .
+  exclude:
+    # Nested copy that duplicates the root SKILL.md + references/ byte-for-byte.
+    - "1am-midnight-skill/**"
+  provenance:
+    attribution: partner
+    verified: false
+    tags: [trust:medium]

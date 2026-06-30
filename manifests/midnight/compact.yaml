@@ -1,12 +1,22 @@
 manifest_version: 1
 root:
   name: compact
+  path: .
+  exclude:
+    # Compiler/CLI test corpus and golden-output fixtures (not source/docs).
+    - "tools/compact/output/**"
+    - "test-center/**"
+    - "test-src-maps/**"
+    - "debug-test/**"
+    - "srcMaps/**"
+    - "_sources/**"
+    # Built spec HTML + low-signal meeting notes.
+    - "specification/html/**"
+    - "meetings/**"
+    # Editor plugin packaging (not language source/docs).
+    - "editor-support/**"
   provenance:
     attribution: foundation
     verified: true
     verified_by: midnight-foundation
     tags: [trust:high]
-  children:
-    - name: prerelease
-      path: prerelease/
-      include: ["**/*.md"]

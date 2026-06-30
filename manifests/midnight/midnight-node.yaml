@@ -2,26 +2,15 @@ manifest_version: 1
 root:
   name: midnight-node
   path: .
-  include: ["*.md"]
   exclude:
-    - "**/CODE_OF_CONDUCT.md"
-    - "**/CONTRIBUTING.md"
-    - "**/SECURITY.md"
-    - "docs/**"
-    - "util/toolkit/**"
-    - "util/toolkit-js/**"
-    - "local-environment/**"
+    # Release-note fragments (the consolidated CHANGELOG.md is kept).
+    - "changes/**"
+    # Generated runtime metadata blobs / data dumps.
+    - "metadata/**"
+    # Ingested as its own source (midnight-reserve-contracts) — avoid duplication.
+    - "midnight-reserve-contracts/**"
   provenance:
     attribution: foundation
     verified: true
     verified_by: midnight-foundation
     tags: [trust:high]
-  children:
-    - name: docs
-      path: docs/
-    - name: toolkit
-      path: util/toolkit/
-    - name: toolkit-js
-      path: util/toolkit-js/
-    - name: local-environment
-      path: local-environment/

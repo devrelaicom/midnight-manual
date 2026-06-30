@@ -1,12 +1,18 @@
 manifest_version: 1
 root:
   name: night-token-distribution
+  # NIGHT/Glacier Drop distribution code: Haskell tooling under mgdoc/ (.hs is
+  # recognized) plus Aiken protocol-params validators (.ak is not recognized, so
+  # an include allowlist is required). The allowlist also captures the markdown
+  # and the aiken.toml/compile.sh. Generic *.json is omitted — the only json is
+  # the generated Aiken plutus.json blueprint. Audit PDFs auto-drop.
   path: .
-  include: ["**/*.md"]
-  exclude:
-    - "**/CODE_OF_CONDUCT.md"
-    - "**/CONTRIBUTING.md"
-    - "**/SECURITY.md"
+  include:
+    - "**/*.hs"
+    - "**/*.ak"
+    - "**/*.md"
+    - "**/*.toml"
+    - "**/*.sh"
   provenance:
     attribution: foundation
     verified: true

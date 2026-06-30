@@ -1,0 +1,8 @@
+manifest_version: 1
+root:
+  name: midnames-vc-examples
+  path: .
+  provenance:
+    attribution: partner
+    verified: false
+    tags: [trust:medium]
