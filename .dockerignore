@@ -32,6 +32,8 @@ target/
 .claude/
 .midnight-expert/
 .sdd/
+.superpowers/
+.agents/
 
 # Top-level operator-only docs.
 CONSTITUTION.md
@@ -48,6 +50,15 @@ CODE_OF_CONDUCT.md
 SECURITY.md
 LICENSE
 NOTICE
+
+# Docusaurus docs site — built and deployed separately (Netlify); the server
+# build (`cargo build --release --bin midnight-manual-server`) never consumes
+# it. site/node_modules alone is ~440 MB — the largest leak into the context
+# after target/.
+site/
+
+# Node dependencies anywhere — never consumed by the Rust server build.
+**/node_modules/
 
 # Test fixtures and benches — not compiled into the release binary.
 corpus/
