@@ -14,6 +14,7 @@ use uuid::Uuid;
 use crate::chunk::ChunkerConfig;
 use crate::content_hash::{chunk_hash, document_hash};
 use crate::frontmatter::FrontmatterSplit;
+use crate::ingest::walker::{SkipReason, SkippedFile};
 
 /// One pre-existing document carried over from the prior active source version.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -155,6 +156,11 @@ pub struct IngestPlan {
     pub carried_documents: Vec<CarriedDocument>,
     /// Documents present in the prior active version but missing from this walk.
     pub deleted_documents: Vec<DeletedDocument>,
+    /// New documents dropped because they chunked to nothing (empty /
+    /// whitespace-only / frontmatter-only). They are NOT part of the version —
+    /// the server refuses unsearchable documents — and are surfaced here (and in
+    /// the CLI report's skipped files) rather than silently lost.
+    pub skipped_empty: Vec<SkippedFile>,
     /// Aggregate counters.
     pub stats: IngestStats,
 }
@@ -220,6 +226,7 @@ pub struct PlanBuilder {
     seen_paths: HashSet<PathBuf>,
     new_documents: Vec<PlannedDocument>,
     carried_documents: Vec<CarriedDocument>,
+    skipped_empty: Vec<SkippedFile>,
 }
 
 impl PlanBuilder {
@@ -246,6 +253,7 @@ impl PlanBuilder {
             seen_paths: HashSet::new(),
             new_documents: Vec::new(),
             carried_documents: Vec::new(),
+            skipped_empty: Vec::new(),
         }
     }
 
@@ -322,6 +330,22 @@ impl PlanBuilder {
                 "chunker panicked; file degraded to line-window fallback (run continues)",
             );
         }
+
+        // A new document that chunks to nothing (empty / whitespace-only /
+        // frontmatter-only body) has no searchable content. The server refuses
+        // to persist chunk-less documents, so counting it as a planned document
+        // would inflate the finalize `expected_document_total` and abort the
+        // whole run. Drop it here and record the skip so it is reported, not
+        // silently lost. (Carried documents are handled above and never reach
+        // this point, so their legitimately-empty chunk lists are unaffected.)
+        if chunks.is_empty() {
+            self.skipped_empty.push(SkippedFile {
+                rel_path: walked.path.clone(),
+                reason: SkipReason::EmptyNoChunks,
+            });
+            return Ok(());
+        }
+
         let total = u32::try_from(chunks.len()).unwrap_or(u32::MAX);
         let planned_chunks: Vec<PlannedChunk> = chunks
             .into_iter()
@@ -460,6 +484,7 @@ impl PlanBuilder {
             new_documents: self.new_documents,
             carried_documents: self.carried_documents,
             deleted_documents,
+            skipped_empty: self.skipped_empty,
             stats,
         }
     }
@@ -539,6 +564,81 @@ mod tests {
         assert_eq!(plan.new_documents[0].chunks[0].chunk_index, 0);
         assert_eq!(plan.stats.documents_added, 1);
         assert_eq!(plan.stats.chunks_emitted, 1);
+    }
+
+    #[test]
+    fn whitespace_only_document_is_skipped_not_planned() {
+        // A body that chunks to nothing must NOT become a planned document: the
+        // server refuses chunk-less docs, so counting it would inflate the
+        // finalize `expected_document_total` and abort the run. It is recorded
+        // as a skip instead.
+        let mut b = empty_builder();
+        feed(&mut b, "blank.md", "   \n\n\t  ");
+        let plan = b.finalize();
+
+        assert!(plan.new_documents.is_empty(), "empty doc must not be planned");
+        assert_eq!(plan.stats.documents_added, 0);
+        assert_eq!(plan.stats.chunks_emitted, 0);
+        assert_eq!(plan.skipped_empty.len(), 1);
+        assert_eq!(plan.skipped_empty[0].rel_path, PathBuf::from("blank.md"));
+        assert_eq!(plan.skipped_empty[0].reason, SkipReason::EmptyNoChunks);
+    }
+
+    #[test]
+    fn frontmatter_only_document_is_skipped() {
+        // The real-world trigger (e.g. midnames-docs preprod/index.mdx): valid
+        // frontmatter, no body → zero chunks → skipped, not a new document.
+        let mut b = empty_builder();
+        feed(&mut b, "fm-only.md", "---\ntitle: Reference\nhidden: true\n---\n");
+        let plan = b.finalize();
+
+        assert!(plan.new_documents.is_empty());
+        assert_eq!(plan.skipped_empty.len(), 1);
+        assert_eq!(plan.skipped_empty[0].reason, SkipReason::EmptyNoChunks);
+    }
+
+    #[test]
+    fn one_empty_among_several_only_drops_the_empty() {
+        // Mixed batch: two real docs + one empty. Only the empty is skipped; the
+        // others plan normally and the counts line up (this is exactly what
+        // makes `expected_document_total` correct again).
+        let mut b = empty_builder();
+        feed(&mut b, "a.md", "# A\n\nreal body a");
+        feed(&mut b, "empty.md", "\n");
+        feed(&mut b, "b.md", "# B\n\nreal body b");
+        let plan = b.finalize();
+
+        assert_eq!(plan.stats.documents_added, 2);
+        let paths: Vec<_> = plan.new_documents.iter().map(|d| &d.path).collect();
+        assert_eq!(paths, vec![&PathBuf::from("a.md"), &PathBuf::from("b.md")]);
+        assert_eq!(plan.skipped_empty.len(), 1);
+        assert_eq!(plan.skipped_empty[0].rel_path, PathBuf::from("empty.md"));
+    }
+
+    #[test]
+    fn prior_document_emptied_is_skipped_not_deleted() {
+        // A doc that had content before but is now empty: its hash differs from
+        // the prior (so it is NOT carried), it chunks to nothing (so it is NOT
+        // new), and — because the walk DID see its path — it must NOT be
+        // classified as a deletion either. It lands only in `skipped_empty`.
+        // Pins the `seen_paths`-vs-deleted interaction in `finalize()`.
+        let prior_id = Uuid::new_v4();
+        let prior_state = PriorState {
+            documents: vec![prior("page.md", "# Was real\n\nhad a body", prior_id)],
+        };
+        let mut b = PlanBuilder::new("docs", SourceKind::DocsSite, "rev-2", prior_state);
+        feed(&mut b, "page.md", "   \n");
+        let plan = b.finalize();
+
+        assert!(plan.new_documents.is_empty());
+        assert!(plan.carried_documents.is_empty());
+        assert!(
+            plan.deleted_documents.is_empty(),
+            "a walked (seen) path must not be classified as deleted",
+        );
+        assert_eq!(plan.skipped_empty.len(), 1);
+        assert_eq!(plan.skipped_empty[0].rel_path, PathBuf::from("page.md"));
+        assert_eq!(plan.skipped_empty[0].reason, SkipReason::EmptyNoChunks);
     }
 
     #[test]

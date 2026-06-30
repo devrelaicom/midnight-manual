@@ -16,6 +16,7 @@
 
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use time::OffsetDateTime;
 
@@ -64,8 +65,12 @@ pub enum WalkError {
     },
 }
 
-/// Why the walker skipped a referenced file (EC-52). Skips never abort a walk.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Why a referenced file was skipped (EC-52).
+///
+/// Produced by the walker (non-regular / oversize / binary / non-UTF-8) and by
+/// the planner ([`EmptyNoChunks`](SkipReason::EmptyNoChunks), for a new document
+/// whose body chunks to nothing). Skips never abort a walk or a plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SkipReason {
     /// The path resolved to something other than a regular file (e.g. a
     /// directory mistakenly listed under a `file:` node, or a special file).
@@ -81,6 +86,12 @@ pub enum SkipReason {
     Binary,
     /// The bytes could not be decoded as UTF-8.
     NotUtf8,
+    /// The file is empty / whitespace-only / frontmatter-only — its body
+    /// produced zero chunks, so there is nothing searchable to persist. The
+    /// server refuses such documents (an unsearchable document), so the planner
+    /// drops them rather than uploading a doc that can never persist (issue:
+    /// finalize completeness mismatch).
+    EmptyNoChunks,
 }
 
 impl std::fmt::Display for SkipReason {
@@ -92,12 +103,13 @@ impl std::fmt::Display for SkipReason {
             }
             Self::Binary => write!(f, "looks binary (NUL byte in first {BINARY_SNIFF_LEN} bytes)"),
             Self::NotUtf8 => write!(f, "not valid UTF-8"),
+            Self::EmptyNoChunks => write!(f, "empty / no searchable content (produced 0 chunks)"),
         }
     }
 }
 
-/// One file the walker chose to skip, with the reason.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One file that was skipped, with the reason.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SkippedFile {
     /// Repo-relative path of the skipped file.
     pub rel_path: PathBuf,

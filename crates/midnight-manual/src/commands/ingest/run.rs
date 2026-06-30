@@ -2170,8 +2170,13 @@ pub(super) fn assemble_report(
         }))
         .collect();
 
+    // Skipped files come from two stages: the walker (non-regular / oversize /
+    // binary / non-UTF-8) and the planner (`skipped_empty`: new docs that
+    // chunked to nothing). Both use the shared `SkippedFile` shape, so they
+    // surface together in the report.
     let skipped_files: Vec<ReportSkip> = walk_skipped
         .iter()
+        .chain(plan.skipped_empty.iter())
         .map(|s| ReportSkip {
             path: s.rel_path.display().to_string(),
             reason: s.reason.to_string(),
