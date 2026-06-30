@@ -1,6 +1,8 @@
 # Supply-chain hardening (copied from rover).
 minimumReleaseAge: 4320 # 3 days, in minutes — no newer versions install
-minimumReleaseAgeStrict: false # fall back to newest ≥3-day-old version instead of hard-failing
+# minimumReleaseAgeStrict omitted → defaults to true (because minimumReleaseAge is set
+# explicitly): a dep that can only resolve to a <3-day-old version fails instead of
+# silently installing it. Use minimumReleaseAgeExclude to allow-list specific packages.
 strictDepBuilds: true # error on any unreviewed dependency build script
 dangerouslyAllowAllBuilds: false # never auto-run all dependency build scripts
 allowBuilds:

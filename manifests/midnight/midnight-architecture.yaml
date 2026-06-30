@@ -2,11 +2,11 @@ manifest_version: 1
 root:
   name: midnight-architecture
   path: .
-  include: ["**/*.md"]
   exclude:
-    - "**/CODE_OF_CONDUCT.md"
-    - "**/CONTRIBUTING.md"
-    - "**/SECURITY.md"
+    # Large golden test-vector data dumps (addresses.json ~121KB,
+    # keyDerivation.json ~24KB). The reference impl source under
+    # reference/src/ (incl. test-vectors.ts) is kept.
+    - "components/WalletEngine/test-vectors/**"
   provenance:
     attribution: foundation
     verified: true

@@ -1,0 +1,18 @@
+manifest_version: 1
+root:
+  name: kali-decoder-midnight-skills
+  path: .
+  # Skill-docs repo — signal is the markdown skill content across topic dirs.
+  # Allowlist drops the generated .html site pages (index/howto/skill/analytics),
+  # the netlify/api/analytics JS site infra, supabase SQL, and logo assets.
+  include:
+    - "**/*.md"
+    - "**/*.mdx"
+  provenance:
+    attribution: community
+    verified: false
+    tags: [trust:low]
+    verification_notes: >-
+      Community-contributed repository; unverified and unaudited by the Midnight
+      Foundation. Indexed for ecosystem breadth; treat code and docs as
+      illustrative, not authoritative, and audit before any production use.

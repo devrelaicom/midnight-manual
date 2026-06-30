@@ -3,21 +3,9 @@ root:
   name: midnight-js
   path: .
   exclude:
-    - "**/node_modules/**"
-    - "**/dist/**"
-    - "**/build/**"
-    - "**/target/**"
-    - "**/managed/**"
-    - "**/.git/**"
-    - "**/.github/**"
-    - "**/.next/**"
-    - "**/out/**"
-    - "**/coverage/**"
-    - "**/__snapshots__/**"
-    - "**/.turbo/**"
-    - "**/CODE_OF_CONDUCT.md"
-    - "**/CONTRIBUTING.md"
-    - "**/SECURITY.md"
+    # Generated TypeDoc API reference — the canonical copy lives in
+    # midnight-docs/api-reference/. Handwritten docs/releases/ is kept.
+    - "docs/api/**"
   provenance:
     attribution: foundation
     verified: true

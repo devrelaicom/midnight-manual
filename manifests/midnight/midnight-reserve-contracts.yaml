@@ -1,12 +1,29 @@
 manifest_version: 1
 root:
   name: midnight-reserve-contracts
+  # Aiken/Cardano contracts: the contract source is *.ak (an unrecognized
+  # extension), so an include allowlist is required to admit it. The allowlist
+  # also captures the TS CLI/SDK/tests, the markdown specs, scripts, and config.
+  # Generic *.json is deliberately NOT included — it is overwhelmingly generated
+  # Aiken blueprints + deployment dumps; only package.json/tsconfig is admitted.
   path: .
-  include: ["**/*.md"]
+  include:
+    - "**/*.ak"
+    - "**/*.ts"
+    - "**/*.md"
+    - "**/*.mjs"
+    - "**/*.js"
+    - "**/*.toml"
+    - "**/package.json"
+    - "**/tsconfig*.json"
   exclude:
-    - "**/CODE_OF_CONDUCT.md"
-    - "**/CONTRIBUTING.md"
-    - "**/SECURITY.md"
+    # Generated TS contract blueprints (// @ts-nocheck, emitted from plutus.json).
+    - "contract_blueprint*.ts"
+    # Per-network deployment records, compiled deployed scripts, and release
+    # reports — generated deployment data/artifacts, not source or docs.
+    - "deployments/**"
+    - "deployed-scripts/**"
+    - "release/**"
   provenance:
     attribution: foundation
     verified: true

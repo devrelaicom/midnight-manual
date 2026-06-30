@@ -1,0 +1,16 @@
+manifest_version: 1
+root:
+  name: paranormal39-midnightunityconnector
+  path: .
+  exclude:
+    # Unity WebGL build-template chrome (boilerplate loader JS + demo HTML),
+    # not connector source.
+    - "Assets/WebGLTemplates/**"
+  provenance:
+    attribution: community
+    verified: false
+    tags: [trust:low]
+    verification_notes: >-
+      Community-contributed repository; unverified and unaudited by the Midnight
+      Foundation. Indexed for ecosystem breadth; treat code and docs as
+      illustrative, not authoritative, and audit before any production use.

@@ -2,7 +2,7 @@ manifest_version: 1
 root:
   name: midnight-skill
   path: .
-  include: ["SKILL.md"]
+  include: ["SKILL.md", "README.md"]
   provenance:
     attribution: community
     verified: false

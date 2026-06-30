@@ -1,0 +1,12 @@
+manifest_version: 1
+root:
+  name: spycrypto-midnight-juror-zer0
+  path: .
+  provenance:
+    attribution: community
+    verified: false
+    tags: [trust:low]
+    verification_notes: >-
+      Community-contributed repository; unverified and unaudited by the Midnight
+      Foundation. Indexed for ecosystem breadth; treat code and docs as
+      illustrative, not authoritative, and audit before any production use.

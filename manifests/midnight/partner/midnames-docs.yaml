@@ -1,0 +1,13 @@
+manifest_version: 1
+root:
+  name: midnames-docs
+  provenance:
+    attribution: partner
+    verified: false
+    tags: [trust:medium]
+  children:
+    # Astro docs site: content lives in src/content/docs/ (index + preprod/
+    # guides/ reference/). Excludes the Astro app chrome (src/components/,
+    # src/pages/, src/styles/, src/assets/, *.astro, site config).
+    - name: docs
+      path: src/content/docs/

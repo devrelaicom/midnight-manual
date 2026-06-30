@@ -1,0 +1,15 @@
+manifest_version: 1
+root:
+  name: paranormal39-laylaa
+  path: .
+  exclude:
+    # Runtime user-upload blobs (NFT metadata dumps), not source.
+    - "packages/xaman-backend/uploads/**"
+  provenance:
+    attribution: community
+    verified: false
+    tags: [trust:low]
+    verification_notes: >-
+      Community-contributed repository; unverified and unaudited by the Midnight
+      Foundation. Indexed for ecosystem breadth; treat code and docs as
+      illustrative, not authoritative, and audit before any production use.

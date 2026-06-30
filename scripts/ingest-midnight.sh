@@ -325,6 +325,14 @@ for row in "${rows[@]}"; do
   kind="$(printf '%s' "$row" | cut -f4)"
   url="https://github.com/$repo"
   man="$MANIFESTS_DIR/$slug.yaml"
+  # Manifests may live in a categorised subdirectory (e.g. community/); when the
+  # slug isn't a top-level manifest, fall back to the first <slug>.yaml one level
+  # down. If it's nowhere, leave $man as the top-level path so the not-found
+  # branch below reports a sensible location.
+  if [ ! -f "$man" ]; then
+    found="$(find "$MANIFESTS_DIR" -mindepth 2 -maxdepth 2 -name "$slug.yaml" -print -quit 2>/dev/null)"
+    man="${found:-$man}"
+  fi
   clone="$CLONE_BASE/$slug"
 
   if [ ! -f "$man" ]; then

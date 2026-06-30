@@ -255,9 +255,9 @@ dependencies = [
 
 [[package]]
 name = "anyhow"
-version = "1.0.102"
+version = "1.0.103"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
+checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 
 [[package]]
 name = "arc-swap"
@@ -2710,7 +2710,7 @@ checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
 name = "midnight-manual"
-version = "0.5.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2743,7 +2743,7 @@ dependencies = [
 
 [[package]]
 name = "midnight-manual-server"
-version = "0.5.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -2814,7 +2814,7 @@ dependencies = [
 
 [[package]]
 name = "mnm-auth"
-version = "0.5.0"
+version = "0.6.1"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek",
@@ -2837,7 +2837,7 @@ dependencies = [
 
 [[package]]
 name = "mnm-content"
-version = "0.5.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "cc",
@@ -2885,12 +2885,11 @@ dependencies = [
  "tree-sitter-yaml",
  "url",
  "uuid",
- "walkdir",
 ]
 
 [[package]]
 name = "mnm-core"
-version = "0.5.0"
+version = "0.6.1"
 dependencies = [
  "base64 0.22.1",
  "insta",
@@ -2910,7 +2909,7 @@ dependencies = [
 
 [[package]]
 name = "mnm-embedding"
-version = "0.5.0"
+version = "0.6.1"
 dependencies = [
  "mnm-core",
  "once_cell",
@@ -2927,7 +2926,7 @@ dependencies = [
 
 [[package]]
 name = "mnm-mcp"
-version = "0.5.0"
+version = "0.6.1"
 dependencies = [
  "jsonschema",
  "mnm-core",
@@ -2950,7 +2949,7 @@ dependencies = [
 
 [[package]]
 name = "mnm-retrieval"
-version = "0.5.0"
+version = "0.6.1"
 dependencies = [
  "mnm-core",
  "mnm-store",
@@ -2965,7 +2964,7 @@ dependencies = [
 
 [[package]]
 name = "mnm-sentry"
-version = "0.5.0"
+version = "0.6.1"
 dependencies = [
  "mnm-core",
  "sentry",
@@ -2977,7 +2976,7 @@ dependencies = [
 
 [[package]]
 name = "mnm-skills"
-version = "0.5.0"
+version = "0.6.1"
 dependencies = [
  "mnm-core",
  "regex",
@@ -2991,7 +2990,7 @@ dependencies = [
 
 [[package]]
 name = "mnm-store"
-version = "0.5.0"
+version = "0.6.1"
 dependencies = [
  "mnm-core",
  "pgvector",
@@ -3009,7 +3008,7 @@ dependencies = [
 
 [[package]]
 name = "mnm-telemetry"
-version = "0.5.0"
+version = "0.6.1"
 dependencies = [
  "gauge-telemetry",
  "mnm-core",

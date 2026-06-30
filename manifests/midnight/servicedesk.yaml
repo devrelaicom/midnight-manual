@@ -3,16 +3,18 @@ root:
   name: servicedesk
   path: .
   exclude:
+    # Jekyll site chrome (underscore dirs/config are NOT auto-skipped).
+    - "_config.yml"
     - "_data/**"
     - "_layouts/**"
-    - "_config.yml"
-    - "index.html"
+    # Rendered HTML artifacts: index landing page, layout, and the
+    # network-swimlane diagram — non-prose, not search signal.
+    - "*.html"
+    # v1.6 "uplift" patch-application guide (repo-maintenance machinery,
+    # not service-desk content).
     - "APPLY.md"
-    - "**/CODE_OF_CONDUCT.md"
-    - "**/CONTRIBUTING.md"
-    - "**/SECURITY.md"
   provenance:
     attribution: foundation
-    verified: true
+    verified: false
     verified_by: midnight-foundation
     tags: [trust:high]
