@@ -882,18 +882,25 @@ async fn run_inner(
                 }
             }
         }
-        // SAFETY FLOOR: if anything is still conflicted after the retry, we cannot
-        // produce a complete version. Abort rather than finalize a lossy one.
-        if !conflicts.is_empty() {
+        // SAFETY FLOOR: an ACCIDENTAL drop after the retry means the version
+        // would be silently incomplete — abort rather than finalize a lossy one.
+        // Intentional drops (injection rejections, oversize-upload skips) are
+        // expected; they are subtracted from the finalize expectation below, so
+        // they don't count here.
+        let blocking: Vec<&mnm_core::ingest::UploadConflict> = conflicts
+            .iter()
+            .filter(|c| !is_intentional_drop(c))
+            .collect();
+        if !blocking.is_empty() {
             abort_run(&client, server_url, &args.source_slug, start.ingest_run_id, &token).await;
-            for c in &conflicts {
+            for c in &blocking {
                 tracing::error!(path = %c.path, reason = %c.reason, "unresolved upload conflict after retry");
             }
             return Err(anyhow!(
                 "aborted run {}: {} document(s) still conflicted after re-embed retry; \
                  refusing to finalize an incomplete version",
                 start.ingest_run_id,
-                conflicts.len(),
+                blocking.len(),
             ));
         }
     }
@@ -916,18 +923,16 @@ async fn run_inner(
     // carried. The server's finalize guard refuses to activate (and aborts) if
     // the persisted count differs, so a silently-dropped doc can never ship.
     //
-    // Prompt-injection drops (issue #103) are INTENTIONAL: the server scans
-    // ingested docs and refuses any it flags. Those rejected docs were counted
-    // in new/carried but are deliberately not persisted, so we subtract them
-    // from the expectation — otherwise the first flagged doc would trip the
-    // backstop and abort the whole run. Accidental drops (failed inserts) are
-    // still caught, since they are not injection rejections.
-    let injection_dropped = conflicts
-        .iter()
-        .filter(|c| c.is_injection_rejection())
-        .count();
+    // INTENTIONAL drops were counted in new/carried but deliberately not
+    // persisted, so we subtract them from the expectation — otherwise the first
+    // one would trip the backstop and abort the whole run. Two kinds: prompt-
+    // injection rejections (issue #103, the server refuses flagged docs) and
+    // oversize-upload skips (a single document still over the body limit after
+    // splitting; see `upload_documents_with_split`). Accidental drops (failed
+    // inserts) are still caught, since they are not intentional.
+    let intentional_dropped = conflicts.iter().filter(|c| is_intentional_drop(c)).count();
     let expected_total =
-        i64::try_from((new_count + carried_count).saturating_sub(injection_dropped))
+        i64::try_from((new_count + carried_count).saturating_sub(intentional_dropped))
             .unwrap_or(i64::MAX);
     let finalize: FinalizeResult = match post_json(
         &client,
@@ -1058,7 +1063,9 @@ fn translate_upload_error(
     run_id: Uuid,
 ) -> anyhow::Error {
     let msg = e.to_string();
-    if msg.contains("413") {
+    // Canonical 413 phrase, not bare "413" — the message embeds the run UUID
+    // (see `is_payload_too_large` for why a stray "413" hex run would misfire).
+    if msg.contains("Payload Too Large") {
         let mib = mnm_core::limits::MAX_INGEST_BODY_BYTES / (1024 * 1024);
         return e.context(format!(
             "batch {batch} still exceeded the server's {mib} MiB body limit after \
@@ -1694,10 +1701,11 @@ fn pack_upload_batches(
 /// PUT one already-embedded batch. On HTTP 413 (payload too large), split the
 /// documents into two approximate halves and retry each RECURSIVELY: every half
 /// re-attempts a single PUT and, on a further 413, splits again — bottoming out
-/// at one document per request. A lone document that still 413s propagates its
-/// error (the `documents.len() > 1` guard is the floor that stops the recursion
-/// and surfaces the actionable single-doc message). `batch_index` /
-/// `batch_count` are informational (server logs only).
+/// at one document per request. A lone document that STILL 413s is genuinely too
+/// large to upload, so it is skipped: the response carries it as an
+/// `OVERSIZE_UPLOAD_REASON` conflict (an intentional drop, subtracted from the
+/// finalize expectation) and the run continues rather than aborting the whole
+/// source. `batch_index` / `batch_count` are informational (server logs only).
 async fn upload_documents_with_split(
     client: &reqwest::Client,
     url: &str,
@@ -1715,6 +1723,33 @@ async fn upload_documents_with_split(
     };
     match put_json::<_, UploadDocumentsResponse>(client, url, token, &body).await {
         Ok(r) => Ok(r),
+        Err(e) if is_payload_too_large(&e) && body.documents.len() == 1 => {
+            // The split bottomed out at a single document that STILL exceeds the
+            // body limit — its content + embeddings is genuinely too large and the
+            // pre-emptive estimate drop missed it. It can never be uploaded, so
+            // skip it as an intentional conflict instead of aborting the whole
+            // source. Synthesized client-side: the server never accepted it; the
+            // conflict is subtracted from the finalize expectation (it is an
+            // intentional drop) and surfaced in the report's conflict list.
+            let mib = mnm_core::limits::MAX_INGEST_BODY_BYTES / (1024 * 1024);
+            let doc = body.documents.into_iter().next().expect("len == 1");
+            tracing::warn!(
+                path = %doc.path,
+                "document still exceeded the {mib} MiB body limit after splitting to a single \
+                 doc; skipping it (run continues)",
+            );
+            Ok(UploadDocumentsResponse {
+                accepted: 0,
+                carried: 0,
+                conflicts: vec![mnm_core::ingest::UploadConflict::plain(
+                    doc.path,
+                    format!(
+                        "{OVERSIZE_UPLOAD_REASON}: a single document still exceeded the {mib} MiB \
+                         body limit after splitting"
+                    ),
+                )],
+            })
+        }
         Err(e) if is_payload_too_large(&e) && body.documents.len() > 1 => {
             let docs = body.documents; // recover & split (put_json only borrowed `body`)
             let mid = docs.len() / 2; // >= 1 because len > 1
@@ -1770,7 +1805,29 @@ fn merge_split_responses(
 }
 
 fn is_payload_too_large(e: &anyhow::Error) -> bool {
-    e.to_string().contains("413")
+    // Match the canonical 413 reason phrase, NOT the bare "413". The error string
+    // embeds the run UUID, and ~0.5% of v4 UUIDs contain the hex substring "413",
+    // which would misclassify an unrelated 5xx as payload-too-large — and at the
+    // single-document split floor that now means a SILENT skip + a green finalize
+    // (the count is decremented to match), defeating the completeness guarantee.
+    // `StatusCode` renders 413 as "413 Payload Too Large", so a real 413 always
+    // matches and a stray UUID hex digit-run cannot.
+    e.to_string().contains("Payload Too Large")
+}
+
+/// Stable reason prefix for the conflict the CLI synthesizes when a single
+/// document still exceeds the upload body limit after the batch split bottoms
+/// out (see [`upload_documents_with_split`]).
+const OVERSIZE_UPLOAD_REASON: &str = "upload too large";
+
+/// True for a conflict that represents an INTENTIONAL drop — a document the
+/// pipeline deliberately did not persist: a prompt-injection rejection, or a
+/// single document still over the body limit after splitting. These are
+/// subtracted from the finalize expectation and tolerated by the completeness
+/// safety floor. Everything else (e.g. a failed insert) is an *accidental* drop
+/// that must still abort the run.
+fn is_intentional_drop(c: &mnm_core::ingest::UploadConflict) -> bool {
+    c.is_injection_rejection() || c.reason.starts_with(OVERSIZE_UPLOAD_REASON)
 }
 
 async fn post_json<I: Serialize + Sync, O: for<'de> Deserialize<'de>>(
@@ -3522,6 +3579,41 @@ mod tests {
         assert!(!is_context_window_error(&rate));
 
         assert!(!is_context_window_error(&VoyageError::Http("connection reset".into())));
+    }
+
+    #[test]
+    fn intentional_drops_are_distinguished_from_accidental_ones() {
+        use mnm_core::ingest::{
+            UploadConflict, PROMPT_INJECTION_REASON, PROMPT_INJECTION_UNAVAILABLE_REASON,
+        };
+        // Oversize-upload skip (synthesized at the split floor) is intentional —
+        // it is subtracted from the finalize expectation and tolerated by the
+        // safety floor. This is the round trip with the synthesized reason.
+        let oversize = UploadConflict::plain(
+            "big.rs",
+            format!(
+                "{OVERSIZE_UPLOAD_REASON}: a single document still exceeded the 25 MiB body \
+                 limit after splitting"
+            ),
+        );
+        assert!(is_intentional_drop(&oversize));
+        // Injection rejection is intentional too — both the flagged case and the
+        // fail-closed (scan-unavailable) case, matching `is_injection_rejection`.
+        assert!(is_intentional_drop(&UploadConflict::plain("x.md", PROMPT_INJECTION_REASON)));
+        assert!(is_intentional_drop(&UploadConflict::plain(
+            "w.md",
+            format!("{PROMPT_INJECTION_UNAVAILABLE_REASON} (fail-closed)"),
+        )));
+        // Accidental drops (failed insert, duplicate path) must NOT be treated as
+        // intentional — they have to abort the run, not silently vanish.
+        assert!(!is_intentional_drop(&UploadConflict::plain(
+            "y.md",
+            "insert failed: db connection reset",
+        )));
+        assert!(!is_intentional_drop(&UploadConflict::plain(
+            "z.md",
+            "duplicate path in this batch",
+        )));
     }
 
     /// A `CarriedUploadInput` (carried-doc path): freshly-walked metadata, NO
