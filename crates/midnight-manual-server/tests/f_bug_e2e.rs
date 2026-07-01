@@ -337,6 +337,9 @@ async fn document_metadata_persists_to_postgres_through_full_ingest() {
         disable_default_ignore_list: false,
         strict: false,
         max_file_size: 10 * 1024 * 1024,
+        // Default longest-line ceiling (DEFAULT_MAX_LINE_BYTES); the test
+        // corpus has no long-line files, so this does not filter anything.
+        max_line_bytes: 10_000,
         unsafe_no_global_limit: false,
         no_code_embeddings: false,
         report_file: None,

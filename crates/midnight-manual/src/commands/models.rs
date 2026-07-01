@@ -494,6 +494,9 @@ async fn ingest_source(
         // to the line-window fallback rather than aborting the whole migration.
         strict: false,
         max_file_size: 10 * 1024 * 1024,
+        // Skip machine-generated data (chain-specs, minified/serialized blobs)
+        // at the default longest-line ceiling, matching a normal run.
+        max_line_bytes: mnm_content::chunk::DEFAULT_MAX_LINE_BYTES,
         // Migrate does NOT expose the global-cap opt-out.
         unsafe_no_global_limit: false,
         // Follow the manifest's `code_embeddings` option (default on); migrate

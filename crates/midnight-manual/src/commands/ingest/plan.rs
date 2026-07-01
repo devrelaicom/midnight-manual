@@ -88,9 +88,12 @@ pub async fn run(args: Args, server: Option<&str>, _json: bool) -> Result<()> {
             .map_or_else(|| PathBuf::from("."), Path::to_path_buf)
     });
 
-    // `ingest plan` has no --max-file-size flag, so the walker uses its default
-    // ceiling (DEFAULT_MAX_FILE_BYTES); skipped files are warned, mirroring the
-    // resilient behavior of `ingest run`.
+    // `ingest plan` has no --max-file-size or --max-line-bytes flag, so the
+    // walker uses its default ceilings (DEFAULT_MAX_FILE_BYTES for size,
+    // DEFAULT_MAX_LINE_BYTES for the longest line — the latter skips
+    // machine-generated data like chain-specs). Skipped files are warned,
+    // mirroring the resilient behavior of `ingest run`; the loop below prints
+    // each `skip.reason` generically, so LongLine skips surface automatically.
     let w = Walker::new(manifest.clone(), base.clone()).with_filter_options(
         mnm_content::manifest::resolve::FilterRunOptions {
             respect_gitignore: args.respect_gitignore,
