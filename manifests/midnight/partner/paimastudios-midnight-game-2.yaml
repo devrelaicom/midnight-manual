@@ -1,0 +1,14 @@
+manifest_version: 1
+root:
+  name: paimastudios-midnight-game-2
+  path: .
+  exclude:
+    # Generated/copied build output: transpiled .js + .d.ts and duplicate
+    # .compact copies (build script copies them here; README says "should be
+    # removed"). Authored contracts + source live in contract-game2/src and
+    # frontend/src/*.
+    - "backend/packages/midnight/frontend-libs/**"
+  provenance:
+    attribution: partner
+    verified: false
+    tags: [trust:medium]

@@ -53,6 +53,7 @@ joacolinares-kyc-midnight	joacolinares/kyc-midnight	ramaJoaco	code_repo
 # resolved by the slug→subdirectory fallback described in the header above.
 input-output-hk-arc-mn-tui	input-output-hk/arc-mn-tui	main	code_repo
 input-output-hk-lace	input-output-hk/lace	main	code_repo
+paimastudios-midnight-game-2	PaimaStudios/midnight-game-2	main	code_repo
 openzeppelin-compact-contracts	OpenZeppelin/compact-contracts	main	code_repo
 openzeppelin-compact-tools	OpenZeppelin/compact-tools	main	code_repo
 openzeppelin-midnight-apps	OpenZeppelin/midnight-apps	main	code_repo
