@@ -1,0 +1,22 @@
+manifest_version: 1
+root:
+  name: midnight-zk
+  path: .
+  exclude:
+    # Golden snapshot fixtures: generated cost-model.json + compiled
+    # verification-key example blobs (goldenfiles/examples/*).
+    - "**/goldenfiles/**"
+    # Machine-emitted proptest seed corpus (regression inputs, not source).
+    - "**/proptest-regressions/**"
+    # Foreign-field parameter / code-generation machinery (how params are
+    # generated, not library source or how-to content).
+    - "circuits/scripts/**"
+    # rustdoc KaTeX math-rendering header — doc-build chrome, not content.
+    - "curves/katex-header.html"
+    # License text (LICENSE files auto-skip; this markdown variant does not).
+    - "proofs/COPYING.md"
+  provenance:
+    attribution: foundation
+    verified: true
+    verified_by: midnight-foundation
+    tags: [trust:high]
