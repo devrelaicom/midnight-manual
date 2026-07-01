@@ -64,6 +64,7 @@ no-witness-labs-midday-sdk	no-witness-labs/midday-sdk	main	code_repo
 devrelaicom-compactp	devrelaicom/compactp	main	code_repo
 devrelaicom-midnight-expert	devrelaicom/midnight-expert	main	docs_site
 effectstream-block-kart-legends	effectstream/block-kart-legends	main	code_repo
+effectstream-go-fish	effectstream/go-fish	v2	code_repo
 openzeppelin-compact-contracts	OpenZeppelin/compact-contracts	main	code_repo
 openzeppelin-compact-tools	OpenZeppelin/compact-tools	main	code_repo
 openzeppelin-midnight-apps	OpenZeppelin/midnight-apps	main	code_repo
