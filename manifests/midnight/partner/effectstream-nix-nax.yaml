@@ -1,0 +1,11 @@
+manifest_version: 1
+root:
+  name: effectstream-nix-nax
+  path: .
+  exclude:
+    # Per-deployment contract-address artifact (contractAddress + networkId), not docs.
+    - webapp/public/arena.json
+  provenance:
+    attribution: partner
+    verified: false
+    tags: [trust:medium]
