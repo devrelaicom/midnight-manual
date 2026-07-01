@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use time::OffsetDateTime;
 
-use crate::chunk::DEFAULT_MAX_FILE_BYTES;
+use crate::chunk::{DEFAULT_MAX_FILE_BYTES, DEFAULT_MAX_LINE_BYTES};
 use crate::frontmatter::{split as split_frontmatter, FrontmatterSplit};
 use crate::manifest::resolve::FilterRunOptions;
 use crate::manifest::Manifest;
@@ -82,6 +82,15 @@ pub enum SkipReason {
         /// The ceiling the file exceeded.
         limit: u64,
     },
+    /// A single line exceeded the configured `max_line_bytes` ceiling. Marks
+    /// machine-generated data (chain-specs, minified/serialized blobs) that is
+    /// low-value to search and can form an un-splittable oversize chunk.
+    LongLine {
+        /// Longest line found, in bytes.
+        longest: usize,
+        /// The ceiling it exceeded.
+        limit: usize,
+    },
     /// A NUL byte was found in the leading bytes (binary sniff over the first 8 KiB).
     Binary,
     /// The bytes could not be decoded as UTF-8.
@@ -100,6 +109,9 @@ impl std::fmt::Display for SkipReason {
             Self::NotRegularFile => write!(f, "not a regular file (e.g. a directory)"),
             Self::TooLarge { size, limit } => {
                 write!(f, "exceeds max file size ({size} > {limit} bytes)")
+            }
+            Self::LongLine { longest, limit } => {
+                write!(f, "has a line exceeding max line size ({longest} > {limit} bytes)")
             }
             Self::Binary => write!(f, "looks binary (NUL byte in first {BINARY_SNIFF_LEN} bytes)"),
             Self::NotUtf8 => write!(f, "not valid UTF-8"),
@@ -140,13 +152,30 @@ fn looks_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(BINARY_SNIFF_LEN).any(|&b| b == 0)
 }
 
+/// Longest line by byte length (newline `\n` as the separator; the trailing
+/// `\r` of a CRLF is counted, which is immaterial at the threshold). Returns 0
+/// for empty input.
+///
+/// Used by the walker to skip machine-generated files whose longest line
+/// exceeds `max_line_bytes` (chain-specs, minified/serialized blobs). Kept
+/// dependency-free on purpose — no `memchr`.
+fn longest_line_bytes(bytes: &[u8]) -> usize {
+    bytes
+        .split(|&b| b == b'\n')
+        .map(<[u8]>::len)
+        .max()
+        .unwrap_or(0)
+}
+
 /// Walk every `file:` referenced by `manifest`, rooted at `base`. Files not
 /// referenced by the manifest are skipped.
 ///
 /// Paths that are not regular files (e.g. a directory), files larger than
-/// `max_file_bytes`, files that sniff as binary, and files that are not valid
-/// UTF-8 are recorded in [`WalkOutcome::skipped`] rather than aborting the
-/// walk (EC-52).
+/// `max_file_bytes`, files containing a single line longer than
+/// `max_line_bytes` (machine-generated data), files that sniff as binary, and
+/// files that are not valid UTF-8 are recorded in [`WalkOutcome::skipped`]
+/// rather than aborting the walk (EC-52). A `max_line_bytes` of `0` disables
+/// the long-line check.
 ///
 /// The walk is performed eagerly into a `Vec` so callers can use it
 /// repeatedly (e.g. once for a dry-run, once for the real run). For very
@@ -162,6 +191,7 @@ pub fn walk(
     manifest: &Manifest,
     base: &Path,
     max_file_bytes: u64,
+    max_line_bytes: usize,
     opts: FilterRunOptions,
 ) -> Result<WalkOutcome, WalkError> {
     let leaves = crate::manifest::resolve::resolve(manifest, base, opts);
@@ -210,6 +240,16 @@ pub fn walk(
             });
             continue;
         }
+        if max_line_bytes != 0 {
+            let longest = longest_line_bytes(&bytes);
+            if longest > max_line_bytes {
+                skipped.push(SkippedFile {
+                    rel_path: leaf.rel_path,
+                    reason: SkipReason::LongLine { longest, limit: max_line_bytes },
+                });
+                continue;
+            }
+        }
         let Ok(content) = String::from_utf8(bytes) else {
             skipped.push(SkippedFile {
                 rel_path: leaf.rel_path,
@@ -238,6 +278,7 @@ pub struct Walker {
     manifest: Manifest,
     base: PathBuf,
     max_file_bytes: u64,
+    max_line_bytes: usize,
     filter_opts: FilterRunOptions,
 }
 
@@ -250,6 +291,7 @@ impl Walker {
             manifest,
             base,
             max_file_bytes: DEFAULT_MAX_FILE_BYTES,
+            max_line_bytes: DEFAULT_MAX_LINE_BYTES,
             filter_opts: FilterRunOptions::HERMETIC,
         }
     }
@@ -258,6 +300,14 @@ impl Walker {
     #[must_use]
     pub const fn with_max_file_bytes(mut self, max_file_bytes: u64) -> Self {
         self.max_file_bytes = max_file_bytes;
+        self
+    }
+
+    /// Override the per-file longest-line ceiling (bytes). Files containing a
+    /// line longer than this are skipped. `0` disables the check.
+    #[must_use]
+    pub const fn with_max_line_bytes(mut self, max_line_bytes: usize) -> Self {
+        self.max_line_bytes = max_line_bytes;
         self
     }
 
@@ -280,7 +330,13 @@ impl Walker {
     ///
     /// See [`walk`].
     pub fn walk(&self) -> Result<WalkOutcome, WalkError> {
-        walk(&self.manifest, &self.base, self.max_file_bytes, self.filter_opts)
+        walk(
+            &self.manifest,
+            &self.base,
+            self.max_file_bytes,
+            self.max_line_bytes,
+            self.filter_opts,
+        )
     }
 }
 
@@ -452,6 +508,155 @@ mod tests {
             .unwrap();
         assert_eq!(outcome.documents.len(), 1);
         assert!(outcome.skipped.is_empty());
+    }
+
+    #[test]
+    fn long_line_file_is_skipped_and_normal_ones_kept() {
+        let dir = tempdir();
+        // `long.md`'s second line is 30 bytes — over the 20-byte limit. `ok.md`
+        // has only short lines, so it is kept.
+        write_file(dir.path(), "long.md", "short\n123456789012345678901234567890\n");
+        write_file(dir.path(), "ok.md", "short\nlines\nhere\n");
+        let manifest = Manifest::parse(&manifest_yaml(&["long.md", "ok.md"])).unwrap();
+        let walker = Walker::new(manifest, dir.path().to_path_buf()).with_max_line_bytes(20);
+        let outcome = walker.walk().unwrap();
+        let kept: Vec<_> = outcome
+            .documents
+            .iter()
+            .map(|d| d.rel_path.clone())
+            .collect();
+        assert_eq!(kept, vec![PathBuf::from("ok.md")]);
+        assert_eq!(outcome.skipped.len(), 1);
+        assert_eq!(outcome.skipped[0].rel_path, PathBuf::from("long.md"));
+        assert!(matches!(
+            outcome.skipped[0].reason,
+            SkipReason::LongLine { longest: 30, limit: 20 }
+        ));
+    }
+
+    #[test]
+    fn long_line_boundary_is_strictly_greater() {
+        // A line of exactly `limit` bytes is KEPT; `limit + 1` is skipped.
+        let dir = tempdir();
+        // Single lines with no trailing newline: byte length == content length.
+        write_file(dir.path(), "exact.md", &"a".repeat(20));
+        write_file(dir.path(), "over.md", &"a".repeat(21));
+        let manifest = Manifest::parse(&manifest_yaml(&["exact.md", "over.md"])).unwrap();
+        let walker = Walker::new(manifest, dir.path().to_path_buf()).with_max_line_bytes(20);
+        let outcome = walker.walk().unwrap();
+        let kept: Vec<_> = outcome
+            .documents
+            .iter()
+            .map(|d| d.rel_path.clone())
+            .collect();
+        assert_eq!(kept, vec![PathBuf::from("exact.md")]);
+        assert_eq!(outcome.skipped.len(), 1);
+        assert_eq!(outcome.skipped[0].rel_path, PathBuf::from("over.md"));
+        assert!(matches!(
+            outcome.skipped[0].reason,
+            SkipReason::LongLine { longest: 21, limit: 20 }
+        ));
+    }
+
+    #[test]
+    fn max_line_bytes_zero_disables_the_check() {
+        let dir = tempdir();
+        write_file(dir.path(), "huge-line.md", &"a".repeat(100_000));
+        let manifest = Manifest::parse(&manifest_yaml(&["huge-line.md"])).unwrap();
+        let walker = Walker::new(manifest, dir.path().to_path_buf()).with_max_line_bytes(0);
+        let outcome = walker.walk().unwrap();
+        assert_eq!(outcome.documents.len(), 1);
+        assert_eq!(outcome.documents[0].rel_path, PathBuf::from("huge-line.md"));
+        assert!(outcome.skipped.is_empty());
+    }
+
+    #[test]
+    fn default_walk_keeps_normal_multiline_file_with_no_long_line_skip() {
+        let dir = tempdir();
+        write_file(
+            dir.path(),
+            "a.md",
+            "# Title\n\nSome ordinary prose across several lines.\n\nMore text.\n",
+        );
+        let manifest = Manifest::parse(&manifest_yaml(&["a.md"])).unwrap();
+        let outcome = Walker::new(manifest, dir.path().to_path_buf())
+            .walk()
+            .unwrap();
+        assert_eq!(outcome.documents.len(), 1);
+        assert!(!outcome
+            .skipped
+            .iter()
+            .any(|s| matches!(s.reason, SkipReason::LongLine { .. })));
+    }
+
+    #[test]
+    fn chain_spec_like_single_long_hex_line_is_dropped_at_default() {
+        let dir = tempdir();
+        // One machine-generated hex line: "0x" + 6000 * "ab" = 12002 bytes,
+        // comfortably over the 10,000-byte default ceiling.
+        let hex_line = format!("0x{}", "ab".repeat(6000));
+        assert_eq!(hex_line.len(), 12_002);
+        write_file(dir.path(), "chain-spec.json", &hex_line);
+        let manifest = Manifest::parse(&manifest_yaml(&["chain-spec.json"])).unwrap();
+        // Default Walker → default threshold (DEFAULT_MAX_LINE_BYTES = 10_000).
+        let outcome = Walker::new(manifest, dir.path().to_path_buf())
+            .walk()
+            .unwrap();
+        assert!(outcome.documents.is_empty());
+        assert_eq!(outcome.skipped.len(), 1);
+        assert_eq!(outcome.skipped[0].rel_path, PathBuf::from("chain-spec.json"));
+        assert!(matches!(
+            outcome.skipped[0].reason,
+            SkipReason::LongLine { longest: 12_002, limit: 10_000 }
+        ));
+    }
+
+    #[test]
+    fn long_line_skip_reason_display() {
+        let reason = SkipReason::LongLine { longest: 12_002, limit: 10_000 };
+        let msg = reason.to_string();
+        assert!(msg.contains("has a line exceeding max line size"));
+        assert!(msg.contains("12002"));
+        assert!(msg.contains("10000"));
+    }
+
+    #[test]
+    fn crlf_carriage_return_counts_toward_line_length() {
+        // The `\r` of a CRLF is counted (documented on `longest_line_bytes`):
+        // a 20-byte content line plus its CR is 21 bytes, tripping a 20-byte
+        // limit. Were the CR not counted it would sit exactly at the limit and
+        // be kept — so this pins the documented behavior.
+        let dir = tempdir();
+        write_file(dir.path(), "crlf.md", "aaaaaaaaaaaaaaaaaaaa\r\n");
+        let manifest = Manifest::parse(&manifest_yaml(&["crlf.md"])).unwrap();
+        let outcome = Walker::new(manifest, dir.path().to_path_buf())
+            .with_max_line_bytes(20)
+            .walk()
+            .unwrap();
+        assert_eq!(outcome.skipped.len(), 1);
+        assert!(matches!(
+            outcome.skipped[0].reason,
+            SkipReason::LongLine { longest: 21, limit: 20 }
+        ));
+    }
+
+    #[test]
+    fn empty_and_newline_only_files_are_not_long_line_skipped() {
+        // `slice::split` always yields at least one element, so an empty or
+        // newline-only file must measure a longest line of 0 and never trip the
+        // check — even at the tightest possible limit.
+        let dir = tempdir();
+        write_file(dir.path(), "empty.md", "");
+        write_file(dir.path(), "newlines.md", "\n\n\n");
+        let manifest = Manifest::parse(&manifest_yaml(&["empty.md", "newlines.md"])).unwrap();
+        let outcome = Walker::new(manifest, dir.path().to_path_buf())
+            .with_max_line_bytes(1)
+            .walk()
+            .unwrap();
+        assert!(!outcome
+            .skipped
+            .iter()
+            .any(|s| matches!(s.reason, SkipReason::LongLine { .. })));
     }
 
     #[test]

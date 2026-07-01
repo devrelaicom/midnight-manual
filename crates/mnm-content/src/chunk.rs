@@ -31,6 +31,21 @@ pub struct Chunk {
 /// `--max-file-size` default.
 pub const DEFAULT_MAX_FILE_BYTES: u64 = 10 * 1024 * 1024;
 
+/// Canonical default per-file longest-line ceiling (10,000 bytes).
+///
+/// A single line longer than this marks machine-generated data — chain-specs,
+/// minified bundles, serialized blobs — rather than authored prose or code.
+/// Such files both pollute search (a wall of hex is not a searchable answer)
+/// and can exceed the embedding token limit as one un-splittable chunk (a
+/// multi-million-char line has no natural break to chunk on). Investigation of
+/// a 7,737-file real ingest set found this threshold flags data/config/fixture
+/// files with no false positives (the legit content ceiling sat well below).
+///
+/// Single source of truth for the value shared by [`ChunkerConfig::default`],
+/// the walker ([`crate::ingest::walker::Walker`]), and the CLI
+/// `--max-line-bytes` default. `0` disables the check (unbounded line length).
+pub const DEFAULT_MAX_LINE_BYTES: usize = 10_000;
+
 /// Configuration shared by all chunkers. Token-budgeted.
 #[derive(Debug, Clone, Copy)]
 pub struct ChunkerConfig {
@@ -42,6 +57,12 @@ pub struct ChunkerConfig {
     /// see [`crate::ingest::walker::Walker::with_max_file_bytes`]. Chunkers
     /// themselves never read this field.
     pub max_file_bytes: u64,
+    /// Per-file longest-line ceiling (bytes). Enforced by the *walker* (the
+    /// caller), which skips files containing a line longer than this before
+    /// they ever reach a chunker — see
+    /// [`crate::ingest::walker::Walker::with_max_line_bytes`]. Chunkers
+    /// themselves never read this field. `0` disables the check.
+    pub max_line_bytes: usize,
 }
 
 impl Default for ChunkerConfig {
@@ -49,6 +70,7 @@ impl Default for ChunkerConfig {
         Self {
             max_tokens: 1024,
             max_file_bytes: DEFAULT_MAX_FILE_BYTES,
+            max_line_bytes: DEFAULT_MAX_LINE_BYTES,
         }
     }
 }

@@ -199,6 +199,12 @@ pub struct Args {
     #[arg(long, default_value_t = mnm_content::chunk::DEFAULT_MAX_FILE_BYTES)]
     pub max_file_size: u64,
 
+    /// Skip files containing a single line longer than this many bytes
+    /// (marks machine-generated data — chain-specs, minified/serialized
+    /// blobs). 0 disables the check.
+    #[arg(long, default_value_t = mnm_content::chunk::DEFAULT_MAX_LINE_BYTES)]
+    pub max_line_bytes: usize,
+
     /// Admin-only: exempt THIS ingest's server-side embedding from the
     /// site-wide token cap. Ignored for BYOK/local embedding. The server
     /// enforces the admin-role check — a non-admin caller setting this is still
@@ -383,6 +389,7 @@ async fn run_inner(
     let chunker_config = mnm_content::chunk::ChunkerConfig {
         max_tokens: args.chunk_tokens,
         max_file_bytes: args.max_file_size,
+        max_line_bytes: args.max_line_bytes,
     };
 
     // ── Phase: walk source tree ──────────────────────────────────────────────
@@ -400,6 +407,7 @@ async fn run_inner(
 
     let walker = Walker::new(manifest, source_root.clone())
         .with_max_file_bytes(chunker_config.max_file_bytes)
+        .with_max_line_bytes(chunker_config.max_line_bytes)
         .with_filter_options(mnm_content::manifest::resolve::FilterRunOptions {
             respect_gitignore: args.respect_gitignore,
             default_ignore_list: !args.disable_default_ignore_list,
