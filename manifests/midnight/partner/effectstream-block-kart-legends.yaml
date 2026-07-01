@@ -1,0 +1,17 @@
+manifest_version: 1
+root:
+  name: effectstream-block-kart-legends
+  path: .
+  exclude:
+    # Hardhat Ignition deployment artifacts (generated build-info / compiled
+    # artifact JSON / journal). Authored EVM source lives in evm-contracts/src
+    # + ignition/modules; Midnight contract lives in midnight-contracts/.
+    - "packages/shared/contracts/evm-contracts/ignition/deployments/**"
+    # Deployment-address records (just a {contractAddress} blob per network).
+    - "packages/shared/contracts/midnight-contracts/contract-midnight-data.*.json"
+    # pgTyped-generated typed query wrappers (emitted from the sibling .sql).
+    - "**/*.queries.ts"
+  provenance:
+    attribution: partner
+    verified: false
+    tags: [trust:medium]
