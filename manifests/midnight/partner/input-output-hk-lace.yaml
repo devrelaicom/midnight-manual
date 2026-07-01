@@ -1,0 +1,20 @@
+manifest_version: 1
+root:
+  name: input-output-hk-lace
+  provenance:
+    attribution: partner
+    verified: false
+    tags: [trust:high]
+  children:
+    # Lace is IOG's primarily-Cardano browser wallet; only its Midnight
+    # integration is relevant here. Scope to the three Midnight-specific
+    # packages (they hold 39 of the 41 @midnight-ntwrk-importing files) and
+    # drop the Cardano/Bitcoin/wallet-shell bulk and the generic monorepo
+    # docs/ (WORKSPACE.md, contracts-and-modules.md describe the whole Lace
+    # platform, not Midnight).
+    - name: midnight-context
+      path: packages/contract/midnight-context/
+    - name: blockchain-midnight
+      path: packages/module/blockchain-midnight/
+    - name: dapp-connector-midnight
+      path: packages/module/dapp-connector-midnight/
