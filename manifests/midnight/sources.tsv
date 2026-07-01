@@ -57,6 +57,7 @@ input-output-hk-lace	input-output-hk/lace	main	code_repo
 # owner/repo columns use the canonical effectstream paths (redirect-independent); slugs kept as originally added.
 paimastudios-midnight-game-2	effectstream/dust-to-dust	main	code_repo
 paimastudios-pvp-arena	effectstream/kachina-colosseum	main	code_repo
+sundaeswap-finance-capacity-exchange	SundaeSwap-finance/capacity-exchange	main	code_repo
 openzeppelin-compact-contracts	OpenZeppelin/compact-contracts	main	code_repo
 openzeppelin-compact-tools	OpenZeppelin/compact-tools	main	code_repo
 openzeppelin-midnight-apps	OpenZeppelin/midnight-apps	main	code_repo

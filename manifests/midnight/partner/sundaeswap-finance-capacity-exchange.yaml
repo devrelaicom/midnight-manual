@@ -1,0 +1,17 @@
+manifest_version: 1
+root:
+  name: sundaeswap-finance-capacity-exchange
+  path: .
+  exclude:
+    # Auto-generated OpenAPI client (README: "auto-generated from the server's
+    # OpenAPI spec", regenerated via `task regenerate-client`) — machine output,
+    # not authored source.
+    - "packages/client/generated/**"
+    # Demo static web assets: favicon plus large wallet-snapshot state blobs
+    # (preprod-dust.json is 5.8MB) and a Lottie animation json — machine-emitted
+    # data, no answer content.
+    - "apps/demo/public/**"
+  provenance:
+    attribution: partner
+    verified: false
+    tags: [trust:medium]
