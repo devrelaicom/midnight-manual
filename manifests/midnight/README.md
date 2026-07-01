@@ -89,16 +89,20 @@ is preferred so `kind`/`origin_url` are set.)
 | servicedesk | midnightntwrk/servicedesk | main | docs_site | Foundation | foundation | false | high |
 | midnight-reserve-contracts | midnightntwrk/midnight-reserve-contracts | main | code_repo | Foundation | foundation | true | high |
 | night-token-distribution | midnightntwrk/night-token-distribution | main | code_repo | Foundation | foundation | true | high |
+| midnight-cnight-to-dust-dapp | midnightntwrk/midnight-cnight-to-dust-dapp | main | mixed | Foundation | foundation | false | high |
+| midnight-zk | midnightntwrk/midnight-zk | main | code_repo | Foundation | foundation | true | high |
+| passport | midnightntwrk/passport | main | mixed | Foundation | foundation | false | high |
 | joacolinares-kyc-midnight | joacolinares/kyc-midnight | ramaJoaco | code_repo | Hackathon Winner | third_party | false | medium |
 
 ## Partner sources (`manifests/midnight/partner/`)
 
 Formal partner-org repos. All are `attribution: partner`, `verified: false`.
-OpenZeppelin is `trust:high`; the rest are `trust:medium`. Manifests walk the
-whole repo (`path: .`, minus the walker's default skips) with targeted excludes
-for repo-specific noise (vendored submodules, animation/data blobs, duplicate
-trees); docs-only repos (`midnames-docs`, `webisoftsoftware-1am-midnight-skill`)
-are scoped to their content directories.
+OpenZeppelin and input-output-hk are `trust:high`; the rest are `trust:medium`.
+Manifests walk the whole repo (`path: .`, minus the walker's default skips) with
+targeted excludes for repo-specific noise (vendored submodules, animation/data
+blobs, duplicate trees); large multi-chain monorepos (`input-output-hk-lace`,
+`openzeppelin-adapters`) and docs-only repos (`midnames-docs`,
+`webisoftsoftware-1am-midnight-skill`) are scoped to their content directories.
 
 | slug | repo | branch | kind | owner | attribution | verified | trust |
 |------|------|--------|------|-------|-------------|----------|-------|
@@ -119,6 +123,16 @@ are scoped to their content directories.
 | midnames-deploy-receive-test | midnames/deploy-receive-test | main | code_repo | Partner | partner | false | medium |
 | midnames-did | midnames/did | main | code_repo | Partner | partner | false | medium |
 | midnames-did-frontend | midnames/did-frontend | main | code_repo | Partner | partner | false | medium |
+| input-output-hk-arc-mn-tui | input-output-hk/arc-mn-tui | main | code_repo | Partner | partner | false | high |
+| input-output-hk-lace | input-output-hk/lace | main | code_repo | Partner | partner | false | high |
+| paimastudios-midnight-game-2 | effectstream/dust-to-dust | main | code_repo | Partner | partner | false | medium |
+| paimastudios-pvp-arena | effectstream/kachina-colosseum | main | code_repo | Partner | partner | false | medium |
+| sundaeswap-finance-capacity-exchange | SundaeSwap-finance/capacity-exchange | main | code_repo | Partner | partner | false | medium |
+| sundaeswap-finance-midnight-swaps-smart-contracts | SundaeSwap-finance/midnight-swaps-smart-contracts | main | code_repo | Partner | partner | false | medium |
+| openzeppelin-adapters | OpenZeppelin/openzeppelin-adapters | main | code_repo | Partner | partner | false | high |
+| no-witness-labs-midday-sdk | no-witness-labs/midday-sdk | main | code_repo | Partner | partner | false | medium |
+| devrelaicom-compactp | devrelaicom/compactp | main | code_repo | Partner | partner | false | medium |
+| devrelaicom-midnight-expert | devrelaicom/midnight-expert | main | docs_site | Partner | partner | false | medium |
 
 ## Community sources (`manifests/midnight/community/`)
 
