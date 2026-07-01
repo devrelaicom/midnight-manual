@@ -1,0 +1,17 @@
+manifest_version: 1
+root:
+  name: openzeppelin-adapters
+  provenance:
+    attribution: partner
+    verified: false
+    tags: [trust:high]
+  children:
+    # Multi-chain adapters monorepo — only the Midnight package is relevant;
+    # packages/adapter-{evm,evm-core,polkadot,solana,stellar} target other
+    # chains. adapter-midnight is a browser adapter that runs Midnight contracts
+    # via the Lace wallet + ZK-proof coordination inside the OpenZeppelin
+    # Contracts UI Builder (@midnight-ntwrk/* integration source, patches auto-
+    # dropped by ext). Repo chrome (docs/, specs/, scripts/, other packages) is
+    # multi-chain machinery, not Midnight answer content.
+    - name: adapter-midnight
+      path: packages/adapter-midnight
