@@ -48,7 +48,7 @@ mnm ingest run manifests/midnight/midnight-docs.yaml \
 also auto-creates the source on 404 with `--yes`, but explicit `sources create`
 is preferred so `kind`/`origin_url` are set.)
 
-## Index (82 sources)
+## Index (104 sources)
 
 > This index is generated from `sources.tsv` (slug / repo / branch / kind) and
 > each manifest's `root.provenance` (attribution / verified / trust). It is **not**
@@ -133,6 +133,15 @@ blobs, duplicate trees); large multi-chain monorepos (`input-output-hk-lace`,
 | no-witness-labs-midday-sdk | no-witness-labs/midday-sdk | main | code_repo | Partner | partner | false | medium |
 | devrelaicom-compactp | devrelaicom/compactp | main | code_repo | Partner | partner | false | medium |
 | devrelaicom-midnight-expert | devrelaicom/midnight-expert | main | docs_site | Partner | partner | false | medium |
+| effectstream-block-kart-legends | effectstream/block-kart-legends | main | code_repo | Partner | partner | false | medium |
+| effectstream-go-fish | effectstream/go-fish | v2 | code_repo | Partner | partner | false | medium |
+| effectstream-mip-zswap-offer | effectstream/mip-zswap-offer | main | code_repo | Partner | partner | false | medium |
+| effectstream-nix-nax | effectstream/nix-nax | main | code_repo | Partner | partner | false | medium |
+| effectstream-safe-solver | effectstream/safe-solver | main | code_repo | Partner | partner | false | medium |
+| effectstream-social-wallet-2of3 | effectstream/social-wallet-2of3 | main | code_repo | Partner | partner | false | medium |
+| effectstream-werewolf-game | effectstream/werewolf-game | main | code_repo | Partner | partner | false | medium |
+| effectstream-zkir-wasm-experiment | effectstream/zkir-wasm-experiment | main | code_repo | Partner | partner | false | medium |
+| effectstream-zswap-presale | effectstream/zswap-presale | main | code_repo | Partner | partner | false | medium |
 
 ## Community sources (`manifests/midnight/community/`)
 
