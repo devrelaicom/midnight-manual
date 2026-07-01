@@ -1,0 +1,17 @@
+manifest_version: 1
+root:
+  name: effectstream-zkir-wasm-experiment
+  path: .
+  exclude:
+    # wasm-bindgen generated output: WASM binary plus its emitted JS/.d.ts glue
+    # (`let wasm;` header). Authored Rust source lives in src/ + tests/.
+    - "pkg/**"
+    # Compiled/vendored webapp assets: the Compact compiler cross-compiled to
+    # WASM (minified scheme.js + scheme.wasm/.data Emscripten module), a copied
+    # wasm-bindgen keygen glue file, and a vendored Midnight Foundation
+    # standard-library.compact. Authored webapp code lives in webapp/src/.
+    - "webapp/assets/**"
+  provenance:
+    attribution: partner
+    verified: false
+    tags: [trust:medium]
