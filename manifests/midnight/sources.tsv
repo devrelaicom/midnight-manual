@@ -69,6 +69,7 @@ effectstream-mip-zswap-offer	effectstream/mip-zswap-offer	main	code_repo
 effectstream-nix-nax	effectstream/nix-nax	main	code_repo
 effectstream-safe-solver	effectstream/safe-solver	main	code_repo
 effectstream-social-wallet-2of3	effectstream/social-wallet-2of3	main	code_repo
+effectstream-werewolf-game	effectstream/werewolf-game	main	code_repo
 openzeppelin-compact-contracts	OpenZeppelin/compact-contracts	main	code_repo
 openzeppelin-compact-tools	OpenZeppelin/compact-tools	main	code_repo
 openzeppelin-midnight-apps	OpenZeppelin/midnight-apps	main	code_repo

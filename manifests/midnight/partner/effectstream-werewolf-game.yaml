@@ -1,0 +1,18 @@
+manifest_version: 1
+root:
+  name: effectstream-werewolf-game
+  path: .
+  exclude:
+    # Hardhat Ignition deployment artifacts (generated build-info / compiled
+    # artifact JSON / deployed_addresses). Authored EVM source lives in
+    # evm/src + evm/ignition/modules; Midnight contracts live under
+    # contracts/midnight/contract-werewolf.
+    - "packages/shared/contracts/evm/ignition/deployments/**"
+    # Deployment-address records (91-byte {contractAddress} blob per network).
+    - "packages/shared/contracts/midnight/contract-werewolf.*.json"
+    # pgTyped-generated typed query wrappers (emitted from the sibling .sql).
+    - "**/*.queries.ts"
+  provenance:
+    attribution: partner
+    verified: false
+    tags: [trust:medium]
