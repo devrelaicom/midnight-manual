@@ -1,0 +1,19 @@
+manifest_version: 1
+root:
+  name: devrelaicom-midnight-expert
+  path: .
+  exclude:
+    # Repo's own build/runtime tooling: the template-rendering engine and the
+    # fact-checker CLI utils that drive the plugins/marketplace themselves —
+    # ship machinery, not Midnight-developer answer content.
+    - "packages/**"
+    # Marketplace add/review/validate + CI shell scripts — how the repo builds
+    # and ships itself, not Midnight content.
+    - "scripts/**"
+    # 526 KB machine-generated status-code lookup index (generated 2026-05-04);
+    # the developer-facing answer lives in status-codes/references/*.md.
+    - "plugins/midnight-status-codes/skills/status-codes-lookup/scripts/codes.json"
+  provenance:
+    attribution: partner
+    verified: false
+    tags: [trust:medium]
