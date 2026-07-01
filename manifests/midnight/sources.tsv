@@ -43,6 +43,7 @@ midnight-reserve-contracts	midnightntwrk/midnight-reserve-contracts	main	code_re
 night-token-distribution	midnightntwrk/night-token-distribution	main	code_repo
 midnight-cnight-to-dust-dapp	midnightntwrk/midnight-cnight-to-dust-dapp	main	mixed
 midnight-zk	midnightntwrk/midnight-zk	main	code_repo
+passport	midnightntwrk/passport	main	mixed
 joacolinares-kyc-midnight	joacolinares/kyc-midnight	ramaJoaco	code_repo
 #
 # ── partner sources (manifests/midnight/partner/<slug>.yaml) ──────────────────
