@@ -8,10 +8,11 @@
         "additionalProperties": true,
         "properties": {
           "auth_reason": {
-            "description": "AUTH_FAILED only: invalid_credentials (401 — invalid or expired token) or insufficient_tier (403 — valid token, request not permitted for the account, typically an access-tier restriction).",
+            "description": "AUTH_FAILED only: invalid_credentials (401 — invalid/expired Midnight token; recover via `mnm auth github`), insufficient_tier (403 — valid token, request not permitted for the account, typically an access-tier restriction), or invalid_embedding_key (BYOK embed/rerank — VoyageAI rejected your VOYAGE_API_KEY; set a valid VOYAGE_API_KEY, not `mnm auth github`).",
             "enum": [
               "invalid_credentials",
-              "insufficient_tier"
+              "insufficient_tier",
+              "invalid_embedding_key"
             ],
             "type": "string"
           },
@@ -96,9 +97,9 @@
   "error_envelope": {
     "codes": {
       "AUTH_FAILED": {
-        "description": "Authentication or authorization failed on a cloud call (HTTP 401/403). `auth_reason` distinguishes `invalid_credentials` (401 — invalid or expired token; run `mnm auth github` to obtain or refresh one) from `insufficient_tier` (403 — the token is valid but the request is not permitted for the account, typically an access-tier restriction). An identical retry cannot succeed; follow `suggested_next_actions`.",
+        "description": "Authentication or authorization failed (HTTP 401/403). `auth_reason` distinguishes `invalid_credentials` (401 on a Midnight cloud call — invalid or expired token; run `mnm auth github` to obtain or refresh one), `insufficient_tier` (403 — the token is valid but the request is not permitted for the account, typically an access-tier restriction), and `invalid_embedding_key` (BYOK embed/rerank — VoyageAI rejected your `VOYAGE_API_KEY`, a DIFFERENT credential; set a valid `VOYAGE_API_KEY`, NOT `mnm auth github`). An identical retry cannot succeed; follow `suggested_next_actions`.",
         "details": {
-          "auth_reason": "string (`invalid_credentials` | `insufficient_tier`)"
+          "auth_reason": "string (`invalid_credentials` | `insufficient_tier` | `invalid_embedding_key`)"
         },
         "retryable": false
       },
@@ -143,7 +144,7 @@
         "retryable": true
       }
     },
-    "description": "Tool failures are MCP tool results with `isError: true` — not JSON-RPC errors. `structuredContent` carries `{ error: { code, retryable, message, ...details }, suggested_next_actions: [..] }`; the text content block carries agent-facing recovery guidance plus a trimmed `{\"error\":{\"code\",\"retryable\"}}` JSON fence. `code` is a closed set (below). `retryable: false` means an identical retry cannot succeed — recovery requires a different call; follow `suggested_next_actions` or the guidance text. The machine-readable JSON Schema for this envelope is published as the top-level `errorSchema` key in this document (generated from `crates/mnm-mcp/src/render.rs` `ErrorKind` / `ToolFailure`, so its `code` enum, this prose, and the code never drift)."
+    "description": "Tool failures are MCP tool results with `isError: true` — not JSON-RPC errors. `structuredContent` carries `{ error: { code, retryable, message, ...details }, suggested_next_actions: [..] }`; the text content block carries agent-facing recovery guidance plus a trimmed `{\"error\":{\"code\",\"retryable\"}}` JSON fence (for `RATE_LIMITED` the fence additionally carries `retry_after_secs`, so an agent keying off the fence alone still sees how long to wait). `code` is a closed set (below). `retryable: false` means an identical retry cannot succeed — recovery requires a different call; follow `suggested_next_actions` or the guidance text. The machine-readable JSON Schema for this envelope is published as the top-level `errorSchema` key in this document (generated from `crates/mnm-mcp/src/render.rs` `ErrorKind` / `ToolFailure`, so its `code` enum, this prose, and the code never drift)."
   },
   "title": "midnight-manual MCP tools",
   "tools": [

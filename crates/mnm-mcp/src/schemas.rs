@@ -462,7 +462,7 @@ pub fn error_output_schema() -> Value {
                     "remediation": { "type": "string", "description": "EMBEDDING_MODEL_MISMATCH only: concrete next step (cloud-provided)." },
                     "retry_after_secs": { "type": "integer", "description": "RATE_LIMITED only: seconds to WAIT before retrying (from the server's Retry-After header, or a conservative default when absent). Do not retry sooner." },
                     "rate_limit": { "type": "object", "description": "RATE_LIMITED only: snapshot of the server's X-RateLimit-* headers at rejection — any of { limit, remaining, reset_secs } the server sent." },
-                    "auth_reason": { "type": "string", "enum": ["invalid_credentials", "insufficient_tier"], "description": "AUTH_FAILED only: invalid_credentials (401 — invalid or expired token) or insufficient_tier (403 — valid token, request not permitted for the account, typically an access-tier restriction)." }
+                    "auth_reason": { "type": "string", "enum": ["invalid_credentials", "insufficient_tier", "invalid_embedding_key"], "description": "AUTH_FAILED only: invalid_credentials (401 — invalid/expired Midnight token; recover via `mnm auth github`), insufficient_tier (403 — valid token, request not permitted for the account, typically an access-tier restriction), or invalid_embedding_key (BYOK embed/rerank — VoyageAI rejected your VOYAGE_API_KEY; set a valid VOYAGE_API_KEY, not `mnm auth github`)." }
                 },
                 "required": ["code", "retryable", "message"],
                 "additionalProperties": true

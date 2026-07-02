@@ -270,9 +270,12 @@ pub fn rate_limited_failure(snapshot: &RateLimitSnapshot) -> ToolFailure {
         .retry_after_secs
         .unwrap_or(DEFAULT_RATE_LIMIT_BACKOFF_SECS);
     let guidance = if snapshot.retry_after_secs.is_some() {
+        // "at least" (a floor, not a definitive wait): the header can be a
+        // clamped daily-budget window, so a literal agent must not under-wait
+        // and loop (#133 L-a).
         format!(
-            "Rate limited by the cloud (HTTP 429). Wait {retry_after}s before retrying — an \
-             immediate retry will just be rejected again and delay your success. Call the \
+            "Rate limited by the cloud (HTTP 429). Wait at least {retry_after}s before retrying — \
+             an immediate retry will just be rejected again and delay your success. Call the \
              `status` tool to see your remaining rate-limit and token budget."
         )
     } else {
@@ -330,7 +333,7 @@ pub fn auth_failed_failure(status: u16) -> ToolFailure {
              retry will not succeed."
                 .to_owned(),
             NextAction::user(
-                "This request is not permitted for your account (typically an access-tier restriction); an identical retry will not succeed.",
+                "Ask the operator whether your account/tier has access to this resource.",
             ),
         )
     } else {
@@ -350,6 +353,58 @@ pub fn auth_failed_failure(status: u16) -> ToolFailure {
         guidance,
         details: serde_json::json!({ "auth_reason": auth_reason }),
         suggested_next_actions: vec![action],
+    }
+}
+
+/// Build the BYOK-embedding `RATE_LIMITED` failure — VoyageAI throttled a BYOK
+/// embed/rerank call directly. Retryable (wait-and-retry is valid), but the
+/// guidance names the embedding PROVIDER and does NOT point at `status` (which
+/// reports the Midnight budget, not VoyageAI's) or "the cloud" (#133 BYOK). The
+/// embed client can't read `Retry-After`, so the advised wait is the
+/// conservative default backoff, phrased as a floor.
+///
+/// Public so the canonical agent-facing strings are a single source of truth the
+/// tests assert against.
+#[must_use]
+pub fn embedding_rate_limited_failure() -> ToolFailure {
+    let retry_after = DEFAULT_RATE_LIMIT_BACKOFF_SECS;
+    ToolFailure {
+        kind: ErrorKind::RateLimited,
+        message: "rate limited by the embedding provider (VoyageAI)".to_owned(),
+        guidance: format!(
+            "Rate limited by the embedding provider (VoyageAI). Wait at least {retry_after}s \
+             before retrying, backing off further if it persists — an immediate retry will just \
+             be rejected again."
+        ),
+        details: serde_json::json!({ "retry_after_secs": retry_after }),
+        suggested_next_actions: vec![],
+    }
+}
+
+/// Build the BYOK-embedding `AUTH_FAILED` failure — VoyageAI rejected the user's
+/// `VOYAGE_API_KEY` on a BYOK embed/rerank call. That key is a DIFFERENT
+/// credential from the Midnight read-uplift token, so `retryable: false` and the
+/// guidance names `VOYAGE_API_KEY`, NEVER `mnm auth github` (which would send the
+/// agent to refresh the wrong credential and dead-end loop). `auth_reason` is the
+/// dedicated `invalid_embedding_key` (#133 BYOK).
+///
+/// Public so the canonical agent-facing strings are a single source of truth the
+/// tests assert against.
+#[must_use]
+pub fn embedding_auth_failed_failure(status: u16) -> ToolFailure {
+    ToolFailure {
+        kind: ErrorKind::AuthFailed,
+        message: format!("embedding provider rejected VOYAGE_API_KEY (HTTP {status})"),
+        guidance: format!(
+            "VoyageAI rejected your VOYAGE_API_KEY (HTTP {status}) — the key is invalid or \
+             expired. Set a valid VOYAGE_API_KEY, then retry. (This is your embedding-provider \
+             key, separate from your Midnight access token — refreshing the Midnight token will \
+             not help here.)"
+        ),
+        details: serde_json::json!({ "auth_reason": "invalid_embedding_key" }),
+        suggested_next_actions: vec![NextAction::user(
+            "Set a valid VOYAGE_API_KEY (your VoyageAI embedding key is invalid or expired), then retry.",
+        )],
     }
 }
 
@@ -635,54 +690,52 @@ async fn run_search_dispatch(params: &ToolCallParams, state: &ServerState) -> To
                 outcome: Outcome::Ok,
             }
         }
-        Err(tools::SearchError::Mismatch {
+        // All failure variants render through one place (`search_failure`) so the
+        // dispatcher stays small and the search error taxonomy lives together.
+        Err(e) => ToolResponse {
+            result: search_failure(e).into_result(),
+            telemetry: None,
+            rerank: None,
+            outcome: Outcome::Error,
+        },
+    }
+}
+
+/// Map a [`tools::SearchError`] to its agent-facing [`ToolFailure`]. Split out of
+/// [`run_search_dispatch`] so the dispatcher stays under the line cap and the
+/// full search error taxonomy — including the BYOK vs proxy split (#133) — is
+/// visible in one match.
+fn search_failure(e: tools::SearchError) -> crate::render::ToolFailure {
+    use crate::render::ToolFailure;
+    match e {
+        tools::SearchError::Mismatch {
             corpus_model,
             client_model,
             message,
             remediation,
-        }) => ToolResponse {
-            result: ToolFailure {
-                kind: ErrorKind::EmbeddingModelMismatch,
-                message,
-                guidance: remediation.clone(),
-                details: serde_json::json!({
-                    "corpus_model": corpus_model,
-                    "client_model": client_model,
-                    "remediation": remediation,
-                }),
-                // No suggested tool call: the mismatch is corpus-side (the
-                // client embeds via the live `/v1/models/active` wire id), so
-                // the cloud-provided `remediation` string is the next step.
-                suggested_next_actions: vec![],
-            }
-            .into_result(),
-            telemetry: None,
-            rerank: None,
-            outcome: Outcome::Error,
+        } => ToolFailure {
+            kind: ErrorKind::EmbeddingModelMismatch,
+            message,
+            guidance: remediation.clone(),
+            details: serde_json::json!({
+                "corpus_model": corpus_model,
+                "client_model": client_model,
+                "remediation": remediation,
+            }),
+            // No suggested tool call: the mismatch is corpus-side (the client
+            // embeds via the live `/v1/models/active` wire id), so the
+            // cloud-provided `remediation` string is the next step.
+            suggested_next_actions: vec![],
         },
-        Err(tools::SearchError::RateLimited(snapshot)) => ToolResponse {
-            result: rate_limited_failure(&snapshot).into_result(),
-            telemetry: None,
-            rerank: None,
-            outcome: Outcome::Error,
-        },
-        Err(tools::SearchError::AuthFailed { status }) => ToolResponse {
-            result: auth_failed_failure(status).into_result(),
-            telemetry: None,
-            rerank: None,
-            outcome: Outcome::Error,
-        },
-        Err(tools::SearchError::Cloud(msg)) => ToolResponse {
-            result: ToolFailure::simple(
-                ErrorKind::CloudError,
-                msg,
-                "Search failed upstream; retry shortly.",
-            )
-            .into_result(),
-            telemetry: None,
-            rerank: None,
-            outcome: Outcome::Error,
-        },
+        tools::SearchError::RateLimited(snapshot) => rate_limited_failure(&snapshot),
+        tools::SearchError::AuthFailed { status } => auth_failed_failure(status),
+        tools::SearchError::EmbeddingRateLimited => embedding_rate_limited_failure(),
+        tools::SearchError::EmbeddingAuthFailed { status } => embedding_auth_failed_failure(status),
+        tools::SearchError::Cloud(msg) => ToolFailure::simple(
+            ErrorKind::CloudError,
+            msg,
+            "Search failed upstream; retry shortly.",
+        ),
     }
 }
 

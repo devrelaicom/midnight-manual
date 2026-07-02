@@ -547,7 +547,6 @@ fn read_rate_limit_snapshot(headers: &reqwest::header::HeaderMap) -> RateLimitSn
 /// `snapshot` is taken by value because the `429` arm moves it into
 /// `CloudError::RateLimited`; the other arms simply drop it — so a by-reference
 /// signature would force a needless clone on the one path that matters.
-#[allow(clippy::needless_pass_by_value)]
 fn classify_status(
     status: reqwest::StatusCode,
     snapshot: RateLimitSnapshot,

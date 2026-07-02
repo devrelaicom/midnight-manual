@@ -1175,7 +1175,10 @@ async fn dispatch_rate_limited_429_with_retry_after_produces_rate_limited_envelo
     let text = match &result.content[0] {
         mnm_mcp::protocol::ContentBlock::Text { text } => text.clone(),
     };
-    assert!(text.contains("Wait 30s"), "guidance must name the wait: {text}");
+    assert!(
+        text.contains("Wait at least 30s"),
+        "guidance must name the wait as a floor: {text}"
+    );
     assert!(
         text.contains("just be rejected again"),
         "guidance must explain why an immediate retry is pointless: {text}"
@@ -1242,6 +1245,49 @@ async fn dispatch_rate_limited_429_without_retry_after_uses_default_backoff() {
         !text.contains("burn your budget"),
         "must not repeat the false budget-burn claim"
     );
+    // The trimmed fence carries the (default) wait hint on the no-header path too.
+    assert!(
+        text.contains(&format!(
+            "\"retry_after_secs\":{}",
+            mnm_mcp::server::DEFAULT_RATE_LIMIT_BACKOFF_SECS
+        )),
+        "no-header trimmed fence must still carry retry_after_secs: {text}"
+    );
+}
+
+/// An absurd upstream `Retry-After` is clamped end-to-end: the rendered envelope
+/// shows the 1-hour ceiling, never the raw value, so a literal agent can't be
+/// wedged (#133 L1 / L-a).
+#[tokio::test]
+async fn dispatch_rate_limited_clamps_absurd_retry_after_in_envelope() {
+    let server = MockServer::start().await;
+    let id = "66666666-6666-6666-6666-666666666666";
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/chunks/{id}/parents")))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .insert_header("retry-after", "999999999")
+                .set_body_json(
+                    json!({ "error": { "code": "rate_limited", "message": "slow down" } }),
+                ),
+        )
+        .mount(&server)
+        .await;
+    let client = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
+
+    let err = run_passthrough_id(&json!({ "id": id }), &client, PassthroughKind::Parents)
+        .await
+        .unwrap_err();
+    let snapshot = match err {
+        PassthroughError::RateLimited(s) => s,
+        other => panic!("expected RateLimited, got {other:?}"),
+    };
+    let sc = mnm_mcp::server::rate_limited_failure(&snapshot)
+        .into_result()
+        .structured_content
+        .unwrap();
+    // 3600 = MAX_RATE_LIMIT_BACKOFF_SECS (one hour); never the raw 999999999.
+    assert_eq!(sc["error"]["retry_after_secs"], 3600);
 }
 
 /// 401 → `AUTH_FAILED`, `retryable: false`, `auth_reason: invalid_credentials`,
