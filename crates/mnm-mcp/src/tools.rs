@@ -535,6 +535,29 @@ impl From<CloudError> for SearchError {
     }
 }
 
+/// Classify an embedding / rerank [`VoyageError`] into a [`SearchError`],
+/// preserving `429` and `401`/`403` so the DEFAULT (no-BYOK) search path —
+/// where the cloud's `/v1/embeddings` proxy is the FIRST cloud call — surfaces
+/// `RATE_LIMITED` / `AUTH_FAILED` instead of collapsing every failure into the
+/// retryable `CLOUD_ERROR` "retry shortly" the taxonomy work removes (#133 M1).
+///
+/// The embed client does NOT capture `Retry-After` / `X-RateLimit-*` headers,
+/// so a rate-limited embed carries a default [`RateLimitSnapshot`] — the server
+/// layer then advises its conservative default backoff. That is the accepted,
+/// honest degradation; threading header capture through `mnm_embedding` is out
+/// of scope. `context` labels the failing stage for the `Cloud` fallback.
+fn voyage_search_error(context: &str, e: voyage::VoyageError) -> SearchError {
+    match e {
+        voyage::VoyageError::Status { status: 429, .. } => {
+            SearchError::RateLimited(RateLimitSnapshot::default())
+        }
+        voyage::VoyageError::Status {
+            status: status @ (401 | 403), ..
+        } => SearchError::AuthFailed { status },
+        other => SearchError::Cloud(format!("{context}: {other}")),
+    }
+}
+
 const DEFAULT_LIMIT: u32 = 10;
 const MAX_LIMIT: u32 = 50;
 /// `advanced_search` accepts at most this many query variants (RRF fusion).
@@ -872,7 +895,8 @@ fn build_search_request(
 ///
 /// # Errors
 ///
-/// Returns [`SearchError::Cloud`] on any embedding or active-model failure.
+/// Returns a [`SearchError`] on embedding / active-model failure: `RateLimited`
+/// on 429, `AuthFailed` on 401/403, else `Cloud`.
 async fn build_embedded_pairs(
     parsed: &ParsedSearchArgs,
     models: &mnm_core::config::ModelsConfig,
@@ -970,7 +994,8 @@ async fn build_embedded_pairs(
 ///
 /// # Errors
 ///
-/// Returns [`SearchError::Cloud`] on any embedding failure.
+/// Returns a [`SearchError`] on embedding failure: `RateLimited` on 429,
+/// `AuthFailed` on 401/403 (see [`voyage_search_error`]), else `Cloud`.
 async fn embed_general_queries(
     queries: &[String],
     identity: &mnm_core::embedder_identity::EmbedderIdentity,
@@ -1004,7 +1029,7 @@ async fn embed_general_queries(
         )
         .await
     }
-    .map_err(|e| SearchError::Cloud(format!("embed general failed: {e}")))?;
+    .map_err(|e| voyage_search_error("embed general failed", e))?;
     Ok(embedded.vectors)
 }
 
@@ -1018,7 +1043,8 @@ async fn embed_general_queries(
 ///
 /// # Errors
 ///
-/// Returns [`SearchError::Cloud`] on any embedding failure.
+/// Returns a [`SearchError`] on embedding failure: `RateLimited` on 429,
+/// `AuthFailed` on 401/403 (see [`voyage_search_error`]), else `Cloud`.
 async fn embed_code_queries(
     queries: &[String],
     identity: &mnm_core::embedder_identity::EmbedderIdentity,
@@ -1047,7 +1073,7 @@ async fn embed_code_queries(
         )
         .await
     }
-    .map_err(|e| SearchError::Cloud(format!("embed code failed: {e}")))?;
+    .map_err(|e| voyage_search_error("embed code failed", e))?;
     Ok(embedded.vectors)
 }
 
@@ -1303,7 +1329,8 @@ fn parse_code_mode_arg(
 ///
 /// # Errors
 ///
-/// Returns [`SearchError::Cloud`] on a Voyage rerank failure.
+/// Returns a [`SearchError`] on a Voyage rerank failure: `RateLimited` on 429,
+/// `AuthFailed` on 401/403 (see [`voyage_search_error`]), else `Cloud`.
 async fn rerank_results(
     parsed: &ParsedSearchArgs,
     results: Vec<serde_json::Value>,
@@ -1347,7 +1374,7 @@ async fn rerank_results(
     let out = reranker
         .rerank(composed, docs, None)
         .await
-        .map_err(|e| SearchError::Cloud(format!("rerank failed: {e}")))?;
+        .map_err(|e| voyage_search_error("rerank failed", e))?;
 
     LOADED_MARKERS.mark_reranker();
     Ok((rerank_postprocess(results, &out.results, limit), out.total_tokens))

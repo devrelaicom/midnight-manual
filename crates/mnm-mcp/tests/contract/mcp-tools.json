@@ -8,9 +8,9 @@
         "additionalProperties": true,
         "properties": {
           "auth_reason": {
-            "description": "AUTH_FAILED only: no_credentials (401 — missing/invalid/expired token) or insufficient_tier (403 — valid token, tier not permitted).",
+            "description": "AUTH_FAILED only: invalid_credentials (401 — invalid or expired token) or insufficient_tier (403 — valid token, request not permitted for the account, typically an access-tier restriction).",
             "enum": [
-              "no_credentials",
+              "invalid_credentials",
               "insufficient_tier"
             ],
             "type": "string"
@@ -96,9 +96,9 @@
   "error_envelope": {
     "codes": {
       "AUTH_FAILED": {
-        "description": "Authentication or authorization failed on a cloud call (HTTP 401/403). `auth_reason` distinguishes `no_credentials` (401 — missing/invalid/expired token; run `mnm auth github` to obtain or refresh one) from `insufficient_tier` (403 — the token is valid but its tier is not permitted). An identical retry cannot succeed; follow `suggested_next_actions`.",
+        "description": "Authentication or authorization failed on a cloud call (HTTP 401/403). `auth_reason` distinguishes `invalid_credentials` (401 — invalid or expired token; run `mnm auth github` to obtain or refresh one) from `insufficient_tier` (403 — the token is valid but the request is not permitted for the account, typically an access-tier restriction). An identical retry cannot succeed; follow `suggested_next_actions`.",
         "details": {
-          "auth_reason": "string (`no_credentials` | `insufficient_tier`)"
+          "auth_reason": "string (`invalid_credentials` | `insufficient_tier`)"
         },
         "retryable": false
       },
@@ -135,7 +135,7 @@
         "retryable": false
       },
       "RATE_LIMITED": {
-        "description": "The cloud rate-limited this request (HTTP 429). `retry_after_secs` is how long to WAIT before retrying (from the server's Retry-After header, or a conservative default when absent) — do NOT retry immediately, as that fails and burns budget. `rate_limit` snapshots the X-RateLimit-* headers. Call the `status` tool to see your standing budget.",
+        "description": "The cloud rate-limited this request (HTTP 429). `retry_after_secs` is how long to WAIT before retrying (from the server's Retry-After header, or a conservative default when absent) — an immediate retry will just be rejected again and delay success. `rate_limit` snapshots the X-RateLimit-* headers. Call the `status` tool to see your standing budget.",
         "details": {
           "rate_limit": "object ({ limit, remaining, reset_secs } — whichever X-RateLimit-* headers the server sent)",
           "retry_after_secs": "integer (seconds to wait before retrying)"

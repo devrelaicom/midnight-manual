@@ -248,10 +248,14 @@ const fn passthrough_outcome(e: &tools::PassthroughError) -> Outcome {
     }
 }
 
-/// Backoff to advise on a 429 when the server sent no `Retry-After` header
-/// (e.g. the token-budget rejection path). Conservative but not punitive — the
-/// per-second rate buckets reset in low single-digit seconds.
-const DEFAULT_RATE_LIMIT_BACKOFF_SECS: u64 = 5;
+/// Backoff to advise on a 429 when no `Retry-After` is available: either the
+/// cloud sent none, or the request failed on the embed/rerank path (which routes
+/// through `mnm_embedding` and does not capture response headers, so it always
+/// lands here). Conservative but not punitive — the per-second rate buckets
+/// reset in low single-digit seconds.
+///
+/// Public so the wait floor is a single source of truth the tests assert on.
+pub const DEFAULT_RATE_LIMIT_BACKOFF_SECS: u64 = 5;
 
 /// Build the `RATE_LIMITED` failure (HTTP 429). `retryable: true`, but the
 /// guidance and `suggested_next_actions` tell the agent to WAIT the advised
@@ -267,15 +271,16 @@ pub fn rate_limited_failure(snapshot: &RateLimitSnapshot) -> ToolFailure {
         .unwrap_or(DEFAULT_RATE_LIMIT_BACKOFF_SECS);
     let guidance = if snapshot.retry_after_secs.is_some() {
         format!(
-            "Rate limited by the cloud. Wait {retry_after}s before retrying — do NOT retry \
-             immediately; an immediate retry will fail and burn your budget. Call the `status` \
-             tool to see your remaining rate-limit and token budget."
+            "Rate limited by the cloud (HTTP 429). Wait {retry_after}s before retrying — an \
+             immediate retry will just be rejected again and delay your success. Call the \
+             `status` tool to see your remaining rate-limit and token budget."
         )
     } else {
         format!(
-            "Rate limited by the cloud. Wait at least {retry_after}s before retrying (back off \
-             further if it persists) — do NOT retry immediately; an immediate retry will fail \
-             and burn your budget. Call the `status` tool to see your remaining budget."
+            "Rate limited by the cloud (HTTP 429). Wait at least {retry_after}s before retrying \
+             (back off further if it persists) — an immediate retry will just be rejected again \
+             and delay your success. Call the `status` tool to see your remaining rate-limit and \
+             token budget."
         )
     };
     let mut details = serde_json::Map::new();
@@ -307,10 +312,11 @@ pub fn rate_limited_failure(snapshot: &RateLimitSnapshot) -> ToolFailure {
 }
 
 /// Build the `AUTH_FAILED` failure (HTTP 401/403). `retryable: false` — an
-/// identical retry cannot succeed. 401 means missing/invalid/expired
-/// credentials (recover via `mnm auth github`); 403 means the token is valid
-/// but its tier is not permitted. The distinguishing `auth_reason` is carried
-/// into the error object (issue #133).
+/// identical retry cannot succeed. 401 means invalid/expired credentials
+/// (recover via `mnm auth github`); 403 means the credentials are valid but the
+/// request is not permitted for the account (typically an access-tier
+/// restriction). The distinguishing `auth_reason` is carried into the error
+/// object (issue #133).
 ///
 /// Public so the canonical agent-facing strings have a single source of truth
 /// the tests assert against (rather than re-deriving them).
@@ -319,20 +325,19 @@ pub fn auth_failed_failure(status: u16) -> ToolFailure {
     let (auth_reason, guidance, action) = if status == 403 {
         (
             "insufficient_tier",
-            "Authorization failed (HTTP 403): your credentials are valid, but your tier is not \
-             permitted for this request. This will not change on retry — request a higher access \
-             tier. Retrying with the same token will keep failing."
+            "Authorization failed (HTTP 403): your credentials are valid, but this request is not \
+             permitted for your account (typically an access-tier restriction). An identical \
+             retry will not succeed."
                 .to_owned(),
             NextAction::user(
-                "Request a higher access tier; the current token's tier is insufficient for this request.",
+                "This request is not permitted for your account (typically an access-tier restriction); an identical retry will not succeed.",
             ),
         )
     } else {
         (
-            "no_credentials",
-            "Authentication failed (HTTP 401): your credentials are missing, invalid, or expired. \
-             Run `mnm auth github` to obtain or refresh a read-uplift token, then retry. Retrying \
-             with the same (or no) credentials will keep failing."
+            "invalid_credentials",
+            "Authentication failed (HTTP 401): your credentials are invalid or expired. Run \
+             `mnm auth github` to obtain or refresh a read-uplift token, then retry."
                 .to_owned(),
             NextAction::user(
                 "Run `mnm auth github` to obtain or refresh your access token, then retry the request.",

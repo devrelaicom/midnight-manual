@@ -1166,17 +1166,31 @@ async fn dispatch_rate_limited_429_with_retry_after_produces_rate_limited_envelo
     assert_eq!(sc["error"]["code"], "RATE_LIMITED");
     assert_eq!(sc["error"]["retryable"], true, "429 is retryable — but only after waiting");
     assert_eq!(sc["error"]["retry_after_secs"], 30, "populated from Retry-After");
+    // The full X-RateLimit snapshot propagates (all three fields, not just remaining).
     assert_eq!(sc["error"]["rate_limit"]["remaining"], 0);
-    // Guidance must tell the agent to WAIT, not "retry shortly".
+    assert_eq!(sc["error"]["rate_limit"]["limit"], 5);
+    assert_eq!(sc["error"]["rate_limit"]["reset_secs"], 2);
+    // Guidance must tell the agent to WAIT, not "retry shortly", and must NOT
+    // repeat the false "burn your budget" claim (a rejected 429 charges nothing).
     let text = match &result.content[0] {
         mnm_mcp::protocol::ContentBlock::Text { text } => text.clone(),
     };
     assert!(text.contains("Wait 30s"), "guidance must name the wait: {text}");
     assert!(
-        text.contains("do NOT retry immediately"),
-        "guidance must forbid immediate retry"
+        text.contains("just be rejected again"),
+        "guidance must explain why an immediate retry is pointless: {text}"
     );
     assert!(!text.contains("retry shortly"), "must not carry the old CLOUD_ERROR advice");
+    assert!(
+        !text.contains("burn your budget"),
+        "must not repeat the false budget-burn claim"
+    );
+    // The trimmed JSON fence must carry the wait hint too, so an agent keying off
+    // the fence alone (retryable: true) still learns how long to wait (#133 M4).
+    assert!(
+        text.contains("\"retry_after_secs\":30"),
+        "trimmed fence must include retry_after_secs: {text}"
+    );
     // Recovery points at the `status` tool.
     let actions = sc["suggested_next_actions"].as_array().unwrap();
     assert!(actions.iter().any(|a| a["tool"] == "status"), "must suggest the status tool");
@@ -1212,20 +1226,26 @@ async fn dispatch_rate_limited_429_without_retry_after_uses_default_backoff() {
     let sc = result.structured_content.unwrap();
     assert_eq!(sc["error"]["code"], "RATE_LIMITED");
     assert_eq!(sc["error"]["retryable"], true);
-    // Default backoff is surfaced so the agent still has a concrete number.
+    // The default backoff floor is surfaced, not just any positive number — the
+    // agent must be told to wait at least the conservative minimum (#133 L5).
     assert!(
-        sc["error"]["retry_after_secs"].as_u64().unwrap() >= 1,
-        "a default backoff is set"
+        sc["error"]["retry_after_secs"].as_u64().unwrap()
+            >= mnm_mcp::server::DEFAULT_RATE_LIMIT_BACKOFF_SECS,
+        "the no-header default must be at least the backoff floor"
     );
     let text = match &result.content[0] {
         mnm_mcp::protocol::ContentBlock::Text { text } => text.clone(),
     };
     assert!(text.contains("at least"), "no-header guidance is phrased as a minimum: {text}");
-    assert!(text.contains("do NOT retry immediately"));
+    assert!(text.contains("just be rejected again"));
+    assert!(
+        !text.contains("burn your budget"),
+        "must not repeat the false budget-burn claim"
+    );
 }
 
-/// 401 → `AUTH_FAILED`, `retryable: false`, `auth_reason: no_credentials`, and
-/// guidance naming the concrete recovery (`mnm auth github`).
+/// 401 → `AUTH_FAILED`, `retryable: false`, `auth_reason: invalid_credentials`,
+/// and guidance naming the concrete recovery (`mnm auth github`).
 #[tokio::test]
 async fn dispatch_unauthorized_401_produces_auth_failed_envelope() {
     let server = MockServer::start().await;
@@ -1258,12 +1278,16 @@ async fn dispatch_unauthorized_401_produces_auth_failed_envelope() {
     let sc = result.structured_content.unwrap();
     assert_eq!(sc["error"]["code"], "AUTH_FAILED");
     assert_eq!(sc["error"]["retryable"], false, "401 is not retryable without new credentials");
-    assert_eq!(sc["error"]["auth_reason"], "no_credentials");
+    assert_eq!(sc["error"]["auth_reason"], "invalid_credentials");
     let text = match &result.content[0] {
         mnm_mcp::protocol::ContentBlock::Text { text } => text.clone(),
     };
     assert!(text.contains("mnm auth github"), "guidance names the recovery command: {text}");
     assert!(text.contains("401"));
+    // A missing header degrades to anonymous (never 401); only present-but-bad
+    // credentials 401, so the guidance says "invalid or expired", not "missing".
+    assert!(text.contains("invalid or expired"), "guidance describes the 401 cause: {text}");
+    assert!(!text.contains("missing"), "a 401 is never a *missing*-credential case");
 }
 
 /// 403 → `AUTH_FAILED`, `retryable: false`, `auth_reason: insufficient_tier`
@@ -1300,7 +1324,13 @@ async fn dispatch_forbidden_403_produces_insufficient_tier_envelope() {
         mnm_mcp::protocol::ContentBlock::Text { text } => text.clone(),
     };
     assert!(text.contains("403"));
-    assert!(text.contains("higher access tier"), "guidance names the tier recovery: {text}");
+    // Hedged: "request a higher access tier" is a near-dead-end from the tool
+    // surface, so the guidance describes the restriction rather than commanding
+    // an unreachable action (#133 L4).
+    assert!(
+        text.contains("access-tier restriction"),
+        "guidance hedges to the likely cause: {text}"
+    );
 }
 
 /// Search path: a 429 from `/v1/search` is preserved as
@@ -1346,4 +1376,56 @@ async fn dispatch_search_rate_limited_429_maps_to_search_error() {
         SearchError::RateLimited(s) => assert_eq!(s.retry_after_secs, Some(30)),
         other => panic!("expected SearchError::RateLimited, got {other:?}"),
     }
+}
+
+/// Search path: a 403 from `/v1/search` is preserved as
+/// `SearchError::AuthFailed { status: 403 }` (not collapsed to `Cloud`), then
+/// rendered as `AUTH_FAILED` / `insufficient_tier`. Guards the search-path
+/// `From<CloudError>` impl, which is separate from the passthrough one — a slip
+/// there would silently re-collapse search-path auth to `CLOUD_ERROR` (#133 M2).
+/// fts mode keeps the only cloud call on `POST /v1/search`.
+#[tokio::test]
+async fn dispatch_search_forbidden_403_maps_to_search_error() {
+    use mnm_mcp::server::ServerConfig;
+    use mnm_mcp::tools::{run_search, SearchError};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/search"))
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({
+            "error": { "code": "forbidden", "message": "tier not permitted", "remediation": "request a higher tier" },
+            "request_id": "saf-001",
+        })))
+        .mount(&server)
+        .await;
+
+    let mut cfg = ServerConfig::with_defaults(std::path::PathBuf::from("/tmp/test-mcp-cache"));
+    cfg.cloud_url.clone_from(&server.uri());
+    server.uri().clone_into(&mut cfg.telemetry_endpoint);
+    let cloud = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
+
+    let parsed = mnm_mcp::tools::ParsedSearchArgs {
+        queries: vec!["compact contract".to_owned()],
+        limit: 10,
+        rerank: false,
+        filters: None,
+        mode: "fts",
+        code_mode: None,
+        rerank_instructions: None,
+        version_match: None,
+    };
+    let err = run_search(&parsed, &cfg, &cloud).await.unwrap_err();
+    let status = match err {
+        SearchError::AuthFailed { status } => status,
+        other => panic!("expected SearchError::AuthFailed, got {other:?}"),
+    };
+    assert_eq!(status, 403);
+
+    let sc = mnm_mcp::server::auth_failed_failure(status)
+        .into_result()
+        .structured_content
+        .unwrap();
+    assert_eq!(sc["error"]["code"], "AUTH_FAILED");
+    assert_eq!(sc["error"]["retryable"], false);
+    assert_eq!(sc["error"]["auth_reason"], "insufficient_tier");
 }

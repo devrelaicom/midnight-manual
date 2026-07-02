@@ -174,23 +174,23 @@ pub enum CloudError {
     NotFound(String),
     /// 429 rate limited. Carries the `Retry-After` / `X-RateLimit-*` snapshot
     /// read from the response headers so the MCP layer can tell the agent to
-    /// WAIT the advised delay rather than retry immediately (issue #133).
+    /// WAIT the advised delay rather than retry immediately (issue #133). The
+    /// upstream body is deliberately NOT captured — it is never surfaced to the
+    /// agent, so retaining it would only be a latent leak footgun.
     #[error("cloud rate limited")]
     RateLimited {
         /// Rate-limit headers captured before the body was consumed.
         snapshot: RateLimitSnapshot,
-        /// Best-effort body string for diagnostics.
-        body: String,
     },
     /// 401/403 authentication/authorization failure. `status` distinguishes
-    /// missing/invalid/expired credentials (401) from a valid credential with
-    /// an insufficient tier (403), so the MCP layer can name the right recovery.
+    /// invalid/expired credentials (401) from a valid credential with an
+    /// insufficient tier (403), so the MCP layer can name the right recovery.
+    /// The upstream body is deliberately NOT captured (never surfaced to the
+    /// agent; a raw auth-error body is exactly the sort of thing not to echo).
     #[error("cloud auth failed (HTTP {status})")]
     AuthFailed {
         /// The failing status — `401` or `403`.
         status: u16,
-        /// Best-effort body string for diagnostics.
-        body: String,
     },
     /// 409 embedding-model mismatch — surfaced specially so the MCP layer can
     /// emit a typed JSON-RPC error carrying the cloud-provided remediation.
@@ -510,6 +510,13 @@ impl CloudClient {
     }
 }
 
+/// Upper clamp on any upstream-supplied wait/reset seconds. `Retry-After` and
+/// `X-RateLimit-Reset` are attacker-influenceable; without a ceiling a parseable
+/// but absurd value (e.g. `u64::MAX`) would be echoed into the agent's wait hint
+/// and wedge an agent that honors it. One hour is far beyond any real per-second
+/// bucket reset, so clamping here can only ever cap a hostile/broken value.
+const MAX_RATE_LIMIT_BACKOFF_SECS: u64 = 3600;
+
 /// Read the server's rate-limit headers (`Retry-After`, `X-RateLimit-*`) into a
 /// [`RateLimitSnapshot`]. MUST be called BEFORE the response body is consumed
 /// (`resp.bytes()` takes `self`), so the 429 path captures the wait hint the
@@ -519,10 +526,14 @@ fn read_rate_limit_snapshot(headers: &reqwest::header::HeaderMap) -> RateLimitSn
         headers.get(name)?.to_str().ok()?.trim().parse().ok()
     }
     RateLimitSnapshot {
-        retry_after_secs: header_u64(headers, "retry-after"),
+        // Clamp the two duration-valued headers — they gate how long an agent
+        // waits, so a hostile/absurd value must not be able to wedge it (#133).
+        retry_after_secs: header_u64(headers, "retry-after")
+            .map(|v| v.min(MAX_RATE_LIMIT_BACKOFF_SECS)),
         limit: header_u64(headers, "x-ratelimit-limit"),
         remaining: header_u64(headers, "x-ratelimit-remaining"),
-        reset_secs: header_u64(headers, "x-ratelimit-reset"),
+        reset_secs: header_u64(headers, "x-ratelimit-reset")
+            .map(|v| v.min(MAX_RATE_LIMIT_BACKOFF_SECS)),
     }
 }
 
@@ -532,17 +543,24 @@ fn read_rate_limit_snapshot(headers: &reqwest::header::HeaderMap) -> RateLimitSn
 /// everything else (5xx, unexpected 4xx) → [`CloudError::Status`]. The `409`
 /// embedding-model mismatch is handled by the caller before this, since only
 /// `/v1/search` can raise it.
+///
+/// `snapshot` is taken by value because the `429` arm moves it into
+/// `CloudError::RateLimited`; the other arms simply drop it — so a by-reference
+/// signature would force a needless clone on the one path that matters.
+#[allow(clippy::needless_pass_by_value)]
 fn classify_status(
     status: reqwest::StatusCode,
     snapshot: RateLimitSnapshot,
     body_bytes: &[u8],
 ) -> CloudError {
-    let body = String::from_utf8_lossy(body_bytes).into_owned();
     match status.as_u16() {
-        429 => CloudError::RateLimited { snapshot, body },
-        401 | 403 => CloudError::AuthFailed { status: status.as_u16(), body },
-        404 => CloudError::NotFound(body),
-        other => CloudError::Status { status: other, body },
+        429 => CloudError::RateLimited { snapshot },
+        401 | 403 => CloudError::AuthFailed { status: status.as_u16() },
+        404 => CloudError::NotFound(String::from_utf8_lossy(body_bytes).into_owned()),
+        other => CloudError::Status {
+            status: other,
+            body: String::from_utf8_lossy(body_bytes).into_owned(),
+        },
     }
 }
 
@@ -656,6 +674,22 @@ mod tests {
         // A non-numeric Retry-After (HTTP-date form) degrades to None, not a panic.
         let h = headers(&[("retry-after", "Wed, 21 Oct 2026 07:28:00 GMT")]);
         assert_eq!(read_rate_limit_snapshot(&h).retry_after_secs, None);
+    }
+
+    #[test]
+    fn read_snapshot_clamps_absurd_duration_headers() {
+        // An upstream-influenced, parseable-but-absurd duration must be capped so
+        // it cannot wedge an agent that honors the wait (#133 L1). Non-duration
+        // headers (limit/remaining) are echoed verbatim — they are not waits.
+        let h = headers(&[
+            ("retry-after", "18446744073709551615"), // u64::MAX
+            ("x-ratelimit-reset", "999999999"),
+            ("x-ratelimit-remaining", "0"),
+        ]);
+        let s = read_rate_limit_snapshot(&h);
+        assert_eq!(s.retry_after_secs, Some(MAX_RATE_LIMIT_BACKOFF_SECS));
+        assert_eq!(s.reset_secs, Some(MAX_RATE_LIMIT_BACKOFF_SECS));
+        assert_eq!(s.remaining, Some(0), "non-duration headers are not clamped");
     }
 
     #[test]

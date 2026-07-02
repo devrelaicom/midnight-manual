@@ -1542,9 +1542,21 @@ impl ToolFailure {
             "error": error,
             "suggested_next_actions": suggested_next_actions_value(&self.suggested_next_actions),
         });
-        let trimmed =
-            json!({ "error": { "code": self.kind.code(), "retryable": self.kind.retryable() } });
-        let trimmed = serde_json::to_string(&trimmed).unwrap_or_else(|_| "{}".to_owned());
+        let mut trimmed_error =
+            json!({ "code": self.kind.code(), "retryable": self.kind.retryable() });
+        // RATE_LIMITED: echo the wait hint into the trimmed fence too, so an
+        // agent keying off the fence alone (retryable: true) still sees how long
+        // to wait — otherwise the trimmed line reproduces the exact footgun #133
+        // removes (retryable with no delay). (#133 M4)
+        if matches!(self.kind, ErrorKind::RateLimited) {
+            if let (Value::Object(tmap), Some(secs)) =
+                (&mut trimmed_error, self.details.get("retry_after_secs"))
+            {
+                tmap.insert("retry_after_secs".to_owned(), secs.clone());
+            }
+        }
+        let trimmed = serde_json::to_string(&json!({ "error": trimmed_error }))
+            .unwrap_or_else(|_| "{}".to_owned());
         ToolCallResult {
             content: vec![ContentBlock::Text {
                 text: format!("{}\n\n```json\n{trimmed}\n```", self.guidance),
