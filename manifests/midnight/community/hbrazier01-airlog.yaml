@@ -1,0 +1,40 @@
+manifest_version: 1
+root:
+  name: hbrazier01-airlog
+  path: .
+  exclude:
+    # UNDEPLOYED v2 contract: requireOwner() gates grant/revoke/supersede on a spoofable
+    # ownPublicKey() comparison against public ownerId state (spoofable-auth anti-pattern).
+    # The DEPLOYED contract (airlog.compact) is kept; this v2 must not be surfaced.
+    - "compact/contracts/airlog/src/airlog-anchor.compact"
+    # Borrowed third-party "Night Skills" boilerplate that misdescribes this project.
+    - "skills/**"
+    - "AGENTS.md"
+    # data + local level-db + lockfiles (noise / generated)
+    - "data/**"
+    - "**/*.ldb"
+    - "package-lock.json"
+    - "yarn.lock"
+  provenance:
+    attribution: community
+    verified: false
+    tags: [trust:low]
+    verification_notes: >-
+      Community-contributed repository; unverified and unaudited by the Midnight Foundation.
+      A real aviation-logbook ("PilotLog") that anchors off-chain record hashes on Midnight,
+      with a genuine deployed preprod contract and a real deployContract / WalletFacade /
+      provider-assembly SDK integration on a near-current SDK (ledger-v8 8.0.3, midnight-js
+      4.0.4, compact-runtime 0.15.0). A static security review (2026-07-02) confirmed the
+      DEPLOYED contract (compact/contracts/airlog/src/airlog.compact) is safe to learn from:
+      ownPublicKey() is used ONLY to stamp a provenance `owner` field (no circuit reads it for
+      authorization), and the sole state-mutating path is member()-guarded and self-seeding (no
+      fresh-deploy brick) — a good "hash-anchor + guarded fresh-state counter" reference.
+      EXCLUDED from this index: the UNDEPLOYED v2 contract (airlog-anchor.compact), whose
+      requireOwner() gates access on a spoofable ownPublicKey() comparison against public state
+      (do not copy); and borrowed third-party "Night Skills" boilerplate (skills/, AGENTS.md)
+      that misdescribes the project. Caveats: the deployed contract's `owner` and `anchoredAt`
+      fields are self-attested (not signer- or block-time-bound); the integration contains a
+      placeholder dev seed and machine-specific absolute paths (env-var-driven in practice); and
+      the license is inconsistent across files (root package.json ISC, contract GPL-3.0, no
+      top-level LICENSE file). Treat as illustrative, not authoritative, and audit before
+      production use.
