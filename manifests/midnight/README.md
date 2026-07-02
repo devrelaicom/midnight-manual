@@ -48,7 +48,7 @@ mnm ingest run manifests/midnight/midnight-docs.yaml \
 also auto-creates the source on 404 with `--yes`, but explicit `sources create`
 is preferred so `kind`/`origin_url` are set.)
 
-## Index (104 sources)
+## Index (105 sources)
 
 > This index is generated from `sources.tsv` (slug / repo / branch / kind) and
 > each manifest's `root.provenance` (attribution / verified / trust). It is **not**
@@ -186,3 +186,4 @@ docs/skill repos.
 | nstanford5-example-battleship-simple | nstanford5/example-battleship-simple | master | code_repo | Community | community | false | low |
 | nstanford5-example-private-auction-reserve | nstanford5/example-private-auction-reserve | master | code_repo | Community | community | false | low |
 | nstanford5-example-private-party | nstanford5/example-private-party | main | code_repo | Community | community | false | low |
+| 0xstrong-anchorzk | 0xstrong/AnchorZK | main | code_repo | Community | community | false | low |
