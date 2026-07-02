@@ -459,7 +459,10 @@ pub fn error_output_schema() -> Value {
                     "message": { "type": "string", "description": "Human-readable error detail." },
                     "client_model": { "type": "string", "description": "EMBEDDING_MODEL_MISMATCH only: the {name}@{revision} the client embedded with." },
                     "corpus_model": { "type": "string", "description": "EMBEDDING_MODEL_MISMATCH only: the corpus's active {name}@{revision}." },
-                    "remediation": { "type": "string", "description": "EMBEDDING_MODEL_MISMATCH only: concrete next step (cloud-provided)." }
+                    "remediation": { "type": "string", "description": "EMBEDDING_MODEL_MISMATCH only: concrete next step (cloud-provided)." },
+                    "retry_after_secs": { "type": "integer", "description": "RATE_LIMITED only: seconds to WAIT before retrying (from the server's Retry-After header, or a conservative default when absent). Do not retry sooner." },
+                    "rate_limit": { "type": "object", "description": "RATE_LIMITED only: snapshot of the server's X-RateLimit-* headers at rejection — any of { limit, remaining, reset_secs } the server sent." },
+                    "auth_reason": { "type": "string", "enum": ["no_credentials", "insufficient_tier"], "description": "AUTH_FAILED only: no_credentials (401 — missing/invalid/expired token) or insufficient_tier (403 — valid token, tier not permitted)." }
                 },
                 "required": ["code", "retryable", "message"],
                 "additionalProperties": true

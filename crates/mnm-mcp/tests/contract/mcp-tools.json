@@ -7,6 +7,14 @@
       "error": {
         "additionalProperties": true,
         "properties": {
+          "auth_reason": {
+            "description": "AUTH_FAILED only: no_credentials (401 — missing/invalid/expired token) or insufficient_tier (403 — valid token, tier not permitted).",
+            "enum": [
+              "no_credentials",
+              "insufficient_tier"
+            ],
+            "type": "string"
+          },
           "client_model": {
             "description": "EMBEDDING_MODEL_MISMATCH only: the {name}@{revision} the client embedded with.",
             "type": "string"
@@ -18,6 +26,8 @@
               "NOT_FOUND",
               "EMBEDDING_MODEL_MISMATCH",
               "CLOUD_ERROR",
+              "RATE_LIMITED",
+              "AUTH_FAILED",
               "INSTALL_FAILED"
             ],
             "type": "string"
@@ -30,9 +40,17 @@
             "description": "Human-readable error detail.",
             "type": "string"
           },
+          "rate_limit": {
+            "description": "RATE_LIMITED only: snapshot of the server's X-RateLimit-* headers at rejection — any of { limit, remaining, reset_secs } the server sent.",
+            "type": "object"
+          },
           "remediation": {
             "description": "EMBEDDING_MODEL_MISMATCH only: concrete next step (cloud-provided).",
             "type": "string"
+          },
+          "retry_after_secs": {
+            "description": "RATE_LIMITED only: seconds to WAIT before retrying (from the server's Retry-After header, or a conservative default when absent). Do not retry sooner.",
+            "type": "integer"
           },
           "retryable": {
             "description": "false means an identical retry cannot succeed — recovery needs a different call (follow suggested_next_actions).",
@@ -77,8 +95,15 @@
   },
   "error_envelope": {
     "codes": {
+      "AUTH_FAILED": {
+        "description": "Authentication or authorization failed on a cloud call (HTTP 401/403). `auth_reason` distinguishes `no_credentials` (401 — missing/invalid/expired token; run `mnm auth github` to obtain or refresh one) from `insufficient_tier` (403 — the token is valid but its tier is not permitted). An identical retry cannot succeed; follow `suggested_next_actions`.",
+        "details": {
+          "auth_reason": "string (`no_credentials` | `insufficient_tier`)"
+        },
+        "retryable": false
+      },
       "CLOUD_ERROR": {
-        "description": "The cloud API returned a transient or permanent error. Call `status` to diagnose if it persists.",
+        "description": "The cloud API returned a transient or permanent error (genuine 5xx / transport failures; 429 and 401/403 have their own codes). Call `status` to diagnose if it persists.",
         "retryable": true
       },
       "EMBEDDING_MODEL_MISMATCH": {
@@ -108,6 +133,14 @@
       "NOT_FOUND": {
         "description": "The requested chunk, document, or source does not exist. Re-derive the id (e.g. from a fresh search) before trying again.",
         "retryable": false
+      },
+      "RATE_LIMITED": {
+        "description": "The cloud rate-limited this request (HTTP 429). `retry_after_secs` is how long to WAIT before retrying (from the server's Retry-After header, or a conservative default when absent) — do NOT retry immediately, as that fails and burns budget. `rate_limit` snapshots the X-RateLimit-* headers. Call the `status` tool to see your standing budget.",
+        "details": {
+          "rate_limit": "object ({ limit, remaining, reset_secs } — whichever X-RateLimit-* headers the server sent)",
+          "retry_after_secs": "integer (seconds to wait before retrying)"
+        },
+        "retryable": true
       }
     },
     "description": "Tool failures are MCP tool results with `isError: true` — not JSON-RPC errors. `structuredContent` carries `{ error: { code, retryable, message, ...details }, suggested_next_actions: [..] }`; the text content block carries agent-facing recovery guidance plus a trimmed `{\"error\":{\"code\",\"retryable\"}}` JSON fence. `code` is a closed set (below). `retryable: false` means an identical retry cannot succeed — recovery requires a different call; follow `suggested_next_actions` or the guidance text. The machine-readable JSON Schema for this envelope is published as the top-level `errorSchema` key in this document (generated from `crates/mnm-mcp/src/render.rs` `ErrorKind` / `ToolFailure`, so its `code` enum, this prose, and the code never drift)."

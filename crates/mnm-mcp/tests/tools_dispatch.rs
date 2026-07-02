@@ -1038,7 +1038,7 @@ async fn dispatch_search_mismatch_produces_iserror_envelope() {
             remediation,
             ..
         } => (corpus_model, message, remediation),
-        other @ SearchError::Cloud(_) => {
+        other => {
             panic!("expected SearchError::Mismatch, got {other:?}")
         }
     };
@@ -1108,4 +1108,242 @@ async fn dispatch_get_chunk_neighbors_full_pipeline_via_wiremock() {
     assert_eq!(sc["chunk"]["id"], id);
     assert_eq!(sc["prev"]["chunks"].as_array().unwrap().len(), 1);
     assert_eq!(sc["next"]["chunks"].as_array().unwrap().len(), 2);
+}
+
+// ---------------------------------------------------------------------------
+// Error taxonomy (#133): 429 → RATE_LIMITED, 401/403 → AUTH_FAILED.
+//
+// Each test drives the REAL wire path (`run_passthrough_id` against a wiremock
+// cloud) to obtain the typed `PassthroughError`, then renders the envelope
+// through the production builders (`mnm_mcp::server::{rate_limited_failure,
+// auth_failed_failure}`) — so the agent-facing guidance strings under test are
+// the ones shipped, not copies.
+// ---------------------------------------------------------------------------
+
+/// 429 with `Retry-After: 30` → `RATE_LIMITED`, `retryable: true`,
+/// `retry_after_secs: 30` from the header, wait-guidance (not "retry shortly"),
+/// and a `status` next-action.
+#[tokio::test]
+async fn dispatch_rate_limited_429_with_retry_after_produces_rate_limited_envelope() {
+    let server = MockServer::start().await;
+    let id = "22222222-2222-2222-2222-222222222222";
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/chunks/{id}/parents")))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .insert_header("retry-after", "30")
+                .insert_header("x-ratelimit-limit", "5")
+                .insert_header("x-ratelimit-remaining", "0")
+                .insert_header("x-ratelimit-reset", "2")
+                .set_body_json(json!({
+                    "error": {
+                        "code": "rate_limited",
+                        "message": "rate limit exceeded for the free tier (5 req/s)",
+                        "remediation": "retry after 30s or request a higher tier",
+                    },
+                    "request_id": "rl-001",
+                })),
+        )
+        .mount(&server)
+        .await;
+    let client = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
+
+    let err = run_passthrough_id(&json!({ "id": id }), &client, PassthroughKind::Parents)
+        .await
+        .unwrap_err();
+    let snapshot = match err {
+        PassthroughError::RateLimited(s) => s,
+        other => panic!("expected RateLimited, got {other:?}"),
+    };
+    assert_eq!(snapshot.retry_after_secs, Some(30), "retry_after read from header");
+    assert_eq!(snapshot.limit, Some(5));
+    assert_eq!(snapshot.remaining, Some(0));
+    assert_eq!(snapshot.reset_secs, Some(2));
+
+    let result = mnm_mcp::server::rate_limited_failure(&snapshot).into_result();
+    assert!(result.is_error);
+    let sc = result.structured_content.unwrap();
+    assert_eq!(sc["error"]["code"], "RATE_LIMITED");
+    assert_eq!(sc["error"]["retryable"], true, "429 is retryable — but only after waiting");
+    assert_eq!(sc["error"]["retry_after_secs"], 30, "populated from Retry-After");
+    assert_eq!(sc["error"]["rate_limit"]["remaining"], 0);
+    // Guidance must tell the agent to WAIT, not "retry shortly".
+    let text = match &result.content[0] {
+        mnm_mcp::protocol::ContentBlock::Text { text } => text.clone(),
+    };
+    assert!(text.contains("Wait 30s"), "guidance must name the wait: {text}");
+    assert!(
+        text.contains("do NOT retry immediately"),
+        "guidance must forbid immediate retry"
+    );
+    assert!(!text.contains("retry shortly"), "must not carry the old CLOUD_ERROR advice");
+    // Recovery points at the `status` tool.
+    let actions = sc["suggested_next_actions"].as_array().unwrap();
+    assert!(actions.iter().any(|a| a["tool"] == "status"), "must suggest the status tool");
+}
+
+/// 429 with NO `Retry-After` header (e.g. the token-budget path) → still
+/// `RATE_LIMITED`, with a conservative default `retry_after_secs` and
+/// "at least"-phrased wait-guidance (graceful default).
+#[tokio::test]
+async fn dispatch_rate_limited_429_without_retry_after_uses_default_backoff() {
+    let server = MockServer::start().await;
+    let id = "33333333-3333-3333-3333-333333333333";
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/chunks/{id}/parents")))
+        .respond_with(ResponseTemplate::new(429).set_body_json(json!({
+            "error": { "code": "rate_limited", "message": "budget exhausted", "remediation": "back off" },
+            "request_id": "rl-002",
+        })))
+        .mount(&server)
+        .await;
+    let client = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
+
+    let err = run_passthrough_id(&json!({ "id": id }), &client, PassthroughKind::Parents)
+        .await
+        .unwrap_err();
+    let snapshot = match err {
+        PassthroughError::RateLimited(s) => s,
+        other => panic!("expected RateLimited, got {other:?}"),
+    };
+    assert_eq!(snapshot.retry_after_secs, None, "no header → None in the snapshot");
+
+    let result = mnm_mcp::server::rate_limited_failure(&snapshot).into_result();
+    let sc = result.structured_content.unwrap();
+    assert_eq!(sc["error"]["code"], "RATE_LIMITED");
+    assert_eq!(sc["error"]["retryable"], true);
+    // Default backoff is surfaced so the agent still has a concrete number.
+    assert!(
+        sc["error"]["retry_after_secs"].as_u64().unwrap() >= 1,
+        "a default backoff is set"
+    );
+    let text = match &result.content[0] {
+        mnm_mcp::protocol::ContentBlock::Text { text } => text.clone(),
+    };
+    assert!(text.contains("at least"), "no-header guidance is phrased as a minimum: {text}");
+    assert!(text.contains("do NOT retry immediately"));
+}
+
+/// 401 → `AUTH_FAILED`, `retryable: false`, `auth_reason: no_credentials`, and
+/// guidance naming the concrete recovery (`mnm auth github`).
+#[tokio::test]
+async fn dispatch_unauthorized_401_produces_auth_failed_envelope() {
+    let server = MockServer::start().await;
+    let id = "44444444-4444-4444-4444-444444444444";
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/chunks/{id}/parents")))
+        .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+            "error": {
+                "code": "unauthorized",
+                "message": "missing or invalid Authorization bearer",
+                "remediation": "Run `mnm login` to obtain a fresh token",
+            },
+            "request_id": "auth-001",
+        })))
+        .mount(&server)
+        .await;
+    let client = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
+
+    let err = run_passthrough_id(&json!({ "id": id }), &client, PassthroughKind::Parents)
+        .await
+        .unwrap_err();
+    let status = match err {
+        PassthroughError::AuthFailed { status } => status,
+        other => panic!("expected AuthFailed, got {other:?}"),
+    };
+    assert_eq!(status, 401);
+
+    let result = mnm_mcp::server::auth_failed_failure(status).into_result();
+    assert!(result.is_error);
+    let sc = result.structured_content.unwrap();
+    assert_eq!(sc["error"]["code"], "AUTH_FAILED");
+    assert_eq!(sc["error"]["retryable"], false, "401 is not retryable without new credentials");
+    assert_eq!(sc["error"]["auth_reason"], "no_credentials");
+    let text = match &result.content[0] {
+        mnm_mcp::protocol::ContentBlock::Text { text } => text.clone(),
+    };
+    assert!(text.contains("mnm auth github"), "guidance names the recovery command: {text}");
+    assert!(text.contains("401"));
+}
+
+/// 403 → `AUTH_FAILED`, `retryable: false`, `auth_reason: insufficient_tier`
+/// (distinct from the 401 "no credentials" case).
+#[tokio::test]
+async fn dispatch_forbidden_403_produces_insufficient_tier_envelope() {
+    let server = MockServer::start().await;
+    let id = "55555555-5555-5555-5555-555555555555";
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/chunks/{id}/parents")))
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({
+            "error": { "code": "forbidden", "message": "tier not permitted", "remediation": "request a higher tier" },
+            "request_id": "auth-002",
+        })))
+        .mount(&server)
+        .await;
+    let client = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
+
+    let err = run_passthrough_id(&json!({ "id": id }), &client, PassthroughKind::Parents)
+        .await
+        .unwrap_err();
+    let status = match err {
+        PassthroughError::AuthFailed { status } => status,
+        other => panic!("expected AuthFailed, got {other:?}"),
+    };
+    assert_eq!(status, 403);
+
+    let result = mnm_mcp::server::auth_failed_failure(status).into_result();
+    let sc = result.structured_content.unwrap();
+    assert_eq!(sc["error"]["code"], "AUTH_FAILED");
+    assert_eq!(sc["error"]["retryable"], false);
+    assert_eq!(sc["error"]["auth_reason"], "insufficient_tier");
+    let text = match &result.content[0] {
+        mnm_mcp::protocol::ContentBlock::Text { text } => text.clone(),
+    };
+    assert!(text.contains("403"));
+    assert!(text.contains("higher access tier"), "guidance names the tier recovery: {text}");
+}
+
+/// Search path: a 429 from `/v1/search` is preserved as
+/// `SearchError::RateLimited` (not collapsed to `Cloud`). fts mode is used so
+/// the only cloud call is `POST /v1/search` (no embed / models-active).
+#[tokio::test]
+async fn dispatch_search_rate_limited_429_maps_to_search_error() {
+    use mnm_mcp::server::ServerConfig;
+    use mnm_mcp::tools::{run_search, SearchError};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/search"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .insert_header("retry-after", "30")
+                .insert_header("x-ratelimit-remaining", "0")
+                .set_body_json(json!({
+                    "error": { "code": "rate_limited", "message": "slow down", "remediation": "retry after 30s" },
+                    "request_id": "srl-001",
+                })),
+        )
+        .mount(&server)
+        .await;
+
+    let mut cfg = ServerConfig::with_defaults(std::path::PathBuf::from("/tmp/test-mcp-cache"));
+    cfg.cloud_url.clone_from(&server.uri());
+    server.uri().clone_into(&mut cfg.telemetry_endpoint);
+    let cloud = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
+
+    let parsed = mnm_mcp::tools::ParsedSearchArgs {
+        queries: vec!["compact contract".to_owned()],
+        limit: 10,
+        rerank: false,
+        filters: None,
+        mode: "fts",
+        code_mode: None,
+        rerank_instructions: None,
+        version_match: None,
+    };
+    let err = run_search(&parsed, &cfg, &cloud).await.unwrap_err();
+    match err {
+        SearchError::RateLimited(s) => assert_eq!(s.retry_after_secs, Some(30)),
+        other => panic!("expected SearchError::RateLimited, got {other:?}"),
+    }
 }

@@ -18,7 +18,7 @@ use mnm_telemetry::{
 use tokio::io::{stdin, stdout, Stdin, Stdout};
 use tracing::{debug, info, warn};
 
-use crate::cloud_client::CloudClient;
+use crate::cloud_client::{CloudClient, RateLimitSnapshot};
 use crate::prompts;
 use crate::protocol::{
     ErrorCode, Incoming, InitializeResult, PromptGetParams, PromptsCapability, RequestId, Response,
@@ -248,6 +248,106 @@ const fn passthrough_outcome(e: &tools::PassthroughError) -> Outcome {
     }
 }
 
+/// Backoff to advise on a 429 when the server sent no `Retry-After` header
+/// (e.g. the token-budget rejection path). Conservative but not punitive — the
+/// per-second rate buckets reset in low single-digit seconds.
+const DEFAULT_RATE_LIMIT_BACKOFF_SECS: u64 = 5;
+
+/// Build the `RATE_LIMITED` failure (HTTP 429). `retryable: true`, but the
+/// guidance and `suggested_next_actions` tell the agent to WAIT the advised
+/// delay and consult `status` — never to retry immediately (issue #133). The
+/// `retry_after_secs` + `rate_limit` details are carried into the error object.
+///
+/// Public so the canonical agent-facing strings have a single source of truth
+/// the tests assert against (rather than re-deriving them).
+#[must_use]
+pub fn rate_limited_failure(snapshot: &RateLimitSnapshot) -> ToolFailure {
+    let retry_after = snapshot
+        .retry_after_secs
+        .unwrap_or(DEFAULT_RATE_LIMIT_BACKOFF_SECS);
+    let guidance = if snapshot.retry_after_secs.is_some() {
+        format!(
+            "Rate limited by the cloud. Wait {retry_after}s before retrying — do NOT retry \
+             immediately; an immediate retry will fail and burn your budget. Call the `status` \
+             tool to see your remaining rate-limit and token budget."
+        )
+    } else {
+        format!(
+            "Rate limited by the cloud. Wait at least {retry_after}s before retrying (back off \
+             further if it persists) — do NOT retry immediately; an immediate retry will fail \
+             and burn your budget. Call the `status` tool to see your remaining budget."
+        )
+    };
+    let mut details = serde_json::Map::new();
+    details.insert("retry_after_secs".to_owned(), serde_json::json!(retry_after));
+    let mut rate_limit = serde_json::Map::new();
+    if let Some(limit) = snapshot.limit {
+        rate_limit.insert("limit".to_owned(), serde_json::json!(limit));
+    }
+    if let Some(remaining) = snapshot.remaining {
+        rate_limit.insert("remaining".to_owned(), serde_json::json!(remaining));
+    }
+    if let Some(reset_secs) = snapshot.reset_secs {
+        rate_limit.insert("reset_secs".to_owned(), serde_json::json!(reset_secs));
+    }
+    if !rate_limit.is_empty() {
+        details.insert("rate_limit".to_owned(), serde_json::Value::Object(rate_limit));
+    }
+    ToolFailure {
+        kind: ErrorKind::RateLimited,
+        message: "rate limited by the cloud API".to_owned(),
+        guidance,
+        details: serde_json::Value::Object(details),
+        suggested_next_actions: vec![NextAction::call(
+            "Check your current rate-limit and token budget before retrying",
+            "status",
+            serde_json::json!({}),
+        )],
+    }
+}
+
+/// Build the `AUTH_FAILED` failure (HTTP 401/403). `retryable: false` — an
+/// identical retry cannot succeed. 401 means missing/invalid/expired
+/// credentials (recover via `mnm auth github`); 403 means the token is valid
+/// but its tier is not permitted. The distinguishing `auth_reason` is carried
+/// into the error object (issue #133).
+///
+/// Public so the canonical agent-facing strings have a single source of truth
+/// the tests assert against (rather than re-deriving them).
+#[must_use]
+pub fn auth_failed_failure(status: u16) -> ToolFailure {
+    let (auth_reason, guidance, action) = if status == 403 {
+        (
+            "insufficient_tier",
+            "Authorization failed (HTTP 403): your credentials are valid, but your tier is not \
+             permitted for this request. This will not change on retry — request a higher access \
+             tier. Retrying with the same token will keep failing."
+                .to_owned(),
+            NextAction::user(
+                "Request a higher access tier; the current token's tier is insufficient for this request.",
+            ),
+        )
+    } else {
+        (
+            "no_credentials",
+            "Authentication failed (HTTP 401): your credentials are missing, invalid, or expired. \
+             Run `mnm auth github` to obtain or refresh a read-uplift token, then retry. Retrying \
+             with the same (or no) credentials will keep failing."
+                .to_owned(),
+            NextAction::user(
+                "Run `mnm auth github` to obtain or refresh your access token, then retry the request.",
+            ),
+        )
+    };
+    ToolFailure {
+        kind: ErrorKind::AuthFailed,
+        message: format!("cloud authentication/authorization failed (HTTP {status})"),
+        guidance,
+        details: serde_json::json!({ "auth_reason": auth_reason }),
+        suggested_next_actions: vec![action],
+    }
+}
+
 fn cloud_failure(e: &crate::cloud_client::CloudError) -> ToolFailure {
     use crate::cloud_client::CloudError;
     match e {
@@ -262,6 +362,8 @@ fn cloud_failure(e: &crate::cloud_client::CloudError) -> ToolFailure {
                 serde_json::json!({ "query": "<terms>" }),
             )],
         },
+        CloudError::RateLimited { snapshot, .. } => rate_limited_failure(snapshot),
+        CloudError::AuthFailed { status, .. } => auth_failed_failure(*status),
         other => ToolFailure::simple(
             ErrorKind::CloudError,
             other.to_string(),
@@ -287,6 +389,8 @@ fn passthrough_failure(e: tools::PassthroughError) -> ToolFailure {
                 json!({ "query": "<terms>" }),
             )],
         },
+        tools::PassthroughError::RateLimited(snapshot) => rate_limited_failure(&snapshot),
+        tools::PassthroughError::AuthFailed { status } => auth_failed_failure(status),
         tools::PassthroughError::Cloud(msg) => {
             ToolFailure::simple(ErrorKind::CloudError, msg, "Upstream call failed; retry shortly.")
         }
@@ -547,6 +651,18 @@ async fn run_search_dispatch(params: &ToolCallParams, state: &ServerState) -> To
                 suggested_next_actions: vec![],
             }
             .into_result(),
+            telemetry: None,
+            rerank: None,
+            outcome: Outcome::Error,
+        },
+        Err(tools::SearchError::RateLimited(snapshot)) => ToolResponse {
+            result: rate_limited_failure(&snapshot).into_result(),
+            telemetry: None,
+            rerank: None,
+            outcome: Outcome::Error,
+        },
+        Err(tools::SearchError::AuthFailed { status }) => ToolResponse {
+            result: auth_failed_failure(status).into_result(),
             telemetry: None,
             rerank: None,
             outcome: Outcome::Error,

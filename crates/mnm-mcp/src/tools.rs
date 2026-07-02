@@ -27,7 +27,7 @@ use mnm_embedding::{client as embed_client, contextualized, reranker, voyage};
 use serde_json::json;
 use uuid::Uuid;
 
-use crate::cloud_client::{CloudClient, CloudError, QueryPair, SearchRequest};
+use crate::cloud_client::{CloudClient, CloudError, QueryPair, RateLimitSnapshot, SearchRequest};
 use crate::protocol::{ToolAnnotations, ToolDescription, ToolsListResult};
 use crate::server::ServerConfig;
 
@@ -498,8 +498,41 @@ pub enum SearchError {
         /// Concrete next step.
         remediation: String,
     },
-    /// Catchall cloud / decode / transport failure.
+    /// Cloud returned 429 — the server layer maps this to `RATE_LIMITED` with
+    /// wait-guidance. Carries the `Retry-After` / `X-RateLimit-*` snapshot.
+    RateLimited(RateLimitSnapshot),
+    /// Cloud returned 401/403 — the server layer maps this to `AUTH_FAILED`.
+    /// `status` distinguishes 401 (no/invalid credentials) from 403 (tier).
+    AuthFailed {
+        /// The failing status — `401` or `403`.
+        status: u16,
+    },
+    /// Catchall cloud / decode / transport failure (genuine 5xx / transport).
     Cloud(String),
+}
+
+impl From<CloudError> for SearchError {
+    /// Preserve the typed 409/429/401/403 classifications from the cloud client
+    /// so the server layer can emit precise MCP error codes; everything else
+    /// (5xx, transport, decode, 404) collapses to the retryable `Cloud` string.
+    fn from(e: CloudError) -> Self {
+        match e {
+            CloudError::EmbeddingModelMismatch {
+                corpus_model,
+                client_model,
+                message,
+                remediation,
+            } => Self::Mismatch {
+                corpus_model,
+                client_model,
+                message,
+                remediation,
+            },
+            CloudError::RateLimited { snapshot, .. } => Self::RateLimited(snapshot),
+            CloudError::AuthFailed { status, .. } => Self::AuthFailed { status },
+            other => Self::Cloud(other.to_string()),
+        }
+    }
 }
 
 const DEFAULT_LIMIT: u32 = 10;
@@ -661,23 +694,9 @@ pub async fn run_search(
         client_embedding_model.clone(),
         code_wire.clone(),
     );
-    let cloud_resp = match cloud.search(&req).await {
-        Ok(v) => v,
-        Err(CloudError::EmbeddingModelMismatch {
-            corpus_model,
-            client_model,
-            message,
-            remediation,
-        }) => {
-            return Err(SearchError::Mismatch {
-                corpus_model,
-                client_model,
-                message,
-                remediation,
-            });
-        }
-        Err(e) => return Err(SearchError::Cloud(e.to_string())),
-    };
+    // `SearchError::from` preserves the typed 409 mismatch / 429 rate-limit /
+    // 401-403 auth classifications; genuine 5xx / transport collapse to `Cloud`.
+    let cloud_resp = cloud.search(&req).await.map_err(SearchError::from)?;
 
     // Decompose cloud response. `results` is the only field we touch — every
     // other field is passed through verbatim so the response stays additive
@@ -872,7 +891,7 @@ async fn build_embedded_pairs(
     let active = cloud
         .fetch_active_model()
         .await
-        .map_err(|e| SearchError::Cloud(e.to_string()))?;
+        .map_err(SearchError::from)?;
 
     // Derive embedder identities from the active fetch (the authority); config
     // is only the logged fallback. The active fetch always succeeds here (we
@@ -1455,8 +1474,29 @@ pub enum PassthroughError {
     InvalidInput(String),
     /// Cloud returned 404.
     NotFound(String),
-    /// Cloud / transport / decode failure.
+    /// Cloud returned 429 — carries the `Retry-After` / `X-RateLimit-*` snapshot.
+    RateLimited(RateLimitSnapshot),
+    /// Cloud returned 401/403. `status` distinguishes 401 (credentials) from
+    /// 403 (tier).
+    AuthFailed {
+        /// The failing status — `401` or `403`.
+        status: u16,
+    },
+    /// Cloud / transport / decode failure (genuine 5xx / transport).
     Cloud(String),
+}
+
+impl From<CloudError> for PassthroughError {
+    /// Preserve the typed 404/429/401/403 classifications; everything else
+    /// (5xx, transport, decode) collapses to the retryable `Cloud` string.
+    fn from(e: CloudError) -> Self {
+        match e {
+            CloudError::NotFound(msg) => Self::NotFound(msg),
+            CloudError::RateLimited { snapshot, .. } => Self::RateLimited(snapshot),
+            CloudError::AuthFailed { status, .. } => Self::AuthFailed { status },
+            other => Self::Cloud(other.to_string()),
+        }
+    }
 }
 
 /// Direction for `run_chunk_nav` — selects `/next` or `/prev`.
@@ -1514,10 +1554,7 @@ pub async fn run_chunk_nav(
         ChunkNavDirection::Next => cloud.get_chunk_next(id_str, count).await,
         ChunkNavDirection::Prev => cloud.get_chunk_prev(id_str, count).await,
     };
-    r.map_err(|e| match e {
-        CloudError::NotFound(msg) => PassthroughError::NotFound(msg),
-        other => PassthroughError::Cloud(other.to_string()),
-    })
+    r.map_err(PassthroughError::from)
 }
 
 /// Default chunks on each side of the anchor for `get_chunk_neighbors`. Two is
@@ -1569,10 +1606,7 @@ pub async fn run_chunk_neighbors(
     cloud
         .get_chunk_neighbors(id_str, count, count)
         .await
-        .map_err(|e| match e {
-            CloudError::NotFound(msg) => PassthroughError::NotFound(msg),
-            other => PassthroughError::Cloud(other.to_string()),
-        })
+        .map_err(PassthroughError::from)
 }
 
 const DOCUMENT_CHUNKS_DEFAULT_FROM: u32 = 0;
@@ -1635,10 +1669,7 @@ pub async fn run_document_chunks(
     cloud
         .get_document_chunks(id_str, from, limit)
         .await
-        .map_err(|e| match e {
-            CloudError::NotFound(msg) => PassthroughError::NotFound(msg),
-            other => PassthroughError::Cloud(other.to_string()),
-        })
+        .map_err(PassthroughError::from)
 }
 
 /// Dispatch the single-id pass-through tools (`get_chunk_parents` /
@@ -1662,10 +1693,7 @@ pub async fn run_passthrough_id(
         PassthroughKind::Parents => cloud.get_chunk_parents(id_str).await,
         PassthroughKind::Document => cloud.get_document(id_str).await,
     };
-    r.map_err(|e| match e {
-        CloudError::NotFound(msg) => PassthroughError::NotFound(msg),
-        other => PassthroughError::Cloud(other.to_string()),
-    })
+    r.map_err(PassthroughError::from)
 }
 
 /// Maximum number of ids accepted by one `get_chunks` call.
@@ -1712,10 +1740,7 @@ pub async fn run_get_chunks(
         })?;
         ids.push(s.to_owned());
     }
-    cloud.get_chunks(&ids).await.map_err(|e| match e {
-        CloudError::NotFound(msg) => PassthroughError::NotFound(msg),
-        other => PassthroughError::Cloud(other.to_string()),
-    })
+    cloud.get_chunks(&ids).await.map_err(PassthroughError::from)
 }
 
 /// Dispatch `list_sources`. Forwards the pagination/filter arguments
