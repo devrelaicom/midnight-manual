@@ -62,7 +62,7 @@ fn scores_fragment() -> Value {
 /// ordered array of `{kind, name, path}` segments (`path` = the segment's
 /// ancestor names, outermost first, omitted when empty).
 ///
-/// This is deliberately richer than the flat name-string breadcrumb `search`
+/// This is deliberately richer than the flat name-string list `search`
 /// returns (see [`search_result_fragment`], where `symbol_path` is
 /// `items: {type: "string"}`): the search route intentionally flattens the
 /// segments and drops `kind` for a ranked hit, whereas the read endpoints hand
