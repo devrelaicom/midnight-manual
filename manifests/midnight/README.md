@@ -48,7 +48,7 @@ mnm ingest run manifests/midnight/midnight-docs.yaml \
 also auto-creates the source on 404 with `--yes`, but explicit `sources create`
 is preferred so `kind`/`origin_url` are set.)
 
-## Index (114 sources)
+## Index (119 sources)
 
 > This index is generated from `sources.tsv` (slug / repo / branch / kind) and
 > each manifest's `root.provenance` (attribution / verified / trust). It is **not**
@@ -196,3 +196,8 @@ docs/skill repos.
 | apestchanker-midnight-agent-did-manager | apestchanker/midnight-agent-did-manager | main | code_repo | Community | community | false | low |
 | cadalt0-nightforge | cadalt0/NIGHTFORGE | main | code_repo | Community | community | false | low |
 | tusharpamnani-midnight-programs-list | tusharpamnani/midnight-programs-list | main | code_repo | Community | community | false | low |
+| mbs-midnight-technical-guides | mbs-midnight/technical-guides | main | docs_site | Community | community | false | low |
+| hbrazier01-airlog | hbrazier01/Airlog | main | code_repo | Community | community | false | low |
+| gutopro-nightroom | gutopro/nightroom | main | code_repo | Community | community | false | low |
+| jalal-1-mnf-se-examples | Jalal-1/mnf-se-examples | main | code_repo | Community | community | false | low |
+| kaleababayneh-kaamos | kaleababayneh/kaamos | main | code_repo | Community | community | false | low |
