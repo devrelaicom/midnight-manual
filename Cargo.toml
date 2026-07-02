@@ -100,7 +100,7 @@ base64           = "0.22"
 
 # Content processing
 pulldown-cmark   = "0.12"
-quick-xml        = "0.31"
+quick-xml        = "0.41"
 # Compact parser frontend (rowan-based, pure Rust — no native build step).
 # Optional + feature-gated in mnm-content. Exact pin: pre-release (beta) API.
 compactp_parser = "=0.1.0-beta.1"
