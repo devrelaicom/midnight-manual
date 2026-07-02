@@ -120,7 +120,7 @@
         "readOnlyHint": true,
         "title": "Search corpus"
       },
-      "description": "Search the Midnight Network documentation and code corpus (docs, SDK references, Compact language material, code examples). Returns ranked excerpts with confidence scores and source attribution. Use it whenever you need facts about Midnight, Compact, or the Midnight SDK. Code-heavy queries (function names, API signatures, error strings from code) benefit from code_mode=exclusive; conceptual queries should keep the default. For multi-query strategies, facet filters, or rerank control, use advanced_search.",
+      "description": "Search the Midnight Network documentation and code corpus (docs, SDK references, Compact language material, code examples). Returns ranked excerpts with confidence scores and source attribution. Use it whenever you need facts about Midnight, Compact, or the Midnight SDK. Code-heavy queries (function names, API signatures, error strings from code) benefit from code_mode=exclusive; conceptual queries should keep the default. For multi-query strategies, facet filters, or rerank control, use advanced_search. In results, symbol_path is a flat breadcrumb of symbol names; the get_chunks family returns the richer structured {kind, name} segments.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -277,6 +277,7 @@
                   "type": "string"
                 },
                 "symbol_path": {
+                  "description": "Flat breadcrumb of symbol names (kind dropped). The get_chunks family and get_document_chunks return the richer `{kind, name}` segment form.",
                   "items": {
                     "type": "string"
                   },
@@ -334,7 +335,7 @@
         "readOnlyHint": true,
         "title": "Advanced search"
       },
-      "description": "Full-control search over the Midnight corpus: fuse multiple queries (HyDE, expansion, step-back), restrict by facet filters, switch retrieval mode, and toggle reranking. Use when basic search comes up short or when the midnight-advanced-search skill prescribes a pattern. Call facets first to discover valid filter values.",
+      "description": "Full-control search over the Midnight corpus: fuse multiple queries (HyDE, expansion, step-back), restrict by facet filters, switch retrieval mode, and toggle reranking. Use when basic search comes up short or when the midnight-advanced-search skill prescribes a pattern. Call facets first to discover valid filter values. In results, symbol_path is a flat breadcrumb of symbol names; the get_chunks family returns the richer structured {kind, name} segments.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -914,6 +915,7 @@
                   "type": "string"
                 },
                 "symbol_path": {
+                  "description": "Flat breadcrumb of symbol names (kind dropped). The get_chunks family and get_document_chunks return the richer `{kind, name}` segment form.",
                   "items": {
                     "type": "string"
                   },
@@ -971,7 +973,7 @@
         "readOnlyHint": true,
         "title": "Fetch chunks"
       },
-      "description": "Fetch the full content of one or more chunks by id, typically ids returned by search. Use this to read the actual text behind search results.",
+      "description": "Fetch the full content of one or more chunks by id, typically ids returned by search. Use this to read the actual text behind search results. For code chunks, symbol_path is an array of structured {kind, name} segments (search returns only the flat name breadcrumb).",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -1026,8 +1028,31 @@
                   "type": "object"
                 },
                 "symbol_path": {
+                  "description": "Code-symbol path as structured `{kind, name, path}` segments (empty for prose chunks). Richer than search's flat name-string breadcrumb.",
                   "items": {
-                    "type": "string"
+                    "additionalProperties": true,
+                    "properties": {
+                      "kind": {
+                        "description": "Syntactic kind: impl, fn, class, interface, key, element, …",
+                        "type": "string"
+                      },
+                      "name": {
+                        "description": "Identifier or label for this segment.",
+                        "type": "string"
+                      },
+                      "path": {
+                        "description": "Ancestor symbol names, outermost first; omitted when empty.",
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "name"
+                    ],
+                    "type": "object"
                   },
                   "type": "array"
                 },
@@ -1086,7 +1111,7 @@
         "readOnlyHint": true,
         "title": "Next chunks"
       },
-      "description": "Fetch chunks that immediately follow a given chunk in its document's reading order. Use to continue reading past the end of a chunk you already have.",
+      "description": "Fetch chunks that immediately follow a given chunk in its document's reading order. Use to continue reading past the end of a chunk you already have. Code chunks carry the structured {kind, name} symbol_path segments.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -1143,8 +1168,31 @@
                   "type": "object"
                 },
                 "symbol_path": {
+                  "description": "Code-symbol path as structured `{kind, name, path}` segments (empty for prose chunks). Richer than search's flat name-string breadcrumb.",
                   "items": {
-                    "type": "string"
+                    "additionalProperties": true,
+                    "properties": {
+                      "kind": {
+                        "description": "Syntactic kind: impl, fn, class, interface, key, element, …",
+                        "type": "string"
+                      },
+                      "name": {
+                        "description": "Identifier or label for this segment.",
+                        "type": "string"
+                      },
+                      "path": {
+                        "description": "Ancestor symbol names, outermost first; omitted when empty.",
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "name"
+                    ],
+                    "type": "object"
                   },
                   "type": "array"
                 },
@@ -1196,7 +1244,7 @@
         "readOnlyHint": true,
         "title": "Previous chunks"
       },
-      "description": "Fetch chunks that immediately precede a given chunk in its document's reading order. Use to read the context leading up to a chunk you already have.",
+      "description": "Fetch chunks that immediately precede a given chunk in its document's reading order. Use to read the context leading up to a chunk you already have. Code chunks carry the structured {kind, name} symbol_path segments.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -1253,8 +1301,31 @@
                   "type": "object"
                 },
                 "symbol_path": {
+                  "description": "Code-symbol path as structured `{kind, name, path}` segments (empty for prose chunks). Richer than search's flat name-string breadcrumb.",
                   "items": {
-                    "type": "string"
+                    "additionalProperties": true,
+                    "properties": {
+                      "kind": {
+                        "description": "Syntactic kind: impl, fn, class, interface, key, element, …",
+                        "type": "string"
+                      },
+                      "name": {
+                        "description": "Identifier or label for this segment.",
+                        "type": "string"
+                      },
+                      "path": {
+                        "description": "Ancestor symbol names, outermost first; omitted when empty.",
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "name"
+                    ],
+                    "type": "object"
                   },
                   "type": "array"
                 },
@@ -1306,7 +1377,7 @@
         "readOnlyHint": true,
         "title": "Surrounding chunks"
       },
-      "description": "Fetch the chunks immediately before and after a given chunk in one call. Use when a search hit needs surrounding context to be understood.",
+      "description": "Fetch the chunks immediately before and after a given chunk in one call. Use when a search hit needs surrounding context to be understood. Code chunks carry the structured {kind, name} symbol_path segments.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -1362,8 +1433,31 @@
                 "type": "object"
               },
               "symbol_path": {
+                "description": "Code-symbol path as structured `{kind, name, path}` segments (empty for prose chunks). Richer than search's flat name-string breadcrumb.",
                 "items": {
-                  "type": "string"
+                  "additionalProperties": true,
+                  "properties": {
+                    "kind": {
+                      "description": "Syntactic kind: impl, fn, class, interface, key, element, …",
+                      "type": "string"
+                    },
+                    "name": {
+                      "description": "Identifier or label for this segment.",
+                      "type": "string"
+                    },
+                    "path": {
+                      "description": "Ancestor symbol names, outermost first; omitted when empty.",
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "name"
+                  ],
+                  "type": "object"
                 },
                 "type": "array"
               },
@@ -1411,8 +1505,31 @@
                       "type": "object"
                     },
                     "symbol_path": {
+                      "description": "Code-symbol path as structured `{kind, name, path}` segments (empty for prose chunks). Richer than search's flat name-string breadcrumb.",
                       "items": {
-                        "type": "string"
+                        "additionalProperties": true,
+                        "properties": {
+                          "kind": {
+                            "description": "Syntactic kind: impl, fn, class, interface, key, element, …",
+                            "type": "string"
+                          },
+                          "name": {
+                            "description": "Identifier or label for this segment.",
+                            "type": "string"
+                          },
+                          "path": {
+                            "description": "Ancestor symbol names, outermost first; omitted when empty.",
+                            "items": {
+                              "type": "string"
+                            },
+                            "type": "array"
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "name"
+                        ],
+                        "type": "object"
                       },
                       "type": "array"
                     },
@@ -1468,8 +1585,31 @@
                       "type": "object"
                     },
                     "symbol_path": {
+                      "description": "Code-symbol path as structured `{kind, name, path}` segments (empty for prose chunks). Richer than search's flat name-string breadcrumb.",
                       "items": {
-                        "type": "string"
+                        "additionalProperties": true,
+                        "properties": {
+                          "kind": {
+                            "description": "Syntactic kind: impl, fn, class, interface, key, element, …",
+                            "type": "string"
+                          },
+                          "name": {
+                            "description": "Identifier or label for this segment.",
+                            "type": "string"
+                          },
+                          "path": {
+                            "description": "Ancestor symbol names, outermost first; omitted when empty.",
+                            "items": {
+                              "type": "string"
+                            },
+                            "type": "array"
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "name"
+                        ],
+                        "type": "object"
                       },
                       "type": "array"
                     },
@@ -1714,7 +1854,7 @@
         "readOnlyHint": true,
         "title": "Read document"
       },
-      "description": "Read a window of a document's chunk bodies by position. Use after get_document to read a document section by section.",
+      "description": "Read a window of a document's chunk bodies by position. Use after get_document to read a document section by section. Code chunk bodies include the structured {kind, name} symbol_path segments (same shape as the get_chunks family).",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -1758,6 +1898,44 @@
                 },
                 "content": {
                   "type": "string"
+                },
+                "heading_path": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "symbol_path": {
+                  "description": "Code-symbol path as structured `{kind, name, path}` segments (empty for prose chunks). Richer than search's flat name-string breadcrumb.",
+                  "items": {
+                    "additionalProperties": true,
+                    "properties": {
+                      "kind": {
+                        "description": "Syntactic kind: impl, fn, class, interface, key, element, …",
+                        "type": "string"
+                      },
+                      "name": {
+                        "description": "Identifier or label for this segment.",
+                        "type": "string"
+                      },
+                      "path": {
+                        "description": "Ancestor symbol names, outermost first; omitted when empty.",
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "name"
+                    ],
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "token_count": {
+                  "type": "integer"
                 }
               },
               "required": [
