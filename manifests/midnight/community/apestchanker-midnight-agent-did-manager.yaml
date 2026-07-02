@@ -1,0 +1,99 @@
+manifest_version: 1
+root:
+  name: apestchanker-midnight-agent-did-manager
+  # Agentic-DID platform on Midnight (React/Vite DApp + Node/Postgres/MCP services +
+  # Compact contracts). Indexed SELECTIVELY via a children allowlist: the DID-registry
+  # Compact contract authorizes with ownPublicKey()-based role/controller checks that
+  # are EXPLOITABLE (ownPublicKey() is a prover-supplied witness, not the authenticated
+  # caller; the admin/controller keys compared against are PUBLIC ledger fields; the
+  # shielded token layer is gated by the same spoofable check, so it does not mitigate).
+  # Everything that presents that model as working is EXCLUDED by omission: the exploitable
+  # contracts + variants/probes (contracts/did_registry*.compact, contracts/archived/**,
+  # .analysis/**), the README (it falsely states the check "proves which wallet is calling"),
+  # and the design/architecture/method/SDD/demo docs that depict ownPublicKey() as
+  # authenticating the caller (identity-architecture.md, did-midnight-method.md,
+  # self-registration-role-sdd.md, agent-platform-interface-sequence.md, did-vc-specification.md,
+  # demo-*), plus one UI component (OwnerVaultPanel.tsx) that labels ownPublicKey() as
+  # authorization. What IS indexed: the author's accurate, source-cited MPS-0028
+  # caller-identity analysis (the reason to index — it correctly refutes ownPublicKey-for-auth
+  # and reinforces the corpus's own dealbreaker lesson), a sound holder-side proof-of-knowledge
+  # contract, two model-independent W3C/EUDI docs, and the DApp/MCP/VC/wallet-SDK service code.
+  provenance:
+    attribution: community
+    verified: false
+    tags: [trust:low]
+    verification_notes: >-
+      Community-contributed repository; unverified and unaudited by the Midnight Foundation.
+      Indexed SELECTIVELY (2026-07-02) after a static security review found the project's
+      DID-registry Compact contract uses ownPublicKey()-based role/controller authorization
+      that is EXPLOITABLE: ownPublicKey() is a prover-supplied witness (the caller's
+      coinPublicKey), not the authenticated on-chain caller, and the admin/controller keys it
+      is compared against are PUBLIC ledger fields — so an attacker reads the target key
+      off-chain, supplies it as their own ownPublicKey(), and passes every gate (full admin
+      compromise; impersonate or update any DID). The shielded capability-token layer does NOT
+      mitigate this, because token minting is gated by the same spoofable check. EXCLUDED from
+      this index (do NOT treat as an access-control reference): the exploitable registry
+      contracts and their variants/probes (contracts/did_registry*.compact,
+      contracts/archived/**, .analysis/**), the README and the design/architecture/method/SDD/
+      demo docs that present ownPublicKey() as authenticating the caller — several explicitly
+      and falsely claim it "proves which wallet is calling" or that "knowing a victim's public
+      key is not enough to act as the victim," directly contradicting the project's own
+      MPS-0028 — and one UI component that labels ownPublicKey() as authorization. INDEXED as
+      accurate/valuable: the author's docs/mps-0028-compact-caller-identity.md, an accurate,
+      source-cited analysis (correctly explaining ownPublicKey() is a prover witness =
+      coinPublicKey, not the authenticated CallContext.caller) that reinforces the corpus's own
+      ownPublicKey-for-auth dealbreaker lesson; a sound holder-side proof-of-knowledge contract
+      (contracts/native_ownership_proof.compact); model-independent W3C-DID and EUDI-alignment
+      docs; and the DApp/MCP/VC/wallet-SDK service code as supporting context. SDK is current
+      (compact-runtime 0.16.0, midnight-js 4.0.x, ledger-v8 8.0.3, dapp-connector-api 4.0.1);
+      Apache-2.0. Treat as illustrative, not authoritative, and audit before production use.
+  children:
+    # THE reason to index: accurate, source-cited refutation of ownPublicKey-for-auth.
+    - name: mps-0028-caller-identity
+      file: docs/mps-0028-compact-caller-identity.md
+      provenance:
+        content_type: reference
+    # Model-independent DID/VC and EUDI-alignment docs (no ownPublicKey / controller-auth
+    # depiction — verified zero mentions).
+    - name: docs-w3c-compatibility
+      file: docs/w3c-compatibility-report.md
+      provenance:
+        content_type: reference
+    - name: docs-eudi-best-practices
+      file: docs/eudi-best-practices.md
+      provenance:
+        content_type: reference
+    # Sound holder-side proof-of-knowledge contract (commitments + disclose of public
+    # inputs + domain separation; no ownPublicKey auth, no unguarded lookup).
+    - name: contract-native-ownership-proof
+      file: contracts/native_ownership_proof.compact
+      provenance:
+        content_type: example
+    # DApp client / SDK code as supporting context. EXCLUDES OwnerVaultPanel.tsx (its UI
+    # label presents ownPublicKey() as "Authorization") and the test suite (its DID-registry
+    # / token-gating tests exercise the exploitable auth model — one even asserts "identity
+    # theft resistance" that does not hold).
+    - name: src
+      path: src/
+      exclude:
+        - "**/OwnerVaultPanel.tsx"
+        - "**/tests/**"
+      provenance:
+        content_type: example
+    # Node/Postgres backend: MCP server (http + stdio), VC service, registry service,
+    # issuer keys, native-ownership prover, proof-request service.
+    - name: server
+      path: server/
+      provenance:
+        content_type: example
+    # Shared SDK/proof/wallet helpers: canonical-json, midnight-proof-envelope,
+    # native-ownership-proof, providers, wallet-bridge, wallet-permissions.
+    - name: lib
+      path: lib/
+      provenance:
+        content_type: example
+    # Wallet connection hook.
+    - name: hooks
+      path: hooks/
+      provenance:
+        content_type: example
