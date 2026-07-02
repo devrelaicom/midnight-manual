@@ -48,7 +48,7 @@ mnm ingest run manifests/midnight/midnight-docs.yaml \
 also auto-creates the source on 404 with `--yes`, but explicit `sources create`
 is preferred so `kind`/`origin_url` are set.)
 
-## Index (110 sources)
+## Index (114 sources)
 
 > This index is generated from `sources.tsv` (slug / repo / branch / kind) and
 > each manifest's `root.provenance` (attribution / verified / trust). It is **not**
@@ -192,3 +192,7 @@ docs/skill repos.
 | nel349-midnight-kicks | kuiralabs/midnight-kicks | main | code_repo | Community | community | false | low |
 | nel349-kuira-midnight-ffi | nel349/kuira-midnight-ffi | main | code_repo | Community | community | false | low |
 | nel349-midnight-wallet-cli | nel349/midnight-wallet-cli | main | code_repo | Community | community | false | low |
+| nftmakerio-midnight-dotnet-sdk | nftmakerio/midnight-dotnet-sdk | main | code_repo | Community | community | false | low |
+| apestchanker-midnight-agent-did-manager | apestchanker/midnight-agent-did-manager | main | code_repo | Community | community | false | low |
+| cadalt0-nightforge | cadalt0/NIGHTFORGE | main | code_repo | Community | community | false | low |
+| tusharpamnani-midnight-programs-list | tusharpamnani/midnight-programs-list | main | code_repo | Community | community | false | low |
