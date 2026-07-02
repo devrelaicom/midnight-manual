@@ -39,7 +39,7 @@ pub fn parse(body: &str) -> Result<Parsed, SitemapError> {
     use quick_xml::Reader;
 
     let mut reader = Reader::from_str(body);
-    reader.trim_text(true);
+    reader.config_mut().trim_text(true);
 
     let mut urls: Vec<Url> = Vec::new();
     let mut is_index = false;
@@ -60,10 +60,22 @@ pub fn parse(body: &str) -> Result<Parsed, SitemapError> {
                 }
             }
             Ok(Event::Text(t)) if in_loc => {
-                loc_buf.push_str(
-                    &t.unescape()
-                        .map_err(|e| SitemapError::Parse(e.to_string()))?,
-                );
+                // quick-xml >= 0.37 splits entity/character references out of the
+                // text stream into separate `GeneralRef` events, so `Text` here is
+                // already entity-free — a plain decode is all that's needed.
+                let decoded = t.decode().map_err(|e| SitemapError::Parse(e.to_string()))?;
+                loc_buf.push_str(&decoded);
+            }
+            Ok(Event::GeneralRef(r)) if in_loc => {
+                // Fold the reference the reader split out back into the URL,
+                // otherwise `&amp;`/`&#38;` in a query string are silently dropped
+                // (a valid-but-wrong URL). Reconstruct `&{name};` and unescape it,
+                // which handles named, decimal, and hex references uniformly.
+                let name = r.decode().map_err(|e| SitemapError::Parse(e.to_string()))?;
+                let entity = format!("&{name};");
+                let resolved = quick_xml::escape::unescape(&entity)
+                    .map_err(|e| SitemapError::Parse(e.to_string()))?;
+                loc_buf.push_str(&resolved);
             }
             Ok(Event::End(e)) if e.name().0.eq_ignore_ascii_case(b"loc") => {
                 in_loc = false;
@@ -153,6 +165,56 @@ mod tests {
 </urlset>"#;
         match parse(body).unwrap() {
             Parsed::Urls(v) => assert_eq!(v.len(), 2),
+            Parsed::Index(_) => panic!("expected urlset"),
+        }
+    }
+
+    #[test]
+    fn parses_loc_with_named_ampersand_entity() {
+        // A literal `&` in element text is not well-formed XML; sitemaps encode
+        // query-string separators as `&amp;`. quick-xml >= 0.37 emits these as
+        // separate `GeneralRef` events, so the parser must fold them back into
+        // the `<loc>` text or the `&` is silently dropped (valid-but-wrong URL).
+        let body = r"<urlset><url>
+          <loc>https://example.com/?a=1&amp;b=2&amp;c=3</loc>
+        </url></urlset>";
+        match parse(body).unwrap() {
+            Parsed::Urls(v) => {
+                assert_eq!(v.len(), 1);
+                assert_eq!(v[0].as_str(), "https://example.com/?a=1&b=2&c=3");
+            }
+            Parsed::Index(_) => panic!("expected urlset"),
+        }
+    }
+
+    #[test]
+    fn parses_loc_with_numeric_ampersand_reference() {
+        // Numeric character references (`&#38;` == `&`) route through the same
+        // `GeneralRef` path as named entities and must resolve identically.
+        let body = r"<urlset><url>
+          <loc>https://example.com/?a=1&#38;b=2</loc>
+        </url></urlset>";
+        match parse(body).unwrap() {
+            Parsed::Urls(v) => {
+                assert_eq!(v.len(), 1);
+                assert_eq!(v[0].as_str(), "https://example.com/?a=1&b=2");
+            }
+            Parsed::Index(_) => panic!("expected urlset"),
+        }
+    }
+
+    #[test]
+    fn parses_loc_with_hex_ampersand_reference() {
+        // Hexadecimal character references (`&#x26;` == `&`) also route through
+        // the `GeneralRef` path and must resolve identically.
+        let body = r"<urlset><url>
+          <loc>https://example.com/?a=1&#x26;b=2</loc>
+        </url></urlset>";
+        match parse(body).unwrap() {
+            Parsed::Urls(v) => {
+                assert_eq!(v.len(), 1);
+                assert_eq!(v[0].as_str(), "https://example.com/?a=1&b=2");
+            }
             Parsed::Index(_) => panic!("expected urlset"),
         }
     }
