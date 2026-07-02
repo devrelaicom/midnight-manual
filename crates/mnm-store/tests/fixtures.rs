@@ -11,7 +11,7 @@
 )]
 
 use mnm_core::provenance::Provenance;
-use mnm_core::types::{ChunkStatus, DocumentKind, NodeKind, SourceKind};
+use mnm_core::types::{ChunkStatus, DocumentKind, NodeKind, SourceKind, SymbolSegment};
 use mnm_store::entities::{chunk, document, embedding_model, node, source, source_version};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -249,6 +249,117 @@ pub async fn ingest_n_chunk_doc(pool: &PgPool, slug: &str, n: usize) -> MinimalD
         source_version_id: sv_id,
         document_id,
         chunk_ids,
+    }
+}
+
+/// The structured `symbol_path` seeded by [`ingest_code_chunk_doc`].
+///
+/// An `impl`-then-`fn` nesting where the inner `fn` segment carries a non-empty
+/// ancestor `path` (`["Counter"]`). Returned so tests can assert an exact
+/// round-trip through the JSONB column (issue #132).
+#[must_use]
+pub fn code_symbol_path() -> Vec<SymbolSegment> {
+    vec![
+        SymbolSegment {
+            kind: "impl".to_owned(),
+            name: "Counter".to_owned(),
+            path: vec![],
+        },
+        SymbolSegment {
+            kind: "fn".to_owned(),
+            name: "increment".to_owned(),
+            path: vec!["Counter".to_owned()],
+        },
+    ]
+}
+
+/// Insert a fresh source + `source_version` + one **code** document + one code
+/// chunk whose `symbol_path` is the structured [`code_symbol_path`].
+///
+/// Exercises the JSONB `chunk.symbol_path` write/read path that
+/// `document::list_chunks_window` (issue #132) relies on — the store's minimal
+/// helpers otherwise only insert `symbol_path: &[]`, leaving the structured
+/// round-trip untested. `chunk_ids` contains exactly one id.
+pub async fn ingest_code_chunk_doc(pool: &PgPool, slug: &str) -> MinimalDocFixture {
+    let model_id = embedding_model::upsert(pool, "bge-base-en-v1.5", 1, 768, "baai")
+        .await
+        .expect("upsert embedding model");
+
+    let source_id =
+        source::insert(pool, slug, &format!("{slug} (fixture)"), SourceKind::CodeRepo, None, 5)
+            .await
+            .expect("insert source");
+
+    let (sv_id, _) = source_version::create_building(pool, source_id, model_id, None, "0.1.0", "h")
+        .await
+        .expect("create source_version");
+
+    let root_node = node::insert(pool, sv_id, None, NodeKind::Root, "root", 0)
+        .await
+        .expect("insert root node");
+
+    let doc_node = node::insert(pool, sv_id, Some(root_node), NodeKind::Document, "lib.rs", 0)
+        .await
+        .expect("insert document node");
+
+    let provenance = Provenance::default();
+
+    let document_id = document::insert(
+        pool,
+        document::NewDocument {
+            source_version_id: sv_id,
+            node_id: doc_node,
+            kind: DocumentKind::Code,
+            source_url: None,
+            published_url: None,
+            source_path: "src/lib.rs",
+            language: Some("rust"),
+            content_hash: "fixture-hash-code",
+            source_modified_at: None,
+            frontmatter: None,
+            provenance: &provenance,
+            package_id: None,
+            char_count: 43,
+            token_count: 12,
+        },
+    )
+    .await
+    .expect("insert code document");
+
+    let chunk_node = node::insert(pool, sv_id, Some(doc_node), NodeKind::Chunk, "c0", 0)
+        .await
+        .expect("insert chunk node");
+
+    let symbol_path = code_symbol_path();
+    let chunk_id = chunk::insert(
+        pool,
+        chunk::NewChunk {
+            source_version_id: sv_id,
+            document_id,
+            node_id: chunk_node,
+            chunk_index: 0,
+            total_chunks: 1,
+            content: "impl Counter { fn increment(&mut self) {} }",
+            content_hash: "fixture-code-chunk-hash-0",
+            embedding: None,
+            embedding_model_id: model_id,
+            code_embedding: None,
+            heading_path: &[],
+            symbol_path: &symbol_path,
+            start_byte: 0,
+            end_byte: 43,
+            token_count: 12,
+            status: ChunkStatus::Ready,
+        },
+    )
+    .await
+    .expect("insert code chunk");
+
+    MinimalDocFixture {
+        source_id,
+        source_version_id: sv_id,
+        document_id,
+        chunk_ids: vec![chunk_id],
     }
 }
 

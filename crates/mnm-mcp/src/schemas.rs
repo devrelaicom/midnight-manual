@@ -71,7 +71,7 @@ fn scores_fragment() -> Value {
 fn symbol_path_fragment() -> Value {
     json!({
         "type": "array",
-        "description": "Code-symbol path as structured `{kind, name, path}` segments (empty for prose chunks). Richer than search's flat name-string breadcrumb.",
+        "description": "Code-symbol path as structured `{kind, name, path}` segments (empty for prose chunks); `path` = ancestor symbol names, present for nested symbols. Richer than search's flat name-string list.",
         "items": {
             "type": "object",
             "properties": {
@@ -100,12 +100,14 @@ fn search_result_fragment() -> Value {
             "source_display_name": { "type": "string" },
             "source_path": { "type": "string" },
             "heading_path": { "type": "array", "items": { "type": "string" } },
-            // Flat name-string breadcrumb: the search route flattens the
-            // structured segments and drops `kind` for a ranked hit. The
-            // body-read endpoints return the richer object form
-            // (`symbol_path_fragment`) — see issue #132.
+            // Flat name-string list: the search route flattens the structured
+            // segments and drops `kind` for a ranked hit. Its order is not a
+            // containment hierarchy (post dual-embeddings cutover, nesting lives
+            // in each segment's `path`, which search drops). The body-read
+            // endpoints return the richer object form (`symbol_path_fragment`)
+            // — see issue #132.
             "symbol_path": { "type": "array", "items": { "type": "string" },
-                "description": "Flat breadcrumb of symbol names (kind dropped). The get_chunks family and get_document_chunks return the richer `{kind, name}` segment form." },
+                "description": "Flat list of symbol names (kind dropped; order is not a containment hierarchy). Empty for prose chunks. The get_chunks family and get_document_chunks return the richer structured `{kind, name, path}` segment form." },
             "content": { "type": "string" },
             "rank": { "type": "integer", "minimum": 1,
                 "description": "1-based position in the returned result list." },

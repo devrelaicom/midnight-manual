@@ -71,3 +71,26 @@ async fn list_chunks_window_past_end_returns_empty_with_total() {
     assert_eq!(w.from, 10);
     assert_eq!(w.total_chunks, 5);
 }
+
+/// Issue #132: the structured `symbol_path` (`[{kind, name, path}]`, including a
+/// nested segment's non-empty ancestor `path`) must survive the JSONB
+/// round-trip from `chunk.symbol_path` into `ChunkBody.symbol_path` — the
+/// load-bearing store half of the "carry it on get_document_chunks" decision.
+#[tokio::test]
+async fn list_chunks_window_round_trips_structured_symbol_path() {
+    let h = common::boot().await;
+    let fx = fixtures::ingest_code_chunk_doc(&h.pool, "window-symbols").await;
+
+    let w = document::list_chunks_window(&h.pool, fx.document_id, 0, 10)
+        .await
+        .unwrap();
+
+    assert_eq!(w.chunks.len(), 1, "the code fixture inserts exactly one chunk");
+    let body = &w.chunks[0];
+    // Exact round-trip of every segment (kind, name, and the nested ancestor path).
+    assert_eq!(body.symbol_path, fixtures::code_symbol_path());
+    // Spot-check the nested `fn` segment's ancestor array specifically.
+    assert_eq!(body.symbol_path[1].kind, "fn");
+    assert_eq!(body.symbol_path[1].name, "increment");
+    assert_eq!(body.symbol_path[1].path, vec!["Counter".to_owned()]);
+}
