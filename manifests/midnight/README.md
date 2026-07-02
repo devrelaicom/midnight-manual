@@ -48,7 +48,7 @@ mnm ingest run manifests/midnight/midnight-docs.yaml \
 also auto-creates the source on 404 with `--yes`, but explicit `sources create`
 is preferred so `kind`/`origin_url` are set.)
 
-## Index (105 sources)
+## Index (110 sources)
 
 > This index is generated from `sources.tsv` (slug / repo / branch / kind) and
 > each manifest's `root.provenance` (attribution / verified / trust). It is **not**
@@ -187,3 +187,8 @@ docs/skill repos.
 | nstanford5-example-private-auction-reserve | nstanford5/example-private-auction-reserve | master | code_repo | Community | community | false | low |
 | nstanford5-example-private-party | nstanford5/example-private-party | main | code_repo | Community | community | false | low |
 | 0xstrong-anchorzk | 0xstrong/AnchorZK | main | code_repo | Community | community | false | low |
+| adamreynolds-io-compact-zkir-lint | adamreynolds-io/compact-zkir-lint | main | code_repo | Community | community | false | low |
+| adamreynolds-io-gsd-wallet | adamreynolds-io/gsd-wallet | main | code_repo | Community | community | false | low |
+| nel349-midnight-kicks | kuiralabs/midnight-kicks | main | code_repo | Community | community | false | low |
+| nel349-kuira-midnight-ffi | nel349/kuira-midnight-ffi | main | code_repo | Community | community | false | low |
+| nel349-midnight-wallet-cli | nel349/midnight-wallet-cli | main | code_repo | Community | community | false | low |
