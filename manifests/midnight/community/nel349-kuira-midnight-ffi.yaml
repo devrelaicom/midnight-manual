@@ -1,0 +1,37 @@
+manifest_version: 1
+root:
+  name: nel349-kuira-midnight-ffi
+  # Single cohesive Rust crate: a cryptographic FFI library (154 extern "C"
+  # exports + a JNI C bridge) that bridges Midnight's Rust ledger/crypto crates
+  # into Android/Kotlin. The whole repo is doc-rich source worth indexing except
+  # the vendored ledger submodule and build output.
+  path: .
+  exclude:
+    # vendored fork of the entire Midnight ledger Rust workspace (git submodule;
+    # not this repo's own code)
+    - "midnight-ledger/**"
+    # Rust build output
+    - "target/**"
+    # low-value test fixture blobs
+    - "test-fixtures/*.json"
+    # (Cargo.lock auto-skips as a lockfile; native artifacts *.so/*.dylib/*.a
+    # auto-drop as unrecognized extensions)
+  provenance:
+    attribution: community
+    verified: false
+    tags: [trust:low]
+    verification_notes: >-
+      Community-contributed repository; unverified and unaudited by the Midnight
+      Foundation. Passed a static Rust code review (2026-07-02): a substantial,
+      well-documented FFI crate (154 extern "C" exports + JNI bridge) that bridges
+      Midnight's Rust ledger/crypto crates (zswap, ledger, base-crypto, dust,
+      onchain-runtime, zkir) into Android/Kotlin — disciplined FFI memory safety
+      (guarded boundaries, paired alloc/free, per-function safety contracts),
+      idiomatic Midnight-crate usage, and strong tests (BIP-340 vectors,
+      replay-equivalence). Two localized DO-NOT-COPY crypto-hygiene defects a reader
+      must not replicate: a hardcoded-seed RNG in one transaction-seal path
+      (serialize.rs — OsRng is used correctly elsewhere), and an unconditional debug
+      print of the coin secret key (lib.rs). Also: no catch_unwind at the FFI
+      boundary; ships no LICENSE file; targets the Rust ledger workspace ~v7 (one
+      generation behind the current ledger-v8). Treat as illustrative, not
+      authoritative, and audit before production use.
