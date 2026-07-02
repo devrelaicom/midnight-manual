@@ -1,0 +1,29 @@
+manifest_version: 1
+root:
+  name: adamreynolds-io-gsd-wallet
+  path: .
+  exclude:
+    # 21 MB packaged build artifact (zipped dist/ for chrome://extensions load).
+    - "dist.zip"
+    # Generated compiled-contract metadata JSON for the counter test fixture
+    # (the walker would otherwise treat this as content). The sibling
+    # *.zkir/*.bzkir/*.prover/*.verifier binaries auto-drop as unrecognized
+    # extensions, and pnpm-lock.yaml/package-lock.json auto-skip as lockfiles.
+    - "packages/gsd-socket/test/fixtures/counter/compiled/**"
+  provenance:
+    attribution: community
+    verified: false
+    tags: [trust:low]
+    verification_notes: >-
+      Community-contributed repository; unverified and unaudited by the Midnight
+      Foundation. Passed a multi-agent static review (2026-07-02): a substantial,
+      genuinely-Midnight Chrome MV3 developer wallet with current-track wallet-sdk 3.x
+      + DApp-connector v4 + ledger-v8 usage and idiomatic low-level SDK patterns
+      (custom sync-service injection, dust register/deregister); DApp/SDK review PASS,
+      CQ adequate (CI gating, SHA-pinned actions, property + live-e2e tests). It is an
+      explicitly NON-PRODUCTION dev/QA wallet (seeds stored unencrypted by documented
+      design; auto-approves txns with in-code BYPASS warnings) — do not use for real
+      funds. Known caveat: the balanceSealedTransaction handler
+      (src/offscreen/connectedApiHandler.ts) omits the signRecipe step present in every
+      other tx path and in the official reference wallets — do not copy that one handler
+      verbatim. Treat as illustrative, not authoritative, and audit before production use.
