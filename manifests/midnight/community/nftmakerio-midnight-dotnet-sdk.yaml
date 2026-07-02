@@ -1,0 +1,36 @@
+manifest_version: 1
+root:
+  name: nftmakerio-midnight-dotnet-sdk
+  path: .
+  exclude:
+    # Incorrect mnemonic->seed derivation: uses NBitcoin's 64-byte BIP39 PBKDF2
+    # seed instead of Midnight's 32-byte mnemonicToEntropy fed to fromMasterSeed,
+    # so the SAME 24-word mnemonic yields keys/addresses that do NOT match
+    # Lace / the official SDK. The raw-seed interop path IS correct; only this
+    # mnemonic->seed step is wrong. Excluded so RAG can't surface the wrong pattern.
+    - "src/Midnight.Sdk/Hd/Bip39Helper.cs"
+    # .NET build output.
+    - "bin/**"
+    - "obj/**"
+    # (native/*.wasm and any *.dll auto-drop as unrecognized exts; verify via ingest plan)
+  provenance:
+    attribution: community
+    verified: false
+    tags: [trust:low]
+    verification_notes: >-
+      Community-contributed repository; unverified and unaudited by the Midnight
+      Foundation. Passed a static C# review (2026-07-02) with protocol claims verified
+      against canonical Midnight upstream source: a novel standalone C#/.NET 9 read-side
+      SDK whose indexer v4 GraphQL schema + endpoints, unshielded-UTXO/NIGHT-token model
+      (NIGHT = 32 zero bytes), and HD-derivation path facts (SLIP-44 coin type 2400,
+      five roles, m/44'/2400'/account'/role/index) are all CONFIRMED CORRECT and safe to
+      learn from. Known caveats: (1) the mnemonic->seed derivation was WRONG (used
+      BIP39's 64-byte PBKDF2 seed instead of Midnight's 32-byte entropy), so a wallet
+      created from a mnemonic here does NOT match Lace/the official SDK — that file is
+      EXCLUDED from this index and the README's "Lace-compatible" claim is inaccurate for
+      the mnemonic path (the raw-seed interop path IS correct); (2) shielded state and
+      transaction-building are not implemented in pure C# (deferred to a WASM skeleton /
+      Node worker; the write path calls a separate NMKR API); (3) the demo handles raw
+      seeds unsafely (plaintext CLI/HTTP, no zeroization) — do not copy. Apache-2.0
+      (README-declared; no LICENSE file). Treat as illustrative, not authoritative, and
+      audit before production use.
