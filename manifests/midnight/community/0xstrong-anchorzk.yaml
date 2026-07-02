@@ -1,0 +1,20 @@
+manifest_version: 1
+root:
+  name: 0xstrong-anchorzk
+  path: .
+  exclude:
+    # generated Compact compiler output (JS/.d.ts/map emitted from anchorzk.compact)
+    - "contract/src/managed/**"
+  provenance:
+    attribution: community
+    verified: false
+    tags: [trust:low]
+    verification_notes: >-
+      Community-contributed repository; unverified and unaudited by the Midnight
+      Foundation. Passed a multi-agent static code-quality review (2026-07-02):
+      Compact-contract, DApp/SDK, and CLI reviews all PASS with no dealbreakers
+      (correct witness-secret -> domain-separated-hash -> pinned-commitment access
+      control; privacy by construction); CQ tooling adequate (real unit tests +
+      strict TypeScript, no working linter/formatter). Ships no LICENSE file
+      (all-rights-reserved by default). Treat as illustrative, not authoritative,
+      and audit before any production use.
