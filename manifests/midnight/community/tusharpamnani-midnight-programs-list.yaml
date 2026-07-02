@@ -1,0 +1,53 @@
+manifest_version: 1
+root:
+  name: tusharpamnani-midnight-programs-list
+  path: .
+  # SAFE SUBSET ONLY. This monorepo aggregates 16 contracts of mixed quality;
+  # a multi-agent static review (2026-07-02, one reviewer compiling each
+  # contract) found dealbreakers in 13 of them. The include allowlist below
+  # pins ONLY the three vetted-safe subdirectories:
+  #   - compact-allowlist  (zk-allowlist: exemplary domain-separated Merkle
+  #                          path + nullifier + hash-preimage admin auth,
+  #                          plus 10 adversarial test files)
+  #   - compact-escrow     (correct hash-derived-key auth + commitment check)
+  #   - compact-todo       (sound deriveKey ownership auth)
+  # The root README.md is intentionally NOT included: it advertises the
+  # excluded/broken collection.
+  include:
+    - "compact-allowlist/**"
+    - "compact-escrow/**"
+    - "compact-todo/**"
+  # Drop generated artifacts, deps, lockfiles, and binary assets. (Several of
+  # these — managed/, node_modules/, dist/, package-lock.json — are also on the
+  # default skip list; listed here for self-documentation.)
+  exclude:
+    - "**/managed/**"
+    - "**/node_modules/**"
+    - "**/dist/**"
+    - "**/*.lock"
+    - "**/package-lock.json"
+    - "**/*.png"
+    - "**/*.svg"
+  provenance:
+    attribution: community
+    verified: false
+    tags: [trust:low]
+    verification_notes: >-
+      Community-contributed repository; unverified and unaudited by the Midnight
+      Foundation. This monorepo contains 16 contracts of MIXED quality; a
+      multi-agent static review (2026-07-02, one reviewer compiling each
+      contract) found dealbreakers in most of them, so ONLY a vetted SAFE SUBSET
+      of three is indexed: zk-allowlist (an exemplary domain-separated
+      Merkle-path + nullifier allowlist with sound hash-of-secret admin auth and
+      10 adversarial test files), escrow, and todo (both demonstrating the
+      CORRECT derived-key authorization pattern, deriveKey(secretKey())==storedKey).
+      The other 13 contracts were EXCLUDED for spoofable identity auth (unbound
+      callerAddress()/ownPublicKey() used for authorization → admin takeover /
+      token theft / impersonation), broken commit-reveal (no hash-to-commitment
+      binding), missing access control on value-moving circuits, absent vote
+      authentication, or compile failures. Caveat on the indexed subset: as
+      shipped these write an exact-match `pragma language_version 0.22;` (no `>=`
+      floor) which does not compile on the current 0.23 toolchain until a `>=`
+      comparator is added — the patterns themselves are sound and current-idiom.
+      Also note todo's createTodo lacks a re-init guard. Treat as illustrative,
+      not authoritative, and audit before production use.
