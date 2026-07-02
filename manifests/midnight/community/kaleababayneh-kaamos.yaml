@@ -1,0 +1,42 @@
+manifest_version: 1
+root:
+  name: kaleababayneh-kaamos
+  path: .
+  exclude:
+    # Unauthenticated, UNLIMITED mint on a token named "USDC" — a fund-loss anti-pattern
+    # if it ever bears value (dev-acknowledged permissionless preprod faucet). Do not surface.
+    - "contract/src/usdc.compact"
+    - "contract/src/usdc-contract.ts"
+    # Vendored OpenZeppelin modules — dead code (not imported by htlc.compact) and OZ carried upstream.
+    - "contract/src/vendor/**"
+    # generated / compiled / noise
+    - "**/managed/**"
+    - "**/*.zkir"
+    - "**/*.bzkir"
+    - "**/*.prover"
+    - "**/*.verifier"
+    - "**/package-lock.json"
+    - "**/*.png"
+  provenance:
+    attribution: community
+    verified: false
+    tags: [trust:low]
+    verification_notes: >-
+      Community-contributed repository; unverified and unaudited by the Midnight Foundation.
+      A cross-chain OTC atomic-swap dApp (Cardano <-> Midnight, USDM/USDC) via SHA-256
+      hash-time-locked escrow, on a current SDK (compact-runtime 0.15.0, ledger-v8 8.0.3,
+      midnight-js 4.0.x). A static security review (2026-07-02) found the HTLC contract
+      (contract/src/htlc.compact) genuinely well-built and instructive: a sound preimage
+      hashlock, cleanly-disjoint REAL block-time timelock windows (blockTimeLte on withdraw /
+      blockTimeGt on reclaim — not caller-supplied time), correct double-spend sentinels, and
+      conserved custody (receiveUnshielded -> sendUnshielded, exact per swap). Notably, its
+      ownPublicKey()-based auth asserts are decorative/spoofable BUT NON-EXPLOITABLE because
+      payouts are bound to FIXED addresses captured at deposit (not ownPublicKey-derived) — an
+      instructive contrast to the theft-prone identity-derived-payout pattern. Do NOT copy the
+      ownPublicKey() gates as real access control, and never derive a payout from ownPublicKey().
+      EXCLUDED from this index: contract/src/usdc.compact (an unauthenticated UNLIMITED mint on a
+      token named "USDC" — a fund-loss anti-pattern; the authors document it as a permissionless
+      faucet) and the vendored, dead-code OpenZeppelin modules. Caveats: a hash-slot
+      pre-occupation griefing/DoS on a swap leg (no fund loss), and stale-preimage-on-slot-reuse
+      (do not reuse secrets). License is inconsistent (README MIT vs LICENSE file Apache-2.0).
+      Treat as illustrative, not authoritative, and audit before production use.
