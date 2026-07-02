@@ -18,7 +18,7 @@ use mnm_telemetry::{
 use tokio::io::{stdin, stdout, Stdin, Stdout};
 use tracing::{debug, info, warn};
 
-use crate::cloud_client::CloudClient;
+use crate::cloud_client::{CloudClient, RateLimitSnapshot};
 use crate::prompts;
 use crate::protocol::{
     ErrorCode, Incoming, InitializeResult, PromptGetParams, PromptsCapability, RequestId, Response,
@@ -248,6 +248,166 @@ const fn passthrough_outcome(e: &tools::PassthroughError) -> Outcome {
     }
 }
 
+/// Backoff to advise on a 429 when no `Retry-After` is available: either the
+/// cloud sent none, or the request failed on the embed/rerank path (which routes
+/// through `mnm_embedding` and does not capture response headers, so it always
+/// lands here). Conservative but not punitive — the per-second rate buckets
+/// reset in low single-digit seconds.
+///
+/// Public so the wait floor is a single source of truth the tests assert on.
+pub const DEFAULT_RATE_LIMIT_BACKOFF_SECS: u64 = 5;
+
+/// Build the `RATE_LIMITED` failure (HTTP 429). `retryable: true`, but the
+/// guidance and `suggested_next_actions` tell the agent to WAIT the advised
+/// delay and consult `status` — never to retry immediately (issue #133). The
+/// `retry_after_secs` + `rate_limit` details are carried into the error object.
+///
+/// Public so the canonical agent-facing strings have a single source of truth
+/// the tests assert against (rather than re-deriving them).
+#[must_use]
+pub fn rate_limited_failure(snapshot: &RateLimitSnapshot) -> ToolFailure {
+    let retry_after = snapshot
+        .retry_after_secs
+        .unwrap_or(DEFAULT_RATE_LIMIT_BACKOFF_SECS);
+    let guidance = if snapshot.retry_after_secs.is_some() {
+        // "at least" (a floor, not a definitive wait): the header can be a
+        // clamped daily-budget window, so a literal agent must not under-wait
+        // and loop (#133 L-a).
+        format!(
+            "Rate limited by the cloud (HTTP 429). Wait at least {retry_after}s before retrying — \
+             an immediate retry will just be rejected again and delay your success. Call the \
+             `status` tool to see your remaining rate-limit and token budget."
+        )
+    } else {
+        format!(
+            "Rate limited by the cloud (HTTP 429). Wait at least {retry_after}s before retrying \
+             (back off further if it persists) — an immediate retry will just be rejected again \
+             and delay your success. Call the `status` tool to see your remaining rate-limit and \
+             token budget."
+        )
+    };
+    let mut details = serde_json::Map::new();
+    details.insert("retry_after_secs".to_owned(), serde_json::json!(retry_after));
+    let mut rate_limit = serde_json::Map::new();
+    if let Some(limit) = snapshot.limit {
+        rate_limit.insert("limit".to_owned(), serde_json::json!(limit));
+    }
+    if let Some(remaining) = snapshot.remaining {
+        rate_limit.insert("remaining".to_owned(), serde_json::json!(remaining));
+    }
+    if let Some(reset_secs) = snapshot.reset_secs {
+        rate_limit.insert("reset_secs".to_owned(), serde_json::json!(reset_secs));
+    }
+    if !rate_limit.is_empty() {
+        details.insert("rate_limit".to_owned(), serde_json::Value::Object(rate_limit));
+    }
+    ToolFailure {
+        kind: ErrorKind::RateLimited,
+        message: "rate limited by the cloud API".to_owned(),
+        guidance,
+        details: serde_json::Value::Object(details),
+        suggested_next_actions: vec![NextAction::call(
+            "Check your current rate-limit and token budget before retrying",
+            "status",
+            serde_json::json!({}),
+        )],
+    }
+}
+
+/// Build the `AUTH_FAILED` failure (HTTP 401/403). `retryable: false` — an
+/// identical retry cannot succeed. 401 means invalid/expired credentials
+/// (recover via `mnm auth github`); 403 means the credentials are valid but the
+/// request is not permitted for the account (typically an access-tier
+/// restriction). The distinguishing `auth_reason` is carried into the error
+/// object (issue #133).
+///
+/// Public so the canonical agent-facing strings have a single source of truth
+/// the tests assert against (rather than re-deriving them).
+#[must_use]
+pub fn auth_failed_failure(status: u16) -> ToolFailure {
+    let (auth_reason, guidance, action) = if status == 403 {
+        (
+            "insufficient_tier",
+            "Authorization failed (HTTP 403): your credentials are valid, but this request is not \
+             permitted for your account (typically an access-tier restriction). An identical \
+             retry will not succeed."
+                .to_owned(),
+            NextAction::user(
+                "Ask the operator whether your account/tier has access to this resource.",
+            ),
+        )
+    } else {
+        (
+            "invalid_credentials",
+            "Authentication failed (HTTP 401): your credentials are invalid or expired. Run \
+             `mnm auth github` to obtain or refresh a read-uplift token, then retry."
+                .to_owned(),
+            NextAction::user(
+                "Run `mnm auth github` to obtain or refresh your access token, then retry the request.",
+            ),
+        )
+    };
+    ToolFailure {
+        kind: ErrorKind::AuthFailed,
+        message: format!("cloud authentication/authorization failed (HTTP {status})"),
+        guidance,
+        details: serde_json::json!({ "auth_reason": auth_reason }),
+        suggested_next_actions: vec![action],
+    }
+}
+
+/// Build the BYOK-embedding `RATE_LIMITED` failure — VoyageAI throttled a BYOK
+/// embed/rerank call directly. Retryable (wait-and-retry is valid), but the
+/// guidance names the embedding PROVIDER and does NOT point at `status` (which
+/// reports the Midnight budget, not VoyageAI's) or "the cloud" (#133 BYOK). The
+/// embed client can't read `Retry-After`, so the advised wait is the
+/// conservative default backoff, phrased as a floor.
+///
+/// Public so the canonical agent-facing strings are a single source of truth the
+/// tests assert against.
+#[must_use]
+pub fn embedding_rate_limited_failure() -> ToolFailure {
+    let retry_after = DEFAULT_RATE_LIMIT_BACKOFF_SECS;
+    ToolFailure {
+        kind: ErrorKind::RateLimited,
+        message: "rate limited by the embedding provider (VoyageAI)".to_owned(),
+        guidance: format!(
+            "Rate limited by the embedding provider (VoyageAI). Wait at least {retry_after}s \
+             before retrying, backing off further if it persists — an immediate retry will just \
+             be rejected again."
+        ),
+        details: serde_json::json!({ "retry_after_secs": retry_after }),
+        suggested_next_actions: vec![],
+    }
+}
+
+/// Build the BYOK-embedding `AUTH_FAILED` failure — VoyageAI rejected the user's
+/// `VOYAGE_API_KEY` on a BYOK embed/rerank call. That key is a DIFFERENT
+/// credential from the Midnight read-uplift token, so `retryable: false` and the
+/// guidance names `VOYAGE_API_KEY`, NEVER `mnm auth github` (which would send the
+/// agent to refresh the wrong credential and dead-end loop). `auth_reason` is the
+/// dedicated `invalid_embedding_key` (#133 BYOK).
+///
+/// Public so the canonical agent-facing strings are a single source of truth the
+/// tests assert against.
+#[must_use]
+pub fn embedding_auth_failed_failure(status: u16) -> ToolFailure {
+    ToolFailure {
+        kind: ErrorKind::AuthFailed,
+        message: format!("embedding provider rejected VOYAGE_API_KEY (HTTP {status})"),
+        guidance: format!(
+            "VoyageAI rejected your VOYAGE_API_KEY (HTTP {status}) — the key is invalid or \
+             expired. Set a valid VOYAGE_API_KEY, then retry. (This is your embedding-provider \
+             key, separate from your Midnight access token — refreshing the Midnight token will \
+             not help here.)"
+        ),
+        details: serde_json::json!({ "auth_reason": "invalid_embedding_key" }),
+        suggested_next_actions: vec![NextAction::user(
+            "Set a valid VOYAGE_API_KEY (your VoyageAI embedding key is invalid or expired), then retry.",
+        )],
+    }
+}
+
 fn cloud_failure(e: &crate::cloud_client::CloudError) -> ToolFailure {
     use crate::cloud_client::CloudError;
     match e {
@@ -262,6 +422,8 @@ fn cloud_failure(e: &crate::cloud_client::CloudError) -> ToolFailure {
                 serde_json::json!({ "query": "<terms>" }),
             )],
         },
+        CloudError::RateLimited { snapshot, .. } => rate_limited_failure(snapshot),
+        CloudError::AuthFailed { status, .. } => auth_failed_failure(*status),
         other => ToolFailure::simple(
             ErrorKind::CloudError,
             other.to_string(),
@@ -287,6 +449,8 @@ fn passthrough_failure(e: tools::PassthroughError) -> ToolFailure {
                 json!({ "query": "<terms>" }),
             )],
         },
+        tools::PassthroughError::RateLimited(snapshot) => rate_limited_failure(&snapshot),
+        tools::PassthroughError::AuthFailed { status } => auth_failed_failure(status),
         tools::PassthroughError::Cloud(msg) => {
             ToolFailure::simple(ErrorKind::CloudError, msg, "Upstream call failed; retry shortly.")
         }
@@ -526,42 +690,52 @@ async fn run_search_dispatch(params: &ToolCallParams, state: &ServerState) -> To
                 outcome: Outcome::Ok,
             }
         }
-        Err(tools::SearchError::Mismatch {
+        // All failure variants render through one place (`search_failure`) so the
+        // dispatcher stays small and the search error taxonomy lives together.
+        Err(e) => ToolResponse {
+            result: search_failure(e).into_result(),
+            telemetry: None,
+            rerank: None,
+            outcome: Outcome::Error,
+        },
+    }
+}
+
+/// Map a [`tools::SearchError`] to its agent-facing [`ToolFailure`]. Split out of
+/// [`run_search_dispatch`] so the dispatcher stays under the line cap and the
+/// full search error taxonomy — including the BYOK vs proxy split (#133) — is
+/// visible in one match.
+fn search_failure(e: tools::SearchError) -> crate::render::ToolFailure {
+    use crate::render::ToolFailure;
+    match e {
+        tools::SearchError::Mismatch {
             corpus_model,
             client_model,
             message,
             remediation,
-        }) => ToolResponse {
-            result: ToolFailure {
-                kind: ErrorKind::EmbeddingModelMismatch,
-                message,
-                guidance: remediation.clone(),
-                details: serde_json::json!({
-                    "corpus_model": corpus_model,
-                    "client_model": client_model,
-                    "remediation": remediation,
-                }),
-                // No suggested tool call: the mismatch is corpus-side (the
-                // client embeds via the live `/v1/models/active` wire id), so
-                // the cloud-provided `remediation` string is the next step.
-                suggested_next_actions: vec![],
-            }
-            .into_result(),
-            telemetry: None,
-            rerank: None,
-            outcome: Outcome::Error,
+        } => ToolFailure {
+            kind: ErrorKind::EmbeddingModelMismatch,
+            message,
+            guidance: remediation.clone(),
+            details: serde_json::json!({
+                "corpus_model": corpus_model,
+                "client_model": client_model,
+                "remediation": remediation,
+            }),
+            // No suggested tool call: the mismatch is corpus-side (the client
+            // embeds via the live `/v1/models/active` wire id), so the
+            // cloud-provided `remediation` string is the next step.
+            suggested_next_actions: vec![],
         },
-        Err(tools::SearchError::Cloud(msg)) => ToolResponse {
-            result: ToolFailure::simple(
-                ErrorKind::CloudError,
-                msg,
-                "Search failed upstream; retry shortly.",
-            )
-            .into_result(),
-            telemetry: None,
-            rerank: None,
-            outcome: Outcome::Error,
-        },
+        tools::SearchError::RateLimited(snapshot) => rate_limited_failure(&snapshot),
+        tools::SearchError::AuthFailed { status } => auth_failed_failure(status),
+        tools::SearchError::EmbeddingRateLimited => embedding_rate_limited_failure(),
+        tools::SearchError::EmbeddingAuthFailed { status } => embedding_auth_failed_failure(status),
+        tools::SearchError::Cloud(msg) => ToolFailure::simple(
+            ErrorKind::CloudError,
+            msg,
+            "Search failed upstream; retry shortly.",
+        ),
     }
 }
 

@@ -27,7 +27,7 @@ use mnm_embedding::{client as embed_client, contextualized, reranker, voyage};
 use serde_json::json;
 use uuid::Uuid;
 
-use crate::cloud_client::{CloudClient, CloudError, QueryPair, SearchRequest};
+use crate::cloud_client::{CloudClient, CloudError, QueryPair, RateLimitSnapshot, SearchRequest};
 use crate::protocol::{ToolAnnotations, ToolDescription, ToolsListResult};
 use crate::server::ServerConfig;
 
@@ -498,8 +498,98 @@ pub enum SearchError {
         /// Concrete next step.
         remediation: String,
     },
-    /// Catchall cloud / decode / transport failure.
+    /// The Midnight cloud returned 429 (on `/v1/search`, or the `/v1/embeddings`
+    /// PROXY path) — the server layer maps this to `RATE_LIMITED` with the
+    /// wait-and-`status` guidance. Carries the `Retry-After` / `X-RateLimit-*`
+    /// snapshot (default/empty on the proxy embed path, which cannot read them).
+    RateLimited(RateLimitSnapshot),
+    /// The Midnight cloud returned 401/403 (proxy path) — the server layer maps
+    /// this to `AUTH_FAILED` with the `mnm auth github` recovery. `status`
+    /// distinguishes 401 (invalid credentials) from 403 (tier).
+    AuthFailed {
+        /// The failing status — `401` or `403`.
+        status: u16,
+    },
+    /// A BYOK embed/rerank call hit VoyageAI DIRECTLY and was rate-limited (429).
+    /// Distinct from [`Self::RateLimited`] so the guidance names the embedding
+    /// provider, not the Midnight cloud / `status` budget (#133 BYOK).
+    EmbeddingRateLimited,
+    /// A BYOK embed/rerank call hit VoyageAI DIRECTLY and got 401/403 — the
+    /// user's `VOYAGE_API_KEY` is invalid/expired, a DIFFERENT credential from
+    /// the Midnight read-uplift token. Distinct from [`Self::AuthFailed`] so the
+    /// recovery names `VOYAGE_API_KEY`, never `mnm auth github` (#133 BYOK).
+    EmbeddingAuthFailed {
+        /// The failing status — `401` or `403`.
+        status: u16,
+    },
+    /// Catchall cloud / decode / transport failure (genuine 5xx / transport).
     Cloud(String),
+}
+
+impl From<CloudError> for SearchError {
+    /// Preserve the typed 409/429/401/403 classifications from the cloud client
+    /// so the server layer can emit precise MCP error codes; everything else
+    /// (5xx, transport, decode, 404) collapses to the retryable `Cloud` string.
+    fn from(e: CloudError) -> Self {
+        match e {
+            CloudError::EmbeddingModelMismatch {
+                corpus_model,
+                client_model,
+                message,
+                remediation,
+            } => Self::Mismatch {
+                corpus_model,
+                client_model,
+                message,
+                remediation,
+            },
+            CloudError::RateLimited { snapshot, .. } => Self::RateLimited(snapshot),
+            CloudError::AuthFailed { status, .. } => Self::AuthFailed { status },
+            other => Self::Cloud(other.to_string()),
+        }
+    }
+}
+
+/// Classify an embedding / rerank [`VoyageError`] into a [`SearchError`],
+/// preserving `429` and `401`/`403` so the FIRST cloud call on a search surfaces
+/// `RATE_LIMITED` / `AUTH_FAILED` instead of collapsing every failure into the
+/// retryable `CLOUD_ERROR` "retry shortly" the taxonomy work removes (#133 M1).
+///
+/// `is_byok` selects the recovery, because the two paths use DIFFERENT
+/// credentials and endpoints:
+/// - PROXY (`is_byok == false`): the call went to the Midnight cloud's
+///   `/v1/embeddings` proxy, authenticated by the read-uplift token. 401/403 →
+///   [`SearchError::AuthFailed`] (recover via `mnm auth github`); 429 →
+///   [`SearchError::RateLimited`] with a default snapshot (the proxy embed path
+///   cannot read `Retry-After`), pointing the agent at `status`.
+/// - BYOK (`is_byok == true`): the call went to VoyageAI DIRECTLY, authenticated
+///   by the user's `VOYAGE_API_KEY`. 401/403 → [`SearchError::EmbeddingAuthFailed`]
+///   (the recovery names `VOYAGE_API_KEY`, NOT `mnm auth github` — sending a BYOK
+///   agent to refresh the Midnight token is a dead-end loop); 429 →
+///   [`SearchError::EmbeddingRateLimited`] (guidance names the embedding
+///   provider, not the Midnight cloud / `status`).
+///
+/// `context` labels the failing stage for the `Cloud` fallback.
+fn voyage_search_error(context: &str, e: voyage::VoyageError, is_byok: bool) -> SearchError {
+    match e {
+        voyage::VoyageError::Status { status: 429, .. } => {
+            if is_byok {
+                SearchError::EmbeddingRateLimited
+            } else {
+                SearchError::RateLimited(RateLimitSnapshot::default())
+            }
+        }
+        voyage::VoyageError::Status {
+            status: status @ (401 | 403), ..
+        } => {
+            if is_byok {
+                SearchError::EmbeddingAuthFailed { status }
+            } else {
+                SearchError::AuthFailed { status }
+            }
+        }
+        other => SearchError::Cloud(format!("{context}: {other}")),
+    }
 }
 
 const DEFAULT_LIMIT: u32 = 10;
@@ -661,23 +751,9 @@ pub async fn run_search(
         client_embedding_model.clone(),
         code_wire.clone(),
     );
-    let cloud_resp = match cloud.search(&req).await {
-        Ok(v) => v,
-        Err(CloudError::EmbeddingModelMismatch {
-            corpus_model,
-            client_model,
-            message,
-            remediation,
-        }) => {
-            return Err(SearchError::Mismatch {
-                corpus_model,
-                client_model,
-                message,
-                remediation,
-            });
-        }
-        Err(e) => return Err(SearchError::Cloud(e.to_string())),
-    };
+    // `SearchError::from` preserves the typed 409 mismatch / 429 rate-limit /
+    // 401-403 auth classifications; genuine 5xx / transport collapse to `Cloud`.
+    let cloud_resp = cloud.search(&req).await.map_err(SearchError::from)?;
 
     // Decompose cloud response. `results` is the only field we touch — every
     // other field is passed through verbatim so the response stays additive
@@ -853,7 +929,8 @@ fn build_search_request(
 ///
 /// # Errors
 ///
-/// Returns [`SearchError::Cloud`] on any embedding or active-model failure.
+/// Returns a [`SearchError`] on embedding / active-model failure: `RateLimited`
+/// on 429, `AuthFailed` on 401/403, else `Cloud`.
 async fn build_embedded_pairs(
     parsed: &ParsedSearchArgs,
     models: &mnm_core::config::ModelsConfig,
@@ -872,7 +949,7 @@ async fn build_embedded_pairs(
     let active = cloud
         .fetch_active_model()
         .await
-        .map_err(|e| SearchError::Cloud(e.to_string()))?;
+        .map_err(SearchError::from)?;
 
     // Derive embedder identities from the active fetch (the authority); config
     // is only the logged fallback. The active fetch always succeeds here (we
@@ -951,7 +1028,10 @@ async fn build_embedded_pairs(
 ///
 /// # Errors
 ///
-/// Returns [`SearchError::Cloud`] on any embedding failure.
+/// Returns a [`SearchError`] on embedding failure: on 429/401/403 the proxy
+/// path yields `RateLimited`/`AuthFailed` and the BYOK path yields
+/// `EmbeddingRateLimited`/`EmbeddingAuthFailed` (see [`voyage_search_error`]);
+/// else `Cloud`.
 async fn embed_general_queries(
     queries: &[String],
     identity: &mnm_core::embedder_identity::EmbedderIdentity,
@@ -985,7 +1065,7 @@ async fn embed_general_queries(
         )
         .await
     }
-    .map_err(|e| SearchError::Cloud(format!("embed general failed: {e}")))?;
+    .map_err(|e| voyage_search_error("embed general failed", e, voyage_key.is_some()))?;
     Ok(embedded.vectors)
 }
 
@@ -999,7 +1079,10 @@ async fn embed_general_queries(
 ///
 /// # Errors
 ///
-/// Returns [`SearchError::Cloud`] on any embedding failure.
+/// Returns a [`SearchError`] on embedding failure: on 429/401/403 the proxy
+/// path yields `RateLimited`/`AuthFailed` and the BYOK path yields
+/// `EmbeddingRateLimited`/`EmbeddingAuthFailed` (see [`voyage_search_error`]);
+/// else `Cloud`.
 async fn embed_code_queries(
     queries: &[String],
     identity: &mnm_core::embedder_identity::EmbedderIdentity,
@@ -1028,7 +1111,7 @@ async fn embed_code_queries(
         )
         .await
     }
-    .map_err(|e| SearchError::Cloud(format!("embed code failed: {e}")))?;
+    .map_err(|e| voyage_search_error("embed code failed", e, voyage_key.is_some()))?;
     Ok(embedded.vectors)
 }
 
@@ -1284,7 +1367,9 @@ fn parse_code_mode_arg(
 ///
 /// # Errors
 ///
-/// Returns [`SearchError::Cloud`] on a Voyage rerank failure.
+/// Returns a [`SearchError`] on a Voyage rerank failure. Local rerank is always
+/// BYOK, so 429 → `EmbeddingRateLimited` and 401/403 → `EmbeddingAuthFailed`
+/// (see [`voyage_search_error`]); else `Cloud`.
 async fn rerank_results(
     parsed: &ParsedSearchArgs,
     results: Vec<serde_json::Value>,
@@ -1328,7 +1413,9 @@ async fn rerank_results(
     let out = reranker
         .rerank(composed, docs, None)
         .await
-        .map_err(|e| SearchError::Cloud(format!("rerank failed: {e}")))?;
+        // Local rerank always uses the caller's own key against VoyageAI (the
+        // proxy reranks server-side inside `/v1/search`), so this is BYOK.
+        .map_err(|e| voyage_search_error("rerank failed", e, true))?;
 
     LOADED_MARKERS.mark_reranker();
     Ok((rerank_postprocess(results, &out.results, limit), out.total_tokens))
@@ -1455,8 +1542,29 @@ pub enum PassthroughError {
     InvalidInput(String),
     /// Cloud returned 404.
     NotFound(String),
-    /// Cloud / transport / decode failure.
+    /// Cloud returned 429 — carries the `Retry-After` / `X-RateLimit-*` snapshot.
+    RateLimited(RateLimitSnapshot),
+    /// Cloud returned 401/403. `status` distinguishes 401 (credentials) from
+    /// 403 (tier).
+    AuthFailed {
+        /// The failing status — `401` or `403`.
+        status: u16,
+    },
+    /// Cloud / transport / decode failure (genuine 5xx / transport).
     Cloud(String),
+}
+
+impl From<CloudError> for PassthroughError {
+    /// Preserve the typed 404/429/401/403 classifications; everything else
+    /// (5xx, transport, decode) collapses to the retryable `Cloud` string.
+    fn from(e: CloudError) -> Self {
+        match e {
+            CloudError::NotFound(msg) => Self::NotFound(msg),
+            CloudError::RateLimited { snapshot, .. } => Self::RateLimited(snapshot),
+            CloudError::AuthFailed { status, .. } => Self::AuthFailed { status },
+            other => Self::Cloud(other.to_string()),
+        }
+    }
 }
 
 /// Direction for `run_chunk_nav` — selects `/next` or `/prev`.
@@ -1514,10 +1622,7 @@ pub async fn run_chunk_nav(
         ChunkNavDirection::Next => cloud.get_chunk_next(id_str, count).await,
         ChunkNavDirection::Prev => cloud.get_chunk_prev(id_str, count).await,
     };
-    r.map_err(|e| match e {
-        CloudError::NotFound(msg) => PassthroughError::NotFound(msg),
-        other => PassthroughError::Cloud(other.to_string()),
-    })
+    r.map_err(PassthroughError::from)
 }
 
 /// Default chunks on each side of the anchor for `get_chunk_neighbors`. Two is
@@ -1569,10 +1674,7 @@ pub async fn run_chunk_neighbors(
     cloud
         .get_chunk_neighbors(id_str, count, count)
         .await
-        .map_err(|e| match e {
-            CloudError::NotFound(msg) => PassthroughError::NotFound(msg),
-            other => PassthroughError::Cloud(other.to_string()),
-        })
+        .map_err(PassthroughError::from)
 }
 
 const DOCUMENT_CHUNKS_DEFAULT_FROM: u32 = 0;
@@ -1635,10 +1737,7 @@ pub async fn run_document_chunks(
     cloud
         .get_document_chunks(id_str, from, limit)
         .await
-        .map_err(|e| match e {
-            CloudError::NotFound(msg) => PassthroughError::NotFound(msg),
-            other => PassthroughError::Cloud(other.to_string()),
-        })
+        .map_err(PassthroughError::from)
 }
 
 /// Dispatch the single-id pass-through tools (`get_chunk_parents` /
@@ -1662,10 +1761,7 @@ pub async fn run_passthrough_id(
         PassthroughKind::Parents => cloud.get_chunk_parents(id_str).await,
         PassthroughKind::Document => cloud.get_document(id_str).await,
     };
-    r.map_err(|e| match e {
-        CloudError::NotFound(msg) => PassthroughError::NotFound(msg),
-        other => PassthroughError::Cloud(other.to_string()),
-    })
+    r.map_err(PassthroughError::from)
 }
 
 /// Maximum number of ids accepted by one `get_chunks` call.
@@ -1712,10 +1808,7 @@ pub async fn run_get_chunks(
         })?;
         ids.push(s.to_owned());
     }
-    cloud.get_chunks(&ids).await.map_err(|e| match e {
-        CloudError::NotFound(msg) => PassthroughError::NotFound(msg),
-        other => PassthroughError::Cloud(other.to_string()),
-    })
+    cloud.get_chunks(&ids).await.map_err(PassthroughError::from)
 }
 
 /// Dispatch `list_sources`. Forwards the pagination/filter arguments
@@ -1782,6 +1875,69 @@ pub async fn run_facets(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `voyage_search_error` must route BYOK vs proxy to DIFFERENT recoveries:
+    /// the credential and endpoint differ, so a BYOK auth failure that told the
+    /// agent to `mnm auth github` would refresh the wrong token and dead-end
+    /// loop (#133 BYOK). Renders each through the production server builders to
+    /// pin the exact agent-facing guidance, not just the variant.
+    #[test]
+    fn voyage_search_error_routes_byok_and_proxy_to_distinct_recoveries() {
+        fn status(code: u16) -> voyage::VoyageError {
+            voyage::VoyageError::Status {
+                status: code,
+                body: String::new(),
+            }
+        }
+
+        // --- Proxy path (no BYOK key): Midnight-cloud recoveries. ---
+        match voyage_search_error("embed", status(401), false) {
+            SearchError::AuthFailed { status } => assert_eq!(status, 401),
+            other => panic!("proxy 401 must be AuthFailed, got {other:?}"),
+        }
+        match voyage_search_error("embed", status(403), false) {
+            SearchError::AuthFailed { status } => assert_eq!(status, 403),
+            other => panic!("proxy 403 must be AuthFailed, got {other:?}"),
+        }
+        assert!(matches!(
+            voyage_search_error("embed", status(429), false),
+            SearchError::RateLimited(_)
+        ));
+
+        // --- BYOK path: VoyageAI-key recoveries (never `mnm auth github`). ---
+        match voyage_search_error("embed", status(401), true) {
+            SearchError::EmbeddingAuthFailed { status } => assert_eq!(status, 401),
+            other => panic!("BYOK 401 must be EmbeddingAuthFailed, got {other:?}"),
+        }
+        match voyage_search_error("rerank", status(403), true) {
+            SearchError::EmbeddingAuthFailed { status } => assert_eq!(status, 403),
+            other => panic!("BYOK 403 must be EmbeddingAuthFailed, got {other:?}"),
+        }
+        assert!(matches!(
+            voyage_search_error("embed", status(429), true),
+            SearchError::EmbeddingRateLimited
+        ));
+        // 5xx / transport still collapse to Cloud regardless of BYOK.
+        assert!(matches!(voyage_search_error("embed", status(500), true), SearchError::Cloud(_)));
+
+        // --- Rendered guidance: the recoveries must name the RIGHT credential. ---
+        let proxy_auth = crate::server::auth_failed_failure(401);
+        assert!(proxy_auth.guidance.contains("mnm auth github"));
+        assert_eq!(proxy_auth.details["auth_reason"], "invalid_credentials");
+
+        let byok_auth = crate::server::embedding_auth_failed_failure(401);
+        assert!(byok_auth.guidance.contains("VOYAGE_API_KEY"), "BYOK names the real key");
+        assert!(
+            !byok_auth.guidance.contains("mnm auth github"),
+            "BYOK must NOT send the agent to refresh the Midnight token"
+        );
+        assert_eq!(byok_auth.details["auth_reason"], "invalid_embedding_key");
+
+        let byok_rl = crate::server::embedding_rate_limited_failure();
+        assert!(byok_rl.guidance.contains("VoyageAI"), "BYOK 429 names the provider");
+        assert!(!byok_rl.guidance.contains("`status`"), "BYOK 429 must NOT point at `status`");
+        assert!(byok_rl.guidance.contains("at least"), "advised wait is a floor");
+    }
 
     #[test]
     fn tools_list_has_13_tools_with_annotations() {

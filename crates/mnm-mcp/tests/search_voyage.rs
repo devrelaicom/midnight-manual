@@ -763,3 +763,110 @@ fn fts_with_code_mode_on_is_rejected_at_parse_time() {
     .unwrap_err();
     assert!(err.contains("code_mode"), "got: {err}");
 }
+
+// ---------------------------------------------------------------------------
+// Error taxonomy on the embed step (#133 M1)
+//
+// On the DEFAULT hybrid/vector search path with NO BYOK key, the cloud's
+// `/v1/embeddings` proxy is the FIRST rate-limited/authenticated cloud call —
+// so a 429 / 401 there must surface RATE_LIMITED / AUTH_FAILED, NOT collapse
+// into the retryable CLOUD_ERROR "retry shortly" the taxonomy work removes.
+// The embed client cannot read `Retry-After`, so 429 carries a default snapshot
+// and the server advises the conservative default backoff.
+// ---------------------------------------------------------------------------
+
+/// A 429 on the embed step of a hybrid `search` → `SearchError::RateLimited`
+/// (default snapshot), rendered as `RATE_LIMITED` with the default backoff.
+#[tokio::test]
+async fn run_search_embed_429_maps_to_rate_limited() {
+    if byok_active() {
+        eprintln!("SKIP: run_search_embed_429_maps_to_rate_limited — BYOK path active");
+        return;
+    }
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models/active"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "name": "voyage-code-3", "revision": 1, "dim": 4, "provider": "voyageai",
+        })))
+        .mount(&server)
+        .await;
+    // The embed proxy is rate-limited (the first cloud call the agent hits).
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(ResponseTemplate::new(429).set_body_json(json!({
+            "error": { "code": "rate_limited", "message": "slow down" },
+        })))
+        .mount(&server)
+        .await;
+
+    let cfg = make_server_cfg(&server.uri());
+    let cloud = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
+
+    let err = run_search(&single_query_args("zero knowledge proof"), &cfg, &cloud)
+        .await
+        .unwrap_err();
+    let snapshot = match err {
+        mnm_mcp::tools::SearchError::RateLimited(s) => s,
+        other => panic!("expected SearchError::RateLimited from the embed step, got {other:?}"),
+    };
+    // The embed client does not capture headers → default (empty) snapshot.
+    assert_eq!(snapshot.retry_after_secs, None);
+
+    let sc = mnm_mcp::server::rate_limited_failure(&snapshot)
+        .into_result()
+        .structured_content
+        .unwrap();
+    assert_eq!(sc["error"]["code"], "RATE_LIMITED");
+    assert_eq!(sc["error"]["retryable"], true);
+    assert_eq!(
+        sc["error"]["retry_after_secs"].as_u64().unwrap(),
+        mnm_mcp::server::DEFAULT_RATE_LIMIT_BACKOFF_SECS,
+        "no header on the embed path → the conservative default backoff"
+    );
+}
+
+/// A 401 on the embed step of a hybrid `search` → `SearchError::AuthFailed`,
+/// rendered as `AUTH_FAILED` / `invalid_credentials`, `retryable: false`.
+#[tokio::test]
+async fn run_search_embed_401_maps_to_auth_failed() {
+    if byok_active() {
+        eprintln!("SKIP: run_search_embed_401_maps_to_auth_failed — BYOK path active");
+        return;
+    }
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models/active"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "name": "voyage-code-3", "revision": 1, "dim": 4, "provider": "voyageai",
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+            "error": { "code": "unauthorized", "message": "invalid bearer" },
+        })))
+        .mount(&server)
+        .await;
+
+    let cfg = make_server_cfg(&server.uri());
+    let cloud = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
+
+    let err = run_search(&single_query_args("zero knowledge proof"), &cfg, &cloud)
+        .await
+        .unwrap_err();
+    let status = match err {
+        mnm_mcp::tools::SearchError::AuthFailed { status } => status,
+        other => panic!("expected SearchError::AuthFailed from the embed step, got {other:?}"),
+    };
+    assert_eq!(status, 401);
+
+    let sc = mnm_mcp::server::auth_failed_failure(status)
+        .into_result()
+        .structured_content
+        .unwrap();
+    assert_eq!(sc["error"]["code"], "AUTH_FAILED");
+    assert_eq!(sc["error"]["retryable"], false);
+    assert_eq!(sc["error"]["auth_reason"], "invalid_credentials");
+}

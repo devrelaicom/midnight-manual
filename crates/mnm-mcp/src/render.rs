@@ -1444,8 +1444,15 @@ pub enum ErrorKind {
     NotFound,
     /// The embedding model used by the corpus does not match the local model.
     EmbeddingModelMismatch,
-    /// A transient or permanent error was returned by the cloud API.
+    /// A transient or permanent error was returned by the cloud API (genuine
+    /// 5xx / transport failures only; 429 and 401/403 have their own kinds).
     CloudError,
+    /// The cloud rate-limited the request (HTTP 429). Retryable, but only AFTER
+    /// the advised `retry_after_secs` delay — never immediately.
+    RateLimited,
+    /// Authentication/authorization failed (HTTP 401/403). Not retryable
+    /// without new credentials (401) or a higher tier (403).
+    AuthFailed,
     /// The `install_search_skill` tool failed to write the skill file.
     InstallFailed,
 }
@@ -1454,11 +1461,13 @@ impl ErrorKind {
     /// Every error kind, in canonical (code-set) order. The single source of
     /// truth for the closed `code` set the `errorSchema` enumerates and the
     /// contract's `error_envelope` documents.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 7] = [
         Self::InvalidInput,
         Self::NotFound,
         Self::EmbeddingModelMismatch,
         Self::CloudError,
+        Self::RateLimited,
+        Self::AuthFailed,
         Self::InstallFailed,
     ];
 
@@ -1470,15 +1479,19 @@ impl ErrorKind {
             Self::NotFound => "NOT_FOUND",
             Self::EmbeddingModelMismatch => "EMBEDDING_MODEL_MISMATCH",
             Self::CloudError => "CLOUD_ERROR",
+            Self::RateLimited => "RATE_LIMITED",
+            Self::AuthFailed => "AUTH_FAILED",
             Self::InstallFailed => "INSTALL_FAILED",
         }
     }
     const fn retryable(self) -> bool {
         match self {
-            // Permanent for an identical retry — recovery requires a suggested action.
-            Self::NotFound | Self::EmbeddingModelMismatch => false,
-            // Transient or fixable-and-retry.
-            Self::InvalidInput | Self::CloudError | Self::InstallFailed => true,
+            // Permanent for an identical retry — recovery requires a suggested
+            // action (a fresh id, corpus-side fix, or new credentials/tier).
+            Self::NotFound | Self::EmbeddingModelMismatch | Self::AuthFailed => false,
+            // Transient or fixable-and-retry. `RateLimited` is retryable but the
+            // guidance string requires WAITING the advised delay first (#133).
+            Self::InvalidInput | Self::CloudError | Self::RateLimited | Self::InstallFailed => true,
         }
     }
 }
@@ -1529,9 +1542,21 @@ impl ToolFailure {
             "error": error,
             "suggested_next_actions": suggested_next_actions_value(&self.suggested_next_actions),
         });
-        let trimmed =
-            json!({ "error": { "code": self.kind.code(), "retryable": self.kind.retryable() } });
-        let trimmed = serde_json::to_string(&trimmed).unwrap_or_else(|_| "{}".to_owned());
+        let mut trimmed_error =
+            json!({ "code": self.kind.code(), "retryable": self.kind.retryable() });
+        // RATE_LIMITED: echo the wait hint into the trimmed fence too, so an
+        // agent keying off the fence alone (retryable: true) still sees how long
+        // to wait — otherwise the trimmed line reproduces the exact footgun #133
+        // removes (retryable with no delay). (#133 M4)
+        if matches!(self.kind, ErrorKind::RateLimited) {
+            if let (Value::Object(tmap), Some(secs)) =
+                (&mut trimmed_error, self.details.get("retry_after_secs"))
+            {
+                tmap.insert("retry_after_secs".to_owned(), secs.clone());
+            }
+        }
+        let trimmed = serde_json::to_string(&json!({ "error": trimmed_error }))
+            .unwrap_or_else(|_| "{}".to_owned());
         ToolCallResult {
             content: vec![ContentBlock::Text {
                 text: format!("{}\n\n```json\n{trimmed}\n```", self.guidance),
