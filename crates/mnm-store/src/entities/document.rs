@@ -167,7 +167,7 @@ pub async fn list_chunks_window(
     .fetch_one(pool)
     .await?;
     let chunks = sqlx::query_as::<_, ChunkBodyRow>(
-        "SELECT id AS chunk_id, chunk_index, content, heading_path, token_count \
+        "SELECT id AS chunk_id, chunk_index, content, heading_path, symbol_path, token_count \
          FROM chunk \
          WHERE document_id = $1 AND status <> 'embed_failed' \
          ORDER BY chunk_index ASC \
@@ -184,6 +184,7 @@ pub async fn list_chunks_window(
         chunk_index: r.chunk_index,
         content: r.content,
         heading_path: r.heading_path,
+        symbol_path: r.symbol_path.0,
         token_count: r.token_count,
     })
     .collect();
@@ -251,6 +252,12 @@ pub struct ChunkBody {
     pub content: String,
     /// Markdown heading path.
     pub heading_path: Vec<String>,
+    /// Code-symbol path leading to this chunk — structured `{kind, name, path}`
+    /// segments (empty for prose chunks). Carried here so the windowed body-read
+    /// path keeps the same code-symbol context as the `get_chunks` family
+    /// (issue #132); mirrors [`mnm_core::types::Chunk::symbol_path`].
+    #[serde(default)]
+    pub symbol_path: Vec<mnm_core::types::SymbolSegment>,
     /// Best-effort token count.
     pub token_count: i32,
 }
@@ -394,6 +401,7 @@ struct ChunkBodyRow {
     chunk_index: i32,
     content: String,
     heading_path: Vec<String>,
+    symbol_path: sqlx::types::Json<Vec<mnm_core::types::SymbolSegment>>,
     token_count: i32,
 }
 

@@ -49,7 +49,7 @@ pub fn list() -> ToolsListResult {
             ToolDescription {
                 name: "search",
                 description:
-                    "Search the Midnight Network documentation and code corpus (docs, SDK references, Compact language material, code examples). Returns ranked excerpts with confidence scores and source attribution. Use it whenever you need facts about Midnight, Compact, or the Midnight SDK. Code-heavy queries (function names, API signatures, error strings from code) benefit from code_mode=exclusive; conceptual queries should keep the default. For multi-query strategies, facet filters, or rerank control, use advanced_search.",
+                    "Search the Midnight Network documentation and code corpus (docs, SDK references, Compact language material, code examples). Returns ranked excerpts with confidence scores and source attribution. Use it whenever you need facts about Midnight, Compact, or the Midnight SDK. Code-heavy queries (function names, API signatures, error strings from code) benefit from code_mode=exclusive; conceptual queries should keep the default. For multi-query strategies, facet filters, or rerank control, use advanced_search. In results, symbol_path is a flat list of symbol names (their order is not a containment hierarchy); the get_chunks family and get_document_chunks return the richer structured {kind, name, path} segments (path = ancestor symbol names, present for nested symbols).",
                 input_schema: search_input_schema(),
                 output_schema: Some(crate::schemas::search_output_schema()),
                 annotations: ToolAnnotations::read_only().with_title("Search corpus"),
@@ -57,7 +57,7 @@ pub fn list() -> ToolsListResult {
             ToolDescription {
                 name: "advanced_search",
                 description:
-                    "Full-control search over the Midnight corpus: fuse multiple queries (HyDE, expansion, step-back), restrict by facet filters, switch retrieval mode, and toggle reranking. Use when basic search comes up short or when the midnight-advanced-search skill prescribes a pattern. Call facets first to discover valid filter values.",
+                    "Full-control search over the Midnight corpus: fuse multiple queries (HyDE, expansion, step-back), restrict by facet filters, switch retrieval mode, and toggle reranking. Use when basic search comes up short or when the midnight-advanced-search skill prescribes a pattern. Call facets first to discover valid filter values. In results, symbol_path is a flat list of symbol names (their order is not a containment hierarchy); the get_chunks family and get_document_chunks return the richer structured {kind, name, path} segments (path = ancestor symbol names, present for nested symbols).",
                 input_schema: advanced_search_input_schema(),
                 output_schema: Some(crate::schemas::search_output_schema()),
                 annotations: ToolAnnotations::read_only().with_title("Advanced search"),
@@ -65,7 +65,7 @@ pub fn list() -> ToolsListResult {
             ToolDescription {
                 name: "get_chunks",
                 description:
-                    "Fetch the full content of one or more chunks by id, typically ids returned by search. Use this to read the actual text behind search results.",
+                    "Fetch the full content of one or more chunks by id, typically ids returned by search. Use this to read the actual text behind search results. For code chunks, symbol_path is an array of structured {kind, name, path} segments (path = ancestor symbol names, present for nested symbols); search returns only the flat name list.",
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -82,7 +82,7 @@ pub fn list() -> ToolsListResult {
             ToolDescription {
                 name: "get_chunk_next",
                 description:
-                    "Fetch chunks that immediately follow a given chunk in its document's reading order. Use to continue reading past the end of a chunk you already have.",
+                    "Fetch chunks that immediately follow a given chunk in its document's reading order. Use to continue reading past the end of a chunk you already have. Code chunks carry the structured {kind, name, path} symbol_path segments (path = ancestor symbol names for nested symbols).",
                 input_schema: chunk_nav_schema(),
                 output_schema: Some(crate::schemas::chunk_list_output_schema()),
                 annotations: ToolAnnotations::read_only().with_title("Next chunks"),
@@ -90,7 +90,7 @@ pub fn list() -> ToolsListResult {
             ToolDescription {
                 name: "get_chunk_prev",
                 description:
-                    "Fetch chunks that immediately precede a given chunk in its document's reading order. Use to read the context leading up to a chunk you already have.",
+                    "Fetch chunks that immediately precede a given chunk in its document's reading order. Use to read the context leading up to a chunk you already have. Code chunks carry the structured {kind, name, path} symbol_path segments (path = ancestor symbol names for nested symbols).",
                 input_schema: chunk_nav_schema(),
                 output_schema: Some(crate::schemas::chunk_list_output_schema()),
                 annotations: ToolAnnotations::read_only().with_title("Previous chunks"),
@@ -98,7 +98,7 @@ pub fn list() -> ToolsListResult {
             ToolDescription {
                 name: "get_chunk_neighbors",
                 description:
-                    "Fetch the chunks immediately before and after a given chunk in one call. Use when a search hit needs surrounding context to be understood.",
+                    "Fetch the chunks immediately before and after a given chunk in one call. Use when a search hit needs surrounding context to be understood. Code chunks carry the structured {kind, name, path} symbol_path segments (path = ancestor symbol names for nested symbols).",
                 input_schema: chunk_neighbors_schema(),
                 output_schema: Some(crate::schemas::neighbors_output_schema()),
                 annotations: ToolAnnotations::read_only().with_title("Surrounding chunks"),
@@ -122,7 +122,7 @@ pub fn list() -> ToolsListResult {
             ToolDescription {
                 name: "get_document_chunks",
                 description:
-                    "Read a window of a document's chunk bodies by position. Use after get_document to read a document section by section.",
+                    "Read a window of a document's chunk bodies by position. Use after get_document to read a document section by section. Code chunk bodies include the structured {kind, name, path} symbol_path segments (same shape as the get_chunks family; path = ancestor symbol names for nested symbols).",
                 input_schema: document_chunks_schema(),
                 output_schema: Some(crate::schemas::document_window_output_schema()),
                 annotations: ToolAnnotations::read_only().with_title("Read document"),

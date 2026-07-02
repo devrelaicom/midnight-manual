@@ -25,6 +25,23 @@ fn chunk_env(id: &str) -> Value {
     })
 }
 
+/// A *code* `ChunkWithContext` entry: `symbol_path` is the structured
+/// `[{kind, name, path}]` form the server serializes for code chunks (issue
+/// #132), not the flat name-string list `search` returns. The index-1 segment
+/// carries a non-empty ancestor `path` so tests exercise the nested case.
+fn code_chunk_env(id: &str) -> Value {
+    serde_json::json!({
+        "id": id, "chunk_index": 2, "total_chunks": 9,
+        "content": "impl Counter { fn increment(&mut self) {} }",
+        "heading_path": [], "document_id": "d1",
+        "symbol_path": [
+            { "kind": "impl", "name": "Counter" },
+            { "kind": "fn", "name": "increment", "path": ["Counter"] }
+        ],
+        "document": { "source_path": "src/lib.rs" }, "source": { "display_name": "SDK" }
+    })
+}
+
 #[test]
 fn search_structured_conforms_to_output_schema() {
     let env = serde_json::json!({
@@ -87,6 +104,209 @@ fn advanced_search_structured_conforms_to_output_schema() {
         "advanced flavor must keep matched_queries in structuredContent"
     );
     assert!(!result.is_error);
+}
+
+/// Issue #132: `symbol_path` has two genuinely distinct wire shapes, and each
+/// tool's `outputSchema` must match the bytes that tool actually returns.
+///
+/// * `search` / `advanced_search` → flat name-string list (`["Counter"]`).
+/// * `get_chunks` family (incl. nav + neighbors) + `get_document_chunks` →
+///   structured segments (`[{kind, name, path}]`).
+///
+/// This exercises every real projector against its advertised schema *and*
+/// isolates `symbol_path` as the discriminator: the same envelope with the
+/// wrong-shape `symbol_path` must be rejected by the schema, proving the schema
+/// actually pins the shape (not just accepting anything via
+/// `additionalProperties`). The negatives cover all three structured schemas —
+/// `chunks`, the window, and (implicitly, via the shared fragment) the nav /
+/// neighbors ones — so removing any `symbol_path` declaration breaks a test.
+#[test]
+#[allow(clippy::too_many_lines)] // one fixture per projector shape; splitting scatters the sweep
+fn symbol_path_shapes_match_their_output_schemas() {
+    const SEC: mnm_core::injection::SecurityLevel = mnm_core::injection::SecurityLevel::Moderate;
+
+    let chunks_schema = mnm_mcp::schemas::chunks_output_schema();
+    let chunk_list_schema = mnm_mcp::schemas::chunk_list_output_schema();
+    let neighbors_schema = mnm_mcp::schemas::neighbors_output_schema();
+    let search_schema = mnm_mcp::schemas::search_output_schema();
+    let window_schema = mnm_mcp::schemas::document_window_output_schema();
+
+    // 1. get_chunks returns structured segments and conforms.
+    let chunks = mnm_mcp::render::project_chunks(
+        serde_json::json!({ "chunks": [code_chunk_env("c1")], "missing": [] }),
+        SEC,
+    )
+    .into_result()
+    .structured_content
+    .expect("structuredContent present");
+    assert_conforms("get_chunks (code, structured symbol_path)", &chunks, &chunks_schema);
+    // The structured segment fields — including the nested segment's ancestor
+    // `path` array — are really on the wire.
+    assert_eq!(
+        chunks
+            .pointer("/chunks/0/symbol_path/1/kind")
+            .and_then(Value::as_str),
+        Some("fn"),
+        "structured symbol_path must carry kind"
+    );
+    assert_eq!(
+        chunks
+            .pointer("/chunks/0/symbol_path/1/name")
+            .and_then(Value::as_str),
+        Some("increment"),
+        "structured symbol_path must carry name"
+    );
+    assert_eq!(
+        chunks
+            .pointer("/chunks/0/symbol_path/1/path/0")
+            .and_then(Value::as_str),
+        Some("Counter"),
+        "nested segment's ancestor path must survive"
+    );
+
+    // 1b. The nav (get_chunk_next/prev → project_chunk_list) and neighbors
+    // (get_chunk_neighbors → project_neighbors) projectors carry the same
+    // structured shape — asserted directly, not just via the shared fragment.
+    let next = mnm_mcp::render::project_chunk_list(
+        serde_json::json!({ "chunks": [code_chunk_env("c2"), code_chunk_env("c3")] }),
+        "after",
+        SEC,
+    )
+    .into_result()
+    .structured_content
+    .expect("structuredContent present");
+    assert_conforms("get_chunk_next (code, structured symbol_path)", &next, &chunk_list_schema);
+    assert_eq!(
+        next.pointer("/chunks/0/symbol_path/1/kind")
+            .and_then(Value::as_str),
+        Some("fn"),
+        "nav symbol_path must carry structured segments"
+    );
+
+    let neighbors = mnm_mcp::render::project_neighbors(
+        serde_json::json!({
+            "prev": { "chunks": [code_chunk_env("c0")] },
+            "chunk": code_chunk_env("c1"),
+            "next": { "chunks": [code_chunk_env("c2")] }
+        }),
+        SEC,
+    )
+    .into_result()
+    .structured_content
+    .expect("structuredContent present");
+    assert_conforms(
+        "get_chunk_neighbors (code, structured symbol_path)",
+        &neighbors,
+        &neighbors_schema,
+    );
+    assert_eq!(
+        neighbors
+            .pointer("/chunk/symbol_path/1/path/0")
+            .and_then(Value::as_str),
+        Some("Counter"),
+        "neighbors anchor chunk must carry the nested segment's ancestor path"
+    );
+
+    // 2. get_document_chunks (window) carries the same structured shape,
+    // including a nested segment with a non-empty ancestor `path`.
+    let window = mnm_mcp::render::project_document_window(
+        serde_json::json!({
+            "id": "d1", "source_path": "src/lib.rs", "from": 0, "total_chunks": 9,
+            "source": { "slug": "sdk", "display_name": "SDK" },
+            "chunks": [
+                { "chunk_id": "c1", "chunk_index": 2,
+                  "content": "impl Counter { fn increment(&mut self) {} }",
+                  "heading_path": [], "token_count": 12,
+                  "symbol_path": [
+                      { "kind": "impl", "name": "Counter" },
+                      { "kind": "fn", "name": "increment", "path": ["Counter"] }
+                  ] }
+            ]
+        }),
+        SEC,
+    )
+    .into_result()
+    .structured_content
+    .expect("structuredContent present");
+    assert_conforms("get_document_chunks (code, structured symbol_path)", &window, &window_schema);
+    assert_eq!(
+        window
+            .pointer("/chunks/0/symbol_path/0/kind")
+            .and_then(Value::as_str),
+        Some("impl"),
+        "window symbol_path must carry the structured segment"
+    );
+    assert_eq!(
+        window
+            .pointer("/chunks/0/symbol_path/1/path/0")
+            .and_then(Value::as_str),
+        Some("Counter"),
+        "window nested segment's ancestor path must survive"
+    );
+
+    // 3. search returns the flat name-string list and conforms.
+    let search = mnm_mcp::render::project_search(
+        serde_json::json!({
+            "corpus_embedding_model": "voyage-code-3@1",
+            "results": [{ "chunk_id": "a", "document_id": "d1", "source_path": "src/lib.rs",
+                          "source_slug": "sdk", "source_display_name": "SDK", "heading_path": [],
+                          "symbol_path": ["Counter", "increment"], "content": "c",
+                          "scores": { "confidence": 0.9, "trust_score": 1.0,
+                                      "confidence_factors": { "attribution": "foundation", "verified": true } } }],
+            "search_metadata": { "total_candidates": 1 }
+        }),
+        &mnm_mcp::render::SearchRenderOpts::default(),
+    )
+    .into_result()
+    .structured_content
+    .expect("structuredContent present");
+    assert_conforms("search (code, flat symbol_path)", &search, &search_schema);
+    assert_eq!(
+        search
+            .pointer("/results/0/symbol_path/0")
+            .and_then(Value::as_str),
+        Some("Counter"),
+        "search symbol_path must be flat name strings"
+    );
+
+    // 4. The schemas actually pin the shape: swap in the wrong-shape
+    // symbol_path and the schema must reject it (isolating symbol_path as the
+    // sole difference from the conforming envelopes above). One negative per
+    // structured schema so that deleting any window/chunk `symbol_path`
+    // declaration turns an assertion red.
+    let compiled_chunks = JSONSchema::compile(&chunks_schema).expect("chunks schema compiles");
+    let flat_in_chunk = serde_json::json!({
+        "chunks": [{ "id": "c1", "content": "x", "symbol_path": ["Counter"] }],
+        "missing": [],
+        "suggested_next_actions": []
+    });
+    assert!(
+        !compiled_chunks.is_valid(&flat_in_chunk),
+        "flat name strings must NOT validate against the chunk (object-items) symbol_path schema"
+    );
+
+    let compiled_window = JSONSchema::compile(&window_schema).expect("window schema compiles");
+    let flat_in_window = serde_json::json!({
+        "id": "d1", "source_path": "src/lib.rs", "total_chunks": 1,
+        "chunks": [{ "chunk_id": "c1", "symbol_path": ["Counter"] }],
+        "suggested_next_actions": []
+    });
+    assert!(
+        !compiled_window.is_valid(&flat_in_window),
+        "flat name strings must NOT validate against the window (object-items) symbol_path schema"
+    );
+
+    let compiled_search = JSONSchema::compile(&search_schema).expect("search schema compiles");
+    let structured_in_search = serde_json::json!({
+        "results": [{ "chunk_id": "a", "content": "c", "rank": 1, "confidence": 0.9,
+                      "attribution": "foundation",
+                      "symbol_path": [{ "kind": "fn", "name": "increment" }] }],
+        "suggested_next_actions": []
+    });
+    assert!(
+        !compiled_search.is_valid(&structured_in_search),
+        "structured segments must NOT validate against the search (string-items) symbol_path schema"
+    );
 }
 
 #[test]

@@ -56,6 +56,37 @@ fn scores_fragment() -> Value {
     })
 }
 
+/// The **structured** `symbol_path` shape emitted by the body-read endpoints —
+/// the `get_chunks` family (chunk-read) and `get_document_chunks` (window) —
+/// where the server serializes [`mnm_core::types::SymbolSegment`] verbatim: an
+/// ordered array of `{kind, name, path}` segments (`path` = the segment's
+/// ancestor names, outermost first, omitted when empty).
+///
+/// This is deliberately richer than the flat name-string list `search`
+/// returns (see [`search_result_fragment`], where `symbol_path` is
+/// `items: {type: "string"}`): the search route intentionally flattens the
+/// segments and drops `kind` for a ranked hit, whereas the read endpoints hand
+/// back the full segment structs. Issue #132 fixed the drift between this true
+/// shape and the schema that used to advertise `items: {type: "string"}` here.
+fn symbol_path_fragment() -> Value {
+    json!({
+        "type": "array",
+        "description": "Code-symbol path as structured `{kind, name, path}` segments (empty for prose chunks); `path` = ancestor symbol names, present for nested symbols. Richer than search's flat name-string list.",
+        "items": {
+            "type": "object",
+            "properties": {
+                "kind": { "type": "string",
+                    "description": "Syntactic kind: impl, fn, class, interface, key, element, …" },
+                "name": { "type": "string", "description": "Identifier or label for this segment." },
+                "path": { "type": "array", "items": { "type": "string" },
+                    "description": "Ancestor symbol names, outermost first; omitted when empty." }
+            },
+            "required": ["kind", "name"],
+            "additionalProperties": true
+        }
+    })
+}
+
 /// One `search` / `advanced_search` result: the chunk fields, the promoted
 /// top-level `rank` / `confidence` / `attribution` (issue #88 — mirrors the
 /// trimmed text fence), and the nested `scores` block (kept for full fidelity).
@@ -69,7 +100,14 @@ fn search_result_fragment() -> Value {
             "source_display_name": { "type": "string" },
             "source_path": { "type": "string" },
             "heading_path": { "type": "array", "items": { "type": "string" } },
-            "symbol_path": { "type": "array", "items": { "type": "string" } },
+            // Flat name-string list: the search route flattens the structured
+            // segments and drops `kind` for a ranked hit. Its order is not a
+            // containment hierarchy (post dual-embeddings cutover, nesting lives
+            // in each segment's `path`, which search drops). The body-read
+            // endpoints return the richer object form (`symbol_path_fragment`)
+            // — see issue #132.
+            "symbol_path": { "type": "array", "items": { "type": "string" },
+                "description": "Flat list of symbol names (kind dropped; order is not a containment hierarchy). Empty for prose chunks. The get_chunks family and get_document_chunks return the richer structured `{kind, name, path}` segment form." },
             "content": { "type": "string" },
             "rank": { "type": "integer", "minimum": 1,
                 "description": "1-based position in the returned result list." },
@@ -92,6 +130,11 @@ fn search_result_fragment() -> Value {
 
 /// A ChunkWithContext entry (`get_chunks` / `get_chunk_next` / `get_chunk_prev`
 /// / `get_chunk_neighbors`): chunk fields flat, `document` / `source` nested.
+///
+/// The server serializes `mnm_store::entities::chunk::ChunkWithContext`
+/// directly, so `symbol_path` is the **structured** `[{kind, name, path}]` form
+/// (`symbol_path_fragment`), not the flat name strings `search` returns — issue
+/// #132.
 fn chunk_with_context_fragment() -> Value {
     json!({
         "type": "object",
@@ -102,7 +145,7 @@ fn chunk_with_context_fragment() -> Value {
             "document_id": { "type": "string" },
             "content": { "type": "string" },
             "heading_path": { "type": "array", "items": { "type": "string" } },
-            "symbol_path": { "type": "array", "items": { "type": "string" } },
+            "symbol_path": symbol_path_fragment(),
             "document": { "type": "object", "additionalProperties": true },
             "source": { "type": "object", "additionalProperties": true }
         },
@@ -235,8 +278,14 @@ pub fn document_output_schema() -> Value {
 }
 
 /// Output schema for `get_document_chunks` — DocumentChunkWindow: a positional
-/// window of chunk *bodies* (`{chunk_id, chunk_index, content}`) plus window
-/// metadata. Distinct shape from `get_document`'s skeleton overview.
+/// window of chunk *bodies* (`{chunk_id, chunk_index, content, heading_path,
+/// token_count, symbol_path}`) plus window metadata. Distinct shape from
+/// `get_document`'s skeleton overview.
+///
+/// `symbol_path` carries the same **structured** `{kind, name, path}` segments
+/// as the `get_chunks` family (`symbol_path_fragment`) — this is the only
+/// windowed body-read path, so it must not lose the code-symbol context (issue
+/// #132). Empty for prose chunks.
 pub fn document_window_output_schema() -> Value {
     json!({
         "type": "object",
@@ -251,7 +300,10 @@ pub fn document_window_output_schema() -> Value {
                 "properties": {
                     "chunk_id": { "type": "string" },
                     "chunk_index": { "type": "integer" },
-                    "content": { "type": "string" }
+                    "content": { "type": "string" },
+                    "heading_path": { "type": "array", "items": { "type": "string" } },
+                    "token_count": { "type": "integer" },
+                    "symbol_path": symbol_path_fragment()
                 },
                 "required": ["chunk_id"],
                 "additionalProperties": true
