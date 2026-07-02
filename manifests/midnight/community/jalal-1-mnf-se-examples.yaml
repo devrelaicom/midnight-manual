@@ -1,0 +1,49 @@
+manifest_version: 1
+root:
+  name: jalal-1-mnf-se-examples
+  path: .
+  # SAFE SUBSET of a 10-app monorepo. A static security review (2026-07-02) found the
+  # hand-rolled Schnorr-over-Jubjub 2-of-3 multisig (apps/multisig, apps/multisig-token)
+  # cryptographically SOUND and worth teaching, but found Critical dealbreakers elsewhere:
+  #   - apps/token: exported unauthenticated mint_unshielded (anyone can mint)
+  #   - apps/oz-multisig-v3: signature verifier is a `return true;` stub (total auth bypass)
+  #   - contracts/**: vendored OpenZeppelin Compact lib (carried upstream separately)
+  #   - apps/counter, apps/election: verbatim official examples (already in the corpus)
+  # The include allowlist below pins ONLY the verified-sound multisig apps + shared helpers.
+  include:
+    # Only the two verified-sound multisig apps (each carries its own README) + shared helpers.
+    # A bare "README.md" include would match every app's README (incl. the excluded apps), so it
+    # is intentionally omitted; the multisig apps' READMEs come in via their ** globs.
+    - "apps/multisig/**"
+    - "apps/multisig-token/**"
+    - "packages/common/**"
+  exclude:
+    - "**/managed/**"
+    - "**/dist/**"
+    - "**/node_modules/**"
+    - "**/*.lock"
+    - "**/package-lock.json"
+  provenance:
+    attribution: community
+    verified: false
+    tags: [trust:low]
+    verification_notes: >-
+      Community-contributed repository; unverified and unaudited by the Midnight Foundation.
+      From an "MNF Solutions Engineering Examples" monorepo on a current SDK (toolchain 0.31.0,
+      compact-runtime 0.16.0, midnight-js 4.1.1, ledger-v8 8.1.0; Apache-2.0). Indexed subset =
+      ONLY the two verified-sound MULTISIG apps (apps/multisig, apps/multisig-token) plus shared
+      helper code. A static security review (2026-07-02) confirmed the hand-rolled
+      Schnorr-over-Jubjub 2-of-3 multisig is CRYPTOGRAPHICALLY SOUND: correct sigma*G == R + c*P
+      verification, a domain-separated challenge fully binding (R, public key, message), a
+      deploy-pinned signer set with per-signer dedup, and per-instance/per-proposal replay
+      protection; the token mint is correctly gated behind 2-of-3 signatures bound to
+      recipient+amount. EXCLUDED from this index (do NOT treat as safe): apps/token (an exported
+      unauthenticated mint_unshielded — anyone can mint), apps/oz-multisig-v3 (its signature
+      verifier is a stub returning true — total auth bypass), the vendored OpenZeppelin Compact
+      library (contracts/**), and the verbatim official example-counter / example-election.
+      Caveats on the indexed multisig: the Schnorr challenge uses transientHash (the off-chain
+      signer must reproduce the exact circuit hash — fragile across compiler upgrades; persistentHash
+      is safer), there is no explicit on-curve/subgroup validation of R (safe here because signer
+      keys are deploy-pinned, but a hazard if adapted to caller-supplied keys), and multisig-token
+      has a partial-burn change-loss bug. Treat as illustrative, not authoritative, and audit
+      before production use.
