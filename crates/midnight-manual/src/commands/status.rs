@@ -27,13 +27,23 @@ pub async fn run(
     let bearer = crate::shared::resolve_read_uplift_token();
     let cloud = CloudClient::new(&url, bearer)
         .map_err(|e| anyhow::anyhow!("cloud client init failed: {e}"))?;
-    // Same resolution the embed-capable commands use (flag > env > config).
-    let voyage_key = {
+    // Same resolution the embed-capable commands use (flag > env > config) for
+    // the Voyage key, plus the content-guard level resolved exactly as
+    // `mnm mcp serve` does — so `mnm status` reports the level an MCP session
+    // would actually run at.
+    let (voyage_key, security_level) = {
         let cfg_env = mnm_core::config::StdEnv;
         let (core_cfg, _) = mnm_core::config::Config::discover(None, &cfg_env)?;
-        mnm_core::config::resolve_voyage_api_key(voyage_api_key_flag, &core_cfg.models, &cfg_env)
+        let voyage_key = mnm_core::config::resolve_voyage_api_key(
+            voyage_api_key_flag,
+            &core_cfg.models,
+            &cfg_env,
+        );
+        let security_level =
+            mnm_core::config::resolve_security_level(None, &core_cfg.security, &cfg_env)?;
+        (voyage_key, security_level)
     };
-    let report = assemble(&cloud, voyage_key.as_deref()).await;
+    let report = assemble(&cloud, voyage_key.as_deref(), security_level).await;
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
@@ -45,36 +55,48 @@ pub async fn run(
     Ok(())
 }
 
-/// Render the human-formatted report. Exposed for integration tests.
+/// Print the human-formatted report to stdout.
 pub fn print_human(r: &StatusReport, url: &str) {
-    println!("mnm status");
-    println!(
-        "  cloud:        {} ({url})",
-        match r.cloud {
-            CloudState::Reachable => "reachable",
-            CloudState::Degraded => "degraded",
-            CloudState::Unreachable => "UNREACHABLE",
-        }
-    );
+    println!("{}", render_human(r, url));
+}
+
+/// Render the human-formatted report to a `String`. Pure (no I/O beyond the
+/// wall clock read for the token-window countdown), so integration tests can
+/// assert on the exact rendered lines. Exposed for those tests.
+#[must_use]
+pub fn render_human(r: &StatusReport, url: &str) -> String {
+    let mut lines: Vec<String> = vec![
+        "mnm status".to_owned(),
+        format!(
+            "  cloud:        {} ({url})",
+            match r.cloud {
+                CloudState::Reachable => "reachable",
+                CloudState::Degraded => "degraded",
+                CloudState::Unreachable => "UNREACHABLE",
+            }
+        ),
+    ];
     if let Some(v) = &r.cloud_version {
-        println!("  server:       v{v}");
+        lines.push(format!("  server:       v{v}"));
     }
     if r.authenticated {
-        println!(
+        lines.push(format!(
             "  auth:         {} as {} ({})",
             r.auth_type,
             r.identity.as_deref().unwrap_or("?"),
             r.permission_level,
-        );
+        ));
     } else {
-        println!("  auth:         anonymous (read) — run `mnm auth github` for higher limits");
+        lines.push(
+            "  auth:         anonymous (read) — run `mnm auth github` for higher limits".to_owned(),
+        );
     }
     if let Some(rl) = &r.rate_limit {
         // `reset_secs` is a RELATIVE duration: seconds until the bucket refills.
-        println!(
+        lines.push(format!(
             "  requests:     {}/{} remaining ({} tier, resets in {}s)",
             rl.remaining, rl.limit, rl.tier, rl.reset_secs,
-        );
+        ));
     }
     if let Some(tl) = &r.token_limits {
         // `reset_at_secs` is an ABSOLUTE unix timestamp; render the windows'
@@ -82,7 +104,7 @@ pub fn print_human(r: &StatusReport, url: &str) {
         // computed against the current wall clock.
         let now = OffsetDateTime::now_utc().unix_timestamp();
         let mins_until = |reset_at_secs: i64| ((reset_at_secs - now).max(0) + 59) / 60;
-        println!(
+        lines.push(format!(
             "  embed tokens: {}/{} this hour (resets in ~{}m), {}/{} today (resets in ~{}m)",
             tl.hourly.remaining,
             tl.hourly.limit,
@@ -90,9 +112,9 @@ pub fn print_human(r: &StatusReport, url: &str) {
             tl.daily.remaining,
             tl.daily.limit,
             mins_until(tl.daily.reset_at_secs),
-        );
+        ));
     }
-    println!(
+    lines.push(format!(
         "  voyage key:   {}",
         match r.voyage {
             VoyageState::Valid => "valid",
@@ -100,8 +122,8 @@ pub fn print_human(r: &StatusReport, url: &str) {
             VoyageState::Unreachable => "unreachable (could not verify)",
             VoyageState::NotConfigured => "not configured (server-proxy embedding)",
         }
-    );
-    println!(
+    ));
+    lines.push(format!(
         "  reranker:     {} ({})",
         r.reranker,
         if r.reranker_loaded {
@@ -109,5 +131,10 @@ pub fn print_human(r: &StatusReport, url: &str) {
         } else {
             "loads on first reranked search"
         },
-    );
+    ));
+    lines.push(format!(
+        "  guard level:  {} (untrusted-content response guarding)",
+        r.security_level.as_str()
+    ));
+    lines.join("\n")
 }

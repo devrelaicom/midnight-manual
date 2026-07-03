@@ -4,6 +4,7 @@
 
 use std::time::Duration;
 
+use mnm_core::injection::SecurityLevel;
 use mnm_core::introspect::{MeRateLimit, MeResponse, MeTokenLimits};
 use serde::Serialize;
 
@@ -72,6 +73,12 @@ pub struct StatusReport {
     pub reranker: &'static str,
     /// Whether a local (BYOK) rerank has been exercised in this process.
     pub reranker_loaded: bool,
+    /// Active client-side content-guard level resolved for this process
+    /// (`disabled`/`low`/`moderate`/`high`/`strict`; default `moderate`).
+    /// This is the level the response guard actually applies, so an agent can
+    /// see why returned content is (or isn't) wrapped in `<<UNTRUSTED-…>>`
+    /// blocks — and, at `strict`, why flagged items are removed.
+    pub security_level: SecurityLevel,
 }
 
 /// Probe Voyage with the given key. `GET /v1/files` is a cheap authenticated
@@ -101,8 +108,14 @@ async fn probe_voyage_at(url: &str, key: &str) -> VoyageState {
     }
 }
 
-/// Assemble the report. `voyage_key` is the resolved BYOK key (None = proxy mode).
-pub async fn assemble(cloud: &CloudClient, voyage_key: Option<&str>) -> StatusReport {
+/// Assemble the report. `voyage_key` is the resolved BYOK key (None = proxy
+/// mode); `security_level` is the active content-guard level resolved for this
+/// process (the same value the response guard applies), surfaced verbatim.
+pub async fn assemble(
+    cloud: &CloudClient,
+    voyage_key: Option<&str>,
+    security_level: SecurityLevel,
+) -> StatusReport {
     // The wrappers tighten CloudClient's general-purpose 30s timeout down to
     // this module's 3s-per-probe status budget.
     let readyz = tokio::time::timeout(Duration::from_secs(3), cloud.readyz());
@@ -145,6 +158,7 @@ pub async fn assemble(cloud: &CloudClient, voyage_key: Option<&str>) -> StatusRe
         voyage,
         reranker: RERANKER_MODEL_NAME,
         reranker_loaded: crate::tools::reranker_loaded(),
+        security_level,
     }
 }
 
@@ -153,6 +167,8 @@ mod tests {
     use serde_json::json;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use mnm_core::injection::SecurityLevel;
 
     use super::{assemble, probe_voyage_at, CloudState, VoyageState};
     use crate::cloud_client::CloudClient;
@@ -200,7 +216,9 @@ mod tests {
         let server = mock_cloud(200, full_me_body()).await;
         let cloud = CloudClient::new(&server.uri(), Some("tok".into())).unwrap();
 
-        let r = assemble(&cloud, None).await;
+        // A non-default level is threaded through so the report reflects the
+        // resolved level verbatim, not the enum default.
+        let r = assemble(&cloud, None, SecurityLevel::Strict).await;
         assert_eq!(r.cloud, CloudState::Reachable);
         assert_eq!(r.cloud_version.as_deref(), Some("0.4.2"));
         assert!(r.authenticated);
@@ -214,6 +232,7 @@ mod tests {
         assert_eq!(tl.hourly.limit, 200_000);
         assert_eq!(r.voyage, VoyageState::NotConfigured);
         assert_eq!(r.reranker, super::RERANKER_MODEL_NAME);
+        assert_eq!(r.security_level, SecurityLevel::Strict);
     }
 
     #[tokio::test]
@@ -221,7 +240,7 @@ mod tests {
         let server = mock_cloud(503, full_me_body()).await;
         let cloud = CloudClient::new(&server.uri(), None).unwrap();
 
-        let r = assemble(&cloud, None).await;
+        let r = assemble(&cloud, None, SecurityLevel::Moderate).await;
         assert_eq!(r.cloud, CloudState::Degraded);
         // `/v1/me` still populates its sections — a degraded readiness probe
         // does not blank the rest of the report.
@@ -233,7 +252,7 @@ mod tests {
         // Port 9 (discard) is closed: connection refused → transport error.
         let cloud = CloudClient::new("http://127.0.0.1:9", None).unwrap();
 
-        let r = assemble(&cloud, None).await;
+        let r = assemble(&cloud, None, SecurityLevel::Moderate).await;
         assert_eq!(r.cloud, CloudState::Unreachable);
         assert!(!r.authenticated);
         assert_eq!(r.auth_type, "anonymous");
@@ -264,7 +283,7 @@ mod tests {
         let server = mock_cloud(200, body).await;
         let cloud = CloudClient::new(&server.uri(), None).unwrap();
 
-        let r = assemble(&cloud, None).await;
+        let r = assemble(&cloud, None, SecurityLevel::Moderate).await;
         assert!(r.rate_limit.is_none(), "explicit null rate_limit must collapse to None");
         let tl = r
             .token_limits
@@ -288,7 +307,7 @@ mod tests {
         let server = mock_cloud(200, body).await;
         let cloud = CloudClient::new(&server.uri(), None).unwrap();
 
-        let r = assemble(&cloud, None).await;
+        let r = assemble(&cloud, None, SecurityLevel::Moderate).await;
         assert!(!r.authenticated, "malformed body cannot report authenticated");
         assert_eq!(r.auth_type, "anonymous");
         assert_eq!(r.permission_level, "read");
@@ -341,10 +360,13 @@ mod tests {
     #[tokio::test]
     async fn report_serializes_with_snake_case_states() {
         let cloud = CloudClient::new("http://127.0.0.1:9", None).unwrap();
-        let r = assemble(&cloud, None).await;
+        let r = assemble(&cloud, None, SecurityLevel::Moderate).await;
         let v = serde_json::to_value(&r).unwrap();
         assert_eq!(v["cloud"], "unreachable");
         assert_eq!(v["voyage"], "not_configured");
         assert!(v["reranker_loaded"].is_boolean());
+        // `SecurityLevel` serializes as its lowercase wire string, matching the
+        // `security_level` enum advertised in the status outputSchema.
+        assert_eq!(v["security_level"], "moderate");
     }
 }

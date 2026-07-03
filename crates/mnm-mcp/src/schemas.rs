@@ -398,10 +398,12 @@ pub fn status_output_schema() -> Value {
             "voyage": { "type": "string", "enum": ["valid", "invalid_key", "unreachable", "not_configured"] },
             "reranker": { "type": "string" },
             "reranker_loaded": { "type": "boolean" },
+            "security_level": { "type": "string", "enum": ["disabled", "low", "moderate", "high", "strict"],
+                "description": "Active client-side content-guard level (default moderate). Governs whether returned content is wrapped in <<UNTRUSTED-…>> blocks and, at strict, whether flagged items are removed. This is the *standing* configured level, always reported here; what the guard actually did to a given response appears in that response's own `security` object (present only when the guard acted). Ordered least→most aggressive: disabled < low < moderate < high < strict." },
             "suggested_next_actions": suggested_next_actions_fragment()
         },
         "required": ["mcp_version", "cloud", "authenticated", "auth_type", "permission_level",
-                     "voyage", "reranker", "reranker_loaded", "suggested_next_actions"],
+                     "voyage", "reranker", "reranker_loaded", "security_level", "suggested_next_actions"],
         "additionalProperties": true
     })
 }
