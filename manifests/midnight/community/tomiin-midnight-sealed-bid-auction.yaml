@@ -1,0 +1,39 @@
+manifest_version: 1
+root:
+  name: tomiin-midnight-sealed-bid-auction
+  path: .
+  exclude:
+    - "**/managed/**"
+    - "**/node_modules/**"
+    - "**/dist/**"
+    - "**/package-lock.json"
+  provenance:
+    attribution: community
+    verified: false
+    tags: [trust:low]
+    verification_notes: >-
+      Community-contributed repository; unverified and unaudited by the Midnight Foundation.
+      A bespoke, privacy-first SEALED-BID AUCTION in Compact
+      (contract/src/sealed-bid-auction.compact) implementing a classic COMMIT-REVEAL: bidders
+      store only persistentHash(amount, salt) during the bidding phase, then reveal amount+salt
+      in the reveal phase where the contract re-hashes and binds the reveal to the stored
+      commitment before counting it. A multi-agent static security review (2026-07-03) found it
+      SOUND: (1) commit-reveal BINDING is correct — revealBid recomputes makeCommitment(amount,
+      salt) and asserts equality with the stored commitment before updating the winner, with the
+      amount captured once for both the check and the disclosure (not the broken
+      reveal-without-binding pattern); (2) HIDING holds given a high-entropy salt; (3) WINNER/PHASE
+      logic is sound — monotonic strict-> max over bound reveals, phases 0->1->2 fully enforced,
+      duplicate-bid / premature-reveal / double-reveal all blocked; (4) AUTH is the secure
+      key-knowledge pattern — callerId() == owner where owner is pinned at deploy and callerId =
+      persistentHash([localSecretKey()]) (no ownPublicKey, no public-value-as-credential). Tests are
+      12 Vitest cases driving the actually-compiled contract through @midnight-ntwrk/compact-runtime
+      (compact-runtime 0.16.0, compiler +0.31.0, pragma >= 0.23). Known LOW caveats (do not copy
+      uncritically): (i) commitment hiding depends on a HIGH-ENTROPY client-generated salt — bidSalt
+      must be a 32-byte CSPRNG value (a client responsibility, outside witnesses.ts); (ii) accountId
+      has NO domain separation, so the same secret key yields a stable, cross-contract-linkable
+      pseudonym; (iii) the auctioneer has unilateral, UNTIMED control of the reveal window
+      (centralization/liveness — consider blockTime deadlines). Scope note: the on-chain client
+      (frontend/src/auction/midnightClient.ts) is an HONEST, explicitly-unwired stub (throws "not
+      wired up yet"), and localClient.ts is a disclosed in-browser JS demo mirror — no live
+      proof/deploy path is claimed or fabricated. Apache-2.0. Treat as illustrative, not
+      authoritative, and audit before production use.
