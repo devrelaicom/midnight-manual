@@ -180,7 +180,7 @@ A search result is a chunk. These tools let your assistant pull exactly as much 
 | **`list_sources`** | Enumerate corpus sources (paginated; filter by kind, created window, retired) — slug, display name, kind, active revision. The slugs feed `advanced_search` filters. |
 | **`facets`** | Discover the filter dimensions `advanced_search` accepts and the values present in the corpus — call it bare for the overview, `facet=` to drill one open-set facet (`source_slug`, `language`, `tags`, `package`, `language_target`, `sdk_dependency`), and `within=` for the second drill level (the version values within a name). |
 | **`status`** | Diagnose the retrieval setup: cloud reachability, auth state, both limit families (request rate + token budget), VoyageAI key validity, and rerank configuration. Call it when searches misbehave. |
-| **`install_search_skill`** | Install/update the `midnight-advanced-search` skill (`SKILL.md`) into your detected AI harness(es); reports the paths written and the per-harness reload step. The only non-read-only tool. |
+| **`install_skill`** | Install/update bundled skills (`SKILL.md`) into your detected AI harness(es); pass a `skill` array to choose bundles by name, or omit it for all. Reports the paths written and the per-harness reload step. The only non-read-only tool. |
 
 ### Why it's good
 
@@ -200,7 +200,7 @@ The MCP server gives your assistant the *power tools* — hybrid retrieval, rera
 
 ### Install it in one step
 
-Ask your assistant to install it — the MCP server exposes an **`install_search_skill`** tool that writes the `SKILL.md` into every harness it detects and reports the per-harness reload step. Or run the CLI yourself (see [Manual & scripted install](#manual--scripted-install) below). Either way, no manual file copying.
+Ask your assistant to install it — the MCP server exposes an **`install_skill`** tool that writes the `SKILL.md` into every harness it detects and reports the per-harness reload step (pass a `skill` array to pick bundles, or omit it for all). Or run the CLI yourself (see [Manual & scripted install](#manual--scripted-install) below). Either way, no manual file copying.
 
 ### What the skill teaches
 
@@ -223,15 +223,17 @@ Worked examples for every pattern — the exact prompt the agent emits, the resu
 Prefer to drive it yourself? The CLI installs the skill into every harness it detects:
 
 ```bash
-mnm skills add                              # auto-detect installed harnesses
+mnm skills add                              # all bundled skills, auto-detect harnesses
+mnm skills add --skill midnight-advanced-search  # a specific bundle (repeatable)
 mnm skills add --harness claude-code,codex  # target a specific set
 mnm skills add --scope project              # this repo only (default: user)
 ```
 
+- `--skill` (repeatable) picks bundles by name; omit it (or pass `--all`) to install every bundled skill.
 - `--harness` takes a comma-separated list: `claude-code`, `codex`, `opencode`, `cursor`.
 - `--scope` is `user` (all your projects) or `project` (committed to the repo), mirroring how each harness scopes skills/rules.
 
-Agents can install it too: the MCP server exposes an **`install_search_skill`** tool that performs the add and returns the installation status, which harnesses it wrote to, the exact paths, and the per-harness "reload your skills" step to relay back to you.
+Agents can install it too: the MCP server exposes an **`install_skill`** tool that performs the add (a `skill` array selects bundles, omit=all) and returns the installation status, which harnesses it wrote to, the exact paths, and the per-harness "reload your skills" step to relay back to you.
 
 ### Supported harnesses
 

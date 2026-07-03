@@ -117,7 +117,7 @@ pub enum Command {
     Chunks(commands::chunks::Args),
     /// Inspect documents: show, chunks.
     Documents(commands::documents::Args),
-    /// Install the advanced-search skill into your AI harness(es).
+    /// Install bundled skills into your AI harness(es).
     Skills(commands::skills::Args),
 }
 

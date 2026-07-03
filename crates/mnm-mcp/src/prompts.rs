@@ -1,6 +1,6 @@
-//! MCP prompts surface: the `add_advanced_search_skill` bootstrap prompt that
-//! tells the agent to install the advanced-search skill and relay the reload
-//! step. See <https://modelcontextprotocol.io/specification/2025-06-18/server/prompts>.
+//! MCP prompts surface: the `add_midnight_skills` bootstrap prompt that tells
+//! the agent to install the bundled Midnight skills and relay the reload step.
+//! See <https://modelcontextprotocol.io/specification/2025-06-18/server/prompts>.
 
 use crate::protocol::{
     ContentBlock, ErrorCode, PromptArgument, PromptDescription, PromptGetParams, PromptGetResult,
@@ -8,7 +8,7 @@ use crate::protocol::{
 };
 
 /// The one prompt we expose.
-pub const ADD_SKILL_PROMPT: &str = "add_advanced_search_skill";
+pub const ADD_SKILL_PROMPT: &str = "add_midnight_skills";
 
 /// Build the `prompts/list` payload.
 #[must_use]
@@ -17,8 +17,14 @@ pub fn list() -> PromptsListResult {
         prompts: vec![PromptDescription {
             name: ADD_SKILL_PROMPT,
             description:
-                "Install the midnight-advanced-search skill into this session's AI harness so the assistant uses the advanced retrieval playbook automatically. Checks whether it's already present and installs it if not, then tells you how to reload.",
+                "Install the bundled Midnight skills into this session's AI harness so the assistant uses them automatically. Checks whether each is already present and installs it if not, then tells you how to reload.",
             arguments: vec![
+                PromptArgument {
+                    name: "skill",
+                    description:
+                        "Optional comma-separated skill names to install. Omit to install every bundled skill.",
+                    required: false,
+                },
                 PromptArgument {
                     name: "harness",
                     description:
@@ -35,10 +41,10 @@ pub fn list() -> PromptsListResult {
     }
 }
 
-/// Render `prompts/get`. Validates the optional `harness`/`scope` arguments the
-/// same way the CLI / tool do, and embeds the resolved values into the
-/// instruction so the agent calls `install_search_skill` with exactly what the
-/// user asked for.
+/// Render `prompts/get`. Validates the optional `skill`/`harness`/`scope`
+/// arguments the same way the CLI / tool do, and embeds the resolved values into
+/// the instruction so the agent calls `install_skill` with exactly what the user
+/// asked for.
 #[must_use]
 pub fn get(id: RequestId, params: &PromptGetParams) -> Response {
     use mnm_skills::{Harness, Scope};
@@ -89,11 +95,35 @@ pub fn get(id: RequestId, params: &PromptGetParams) -> Response {
         }
     };
 
-    let tool_args = build_tool_args(harness_tokens.as_deref(), scope_arg.as_deref());
+    // Validate and split the skill list if present (against the registry).
+    let skill_arg = arg("skill");
+    let skill_tokens: Option<Vec<&str>> = match skill_arg.as_deref() {
+        None => None,
+        Some(raw) => {
+            let mut tokens = Vec::new();
+            for tok in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                if mnm_skills::bundle(tok).is_none() {
+                    return Response::err(
+                        id,
+                        ErrorCode::InvalidParams,
+                        format!(
+                            "unknown skill `{tok}` (known: {})",
+                            mnm_skills::skill_names().join(", ")
+                        ),
+                    );
+                }
+                tokens.push(tok);
+            }
+            Some(tokens)
+        }
+    };
+
+    let tool_args =
+        build_tool_args(skill_tokens.as_deref(), harness_tokens.as_deref(), scope_arg.as_deref());
     let text = instruction(&tool_args);
 
     let result = PromptGetResult {
-        description: "Install the midnight-advanced-search skill and tell the user how to reload."
+        description: "Install the bundled Midnight skills and tell the user how to reload."
             .to_owned(),
         messages: vec![PromptMessage {
             role: "user",
@@ -103,11 +133,20 @@ pub fn get(id: RequestId, params: &PromptGetParams) -> Response {
     Response::success(id, serde_json::to_value(result).expect("serialize PromptGetResult"))
 }
 
-/// Build the JSON the agent should pass to `install_search_skill`, embedding
-/// only the supplied arguments (so omitted ones fall through to auto-detect /
+/// Build the JSON the agent should pass to `install_skill`, embedding only the
+/// supplied arguments (so omitted ones fall through to all-skills / auto-detect /
 /// default).
-fn build_tool_args(harness: Option<&[&str]>, scope: Option<&str>) -> String {
+fn build_tool_args(
+    skill: Option<&[&str]>,
+    harness: Option<&[&str]>,
+    scope: Option<&str>,
+) -> String {
     let mut obj = serde_json::Map::new();
+    if let Some(tokens) = skill {
+        if !tokens.is_empty() {
+            obj.insert("skill".to_owned(), serde_json::json!(tokens));
+        }
+    }
     if let Some(tokens) = harness {
         if !tokens.is_empty() {
             obj.insert("harness".to_owned(), serde_json::json!(tokens));
@@ -122,16 +161,16 @@ fn build_tool_args(harness: Option<&[&str]>, scope: Option<&str>) -> String {
 /// Render the five-step user instruction embedding the resolved `tool_args` JSON.
 fn instruction(tool_args: &str) -> String {
     format!(
-        "The user wants the Midnight advanced-search skill installed.\n\n\
-         1. Call the `install_search_skill` tool with arguments: {tool_args}\n\
-         (An empty object means auto-detect the installed harnesses at user scope.)\n\
-         2. The tool is idempotent and returns, per harness, an `action` of \
+        "The user wants the Midnight skills installed.\n\n\
+         1. Call the `install_skill` tool with arguments: {tool_args}\n\
+         (An empty object means all bundled skills, auto-detected harnesses, user scope.)\n\
+         2. The tool is idempotent and returns, per skill and harness, an `action` of \
          `created`, `updated`, or `unchanged`, plus a `reload_step`.\n\
          3. For every harness whose action is `created` or `updated`, tell the user the exact \
          `reload_step` from the tool's response.\n\
-         4. If every harness was `unchanged`, tell the user the skill is already installed and \
+         4. If every entry was `unchanged`, tell the user the skills are already installed and \
          current — no reload needed.\n\
-         5. Briefly confirm which harnesses and paths were written."
+         5. Briefly confirm which skills, harnesses, and paths were written."
     )
 }
 
@@ -153,7 +192,7 @@ mod tests {
         assert_eq!(l.prompts.len(), 1);
         assert_eq!(l.prompts[0].name, ADD_SKILL_PROMPT);
         let names: Vec<_> = l.prompts[0].arguments.iter().map(|a| a.name).collect();
-        assert_eq!(names, vec!["harness", "scope"]);
+        assert_eq!(names, vec!["skill", "harness", "scope"]);
         assert!(l.prompts[0].arguments.iter().all(|a| !a.required));
     }
 
@@ -171,6 +210,7 @@ mod tests {
             .as_str()
             .unwrap();
         assert!(text.contains("arguments: {}"));
+        assert!(text.contains("install_skill"));
         assert_eq!(v["result"]["messages"][0]["role"], "user");
     }
 
@@ -180,19 +220,24 @@ mod tests {
             RequestId::Number(1),
             &params(
                 ADD_SKILL_PROMPT,
-                serde_json::json!({ "harness": "cursor,codex", "scope": "project" }),
+                serde_json::json!({
+                    "skill": "midnight-advanced-search",
+                    "harness": "cursor,codex",
+                    "scope": "project"
+                }),
             ),
         );
         let v = serde_json::to_value(&r).unwrap();
         let text = v["result"]["messages"][0]["content"]["text"]
             .as_str()
             .unwrap();
+        assert!(text.contains("\"skill\":[\"midnight-advanced-search\"]"));
         assert!(text.contains("\"harness\":[\"cursor\",\"codex\"]"));
         assert!(text.contains("\"scope\":\"project\""));
     }
 
     #[test]
-    fn get_rejects_bad_scope_and_harness() {
+    fn get_rejects_bad_scope_harness_and_skill() {
         let bad_scope = get(
             RequestId::Number(1),
             &params(ADD_SKILL_PROMPT, serde_json::json!({ "scope": "global" })),
@@ -203,5 +248,10 @@ mod tests {
             &params(ADD_SKILL_PROMPT, serde_json::json!({ "harness": "windsurf" })),
         );
         assert!(bad_h.error.is_some());
+        let bad_skill = get(
+            RequestId::Number(1),
+            &params(ADD_SKILL_PROMPT, serde_json::json!({ "skill": "no-such-skill" })),
+        );
+        assert!(bad_skill.error.is_some());
     }
 }

@@ -280,7 +280,7 @@ pub struct PromptArgument {
 /// One prompt declaration in a `prompts/list` response.
 #[derive(Debug, Serialize)]
 pub struct PromptDescription {
-    /// Prompt name (e.g. `add_advanced_search_skill`).
+    /// Prompt name (e.g. `add_midnight_skills`).
     pub name: &'static str,
     /// Human-readable description (shown in client prompt menus).
     pub description: &'static str,

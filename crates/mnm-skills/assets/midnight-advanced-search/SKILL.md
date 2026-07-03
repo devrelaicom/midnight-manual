@@ -69,7 +69,7 @@ Thirteen tools, four groups:
 - `status` — cloud reachability, auth identity + permission level, both limit
   families (request rate, and embedding-token hourly/daily windows), Voyage
   key validity, and reranker state. Call it when searches fail or error.
-- `install_search_skill` — (re)install this skill into the user's harness(es).
+- `install_skill` — (re)install bundled Midnight skills into the user's harness(es); pass `{"skill":["midnight-advanced-search"]}` for just this one, or omit `skill` for all.
 
 Reranking is VoyageAI (`rerank-2.5`): server-side by default, or local when a
 `VOYAGE_API_KEY` is configured. `advanced_search` exposes `rerank` (boolean) and

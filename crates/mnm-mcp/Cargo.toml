@@ -1,6 +1,6 @@
 [package]
 name = "mnm-mcp"
-description = "MCP JSON-RPC server over stdio: thirteen tools plus the add_advanced_search_skill prompt."
+description = "MCP JSON-RPC server over stdio: thirteen tools plus the add_midnight_skills prompt."
 
 version       = { workspace = true }
 edition       = { workspace = true }

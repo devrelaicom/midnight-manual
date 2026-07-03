@@ -19,8 +19,8 @@
 //!   out to three cloud endpoints concurrently and bundles the results;
 //!   `list_sources` and `facets` enumerate the corpus and its filter
 //!   dimensions.
-//! - Local install: `install_search_skill` (writes the advanced-search
-//!   `SKILL.md` into the user's AI harness(es)).
+//! - Local install: `install_skill` (writes bundled skills' `SKILL.md` into the
+//!   user's AI harness(es); a `skill` enum selects bundles, omit = all).
 
 use std::sync::Arc;
 
@@ -179,12 +179,12 @@ pub fn list() -> ToolsListResult {
                 annotations: ToolAnnotations::read_only().with_title("Diagnostics"),
             },
             ToolDescription {
-                name: "install_search_skill",
+                name: "install_skill",
                 description:
-                    "Install (or update) the midnight-advanced-search skill — a retrieval playbook teaching effective corpus search patterns — into the user's AI harness(es). Use when search results are poor or the user asks for better search guidance.",
-                input_schema: install_search_skill_schema(),
+                    "Install (or update) bundled Midnight skills — reusable playbooks that teach effective corpus search — into the user's AI harness(es). Pass `skill` to choose specific bundles by name; omit it to install every bundled skill. Use when search results are poor or the user asks for better guidance.",
+                input_schema: install_skill_schema(),
                 output_schema: Some(crate::schemas::install_output_schema()),
-                annotations: ToolAnnotations::idempotent_writer().with_title("Install search skill"),
+                annotations: ToolAnnotations::idempotent_writer().with_title("Install skill"),
             },
         ],
     }
@@ -353,10 +353,18 @@ fn filters_schema() -> serde_json::Value {
     })
 }
 
-fn install_search_skill_schema() -> serde_json::Value {
+fn install_skill_schema() -> serde_json::Value {
+    // The `skill` enum is generated from the registry, so a new bundle is
+    // discoverable here with no schema edit.
+    let skills = mnm_skills::skill_names();
     json!({
         "type": "object",
         "properties": {
+            "skill": {
+                "type": "array",
+                "items": { "type": "string", "enum": skills },
+                "description": "Skills to install, by name. Omit to install every bundled skill."
+            },
             "harness": {
                 "type": "array",
                 "items": { "type": "string", "enum": ["claude-code", "codex", "opencode", "cursor"] },
@@ -379,12 +387,12 @@ fn install_search_skill_schema() -> serde_json::Value {
 ///
 /// # Errors
 ///
-/// Returns `InvalidParams` for a bad `harness`/`scope`, `ToolFailed` for a
-/// filesystem failure or no-harness-detected.
-pub fn run_install_search_skill(
+/// Returns `InvalidParams` for a bad `skill`/`harness`/`scope`, `ToolFailed` for
+/// a filesystem failure or no-harness-detected.
+pub fn run_install_skill(
     args: &serde_json::Value,
 ) -> Result<String, (crate::protocol::ErrorCode, String)> {
-    run_install_search_skill_in(args, &mnm_skills::StdSkillEnv)
+    run_install_skill_in(args, &mnm_skills::StdSkillEnv)
 }
 
 /// Inner form that takes the [`mnm_skills::SkillEnv`] explicitly, so tests can
@@ -392,8 +400,8 @@ pub fn run_install_search_skill(
 ///
 /// # Errors
 ///
-/// As [`run_install_search_skill`].
-pub(crate) fn run_install_search_skill_in(
+/// As [`run_install_skill`].
+pub(crate) fn run_install_skill_in(
     args: &serde_json::Value,
     env: &impl mnm_skills::SkillEnv,
 ) -> Result<String, (crate::protocol::ErrorCode, String)> {
@@ -431,7 +439,27 @@ pub(crate) fn run_install_search_skill_in(
         Some(_) => return Err((ErrorCode::InvalidParams, "harness must be an array".to_owned())),
     };
 
-    let report = mnm_skills::install(explicit.as_deref(), scope, env)
+    // Parse the optional `skill` selector (array of names). Omit — or an empty
+    // array — means every bundled skill.
+    let skill_names: Vec<String> = match args.get("skill") {
+        None => Vec::new(),
+        Some(serde_json::Value::Array(items)) => {
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                let s = item.as_str().ok_or_else(|| {
+                    (ErrorCode::InvalidParams, "skill entries must be strings".to_owned())
+                })?;
+                out.push(s.to_owned());
+            }
+            out
+        }
+        Some(_) => return Err((ErrorCode::InvalidParams, "skill must be an array".to_owned())),
+    };
+    let name_refs: Vec<&str> = skill_names.iter().map(String::as_str).collect();
+    let skills =
+        mnm_skills::select(&name_refs).map_err(|e| (ErrorCode::InvalidParams, e.to_string()))?;
+
+    let report = mnm_skills::install(explicit.as_deref(), &skills, scope, env)
         .map_err(|e| (ErrorCode::ToolFailed, e.to_string()))?;
     serde_json::to_string(&report)
         .map_err(|e| (ErrorCode::ToolFailed, format!("serialize report: {e}")))
@@ -1963,7 +1991,7 @@ mod tests {
                 "list_sources",
                 "facets",
                 "status",
-                "install_search_skill",
+                "install_skill",
             ]
         );
         for t in &m.tools {
@@ -1986,11 +2014,7 @@ mod tests {
                 t.name
             );
         }
-        let install = m
-            .tools
-            .iter()
-            .find(|t| t.name == "install_search_skill")
-            .unwrap();
+        let install = m.tools.iter().find(|t| t.name == "install_skill").unwrap();
         let v = serde_json::to_value(install).unwrap();
         assert_eq!(v["annotations"]["readOnlyHint"], false);
         assert_eq!(v["annotations"]["idempotentHint"], true);
@@ -2736,24 +2760,42 @@ mod install_skill_tests {
     use serde_json::json;
 
     #[test]
-    fn manifest_includes_install_search_skill() {
-        assert!(list()
+    fn manifest_includes_install_skill() {
+        assert!(list().tools.iter().any(|t| t.name == "install_skill"));
+    }
+
+    #[test]
+    fn install_skill_enum_is_generated_from_registry() {
+        let install = list()
             .tools
-            .iter()
-            .any(|t| t.name == "install_search_skill"));
+            .into_iter()
+            .find(|t| t.name == "install_skill")
+            .unwrap();
+        let enum_vals = install.input_schema["properties"]["skill"]["items"]["enum"]
+            .as_array()
+            .expect("skill.items.enum is an array");
+        let got: Vec<&str> = enum_vals.iter().filter_map(|v| v.as_str()).collect();
+        assert_eq!(got, mnm_skills::skill_names(), "skill enum must mirror the registry");
     }
 
     #[test]
     fn install_rejects_bad_scope() {
         let args = json!({ "scope": "global" });
-        let err = run_install_search_skill(&args).unwrap_err();
+        let err = run_install_skill(&args).unwrap_err();
         assert!(matches!(err.0, crate::protocol::ErrorCode::InvalidParams));
     }
 
     #[test]
     fn install_rejects_unknown_harness() {
         let args = json!({ "harness": ["windsurf"] });
-        let err = run_install_search_skill(&args).unwrap_err();
+        let err = run_install_skill(&args).unwrap_err();
+        assert!(matches!(err.0, crate::protocol::ErrorCode::InvalidParams));
+    }
+
+    #[test]
+    fn install_rejects_unknown_skill() {
+        let args = json!({ "skill": ["no-such-skill"] });
+        let err = run_install_skill(&args).unwrap_err();
         assert!(matches!(err.0, crate::protocol::ErrorCode::InvalidParams));
     }
 
@@ -2774,7 +2816,7 @@ mod install_skill_tests {
         let env = EmptyEnv { home: tmp.path().to_path_buf() };
         // No markers under the temp home -> auto-detect finds nothing ->
         // mnm_skills::install returns NoHarnessDetected -> mapped to ToolFailed.
-        let err = run_install_search_skill_in(&json!({}), &env).unwrap_err();
+        let err = run_install_skill_in(&json!({}), &env).unwrap_err();
         assert!(matches!(err.0, crate::protocol::ErrorCode::ToolFailed));
     }
 
@@ -2794,14 +2836,39 @@ mod install_skill_tests {
         }
         let tmp = tempfile::TempDir::new().unwrap();
         let env = FakeEnv { home: tmp.path().to_path_buf() };
-        let text =
-            run_install_search_skill_in(&json!({ "harness": ["cursor"], "scope": "user" }), &env)
-                .expect("install ok");
+        let text = run_install_skill_in(&json!({ "harness": ["cursor"], "scope": "user" }), &env)
+            .expect("install ok");
         let v: serde_json::Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(v["installed"][0]["harness"], "cursor");
+        assert_eq!(v["skills"][0]["skill_name"], "midnight-advanced-search");
+        assert_eq!(v["skills"][0]["installed"][0]["harness"], "cursor");
         assert!(tmp
             .path()
             .join(".cursor/skills/midnight-advanced-search/SKILL.md")
             .exists());
+    }
+
+    #[test]
+    fn install_skill_selector_targets_named_bundle() {
+        struct FakeEnv {
+            home: std::path::PathBuf,
+        }
+        impl mnm_skills::SkillEnv for FakeEnv {
+            fn home_dir(&self) -> Option<std::path::PathBuf> {
+                Some(self.home.clone())
+            }
+            fn current_dir(&self) -> Option<std::path::PathBuf> {
+                Some(self.home.clone())
+            }
+        }
+        let tmp = tempfile::TempDir::new().unwrap();
+        let env = FakeEnv { home: tmp.path().to_path_buf() };
+        let text = run_install_skill_in(
+            &json!({ "skill": ["midnight-advanced-search"], "harness": ["cursor"] }),
+            &env,
+        )
+        .expect("install ok");
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["skills"].as_array().unwrap().len(), 1);
+        assert_eq!(v["skills"][0]["skill_name"], "midnight-advanced-search");
     }
 }

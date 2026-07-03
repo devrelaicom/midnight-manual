@@ -408,30 +408,41 @@ pub fn status_output_schema() -> Value {
     })
 }
 
-/// Output schema for `install_search_skill` (InstallReport — see `mnm_skills`).
+/// Output schema for `install_skill` (InstallReport — see `mnm_skills`). The
+/// report is a per-skill × per-harness matrix: each selected `skill` is written
+/// into the shared set of `detected` harnesses.
 pub fn install_output_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
-            "skill_name": { "type": "string" },
             "scope": { "type": "string", "enum": ["user", "project"] },
-            "installed": { "type": "array", "items": {
+            "detected": { "type": "array", "items": { "type": "string" },
+                "description": "Harness ids written to (auto-detected, or forced via `harness`)." },
+            "not_detected": { "type": "array", "items": { "type": "string" },
+                "description": "Harness ids probed but not present (empty when `harness` was forced)." },
+            "skills": { "type": "array", "items": {
                 "type": "object",
                 "properties": {
-                    "harness": { "type": "string" },
-                    "scope": { "type": "string" },
-                    "path": { "type": "string" },
-                    "action": { "type": "string", "description": "What happened (e.g. created / updated)." },
-                    "reload_step": { "type": "string" }
+                    "skill_name": { "type": "string" },
+                    "installed": { "type": "array", "items": {
+                        "type": "object",
+                        "properties": {
+                            "harness": { "type": "string" },
+                            "scope": { "type": "string" },
+                            "path": { "type": "string" },
+                            "action": { "type": "string", "description": "What happened (e.g. created / updated)." },
+                            "reload_step": { "type": "string", "description": "User instruction to relay so the harness loads the skill (e.g. restart the session)." }
+                        },
+                        "required": ["harness", "action"],
+                        "additionalProperties": true
+                    } }
                 },
-                "required": ["harness", "action"],
+                "required": ["skill_name", "installed"],
                 "additionalProperties": true
             } },
-            "detected": { "type": "array", "items": { "type": "string" } },
-            "not_detected": { "type": "array", "items": { "type": "string" } },
             "suggested_next_actions": suggested_next_actions_fragment()
         },
-        "required": ["skill_name", "scope", "installed", "suggested_next_actions"],
+        "required": ["scope", "skills", "suggested_next_actions"],
         "additionalProperties": true
     })
 }

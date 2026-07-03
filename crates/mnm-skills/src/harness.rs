@@ -90,16 +90,16 @@ impl Harness {
         }
     }
 
-    /// The owned skill directory (`<skills_root>/midnight-advanced-search`).
+    /// The owned skill directory for `skill` (`<skills_root>/<skill>`).
     #[must_use]
-    pub fn skill_dir(self, scope: Scope, base: &Path) -> PathBuf {
-        self.skills_root(scope, base).join(crate::SKILL_NAME)
+    pub fn skill_dir(self, skill: &str, scope: Scope, base: &Path) -> PathBuf {
+        self.skills_root(scope, base).join(skill)
     }
 
-    /// The installed `SKILL.md` path.
+    /// The installed `SKILL.md` path for `skill`.
     #[must_use]
-    pub fn skill_file(self, scope: Scope, base: &Path) -> PathBuf {
-        self.skill_dir(scope, base).join("SKILL.md")
+    pub fn skill_file(self, skill: &str, scope: Scope, base: &Path) -> PathBuf {
+        self.skill_dir(skill, scope, base).join("SKILL.md")
     }
 
     /// Detection markers for this harness at `scope`, rooted at `base`. The
@@ -175,20 +175,21 @@ mod tests {
     #[test]
     fn user_paths_match_verified_matrix() {
         let home = Path::new("/home/u");
+        let s = crate::SEARCH_SKILL;
         assert_eq!(
-            Harness::ClaudeCode.skill_file(Scope::User, home),
+            Harness::ClaudeCode.skill_file(s, Scope::User, home),
             Path::new("/home/u/.claude/skills/midnight-advanced-search/SKILL.md")
         );
         assert_eq!(
-            Harness::Codex.skill_file(Scope::User, home),
+            Harness::Codex.skill_file(s, Scope::User, home),
             Path::new("/home/u/.agents/skills/midnight-advanced-search/SKILL.md")
         );
         assert_eq!(
-            Harness::OpenCode.skill_file(Scope::User, home),
+            Harness::OpenCode.skill_file(s, Scope::User, home),
             Path::new("/home/u/.config/opencode/skills/midnight-advanced-search/SKILL.md")
         );
         assert_eq!(
-            Harness::Cursor.skill_file(Scope::User, home),
+            Harness::Cursor.skill_file(s, Scope::User, home),
             Path::new("/home/u/.cursor/skills/midnight-advanced-search/SKILL.md")
         );
     }
@@ -196,21 +197,33 @@ mod tests {
     #[test]
     fn project_paths_match_verified_matrix() {
         let root = Path::new("/repo");
+        let s = crate::SEARCH_SKILL;
         assert_eq!(
-            Harness::ClaudeCode.skill_file(Scope::Project, root),
+            Harness::ClaudeCode.skill_file(s, Scope::Project, root),
             Path::new("/repo/.claude/skills/midnight-advanced-search/SKILL.md")
         );
         assert_eq!(
-            Harness::Codex.skill_file(Scope::Project, root),
+            Harness::Codex.skill_file(s, Scope::Project, root),
             Path::new("/repo/.agents/skills/midnight-advanced-search/SKILL.md")
         );
         assert_eq!(
-            Harness::OpenCode.skill_file(Scope::Project, root),
+            Harness::OpenCode.skill_file(s, Scope::Project, root),
             Path::new("/repo/.opencode/skills/midnight-advanced-search/SKILL.md")
         );
         assert_eq!(
-            Harness::Cursor.skill_file(Scope::Project, root),
+            Harness::Cursor.skill_file(s, Scope::Project, root),
             Path::new("/repo/.cursor/skills/midnight-advanced-search/SKILL.md")
+        );
+    }
+
+    #[test]
+    fn skill_dir_uses_the_named_skill_folder() {
+        let home = Path::new("/home/u");
+        // A hypothetical second skill resolves to its own owned dir — proof the
+        // path layer is skill-parameterized, not hard-bound to one name.
+        assert_eq!(
+            Harness::ClaudeCode.skill_dir("another-skill", Scope::User, home),
+            Path::new("/home/u/.claude/skills/another-skill")
         );
     }
 

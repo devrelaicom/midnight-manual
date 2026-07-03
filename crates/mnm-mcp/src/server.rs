@@ -540,7 +540,7 @@ fn tool_name_for_event(name: &str) -> Option<McpToolName> {
         "list_sources" => Some(McpToolName::ListSources),
         "facets" => Some(McpToolName::Facets),
         "status" => Some(McpToolName::Status),
-        "install_search_skill" => Some(McpToolName::InstallSearchSkill),
+        "install_skill" => Some(McpToolName::InstallSkill),
         _ => None,
     }
 }
@@ -612,7 +612,7 @@ async fn dispatch_tool_inner(
             Ok(v) => ok(render::project_facets(v).into_result(), None),
             Err(e) => err(cloud_failure(&e).into_result(), Outcome::Error),
         },
-        "install_search_skill" => match tools::run_install_search_skill(&params.arguments) {
+        "install_skill" => match tools::run_install_skill(&params.arguments) {
             Ok(text) => {
                 let v = serde_json::from_str::<serde_json::Value>(&text)
                     .unwrap_or_else(|_| serde_json::json!({ "message": text }));
@@ -683,7 +683,10 @@ async fn run_search_dispatch(params: &ToolCallParams, state: &ServerState) -> To
             let opts = SearchRenderOpts {
                 reranker_used: reranker_name,
                 advanced,
-                skill_installed: mnm_skills::installed_anywhere(&mnm_skills::StdSkillEnv),
+                skill_installed: mnm_skills::installed(
+                    mnm_skills::SEARCH_SKILL,
+                    &mnm_skills::StdSkillEnv,
+                ),
                 security: state.cfg.security,
             };
             let outcome = render::project_search(success.envelope, &opts);
