@@ -452,6 +452,13 @@ pub struct SearchRenderOpts {
     /// Client-side prompt-injection guarding level (issue #103). Each result's
     /// `content` is guarded using its own attribution/verified trust metadata.
     pub security: SecurityLevel,
+    /// `response_format=concise` (issue #137): drop each result's nested `scores`
+    /// block from the projected structuredContent, keeping the promoted top-level
+    /// `confidence` / `attribution`. `false` (the default) = `detailed`, the
+    /// current full-fidelity behavior. Applied client-side only — the cloud
+    /// always returns scores so promotion, the summary, and telemetry can read
+    /// them.
+    pub concise: bool,
 }
 
 /// Fewer fused candidates than this triggers the "install the skill" nudge
@@ -643,6 +650,14 @@ pub fn project_search(envelope: Value, opts: &SearchRenderOpts) -> ToolOutcome {
     // outputSchema all expose the same fields at the same path (issue #88).
     promote_result_scores(&mut envelope);
 
+    // response_format=concise (issue #137): drop the now-redundant nested `scores`
+    // block from each structured result. Runs AFTER promotion so the essential
+    // confidence + attribution survive at the top level; the schema already marks
+    // `scores` optional (it is also absent for include_scores=false / older corpora).
+    if opts.concise {
+        drop_result_scores(&mut envelope);
+    }
+
     // Prompt-injection guarding: prepend the warning/preamble to the summary and
     // attach the additive `security` block (both no-ops when nothing was guarded).
     guard.decorate_summary(&mut summary);
@@ -684,6 +699,22 @@ fn promote_result_scores(env: &mut Value) {
         obj.insert("rank".to_owned(), json!(i + 1));
         obj.insert("confidence".to_owned(), confidence);
         obj.insert("attribution".to_owned(), Value::String(attribution));
+    }
+}
+
+/// Drop each result's nested `scores` block for `response_format=concise`
+/// (issue #137). Must run after [`promote_result_scores`], which copies the
+/// decision-critical `confidence` / `attribution` up to the result's top level;
+/// this only removes the verbose breakdown (rrf/vector/trust/factors), so the
+/// concise shape still carries ids + confidence + attribution.
+fn drop_result_scores(env: &mut Value) {
+    let Some(results) = env.get_mut("results").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for r in results {
+        if let Some(obj) = r.as_object_mut() {
+            obj.remove("scores");
+        }
     }
 }
 
@@ -1042,12 +1073,61 @@ pub fn project_parents(env: Value) -> ToolOutcome {
     ToolOutcome::new(summary, env, trimmed, actions)
 }
 
-/// Skeleton entries are small (`{id, chunk_index, token_count}`), so the text fence carries
-/// up to this many before truncating; the full set is always in `structuredContent`.
+/// One rendered outline line is far smaller than a raw skeleton object, so the
+/// text fence carries up to this many before truncating; the full skeleton
+/// (every entry, with breadcrumbs) always rides `structuredContent`.
 const FENCE_SKELETON_CAP: usize = 50;
 
-/// `get_document` (DocumentOverview): Document flattened to top level; `source` nested;
-/// metadata + chunk skeleton (`chunks: [{id, chunk_index, token_count}]`).
+/// Render one skeleton entry as a document-outline line (issue #141): the
+/// heading/symbol breadcrumb indented by heading depth, tagged with the chunk's
+/// navigational handle (`#index`, `~tokens`).
+///
+/// * markdown → the leaf heading, indented `2·(depth−1)` spaces so nesting reads
+///   as an outline;
+/// * code → `kind name` for the primary symbol (indented by any heading depth);
+/// * plaintext / heading-less → `chunk N`, at column 0.
+///
+/// The `#index` handle is the position to hand `get_document_chunks(from=index)`,
+/// so an agent can scan the outline and jump straight to the right window.
+fn outline_line(entry: &Value) -> String {
+    let idx = entry
+        .get("chunk_index")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let tokens = entry
+        .get("token_count")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let headings: Vec<&str> = entry
+        .get("heading_path")
+        .and_then(Value::as_array)
+        .map(|h| h.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let indent = "  ".repeat(headings.len().saturating_sub(1));
+    // Label precedence: code chunk → `kind name` for the primary symbol;
+    // markdown → the leaf heading; plaintext / heading-less → positional label.
+    // A degenerate empty symbol label (`{kind:"", name:""}`) is filtered out so it
+    // falls through to the heading / positional fallback rather than rendering blank.
+    let symbol_label = entry
+        .get("symbol")
+        .map(|sym| {
+            let kind = sym.get("kind").and_then(Value::as_str).unwrap_or("symbol");
+            let name = sym.get("name").and_then(Value::as_str).unwrap_or("");
+            format!("{kind} {name}").trim().to_owned()
+        })
+        .filter(|s| !s.is_empty());
+    let label = symbol_label
+        .or_else(|| headings.last().map(|leaf| (*leaf).to_owned()))
+        .unwrap_or_else(|| format!("chunk {idx}"));
+    format!("{indent}{label}  [#{idx}, ~{tokens}t]")
+}
+
+/// `get_document` (DocumentOverview): Document flattened to top level; `source`
+/// nested; metadata + an ordered chunk skeleton. The full skeleton (each entry
+/// `{id, chunk_index, token_count}` plus its `heading_path` / primary `symbol`
+/// breadcrumbs) rides `structuredContent`; the text fence carries a compact,
+/// indented `outline` of up to `FENCE_SKELETON_CAP` entries as the document's
+/// table of contents.
 pub fn project_document(env: Value) -> ToolOutcome {
     let path = env
         .get("source_path")
@@ -1074,9 +1154,37 @@ pub fn project_document(env: Value) -> ToolOutcome {
         .filter_map(|c| c.get("token_count").and_then(Value::as_i64))
         .sum();
     let summary = format!("{path} ({name}): {n} chunks, ~{tokens} tokens.");
+    // The fence carries the rendered outline (indented breadcrumbs), not the raw
+    // skeleton objects — smaller per entry than the pre-#141 `{id, …}` objects,
+    // and directly readable. The whole enriched skeleton stays in structuredContent.
+    let mut outline: Vec<String> = skeleton
+        .iter()
+        .take(FENCE_SKELETON_CAP)
+        .map(outline_line)
+        .collect();
+    // Never truncate silently: when the outline is capped, name the remaining
+    // count + index range and point at the full set in structuredContent, so an
+    // agent scanning for a symbol past the cap knows the TOC stopped early (#141).
+    // Both bounds read the REAL chunk_index — the first hidden entry (just past
+    // the cap) and the last — so gaps (embed_failed chunks are excluded, making
+    // chunk_index non-contiguous) can't understate the first-hidden index.
+    if n > FENCE_SKELETON_CAP {
+        let chunk_idx_at = |i: usize| {
+            skeleton
+                .get(i)
+                .and_then(|c| c.get("chunk_index").and_then(Value::as_i64))
+                .unwrap_or_else(|| i64::try_from(i).unwrap_or(i64::MAX))
+        };
+        let first_hidden = chunk_idx_at(FENCE_SKELETON_CAP);
+        let last_idx = chunk_idx_at(n - 1);
+        outline.push(format!(
+            "… +{} more chunks (#{first_hidden}–#{last_idx}); full outline in structuredContent",
+            n - FENCE_SKELETON_CAP,
+        ));
+    }
     let trimmed = json!({
         "id": id, "source_path": path, "chunk_count": n, "total_tokens": tokens,
-        "chunks": skeleton.iter().take(FENCE_SKELETON_CAP).cloned().collect::<Vec<_>>(),
+        "outline": outline,
     });
     let suggested_next_actions = vec![NextAction::call(
         "Read the document's chunk bodies from the beginning",
@@ -1658,6 +1766,7 @@ mod tests {
             // Existing search assertions predate guarding; keep it off here and
             // exercise every level in the dedicated guarding tests below.
             security: SecurityLevel::Disabled,
+            concise: false,
         }
     }
 
@@ -1694,6 +1803,28 @@ mod tests {
         // The nested cloud shape is untouched (additive promotion).
         assert_eq!(result["scores"]["confidence"], json!(0.81));
         assert_eq!(result["scores"]["confidence_factors"]["attribution"], json!("foundation"));
+    }
+
+    #[test]
+    fn project_search_concise_drops_scores_keeps_promoted_fields() {
+        // #137 response_format=concise: the nested scores block is dropped from
+        // each structured result, but the promoted confidence/attribution/rank
+        // (and the ids) survive. detailed (default) keeps scores.
+        let detailed = super::project_search(sample_search_envelope(), &basic_opts());
+        assert!(
+            detailed.structured["results"][0].get("scores").is_some(),
+            "detailed must keep the nested scores block"
+        );
+
+        let opts = SearchRenderOpts { concise: true, ..basic_opts() };
+        let concise = super::project_search(sample_search_envelope(), &opts);
+        let result = &concise.structured["results"][0];
+        assert!(result.get("scores").is_none(), "concise must drop the nested scores block");
+        // Promoted decision-critical fields remain at the top level.
+        assert_eq!(result["rank"], json!(1));
+        assert_eq!(result["confidence"], json!(0.81));
+        assert_eq!(result["attribution"], json!("foundation"));
+        assert!(result.get("chunk_id").is_some(), "ids survive concise projection");
     }
 
     #[test]
@@ -2109,8 +2240,8 @@ mod tests {
         assert!(o.summary.contains("~60 tokens"));
         assert_eq!(o.trimmed["chunk_count"], 3);
         assert_eq!(o.trimmed["total_tokens"], 60);
-        // Skeleton fits under the fence cap → carried whole in the fence.
-        assert_eq!(o.trimmed["chunks"].as_array().unwrap().len(), 3);
+        // Outline fits under the fence cap → one line per chunk in the fence.
+        assert_eq!(o.trimmed["outline"].as_array().unwrap().len(), 3);
         let action = &o.suggested_next_actions[0];
         assert_eq!(action.tool, Some("get_document_chunks"));
         let args = action.arguments.as_ref().unwrap();
@@ -2131,10 +2262,202 @@ mod tests {
         let o = super::project_document(env);
         // display_name absent → slug fallback.
         assert!(o.summary.contains("compact-docs"));
-        assert_eq!(o.trimmed["chunks"].as_array().unwrap().len(), 50);
+        // Fence outline is capped at 50 real lines + 1 truncation sentinel;
+        // structuredContent keeps every entry.
+        let outline = o.trimmed["outline"].as_array().unwrap();
+        assert_eq!(outline.len(), 51, "50 outline lines + the truncation sentinel");
+        let sentinel = outline[50].as_str().unwrap();
+        assert!(
+            sentinel.starts_with("… +10 more chunks"),
+            "sentinel names the remainder: {sentinel}"
+        );
+        assert!(sentinel.contains("#50–#59"), "sentinel names the index range: {sentinel}");
+        assert!(sentinel.contains("structuredContent"), "sentinel points at the full set");
         assert_eq!(o.structured["chunks"].as_array().unwrap().len(), 60);
         assert_eq!(o.trimmed["chunk_count"], 60);
         assert_eq!(o.trimmed["total_tokens"], 300);
+    }
+
+    #[test]
+    fn project_document_sentinel_uses_real_chunk_index_under_gaps() {
+        // embed_failed chunks are excluded from the skeleton, so chunk_index is
+        // non-contiguous. The sentinel's start/end must read the REAL chunk_index
+        // of the first-hidden + last entries, not the positional cap constant.
+        let mut skeleton: Vec<Value> = (0..FENCE_SKELETON_CAP)
+            .map(|i| json!({ "id": format!("c{i}"), "chunk_index": i, "token_count": 5 }))
+            .collect();
+        // Two hidden entries past the cap, with a gap: positions 50,51 but
+        // chunk_index 55,56 (indices 50..54 were dropped as embed_failed).
+        skeleton.push(json!({ "id": "h0", "chunk_index": 55, "token_count": 5 }));
+        skeleton.push(json!({ "id": "h1", "chunk_index": 56, "token_count": 5 }));
+        let o = super::project_document(json!({
+            "id": "d1", "source_path": "docs/gappy.md",
+            "source": { "slug": "s" }, "chunks": skeleton
+        }));
+        let outline = o.trimmed["outline"].as_array().unwrap();
+        let sentinel = outline.last().unwrap().as_str().unwrap();
+        assert!(sentinel.starts_with("… +2 more chunks"), "remaining count: {sentinel}");
+        assert!(
+            sentinel.contains("#55–#56"),
+            "sentinel must name the REAL first-hidden/last chunk_index under gaps: {sentinel}"
+        );
+    }
+
+    #[test]
+    fn project_document_outline_no_sentinel_at_or_below_cap() {
+        // Exactly 50 chunks: full outline, no sentinel (truncation is strict >).
+        let skeleton: Vec<_> = (0..50)
+            .map(|i| json!({ "id": format!("c{i}"), "chunk_index": i, "token_count": 5 }))
+            .collect();
+        let o = super::project_document(json!({
+            "id": "d1", "source_path": "docs/exactly50.md",
+            "source": { "slug": "s" }, "chunks": skeleton
+        }));
+        let outline = o.trimmed["outline"].as_array().unwrap();
+        assert_eq!(outline.len(), 50, "≤ cap → no sentinel line");
+        assert!(
+            !outline
+                .iter()
+                .any(|l| l.as_str().unwrap_or("").starts_with("… +")),
+            "no truncation sentinel at exactly the cap"
+        );
+    }
+
+    #[test]
+    fn project_document_outline_fence_footprint_stays_under_old_skeleton() {
+        // Issue #141 acceptance: measure the response-size impact on a large
+        // document. The enriched breadcrumbs ride structuredContent (uncapped,
+        // full-fidelity); the text fence carries the compact `outline` (capped at
+        // FENCE_SKELETON_CAP). The fence's per-entry footprint must stay under the
+        // pre-#141 fence entry (a raw `{id, chunk_index, token_count}` object).
+        let n: usize = 200;
+        let chunks: Vec<Value> = (0..n)
+            .map(|i| {
+                let id = format!("7f39a1c2-{i:04}-4b8e-9c1d-1a2b3c4d5e6f");
+                if i % 2 == 0 {
+                    json!({ "id": id, "chunk_index": i, "token_count": 320,
+                            "heading_path": ["Getting Started", "Installation", "Prerequisites"] })
+                } else {
+                    json!({ "id": id, "chunk_index": i, "token_count": 320,
+                            "symbol": { "kind": "function", "name": format!("configure_provider_{i}") } })
+                }
+            })
+            .collect();
+        // Bare (pre-#141) skeleton entries: `{id, chunk_index, token_count}`.
+        let bare = |c: &Value| json!({ "id": c["id"], "chunk_index": c["chunk_index"], "token_count": c["token_count"] });
+        // Pre-#141 fence: raw skeleton objects, capped at FENCE_SKELETON_CAP.
+        let old_entries: Vec<Value> = chunks.iter().take(FENCE_SKELETON_CAP).map(bare).collect();
+        let old_fence = serde_json::to_string(&json!(old_entries)).unwrap().len();
+        // structuredContent bare baseline (uncapped) for the enriched comparison.
+        let sc_bare = serde_json::to_string(&chunks.iter().map(bare).collect::<Vec<_>>())
+            .unwrap()
+            .len();
+
+        // Move the chunks into the overview envelope and project.
+        let env = json!({
+            "id": "d-big", "source_path": "docs/reference/configuration.md",
+            "source": { "display_name": "Configuration Reference" },
+            "chunks": chunks
+        });
+        let o = super::project_document(env);
+        let outline = o.trimmed["outline"].as_array().unwrap();
+        // Compare the 50 REAL outline lines (excluding the truncation sentinel)
+        // against the old raw-skeleton fence entries, apples-to-apples.
+        let real: Vec<Value> = outline.iter().take(FENCE_SKELETON_CAP).cloned().collect();
+        let capped = real.len();
+        let new_fence = serde_json::to_string(&json!(real)).unwrap().len();
+        // structuredContent: full enriched skeleton (uncapped) vs the bare skeleton.
+        let sc_full = serde_json::to_string(&o.structured["chunks"])
+            .unwrap()
+            .len();
+
+        // All measurements are byte lengths (usize); report totals + integer
+        // per-entry footprints and deltas — no lossy casts.
+        let fence_saved = old_fence - new_fence; // new is smaller (asserted below)
+        let sc_added = sc_full - sc_bare;
+        eprintln!(
+            "[#141 size] doc: {n} chunks | fence entries: {capped} real + 1 sentinel (cap \
+             {FENCE_SKELETON_CAP})\n  \
+             fence bytes (real lines): old(raw skeleton)={old_fence} ({} B/entry) -> \
+             new(outline)={new_fence} ({} B/entry); saved {fence_saved} B\n  \
+             structuredContent bytes (uncapped, full fidelity): bare skeleton={sc_bare} -> \
+             enriched={sc_full}; added {sc_added} B for {n} entries ({} B/entry)",
+            old_fence / capped,
+            new_fence / capped,
+            sc_added / n,
+        );
+
+        // The fence stays capped (+ sentinel) and its per-entry footprint is under
+        // the old one.
+        assert_eq!(capped, FENCE_SKELETON_CAP, "50 real outline lines under the cap");
+        assert_eq!(outline.len(), FENCE_SKELETON_CAP + 1, "plus the truncation sentinel");
+        assert!(
+            new_fence / capped <= old_fence / capped,
+            "outline per-entry ({}) must stay under the old raw-skeleton per-entry ({})",
+            new_fence / capped,
+            old_fence / capped
+        );
+    }
+
+    #[test]
+    fn project_document_outline_renders_headings_and_symbols() {
+        // A markdown chunk (heading breadcrumb), a code chunk (primary symbol),
+        // and a plaintext chunk (neither) each render a distinct outline line;
+        // the full enriched skeleton still rides structuredContent.
+        let env = json!({
+            "id": "d1", "source_path": "docs/mix.md",
+            "source": { "display_name": "Mixed" },
+            "chunks": [
+                { "id": "a", "chunk_index": 0, "token_count": 12,
+                  "heading_path": ["Guide", "Setup"] },
+                { "id": "b", "chunk_index": 1, "token_count": 20,
+                  "heading_path": ["API", "Counter"],
+                  "symbol": { "kind": "impl", "name": "Counter" } },
+                { "id": "c", "chunk_index": 2, "token_count": 7 }
+            ]
+        });
+        let o = super::project_document(env);
+        let outline: Vec<&str> = o.trimmed["outline"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        // Markdown: leaf heading, indented by depth-1 (one level → 2 spaces).
+        assert_eq!(outline[0], "  Setup  [#0, ~12t]");
+        // Code: `kind name` for the primary symbol, indented by heading depth.
+        assert_eq!(outline[1], "  impl Counter  [#1, ~20t]");
+        // Plaintext: positional fallback at column 0.
+        assert_eq!(outline[2], "chunk 2  [#2, ~7t]");
+        // The full breadcrumbs survive into structuredContent untouched.
+        assert_eq!(o.structured["chunks"][1]["symbol"]["name"], "Counter");
+        assert_eq!(o.structured["chunks"][0]["heading_path"][1], "Setup");
+    }
+
+    #[test]
+    fn project_document_outline_empty_symbol_falls_through() {
+        // A degenerate empty symbol must NOT render a blank label: fall through to
+        // the heading, then to the positional label (defensive; issue #141 O3).
+        let o = super::project_document(json!({
+            "id": "d", "source_path": "x.md", "source": { "slug": "s" },
+            "chunks": [
+                { "id": "a", "chunk_index": 0, "token_count": 3,
+                  "heading_path": ["H"], "symbol": { "kind": "", "name": "" } },
+                { "id": "b", "chunk_index": 1, "token_count": 3,
+                  "symbol": { "kind": "", "name": "" } }
+            ]
+        }));
+        let outline: Vec<&str> = o.trimmed["outline"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(outline[0], "H  [#0, ~3t]", "empty symbol falls through to the heading");
+        assert_eq!(
+            outline[1], "chunk 1  [#1, ~3t]",
+            "empty symbol + no heading falls through to the positional label"
+        );
     }
 
     #[test]

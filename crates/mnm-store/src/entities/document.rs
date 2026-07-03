@@ -102,7 +102,8 @@ pub async fn get_by_id(pool: &PgPool, id: Uuid) -> Result<Document> {
 }
 
 /// Get a document overview: full document row + source slug + ordered
-/// chunk skeletons (`{id, chunk_index, token_count}` — no bodies).
+/// chunk skeletons (`{id, chunk_index, token_count}` plus each chunk's
+/// `heading_path` and primary `symbol` — an outline, no bodies).
 ///
 /// # Errors
 ///
@@ -117,14 +118,17 @@ pub async fn get_overview(pool: &PgPool, id: Uuid) -> Result<DocumentOverview> {
     .bind(document.source_version_id)
     .fetch_one(pool)
     .await?;
-    let chunks = sqlx::query_as::<_, ChunkSkeleton>(
-        "SELECT id, chunk_index, token_count FROM chunk \
+    let chunks = sqlx::query_as::<_, ChunkSkeletonRow>(
+        "SELECT id, chunk_index, token_count, heading_path, symbol_path FROM chunk \
          WHERE document_id = $1 AND status <> 'embed_failed' \
          ORDER BY chunk_index ASC",
     )
     .bind(id)
     .fetch_all(pool)
-    .await?;
+    .await?
+    .into_iter()
+    .map(ChunkSkeletonRow::into_skeleton)
+    .collect();
     Ok(DocumentOverview {
         document,
         source: crate::entities::chunk::SourceSummary {
@@ -226,12 +230,20 @@ pub struct DocumentOverview {
     pub document: Document,
     /// Source summary (slug only).
     pub source: crate::entities::chunk::SourceSummary,
-    /// Ready chunk skeletons in chunk_index order (excluding embed_failed).
+    /// Ready chunk skeletons in chunk_index order (excluding embed_failed),
+    /// each carrying its heading/symbol outline breadcrumbs (issue #141).
     pub chunks: Vec<ChunkSkeleton>,
 }
 
 /// Per-chunk skeleton entry in a document overview: position + cost, no body.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
+///
+/// Plus light structural breadcrumbs — the markdown `heading_path` and, for code
+/// chunks, the primary (`{kind, name}`) symbol — that turn the ordered skeleton
+/// into a document outline / table of contents (issue #141). Both breadcrumb
+/// fields are omitted from the wire when empty, so a plaintext (or heading-less)
+/// chunk serializes exactly as it did before this enrichment
+/// (`{id, chunk_index, token_count}`) — plaintext documents are unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChunkSkeleton {
     /// Chunk id (feed to `GET /v1/chunks?ids=`).
     pub id: Uuid,
@@ -239,6 +251,63 @@ pub struct ChunkSkeleton {
     pub chunk_index: i32,
     /// Token count of the chunk body.
     pub token_count: i32,
+    /// Markdown heading breadcrumb for this chunk (outermost first). Empty —
+    /// and omitted on the wire — for code and plaintext chunks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub heading_path: Vec<String>,
+    /// The chunk's primary code symbol (`{kind, name}`), when it has one — the
+    /// outline label for a code chunk. `None` (and omitted) for prose chunks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbol: Option<PrimarySymbol>,
+}
+
+/// A chunk's primary code symbol (`{kind, name}`): the leading `symbol_path`
+/// segment, used as the chunk's label in a document outline (issue #141).
+///
+/// A deliberately trimmed view of [`mnm_core::types::SymbolSegment`] — no
+/// ancestor `path`: the overview is a table of contents, not a symbol dump. The
+/// full structured `symbol_path` (with `kind`, `name`, and ancestor `path` per
+/// segment) is still available per chunk via `get_document_chunks` / the
+/// `get_chunks` family.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrimarySymbol {
+    /// Syntactic kind of the symbol (`impl`, `fn`, `class`, `key`, …).
+    pub kind: String,
+    /// Identifier or label for the symbol.
+    pub name: String,
+}
+
+/// Raw `get_overview` chunk row: the skeleton columns plus the `text[]`
+/// heading_path and JSONB `symbol_path`, mapped down to [`ChunkSkeleton`]'s
+/// primary-symbol view. Mirrors the `ChunkBodyRow` → `ChunkBody` pattern used
+/// by [`list_chunks_window`], keeping the JSONB decode in one typed place.
+#[derive(sqlx::FromRow)]
+struct ChunkSkeletonRow {
+    id: Uuid,
+    chunk_index: i32,
+    token_count: i32,
+    heading_path: Vec<String>,
+    symbol_path: sqlx::types::Json<Vec<mnm_core::types::SymbolSegment>>,
+}
+
+impl ChunkSkeletonRow {
+    /// Collapse the full structured `symbol_path` to just its leading segment as
+    /// the outline's primary `{kind, name}` symbol (dropping the ancestor
+    /// `path`), leaving `heading_path` untouched.
+    fn into_skeleton(self) -> ChunkSkeleton {
+        ChunkSkeleton {
+            id: self.id,
+            chunk_index: self.chunk_index,
+            token_count: self.token_count,
+            heading_path: self.heading_path,
+            symbol: self
+                .symbol_path
+                .0
+                .into_iter()
+                .next()
+                .map(|s| PrimarySymbol { kind: s.kind, name: s.name }),
+        }
+    }
 }
 
 /// One chunk body in a document-window response.
@@ -431,5 +500,51 @@ impl TryFrom<DocumentRow> for Document {
             token_count: r.token_count,
             created_at: r.created_at,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Issue #141 (S4): the outline breadcrumbs are `skip_serializing_if`-empty,
+    /// so a heading-less, symbol-less skeleton entry serializes to exactly the
+    /// pre-#141 shape (`{id, chunk_index, token_count}`) — the load-bearing
+    /// "plaintext documents are unchanged" claim. A populated entry carries them.
+    #[test]
+    fn chunk_skeleton_omits_empty_breadcrumbs_keeps_populated() {
+        let bare = ChunkSkeleton {
+            id: Uuid::nil(),
+            chunk_index: 0,
+            token_count: 7,
+            heading_path: vec![],
+            symbol: None,
+        };
+        let v = serde_json::to_value(&bare).expect("serialize bare skeleton");
+        let obj = v.as_object().expect("skeleton serializes to an object");
+        assert!(obj.get("heading_path").is_none(), "empty heading_path must be omitted");
+        assert!(obj.get("symbol").is_none(), "absent symbol must be omitted");
+        // Exactly the three pre-#141 keys — byte-for-byte the old shape.
+        let keys: std::collections::BTreeSet<&str> = obj.keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            ["chunk_index", "id", "token_count"].into_iter().collect(),
+            "bare skeleton must carry ONLY the pre-#141 keys"
+        );
+
+        let populated = ChunkSkeleton {
+            id: Uuid::nil(),
+            chunk_index: 1,
+            token_count: 12,
+            heading_path: vec!["Guide".to_owned(), "Setup".to_owned()],
+            symbol: Some(PrimarySymbol {
+                kind: "impl".to_owned(),
+                name: "Counter".to_owned(),
+            }),
+        };
+        let v = serde_json::to_value(&populated).expect("serialize populated skeleton");
+        assert_eq!(v["heading_path"][1], "Setup", "populated heading_path is present");
+        assert_eq!(v["symbol"]["kind"], "impl", "populated symbol is present");
+        assert_eq!(v["symbol"]["name"], "Counter");
     }
 }

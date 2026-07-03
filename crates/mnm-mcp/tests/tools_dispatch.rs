@@ -15,7 +15,7 @@ use mnm_mcp::tools::{
     run_list_sources, run_passthrough_id, ChunkNavDirection, PassthroughError, PassthroughKind,
 };
 use serde_json::json;
-use wiremock::matchers::{method, path, query_param, query_param_is_missing};
+use wiremock::matchers::{body_partial_json, method, path, query_param, query_param_is_missing};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[tokio::test]
@@ -1027,6 +1027,10 @@ async fn dispatch_search_mismatch_produces_iserror_envelope() {
         code_mode: None,
         rerank_instructions: None,
         version_match: None,
+        sort_by: None,
+        min_confidence: None,
+        include_scores: true,
+        rerank_model: None,
     };
     let err = run_search(&parsed, &cfg, &cloud).await.unwrap_err();
 
@@ -1416,6 +1420,10 @@ async fn dispatch_search_rate_limited_429_maps_to_search_error() {
         code_mode: None,
         rerank_instructions: None,
         version_match: None,
+        sort_by: None,
+        min_confidence: None,
+        include_scores: true,
+        rerank_model: None,
     };
     let err = run_search(&parsed, &cfg, &cloud).await.unwrap_err();
     match err {
@@ -1459,6 +1467,10 @@ async fn dispatch_search_forbidden_403_maps_to_search_error() {
         code_mode: None,
         rerank_instructions: None,
         version_match: None,
+        sort_by: None,
+        min_confidence: None,
+        include_scores: true,
+        rerank_model: None,
     };
     let err = run_search(&parsed, &cfg, &cloud).await.unwrap_err();
     let status = match err {
@@ -1474,4 +1486,80 @@ async fn dispatch_search_forbidden_403_maps_to_search_error() {
     assert_eq!(sc["error"]["code"], "AUTH_FAILED");
     assert_eq!(sc["error"]["retryable"], false);
     assert_eq!(sc["error"]["auth_reason"], "insufficient_tier");
+}
+
+// ---------------------------------------------------------------------------
+// #137 advanced_search controls: client-side validation + wire forwarding
+// ---------------------------------------------------------------------------
+
+/// Each new `advanced_search` control validates client-side (in
+/// `parse_advanced_search_args`) before any network call, and a bad value maps
+/// to the same `INVALID_INPUT` `isError` envelope the dispatcher builds — the
+/// fail-fast, truthful-schema contract (#137). Mirrors `run_search_dispatch`'s
+/// `ToolFailure::simple(ErrorKind::InvalidInput, …)` mapping in `server.rs`.
+#[test]
+fn advanced_search_control_validation_failures_map_to_invalid_input() {
+    use mnm_mcp::render::{ErrorKind, ToolFailure};
+    let bad_args = [
+        json!({ "queries": ["q"], "sort_by": "rank" }),
+        json!({ "queries": ["q"], "min_confidence": 1.5 }),
+        json!({ "queries": ["q"], "min_confidence": "high" }),
+        json!({ "queries": ["q"], "response_format": "brief" }),
+        json!({ "queries": ["q"], "rerank_model": "rerank-3" }),
+    ];
+    for args in bad_args {
+        let msg = mnm_mcp::tools::parse_advanced_search_args(&args)
+            .expect_err("bad control value must be rejected client-side");
+        let result = ToolFailure::simple(ErrorKind::InvalidInput, msg.clone(), msg).into_result();
+        assert!(result.is_error, "validation failure must be an isError result: {args}");
+        let sc = result.structured_content.unwrap();
+        assert_eq!(sc["error"]["code"], "INVALID_INPUT", "for args {args}");
+    }
+}
+
+/// The valid controls reach the cloud on the wire: a server/off placement
+/// (`rerank:false`) forwards the caller's `sort_by` and `min_confidence` to
+/// `POST /v1/search` verbatim (#137). `fts` mode keeps the only cloud call on
+/// `/v1/search` (no embedding round-trip), and the strict body matcher fails the
+/// request if either field is missing or wrong.
+#[tokio::test]
+async fn advanced_search_forwards_sort_by_and_min_confidence_to_v1_search() {
+    use mnm_mcp::server::ServerConfig;
+    use mnm_mcp::tools::run_search;
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/search"))
+        .and(body_partial_json(json!({ "sort_by": "trust", "min_confidence": 0.4 })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [],
+            "search_metadata": { "filtered_by_confidence": 0 }
+        })))
+        .mount(&server)
+        .await;
+
+    let mut cfg = ServerConfig::with_defaults(std::path::PathBuf::from("/tmp/test-mcp-cache"));
+    cfg.cloud_url.clone_from(&server.uri());
+    server.uri().clone_into(&mut cfg.telemetry_endpoint);
+    let cloud = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
+
+    let parsed = mnm_mcp::tools::ParsedSearchArgs {
+        queries: vec!["compact contract".to_owned()],
+        limit: 10,
+        rerank: false,
+        filters: None,
+        mode: "fts",
+        code_mode: None,
+        rerank_instructions: None,
+        version_match: None,
+        sort_by: Some("trust"),
+        min_confidence: Some(0.4),
+        include_scores: true,
+        rerank_model: None,
+    };
+    // Succeeds only if the mock matched — i.e. the body carried both fields.
+    let success = run_search(&parsed, &cfg, &cloud)
+        .await
+        .expect("wire must carry sort_by + min_confidence for the mock to match");
+    assert!(success.envelope.get("results").is_some());
 }

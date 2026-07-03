@@ -669,12 +669,15 @@ async fn run_search_dispatch(params: &ToolCallParams, state: &ServerState) -> To
         }
     };
     // Best-effort reranker name for telemetry. Reranking is VoyageAI now, so
-    // report the default Voyage rerank model from the shared `mnm_core::rerank`
+    // report the caller's explicit `rerank_model` when given (issue #137), else
+    // the default Voyage rerank model from the shared `mnm_core::rerank`
     // vocabulary (the same value `status` reports).
     let reranker_name: Option<String> = if parsed.rerank {
-        mnm_core::rerank::RerankParam::Rerank25
-            .model_name()
-            .map(str::to_owned)
+        parsed.rerank_model.clone().or_else(|| {
+            mnm_core::rerank::RerankParam::Rerank25
+                .model_name()
+                .map(str::to_owned)
+        })
     } else {
         None
     };
@@ -689,6 +692,9 @@ async fn run_search_dispatch(params: &ToolCallParams, state: &ServerState) -> To
                     &mnm_skills::StdSkillEnv,
                 ),
                 security: state.cfg.security,
+                // response_format=concise (issue #137) drops the nested scores
+                // block from each projected result; detailed keeps it.
+                concise: !parsed.include_scores,
             };
             let outcome = render::project_search(success.envelope, &opts);
             let telemetry = outcome.telemetry.clone();
@@ -926,6 +932,16 @@ mod tests {
     /// filesystem/network I/O), the cloud pointed at a closed discard port so
     /// `/readyz` + `/v1/me` fail fast, and the given content-guard level.
     fn test_state(security: mnm_core::injection::SecurityLevel) -> ServerState {
+        // Discard port → connection refused (the default: no cloud is reachable).
+        test_state_with_cloud(security, "http://127.0.0.1:9")
+    }
+
+    /// [`test_state`] with the cloud pointed at a caller-supplied base URL (e.g. a
+    /// wiremock server), so a dispatch test can drive a real `/v1/search` round-trip.
+    fn test_state_with_cloud(
+        security: mnm_core::injection::SecurityLevel,
+        cloud_url: &str,
+    ) -> ServerState {
         let telemetry = build_telemetry(BuildParams {
             app_version: "test".to_owned(),
             endpoint: "https://telemetry.disabled.invalid".to_owned(),
@@ -935,9 +951,9 @@ mod tests {
             flush_args: vec![],
         });
         let mut cfg = ServerConfig::with_defaults(std::env::temp_dir());
-        cfg.cloud_url = "http://127.0.0.1:9".to_owned(); // discard port → conn refused
+        cfg.cloud_url = cloud_url.to_owned();
         cfg.security = security;
-        let cloud = CloudClient::new(&cfg.cloud_url, None).expect("build cloud client");
+        let cloud = CloudClient::new(cloud_url, None).expect("build cloud client");
         ServerState {
             cfg,
             cloud: Arc::new(cloud),
@@ -945,6 +961,85 @@ mod tests {
             started_at: Arc::new(Instant::now()),
             tools_served: Arc::new(AtomicU32::new(0)),
         }
+    }
+
+    /// Issue #137 (S1): the `concise: !parsed.include_scores` seam in
+    /// `run_search_dispatch` is the glue that the parse-side and render-side tests
+    /// each miss — a re-derived negation that hardcoding `false` or dropping the
+    /// `!` leaves CI green. Drive a real `advanced_search` `tools/call` through
+    /// `handle_message` against a mock returning a scored result: `concise` must
+    /// DROP the nested `scores` block from structuredContent while `detailed`
+    /// keeps it, and the promoted `confidence` + `content` body survive either way.
+    ///
+    /// Hermetic under the `VOYAGE_API_KEY=` gate: `rerank:false` resolves to the
+    /// Off placement (no Voyage), and `mode:"fts"` skips embedding, so the only
+    /// cloud hit is `POST /v1/search`.
+    #[tokio::test]
+    async fn advanced_search_response_format_toggles_scores_in_structured_content() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/search"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{
+                    "chunk_id": "11111111-1111-1111-1111-111111111111",
+                    "document_id": "22222222-2222-2222-2222-222222222222",
+                    "source_path": "docs/x.md", "source_slug": "s", "source_display_name": "S",
+                    "heading_path": ["Intro"], "symbol_path": [], "content": "body text",
+                    "scores": { "confidence": 0.82, "trust_score": 0.9,
+                                "confidence_factors": { "attribution": "foundation", "verified": true } }
+                }],
+                "search_metadata": { "total_candidates": 20, "filtered_by_confidence": 0 }
+            })))
+            .mount(&server)
+            .await;
+
+        let state =
+            test_state_with_cloud(mnm_core::injection::SecurityLevel::Disabled, &server.uri());
+
+        let call = |fmt: &str| {
+            serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": { "name": "advanced_search",
+                            "arguments": { "queries": ["q"], "mode": "fts", "rerank": false,
+                                           "response_format": fmt } }
+            })
+        };
+        let state = &state;
+        let dispatch = |req: serde_json::Value| async move {
+            let body = serde_json::to_vec(&req).expect("serialize tools/call");
+            let out = handle_message(&body, state)
+                .await
+                .expect("search yields a response");
+            serde_json::from_slice::<serde_json::Value>(&out).expect("parse response")
+        };
+        let scores_present = |resp: &serde_json::Value| {
+            resp.pointer("/result/structuredContent/results/0/scores")
+                .is_some()
+        };
+        let confidence = |resp: &serde_json::Value| {
+            resp.pointer("/result/structuredContent/results/0/confidence")
+                .and_then(serde_json::Value::as_f64)
+        };
+
+        // detailed keeps the nested scores block; promoted confidence present.
+        let resp = dispatch(call("detailed")).await;
+        assert!(scores_present(&resp), "detailed must keep results[0].scores: {resp}");
+        assert_eq!(confidence(&resp), Some(0.82));
+
+        // concise drops ONLY the nested scores block; promoted confidence + the
+        // full content body survive.
+        let resp = dispatch(call("concise")).await;
+        assert!(!scores_present(&resp), "concise must drop results[0].scores: {resp}");
+        assert_eq!(confidence(&resp), Some(0.82), "concise keeps the promoted confidence");
+        assert_eq!(
+            resp.pointer("/result/structuredContent/results/0/content")
+                .and_then(serde_json::Value::as_str),
+            Some("body text"),
+            "concise is NOT bodies-off — the content body survives"
+        );
     }
 
     /// The load-bearing #134 hop: the `status` dispatch branch threads

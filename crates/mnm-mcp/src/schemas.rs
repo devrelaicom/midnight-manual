@@ -250,7 +250,12 @@ pub fn parents_output_schema() -> Value {
 }
 
 /// Output schema for `get_document` — DocumentOverview: metadata plus an
-/// ordered chunk skeleton (`{id, chunk_index, token_count}`, no bodies).
+/// ordered chunk skeleton that doubles as a document outline. Each entry carries
+/// `{id, chunk_index, token_count}` and — turning the skeleton into a table of
+/// contents (issue #141) — the markdown `heading_path` and, for code chunks, the
+/// primary `symbol` (`{kind, name}`). Both breadcrumb fields are omitted when
+/// empty, so a plaintext / heading-less entry is exactly the pre-#141 shape;
+/// neither is `require`d for that reason. No bodies.
 pub fn document_output_schema() -> Value {
     json!({
         "type": "object",
@@ -265,7 +270,19 @@ pub fn document_output_schema() -> Value {
                 "properties": {
                     "id": { "type": "string" },
                     "chunk_index": { "type": "integer" },
-                    "token_count": { "type": "integer" }
+                    "token_count": { "type": "integer" },
+                    "heading_path": { "type": "array", "items": { "type": "string" },
+                        "description": "Markdown heading breadcrumb (outermost first); absent for code/plaintext chunks." },
+                    "symbol": {
+                        "type": "object",
+                        "description": "Primary code symbol for this chunk (the leading symbol_path segment); absent for prose chunks. The full structured symbol_path rides get_document_chunks / get_chunks.",
+                        "properties": {
+                            "kind": { "type": "string", "description": "Syntactic kind: impl, fn, class, key, …" },
+                            "name": { "type": "string", "description": "Identifier or label for the symbol." }
+                        },
+                        "required": ["kind", "name"],
+                        "additionalProperties": true
+                    }
                 },
                 "required": ["id", "chunk_index"],
                 "additionalProperties": true

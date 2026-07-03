@@ -25,6 +25,7 @@ fn make_search_req() -> SearchRequest {
         limit: 10,
         filters: None,
         sort_by: None,
+        min_confidence: None,
         mode: None,
         code_mode: None,
         client_code_embedding_model: None,
@@ -46,6 +47,9 @@ fn search_request_omits_absent_code_fields_from_the_wire() {
     // `skip_serializing_if = Option::is_none`, so they too must be absent.
     assert!(v.get("rerank").is_none());
     assert!(v.get("rerank_instructions").is_none());
+    // #137 sort_by / min_confidence are also omitted when unset.
+    assert!(v.get("sort_by").is_none());
+    assert!(v.get("min_confidence").is_none());
 }
 
 #[test]
