@@ -100,7 +100,7 @@ async fn search_surfaces_typed_embedding_model_mismatch() {
             "error": {
                 "code": "embedding_model_mismatch",
                 "message": "client_embedding_model `bge-base-en-v1.5@1` does not match corpus model `bge-base-en-v1.5@2`",
-                "remediation": "re-run `mnm models pull` to fetch the corpus model",
+                "remediation": "run `mnm models active` to see the corpus's active model",
                 "context": {
                     "corpus_model": "bge-base-en-v1.5@2",
                     "client_model": "bge-base-en-v1.5@1",
@@ -122,7 +122,7 @@ async fn search_surfaces_typed_embedding_model_mismatch() {
         } => {
             assert_eq!(corpus_model, "bge-base-en-v1.5@2");
             assert_eq!(client_model, "bge-base-en-v1.5@1");
-            assert!(remediation.contains("mnm models pull"));
+            assert!(remediation.contains("mnm models active"));
         }
         other => panic!("expected EmbeddingModelMismatch, got {other:?}"),
     }

@@ -1081,12 +1081,18 @@ fn should_create_source(args: &Args) -> Result<bool> {
 }
 
 /// Translate a `start_ingest_run` HTTP error into a helpful message.
+///
+/// The mismatch translation fires only on a STRUCTURAL `409 Conflict` (the
+/// server's `embedding_model_mismatch`), read from the typed [`HttpStatusError`]
+/// carried on the error — not on a bare "409" appearing anywhere in the rendered
+/// text (a source slug, a UUID, or a byte count could contain that digit-run).
 fn translate_start_error(e: anyhow::Error, requested: &str) -> anyhow::Error {
-    let msg = e.to_string();
-    if msg.contains("409") {
+    if http_status(&e) == Some(reqwest::StatusCode::CONFLICT) {
         return anyhow!(
             "server's active embedding model differs from --embedding-model={requested}; \
-             run `mnm models pull` and retry, or pass --embedding-model to match"
+             run `mnm models active` to see the corpus's active wire id, then re-run with \
+             `--embedding-model <wire-id>` (or `--embedding-model auto`) to match it; \
+             use `mnm models migrate` to realign every source in bulk"
         );
     }
     e
@@ -1101,10 +1107,10 @@ fn translate_upload_error(
     of: usize,
     run_id: Uuid,
 ) -> anyhow::Error {
-    let msg = e.to_string();
-    // Canonical 413 phrase, not bare "413" — the message embeds the run UUID
-    // (see `is_payload_too_large` for why a stray "413" hex run would misfire).
-    if msg.contains("Payload Too Large") {
+    // Structural 413 match, not a "413" substring of the rendered text — the
+    // message embeds the run UUID (see `is_payload_too_large` for why a stray
+    // "413" hex run would misfire).
+    if is_payload_too_large(&e) {
         let mib = mnm_core::limits::MAX_INGEST_BODY_BYTES / (1024 * 1024);
         return e.context(format!(
             "batch {batch} still exceeded the server's {mib} MiB body limit after \
@@ -1965,14 +1971,13 @@ fn merge_split_responses(
 }
 
 fn is_payload_too_large(e: &anyhow::Error) -> bool {
-    // Match the canonical 413 reason phrase, NOT the bare "413". The error string
-    // embeds the run UUID, and ~0.5% of v4 UUIDs contain the hex substring "413",
-    // which would misclassify an unrelated 5xx as payload-too-large — and at the
-    // single-document split floor that now means a SILENT skip + a green finalize
-    // (the count is decremented to match), defeating the completeness guarantee.
-    // `StatusCode` renders 413 as "413 Payload Too Large", so a real 413 always
-    // matches and a stray UUID hex digit-run cannot.
-    e.to_string().contains("Payload Too Large")
+    // Match the STRUCTURAL 413 status carried on the error, NOT a "413" substring
+    // of the rendered text. The message embeds the run UUID, and ~0.5% of v4 UUIDs
+    // contain the hex substring "413", which would misclassify an unrelated 5xx as
+    // payload-too-large — and at the single-document split floor that now means a
+    // SILENT skip + a green finalize (the count is decremented to match), defeating
+    // the completeness guarantee.
+    http_status(e) == Some(reqwest::StatusCode::PAYLOAD_TOO_LARGE)
 }
 
 /// Stable reason prefix for the conflict the CLI synthesizes when a single
@@ -2022,6 +2027,40 @@ async fn put_json<I: Serialize + Sync, O: for<'de> Deserialize<'de>>(
     decode_response(resp, url).await
 }
 
+/// A non-success HTTP response from the server, carrying the *structured*
+/// [`reqwest::StatusCode`] alongside the rendered body.
+///
+/// Callers classify failures by matching on [`HttpStatusError::status`]
+/// (see [`http_status`]) rather than scraping the rendered message for a
+/// digit-run: the message embeds a URL and body that can contain a UUID or a
+/// byte count with an incidental "409"/"413" substring, which must NOT trigger
+/// status-specific remediation. The `Display` output is preserved verbatim
+/// (`"{status} from {url}: {body}"`), so anything that prints the error chain
+/// (`{:#}`) is unchanged.
+#[derive(Debug)]
+struct HttpStatusError {
+    status: reqwest::StatusCode,
+    url: String,
+    body: String,
+}
+
+impl std::fmt::Display for HttpStatusError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} from {}: {}", self.status, self.url, self.body)
+    }
+}
+
+impl std::error::Error for HttpStatusError {}
+
+/// The HTTP status carried by an error, if any layer in its chain is an
+/// [`HttpStatusError`]. Returns `None` for transport errors (a `send()` that
+/// never got a response) — matching the previous phrase-match behaviour, which
+/// also could not classify those.
+fn http_status(e: &anyhow::Error) -> Option<reqwest::StatusCode> {
+    e.chain()
+        .find_map(|cause| cause.downcast_ref::<HttpStatusError>().map(|h| h.status))
+}
+
 async fn decode_response<O: for<'de> Deserialize<'de>>(
     resp: reqwest::Response,
     url: &str,
@@ -2029,7 +2068,11 @@ async fn decode_response<O: for<'de> Deserialize<'de>>(
     let status = resp.status();
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
-        return Err(anyhow!("{status} from {url}: {}", redact_token_like(&body)));
+        return Err(anyhow::Error::new(HttpStatusError {
+            status,
+            url: url.to_owned(),
+            body: redact_token_like(&body),
+        }));
     }
     resp.json::<O>()
         .await
@@ -3406,6 +3449,91 @@ mod tests {
         assert!(shown.contains("batch 8/11"), "must add batch context: {shown}");
     }
 
+    /// Build the same typed error `decode_response` produces for a non-success
+    /// response, so the status-classification tests exercise the real path.
+    fn http_err(status: reqwest::StatusCode, body: &str) -> anyhow::Error {
+        anyhow::Error::new(HttpStatusError {
+            status,
+            url: "http://x/v1/admin/sources/s/ingest-runs".to_owned(),
+            body: body.to_owned(),
+        })
+    }
+
+    /// The 409 → embedding-model-mismatch translation fires only on a STRUCTURAL
+    /// `409 Conflict`, and the remediation names commands that exist (#140).
+    #[test]
+    fn translate_start_error_fires_on_structural_409() {
+        let e = http_err(
+            reqwest::StatusCode::CONFLICT,
+            r#"{"error":{"code":"embedding_model_mismatch"}}"#,
+        );
+        let out = translate_start_error(e, "voyage-context-3@1");
+        let shown = format!("{out:#}");
+        assert!(shown.contains("differs from --embedding-model"), "{shown}");
+        assert!(shown.contains("mnm models active"), "names the real fix: {shown}");
+        assert!(shown.contains("mnm models migrate"), "names bulk realign: {shown}");
+        assert!(!shown.contains("models pull"), "no stale no-op command: {shown}");
+    }
+
+    /// A non-409 error whose rendered text merely CONTAINS "409" (a run UUID and
+    /// a byte count) must pass through untranslated — the old `contains("409")`
+    /// would have mistranslated it into the mismatch message.
+    #[test]
+    fn translate_start_error_ignores_incidental_409_in_text() {
+        // The body carries "409" twice (a UUID fragment + a byte count), yet the
+        // structured status is 500, so no mismatch translation.
+        let e = http_err(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            "run 409abcde-... failed after writing 40961 bytes",
+        );
+        let shown_in = format!("{e:#}");
+        assert!(shown_in.contains("409"), "sanity: text contains 409: {shown_in}");
+
+        let out = translate_start_error(e, "voyage-context-3@1");
+        let shown = format!("{out:#}");
+        assert!(
+            !shown.contains("differs from --embedding-model"),
+            "must NOT translate an incidental 409: {shown}"
+        );
+        // And a plain error with no structured status is also left alone.
+        let plain = anyhow!("chunked 4096 docs; last offset 409");
+        let out = translate_start_error(plain, "voyage-context-3@1");
+        assert!(!format!("{out:#}").contains("differs from --embedding-model"));
+    }
+
+    /// `is_payload_too_large` matches the structural 413 status, not a "413"
+    /// substring (a UUID hex run) — the split-retry floor depends on this.
+    #[test]
+    fn is_payload_too_large_is_status_structural() {
+        assert!(is_payload_too_large(&http_err(
+            reqwest::StatusCode::PAYLOAD_TOO_LARGE,
+            "body too big"
+        )));
+        // A 500 whose body contains "413" must NOT be classified as 413.
+        assert!(!is_payload_too_large(&http_err(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            "run 413beef-... exhausted memory"
+        )));
+        // A transport-style error with no structured status is not a 413 either.
+        assert!(!is_payload_too_large(&anyhow!("connection reset (413?)")));
+    }
+
+    /// The typed error's `Display` must render verbatim as
+    /// `"{status} from {url}: {body}"` — every human-facing print and
+    /// `translate_upload_error`'s generic branch rely on that exact shape, and a
+    /// field reorder / dropped url / changed separator would drift `{:#}` output
+    /// with no other test failing (`upload_error_preserves_server_body` builds a
+    /// plain string in the target shape and never touches this type).
+    #[test]
+    fn http_status_error_display_is_verbatim() {
+        let e = HttpStatusError {
+            status: reqwest::StatusCode::PAYLOAD_TOO_LARGE,
+            url: "http://x/documents".to_owned(),
+            body: "b".to_owned(),
+        };
+        assert_eq!(e.to_string(), "413 Payload Too Large from http://x/documents: b");
+    }
+
     #[test]
     fn default_batch_size_is_25_and_embedding_model_defaults_to_auto() {
         use clap::Parser as _;
@@ -3680,6 +3808,44 @@ mod tests {
         assert_eq!(v["conflicts"][0]["path"], "a.md");
         assert_eq!(v["conflicts"][1]["path"], "b.md");
         assert_eq!(v["stats"]["conflicts"], 2);
+    }
+
+    /// M2 (issue #140): the tokenless-plan warning is only half-shipped unless
+    /// the `warnings` arg actually lands in the report's serialized `warnings[]`
+    /// (that is what `--json` / `--report-file` consumers read). `plan.rs`
+    /// threads `plan_warnings(...)` through this arg; reverting it to
+    /// `Vec::new()` (matching the `conflicts` arg one line up) would leave every
+    /// `plan_warnings` unit test green while silently dropping the machine
+    /// -readable half. Pin the passthrough on `assemble_report` directly, the
+    /// funnel `plan.rs` uses.
+    #[test]
+    fn report_serializes_warnings_into_warnings_array() {
+        let plan = plan_with(vec![sample_planned_new("a.md")]);
+        let t = OffsetDateTime::now_utc();
+        let report = assemble_report(
+            "ingest plan",
+            "docs",
+            super::super::report::Outcome::Planned,
+            None,
+            None,
+            "voyage-context-3@1",
+            None,
+            t,
+            t,
+            &plan,
+            &[],
+            Vec::new(),
+            vec!["no admin token — prior-version inventory unavailable".to_owned()],
+            0,
+        );
+        assert_eq!(report.warnings.len(), 1, "the warnings arg is retained on the report");
+        let v = serde_json::to_value(&report).unwrap();
+        assert!(
+            v["warnings"][0]
+                .as_str()
+                .is_some_and(|w| w.contains("no admin token")),
+            "warnings must serialize into the `warnings[]` array: {v}"
+        );
     }
 
     /// S1 (issue #136): the abort artifact selection honours `--json` (returns

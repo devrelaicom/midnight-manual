@@ -609,7 +609,7 @@ mod tests {
             "error": {
                 "code": "embedding_model_mismatch",
                 "message": "client_embedding_model `bge-base-en-v1.5@1` does not match corpus model `bge-base-en-v1.5@2`",
-                "remediation": "re-run `mnm models pull` to fetch the corpus model",
+                "remediation": "run `mnm models active` to see the corpus's active model",
                 "context": {
                     "corpus_model": "bge-base-en-v1.5@2",
                     "client_model": "bge-base-en-v1.5@1",

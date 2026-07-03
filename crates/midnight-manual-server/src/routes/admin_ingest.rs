@@ -300,7 +300,7 @@ async fn start_ingest_run(
             return error::into_response(
                 CoreError::builder(ErrorCode::EmbeddingModelMismatch)
                     .message(format!("embedding model `{}` is not registered", req.embedding_model))
-                    .remediation("run `mnm models list` to see the corpus's active model")
+                    .remediation("run `mnm models active` to see the corpus's active model")
                     .build(),
                 rid,
             );
@@ -384,7 +384,7 @@ async fn resolve_code_model_id(
         Err(StoreError::NotFound) => Err(Box::new(error::into_response(
             CoreError::builder(ErrorCode::EmbeddingModelMismatch)
                 .message(format!("code_embedding_model `{raw}` is not registered"))
-                .remediation("run `mnm models list` to see the corpus's registered models")
+                .remediation("run `mnm models active` to see the corpus's active model")
                 .build(),
             rid,
         ))),

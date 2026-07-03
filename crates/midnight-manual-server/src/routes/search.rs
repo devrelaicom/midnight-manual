@@ -294,6 +294,16 @@ pub struct RerankMetadata {
 /// Server-side rerank candidate-pool floor (mirrors the clients' RERANK_FETCH).
 const RERANK_POOL: u32 = 50;
 
+/// Remediation for the code-vector DIMENSION guard. Shared between the route
+/// (below) and `mismatch_envelope_tests` so the string is guarded against
+/// drifting back to a non-actionable form: reverting the route to an inline
+/// string leaves this `const` unused, which `-D warnings` clippy rejects, and
+/// the envelope test pins its wording. It mirrors its three sibling query-time
+/// mismatch remediations by naming `mnm models active` — the command that
+/// prints exactly the code `dim` this guard rejects on (#140).
+const CODE_VECTOR_DIM_REMEDIATION: &str =
+    "re-embed code queries with the corpus's active code model (see `mnm models active`)";
+
 /// Pool size: at least [`RERANK_POOL`], never below the caller's `limit`.
 const fn rerank_pool_size(limit: u32) -> u32 {
     if limit > RERANK_POOL {
@@ -510,7 +520,7 @@ async fn search(
                         "client_embedding_model `{client_model}` does not match corpus model `{}`",
                         cm.wire,
                     ))
-                    .remediation("re-run `mnm models pull` to fetch the corpus model")
+                    .remediation("run `mnm models active` to see the corpus's active model, then re-embed the query with it")
                     .context("corpus_model", cm.wire.clone())
                     .context("client_model", client_model.to_owned())
                     .build(),
@@ -526,7 +536,7 @@ async fn search(
                             q.vector.len(),
                             cm.dim,
                         ))
-                        .remediation("re-embed with the corpus model (run `mnm models pull`)")
+                        .remediation("re-embed the query with the corpus's active model (see `mnm models active`)")
                         .build(),
                     rid,
                 );
@@ -565,7 +575,7 @@ async fn search(
                         "client_code_embedding_model `{client_model}` does not match code model `{}`",
                         km.wire,
                     ))
-                    .remediation("re-embed code queries with the corpus code model")
+                    .remediation("run `mnm models active` to see the corpus's active code-embedding model, then re-embed code queries with it")
                     // Emit under `corpus_model` (not `code_model`) so this 409
                     // matches the general-model guard above and the MCP client's
                     // `parse_mismatch`, which reads only `corpus_model`/`client_model`.
@@ -585,7 +595,7 @@ async fn search(
                             q.code_vector.len(),
                             km.dim,
                         ))
-                        .remediation("re-embed with the corpus code model")
+                        .remediation(CODE_VECTOR_DIM_REMEDIATION)
                         .build(),
                     rid,
                 );
@@ -2270,7 +2280,7 @@ mod mismatch_envelope_tests {
         // Mirrors the general-model guard (`run_general_vector` branch).
         let general = CoreError::builder(ErrorCode::EmbeddingModelMismatch)
             .message("client_embedding_model `m@1` does not match corpus model `m@2`")
-            .remediation("re-run `mnm models pull` to fetch the corpus model")
+            .remediation("run `mnm models active` to see the corpus's active model, then re-embed the query with it")
             .context("corpus_model", "m@2".to_owned())
             .context("client_model", "m@1".to_owned())
             .build();
@@ -2278,7 +2288,7 @@ mod mismatch_envelope_tests {
         // Mirrors the code-model guard (`run_code_vector` branch).
         let code = CoreError::builder(ErrorCode::EmbeddingModelMismatch)
             .message("client_code_embedding_model `c@1` does not match code model `c@2`")
-            .remediation("re-embed code queries with the corpus code model")
+            .remediation("run `mnm models active` to see the corpus's active code-embedding model, then re-embed code queries with it")
             .context("corpus_model", "c@2".to_owned())
             .context("client_model", "c@1".to_owned())
             .build();
@@ -2310,5 +2320,36 @@ mod mismatch_envelope_tests {
                 "{label}: `code_model` context key must not be emitted"
             );
         }
+    }
+
+    /// The code-vector DIMENSION guard's remediation must name the same
+    /// discovery command as its three sibling query-time mismatch guards
+    /// (`mnm models active` prints the exact code `dim` this guard rejects on),
+    /// so it can't drift back to the non-actionable "re-embed with the corpus
+    /// code model" (#140). Pins the shared const the route emits — reverting the
+    /// route to an inline string leaves the const dead (`-D warnings`).
+    #[test]
+    fn code_dimension_guard_remediation_names_models_active() {
+        assert!(
+            CODE_VECTOR_DIM_REMEDIATION.contains("mnm models active"),
+            "the shared const must name the discovery command: {CODE_VECTOR_DIM_REMEDIATION}"
+        );
+        // Mirror the route builder to pin the on-the-wire envelope shape.
+        let err = CoreError::builder(ErrorCode::InvalidRequest)
+            .message("queries[0].code_vector has 512 dimensions; expected 256")
+            .remediation(CODE_VECTOR_DIM_REMEDIATION)
+            .build();
+        let body = ErrorBody {
+            error: err,
+            request_id: "rid-test".to_owned(),
+        };
+        let v = serde_json::to_value(&body).unwrap();
+        assert_eq!(v["error"]["code"], "invalid_request");
+        assert!(
+            v["error"]["remediation"]
+                .as_str()
+                .is_some_and(|r| r.contains("mnm models active")),
+            "dimension-guard remediation must name the discovery command: {v}"
+        );
     }
 }

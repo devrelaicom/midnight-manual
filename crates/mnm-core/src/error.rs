@@ -223,7 +223,7 @@ mod tests {
     fn wire_shape_is_stable() {
         let err = Error::builder(ErrorCode::EmbeddingModelMismatch)
             .message("client model bge-small@1 does not match corpus model bge-base@1")
-            .remediation("run `mnm models pull` to fetch bge-base@1")
+            .remediation("run `mnm models active` to see the corpus's active model")
             .context("corpus_model", "bge-base-en-v1.5@1")
             .context("client_model", "bge-small-en-v1.5@1")
             .build();

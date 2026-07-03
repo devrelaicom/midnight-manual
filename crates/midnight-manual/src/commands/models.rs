@@ -37,10 +37,9 @@ pub enum ModelsCmd {
     Active(ActiveArgs),
     /// List sources that are still on an older embedding model (i.e. have not
     /// yet been re-ingested against the corpus's current active model).
-    #[command(hide = true)]
     Status(StatusArgs),
     /// Re-ingest every source not yet on the target embedding model (admin).
-    #[command(hide = true)]
+    /// Advertised recovery command for `409 embedding_model_mismatch`.
     Migrate(MigrateArgs),
 }
 
@@ -750,6 +749,22 @@ struct ActiveOutput<'a> {
     dim: i32,
     provider: &'a str,
     wire_id: String,
+    /// The corpus's active code-embedding model, when dual embeddings are
+    /// resolved. Emitted so a `409` code-model mismatch remediation ("run
+    /// `mnm models active`") actually surfaces the code wire id the operator
+    /// needs. Omitted entirely when the corpus has no code model.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code: Option<ActiveCodeOutput<'a>>,
+}
+
+/// The code-embedding half of [`ActiveOutput`]'s JSON shape.
+#[derive(Debug, Serialize)]
+struct ActiveCodeOutput<'a> {
+    name: &'a str,
+    revision: i32,
+    dim: i32,
+    provider: &'a str,
+    wire_id: String,
 }
 
 fn format_active_output(model: &ActiveModelResponse, json: bool) -> String {
@@ -762,6 +777,13 @@ fn format_active_output(model: &ActiveModelResponse, json: bool) -> String {
             dim: model.dim,
             provider: &model.provider,
             wire_id,
+            code: model.code.as_ref().map(|c| ActiveCodeOutput {
+                name: &c.name,
+                revision: c.revision,
+                dim: c.dim,
+                provider: &c.provider,
+                wire_id: format!("{}@{}", c.name, c.revision),
+            }),
         };
         return serde_json::to_string(&body).unwrap_or_default();
     }
@@ -772,6 +794,21 @@ fn format_active_output(model: &ActiveModelResponse, json: bool) -> String {
     writeln!(out, "  revision:  {}", model.revision).ok();
     writeln!(out, "  dim:       {}", model.dim).ok();
     write!(out, "  provider:  {}", model.provider).ok();
+    // Code-embedding model (dual embeddings). Printed so a code-model mismatch's
+    // "run `mnm models active`" remediation actually shows the code wire id;
+    // otherwise an operator hitting a code mismatch cannot discover what to match.
+    writeln!(out).ok();
+    if let Some(c) = &model.code {
+        let code_wire = format!("{}@{}", c.name, c.revision);
+        writeln!(out, "corpus active code-embedding model:").ok();
+        writeln!(out, "  wire id:   {code_wire}").ok();
+        writeln!(out, "  name:      {}", c.name).ok();
+        writeln!(out, "  revision:  {}", c.revision).ok();
+        writeln!(out, "  dim:       {}", c.dim).ok();
+        write!(out, "  provider:  {}", c.provider).ok();
+    } else {
+        write!(out, "corpus active code-embedding model: (none — code search unavailable)").ok();
+    }
     out
 }
 
@@ -838,12 +875,41 @@ mod tests {
         assert!(v.get("embedder_downloaded").is_none());
     }
 
+    /// An active-model response carrying a code model — proves `mnm models
+    /// active` surfaces the code wire id the code-mismatch remediation points at.
+    fn sample_active_with_code() -> ActiveModelResponse {
+        ActiveModelResponse {
+            name: "voyage-context-3".to_owned(),
+            revision: 1,
+            dim: 1024,
+            provider: "voyageai".to_owned(),
+            dtype: "float".to_owned(),
+            code: Some(ActiveCode {
+                name: "voyage-code-3".to_owned(),
+                revision: 2,
+                dim: 256,
+                provider: "voyageai".to_owned(),
+                dtype: "float".to_owned(),
+            }),
+        }
+    }
+
     #[test]
     fn active_human_output_contains_wire_id() {
         let s = format_active_output(&sample_active(), false);
         assert!(s.contains("bge-base-en-v1.5@1"));
         assert!(s.contains("768"));
         assert!(s.contains("baai"));
+        // No code model → an explicit "unavailable" note, not silence.
+        assert!(s.contains("code-embedding model: (none"), "output: {s}");
+    }
+
+    #[test]
+    fn active_human_output_shows_code_model_when_present() {
+        let s = format_active_output(&sample_active_with_code(), false);
+        assert!(s.contains("corpus active code-embedding model:"), "output: {s}");
+        assert!(s.contains("voyage-code-3@2"), "code wire id must show: {s}");
+        assert!(s.contains("256"), "code dim must show: {s}");
     }
 
     #[test]
@@ -854,6 +920,18 @@ mod tests {
         assert_eq!(v["name"], "bge-base-en-v1.5");
         assert_eq!(v["revision"], 1);
         assert_eq!(v["wire_id"], "bge-base-en-v1.5@1");
+        // No code model on this fixture → the `code` field is omitted.
+        assert!(v.get("code").is_none());
+    }
+
+    #[test]
+    fn active_json_output_includes_code_wire_id_when_present() {
+        let s = format_active_output(&sample_active_with_code(), true);
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v["code"]["wire_id"], "voyage-code-3@2");
+        assert_eq!(v["code"]["name"], "voyage-code-3");
+        assert_eq!(v["code"]["revision"], 2);
+        assert_eq!(v["code"]["dim"], 256);
     }
 
     #[test]

@@ -192,7 +192,7 @@ async fn model_mismatch_409_surfaces_message_and_remediation() {
             "error": {
                 "code": "embedding_model_mismatch",
                 "message": "client model bge-base-en-v1.5@1 does not match corpus bge-base-en-v1.5@2",
-                "remediation": "run `mnm models pull` to refresh the local model",
+                "remediation": "run `mnm models active` to see the corpus's active model",
             },
             "request_id": "rid_x",
         })))
@@ -210,7 +210,7 @@ async fn model_mismatch_409_surfaces_message_and_remediation() {
         "expected server message in error: {msg}"
     );
     assert!(
-        msg.contains("run `mnm models pull` to refresh the local model"),
+        msg.contains("run `mnm models active` to see the corpus's active model"),
         "expected server remediation in error: {msg}"
     );
     // The raw JSON envelope / machine code is NOT dumped into the human message.

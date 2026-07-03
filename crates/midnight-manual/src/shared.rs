@@ -125,7 +125,7 @@ mod tests {
             "error": {
                 "code": "embedding_model_mismatch",
                 "message": "client model voyage-code-3@1 does not match corpus model voyage-code-3@2",
-                "remediation": "re-run `mnm models pull` to fetch voyage-code-3@2",
+                "remediation": "run `mnm models active` to see the corpus's active model",
                 "context": { "corpus_model": "voyage-code-3@2", "client_model": "voyage-code-3@1" }
             },
             "request_id": "req-123"
@@ -134,7 +134,7 @@ mod tests {
         let err = decode_error_envelope(&body).expect("envelope must decode");
         assert_eq!(err.code, mnm_core::error::ErrorCode::EmbeddingModelMismatch);
         assert!(err.message.contains("does not match corpus model"));
-        assert!(err.remediation.contains("models pull"));
+        assert!(err.remediation.contains("models active"));
     }
 
     /// A body that is not the typed envelope (e.g. a proxy's plain-text error)

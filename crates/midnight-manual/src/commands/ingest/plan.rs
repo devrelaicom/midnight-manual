@@ -135,6 +135,17 @@ pub async fn run(args: Args, server: Option<&str>, _json: bool) -> Result<()> {
     // pre-existing behaviour.
     let token = load_optional_admin_token();
 
+    // Without an admin token the prior-version inventory fetch 401s and falls
+    // back to an empty PriorState, so EVERY document is classified "new" — a
+    // silently worst-case cost preview. Surface that on stderr (for interactive
+    // users) here AND in the report's `warnings[]` (for `--json` /
+    // `--report-file` consumers) via `build_plan_report` below, so the
+    // degradation is never invisible (#140). Both derive from the same
+    // `plan_warnings(token)` source so they can never diverge.
+    for w in &plan_warnings(token.as_deref()) {
+        eprintln!("{w}");
+    }
+
     // Pass `None` for the code-embedding model: `ingest plan` intentionally
     // ignores code-embedding carry, so it conservatively over-reports "new" for
     // code sources (never under-reports), keeping the preview safe to act on.
@@ -182,21 +193,14 @@ pub async fn run(args: Args, server: Option<&str>, _json: bool) -> Result<()> {
     };
 
     let sel = super::run::ReportSelection::new(args.json, args.report_file.as_deref());
-    let report = super::run::assemble_report(
-        "ingest plan",
+    let report = build_plan_report(
+        token.as_deref(),
         &args.source_slug,
-        super::report::Outcome::Planned,
-        None,
-        None,
         embedding_model_for_report,
-        None, // plan has no code-embedding model
         started_at,
         finished_at,
         &plan,
         &walk_skipped,
-        Vec::new(),
-        Vec::new(),
-        0,
     );
 
     super::run::emit_report(&report, &sel, args.report_file.as_deref(), || {
@@ -218,6 +222,60 @@ pub async fn run(args: Args, server: Option<&str>, _json: bool) -> Result<()> {
         out
     });
     Ok(())
+}
+
+/// The stderr line + report `warnings[]` entry emitted when `ingest plan` runs
+/// without an admin token: the prior-version inventory endpoint 401s, so every
+/// document is classified as new and the cost preview is worst-case (#140).
+const TOKENLESS_PLAN_WARNING: &str =
+    "no admin token — prior-version inventory unavailable; every document is \
+     classified as new, so the cost preview is worst-case (run `mnm login \
+     --user-id <id>` for carry-forward-aware plans)";
+
+/// Warnings to surface (stderr + report) for a plan run. Currently exactly one:
+/// the tokenless-degradation notice when `token` is absent. Pure so the exact
+/// wording and the token→warning mapping are unit-testable without a network
+/// round-trip (#140).
+fn plan_warnings(token: Option<&str>) -> Vec<String> {
+    if token.is_none() {
+        vec![TOKENLESS_PLAN_WARNING.to_owned()]
+    } else {
+        Vec::new()
+    }
+}
+
+/// Assemble the `ingest plan` report, threading `plan_warnings(token)` into the
+/// report's `warnings[]`. `run()` delegates here so the token→`warnings[]`
+/// wiring is a pure, network-free seam: dropping the warning (e.g. reverting
+/// this call's warnings arg to `Vec::new()`) fails `build_plan_report_*` below.
+/// The serialization-funnel test on `assemble_report` cannot catch that
+/// regression because it passes a hardcoded vec — this seam pins the CALL SITE.
+#[allow(clippy::too_many_arguments)]
+fn build_plan_report(
+    token: Option<&str>,
+    source_slug: &str,
+    embedding_model: &str,
+    started_at: OffsetDateTime,
+    finished_at: OffsetDateTime,
+    plan: &mnm_content::ingest::IngestPlan,
+    walk_skipped: &[mnm_content::ingest::SkippedFile],
+) -> super::report::IngestReport {
+    super::run::assemble_report(
+        "ingest plan",
+        source_slug,
+        super::report::Outcome::Planned,
+        None,
+        None,
+        embedding_model,
+        None, // plan has no code-embedding model
+        started_at,
+        finished_at,
+        plan,
+        walk_skipped,
+        Vec::new(), // conflicts: plan does not upload
+        plan_warnings(token),
+        0,
+    )
 }
 
 /// Load the admin bearer token from `auth.toml` if present and not expired.
@@ -336,5 +394,78 @@ mod prior_state_gate_tests {
             "voyage-context-3@1",
             Some("voyage-code-3@1")
         ));
+    }
+}
+
+#[cfg(test)]
+mod plan_warning_tests {
+    use super::{build_plan_report, plan_warnings};
+    use mnm_content::ingest::{IngestPlan, PlanBuilder, PriorState};
+    use mnm_core::types::SourceKind;
+    use time::OffsetDateTime;
+
+    /// A minimal finalized plan (no walked docs) — enough to assemble a report;
+    /// the seam tests care about `warnings[]`, not the document lists.
+    fn empty_plan() -> IngestPlan {
+        PlanBuilder::new("docs", SourceKind::DocsSite, "rev-1", PriorState::default()).finalize()
+    }
+
+    /// Tokenless plan surfaces exactly one warning — the #140 degradation
+    /// notice — which the caller writes to stderr AND threads into the report's
+    /// `warnings[]`. The wording names the real recovery command (`mnm login
+    /// --user-id <id>`).
+    #[test]
+    fn tokenless_plan_emits_degradation_warning() {
+        let warnings = plan_warnings(None);
+        assert_eq!(warnings.len(), 1, "exactly one warning when tokenless");
+        let w = &warnings[0];
+        assert!(w.contains("no admin token"), "names the cause: {w}");
+        assert!(
+            w.contains("every document is classified as new"),
+            "explains the classification: {w}"
+        );
+        assert!(w.contains("worst-case"), "flags the cost inflation explicitly: {w}");
+        assert!(w.contains("mnm login --user-id <id>"), "names the fix: {w}");
+    }
+
+    /// A tokened plan is unchanged: no warning, so `warnings[]` stays empty.
+    #[test]
+    fn tokened_plan_emits_no_warning() {
+        assert!(plan_warnings(Some("admin-bearer")).is_empty());
+    }
+
+    /// The CALL-SITE guard: `build_plan_report(None, …)` must thread the
+    /// tokenless warning into the report's serialized `warnings[]`. This fails
+    /// if the seam's `plan_warnings(token)` arg is reverted to `Vec::new()` —
+    /// the regression the `assemble_report` funnel test (hardcoded vec) misses.
+    #[test]
+    fn build_plan_report_threads_tokenless_warning_into_warnings_array() {
+        let plan = empty_plan();
+        let t = OffsetDateTime::now_utc();
+        let report = build_plan_report(None, "docs", "voyage-context-3@1", t, t, &plan, &[]);
+        assert_eq!(report.warnings.len(), 1, "tokenless report must carry the notice");
+        assert!(report.warnings[0].contains("no admin token"), "{:?}", report.warnings);
+        // And it survives serialization into the `warnings[]` array `--json` /
+        // `--report-file` consumers read.
+        let v = serde_json::to_value(&report).unwrap();
+        assert!(
+            v["warnings"][0]
+                .as_str()
+                .is_some_and(|w| w.contains("no admin token")),
+            "warnings must serialize into `warnings[]`: {v}"
+        );
+    }
+
+    /// Tokened plans are unchanged through the seam: empty `warnings[]`.
+    #[test]
+    fn build_plan_report_tokened_has_no_warnings() {
+        let plan = empty_plan();
+        let t = OffsetDateTime::now_utc();
+        let report = build_plan_report(Some("admin-bearer"), "docs", "m@1", t, t, &plan, &[]);
+        assert!(
+            report.warnings.is_empty(),
+            "tokened report must not warn: {:?}",
+            report.warnings
+        );
     }
 }
