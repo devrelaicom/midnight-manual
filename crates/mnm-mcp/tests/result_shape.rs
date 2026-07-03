@@ -309,6 +309,74 @@ fn symbol_path_shapes_match_their_output_schemas() {
     );
 }
 
+/// Issue #139: the no-arg `facets` overview carries a compact `corpus` block.
+/// It must (a) conform to the advertised `facets_output_schema`, and (b) survive
+/// projection into structuredContent (not be dropped) with its sub-fields intact.
+#[test]
+fn facets_overview_corpus_block_conforms_and_survives_projection() {
+    let env = serde_json::json!({
+        "modes": ["hybrid", "vector", "fts"],
+        "filters": [
+            { "key": "source_slug", "type": "open_set", "negatable": true,
+              "values": ["compact-docs"], "truncated": true, "total": 82 }
+        ],
+        "corpus": {
+            "sources": {
+                "total": 82,
+                "by_kind": { "code_repo": 61, "docs_site": 14, "standalone": 5, "mixed": 2 },
+                "by_attribution": { "foundation": 12, "community": 40, "unknown": 30 }
+            },
+            "languages": ["compact", "typescript", "rust"],
+            "version_coverage": [
+                { "target": "compact", "declared_constraints": [">=0.23", "0.31"] }
+            ],
+            "freshness": {
+                "oldest_ingested_at": "2026-01-02T03:04:05Z",
+                "newest_ingested_at": "2026-07-02T03:04:05Z"
+            },
+            "tags_sample": ["quickstart", "privacy"]
+        }
+    });
+    let sc = mnm_mcp::render::project_facets(env)
+        .into_result()
+        .structured_content
+        .expect("structuredContent present");
+
+    assert_conforms("facets (overview + corpus)", &sc, &mnm_mcp::schemas::facets_output_schema());
+
+    // The corpus block survived projection with its sub-fields intact.
+    assert_eq!(sc.pointer("/corpus/sources/total").and_then(Value::as_i64), Some(82));
+    assert_eq!(
+        sc.pointer("/corpus/sources/by_kind/code_repo")
+            .and_then(Value::as_i64),
+        Some(61)
+    );
+    assert_eq!(sc.pointer("/corpus/languages/0").and_then(Value::as_str), Some("compact"));
+    assert_eq!(
+        sc.pointer("/corpus/version_coverage/0/target")
+            .and_then(Value::as_str),
+        Some("compact")
+    );
+    assert_eq!(
+        sc.pointer("/corpus/freshness/newest_ingested_at")
+            .and_then(Value::as_str),
+        Some("2026-07-02T03:04:05Z")
+    );
+    assert_eq!(sc.pointer("/corpus/tags_sample/0").and_then(Value::as_str), Some("quickstart"));
+
+    // A drill-down response carries no corpus block (the block is overview-only).
+    let drill = mnm_mcp::render::project_facets(serde_json::json!({
+        "facet": "tags", "values": ["zk"], "total": 312, "next_cursor": null
+    }))
+    .into_result()
+    .structured_content
+    .expect("structuredContent present");
+    assert!(
+        drill.get("corpus").is_none(),
+        "drill-down structuredContent must not carry a corpus block: {drill}"
+    );
+}
+
 #[test]
 // One fixture per projector: length is inherent to the data (same rationale
 // as the allow on `tools::list()`); splitting would scatter the sweep.

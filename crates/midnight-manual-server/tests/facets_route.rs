@@ -8,7 +8,7 @@ use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use axum::Router;
 use midnight_manual_server::{app, config::ServerConfig};
-use mnm_core::provenance::{LanguageTarget, Provenance, SdkDependency};
+use mnm_core::provenance::{Attribution, LanguageTarget, Provenance, SdkDependency};
 use mnm_core::types::{DocumentKind, NodeKind, PackageKind, SourceKind};
 use mnm_store::entities::{document, embedding_model, node, package, source, source_version};
 use tower::ServiceExt as _;
@@ -38,12 +38,19 @@ async fn get_facets_body(app: Router) -> serde_json::Value {
 
 /// Seed one finalized (active) `source_version` with one document per supplied
 /// `(language, provenance)` pair, all hung off a single root + group structure.
+/// The source is a `DocsSite`; use [`seed_documents_kind`] to control the kind.
 async fn seed_documents(pool: &sqlx::PgPool, docs: &[(&str, Provenance)]) {
+    seed_documents_kind(pool, SourceKind::DocsSite, docs).await;
+}
+
+/// Like [`seed_documents`] but with an explicit source `kind`, so tests can
+/// build a corpus of multiple sources with differing kinds + attributions.
+async fn seed_documents_kind(pool: &sqlx::PgPool, kind: SourceKind, docs: &[(&str, Provenance)]) {
     let model_id = embedding_model::upsert(pool, "voyage-code-3", 1, 1024, "voyageai")
         .await
         .unwrap();
     let slug = format!("facets-route-test-{}", Uuid::new_v4());
-    let source_id = source::insert(pool, &slug, "Facets", SourceKind::DocsSite, None, 5)
+    let source_id = source::insert(pool, &slug, "Facets", kind, None, 5)
         .await
         .unwrap();
     let (sv_id, _) = source_version::create_building(pool, source_id, model_id, None, "0.1.0", "h")
@@ -344,6 +351,131 @@ async fn version_drill_invalid_params_return_typed_400() {
             .unwrap()
             .contains("has no `within` drill level"),
         "{v}"
+    );
+}
+
+/// Issue #139: the NO-ARG overview carries a compact `corpus` cold-start block
+/// derived from the seeded corpus; a drill-down response does NOT.
+#[tokio::test]
+async fn overview_carries_corpus_block_drilldown_does_not() {
+    let h = common::boot().await;
+    // Two DISTINCT sources with DIFFERING kinds AND attributions, so `sum ==
+    // total` is non-trivial (2, split 1/1) and the mid-rank by_attribution CASE
+    // branches (partner=2, community=4) are exercised — not just Foundation.
+    //
+    // Source A: a docs_site of partner-attributed docs, one carrying a
+    // language_target so version_coverage has data.
+    let partner_compact = Provenance {
+        attribution: Attribution::Partner,
+        language_targets: vec![LanguageTarget {
+            name: "compact".into(),
+            version_constraint: Some(">=0.23".into()),
+        }],
+        tags: vec!["quickstart".into(), "privacy".into()],
+        ..Default::default()
+    };
+    let partner_ts = Provenance {
+        attribution: Attribution::Partner,
+        ..Default::default()
+    };
+    seed_documents_kind(
+        &h.pool,
+        SourceKind::DocsSite,
+        &[("compact", partner_compact), ("typescript", partner_ts)],
+    )
+    .await;
+    // Source B: a code_repo of community-attributed docs.
+    let community_rust = Provenance {
+        attribution: Attribution::Community,
+        ..Default::default()
+    };
+    seed_documents_kind(&h.pool, SourceKind::CodeRepo, &[("rust", community_rust)]).await;
+    let app = app::build_resolved(h.pool.clone(), cfg())
+        .await
+        .expect("build app");
+
+    // Overview: the corpus block is present and well-formed.
+    let body = get_facets_body(app.clone()).await;
+    let corpus = &body["corpus"];
+    assert!(corpus.is_object(), "no-arg overview must carry a corpus block: {body}");
+
+    // sources: exactly the 2 seeded sources (the DB is isolated per test), and
+    // by_kind/by_attribution each sum to total — a non-trivial 1/1 split.
+    let total = corpus["sources"]["total"]
+        .as_i64()
+        .expect("sources.total is int");
+    assert_eq!(total, 2, "two sources seeded: {corpus}");
+    let sum_map = |m: &serde_json::Value| -> i64 {
+        m.as_object()
+            .expect("map object")
+            .values()
+            .filter_map(serde_json::Value::as_i64)
+            .sum()
+    };
+    assert_eq!(sum_map(&corpus["sources"]["by_kind"]), total, "by_kind sums to total: {corpus}");
+    assert_eq!(
+        sum_map(&corpus["sources"]["by_attribution"]),
+        total,
+        "by_attribution sums to total: {corpus}"
+    );
+    // The two differing kinds are each counted once.
+    assert_eq!(corpus["sources"]["by_kind"]["docs_site"].as_i64(), Some(1), "{corpus}");
+    assert_eq!(corpus["sources"]["by_kind"]["code_repo"].as_i64(), Some(1), "{corpus}");
+    // The two differing mid-rank attributions are each counted once (partner=2,
+    // community=4 CASE branches, not just Foundation).
+    assert_eq!(corpus["sources"]["by_attribution"]["partner"].as_i64(), Some(1), "{corpus}");
+    assert_eq!(corpus["sources"]["by_attribution"]["community"].as_i64(), Some(1), "{corpus}");
+    assert!(
+        corpus["sources"]["by_attribution"]
+            .get("foundation")
+            .is_none(),
+        "no foundation source was seeded: {corpus}"
+    );
+
+    // languages: the seeded languages appear.
+    let langs: std::collections::HashSet<&str> = corpus["languages"]
+        .as_array()
+        .expect("languages array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(
+        langs.contains("compact") && langs.contains("typescript") && langs.contains("rust"),
+        "{corpus}"
+    );
+
+    // version_coverage: the compact target's declared constraint is listed.
+    let cov = corpus["version_coverage"]
+        .as_array()
+        .expect("version_coverage array")
+        .iter()
+        .find(|e| e["target"] == "compact")
+        .expect("compact version coverage");
+    assert_eq!(cov["declared_constraints"], serde_json::json!([">=0.23"]), "{corpus}");
+
+    // freshness: both timestamps present (RFC3339 strings) for a populated corpus.
+    assert!(corpus["freshness"]["oldest_ingested_at"].is_string(), "{corpus}");
+    assert!(corpus["freshness"]["newest_ingested_at"].is_string(), "{corpus}");
+
+    // tags_sample: the seeded tags appear.
+    let tags: std::collections::HashSet<&str> = corpus["tags_sample"]
+        .as_array()
+        .expect("tags_sample array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(tags.contains("quickstart") && tags.contains("privacy"), "{corpus}");
+
+    // Budget: the serialized corpus block stays within 2 KB.
+    let bytes = serde_json::to_vec(corpus).unwrap().len();
+    assert!(bytes <= 2048, "corpus block must stay ≤2 KB, got {bytes} bytes: {corpus}");
+
+    // Drill-down: the same server, a facet drill, must NOT carry a corpus block.
+    let (status, drill) = get(app, "/v1/facets?facet=language").await;
+    assert_eq!(status, StatusCode::OK, "{drill}");
+    assert!(
+        drill.get("corpus").is_none(),
+        "drill-down must not carry a corpus block: {drill}"
     );
 }
 

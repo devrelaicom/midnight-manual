@@ -166,6 +166,30 @@ pub struct PromptsCapability {
     pub list_changed: bool,
 }
 
+/// Server `instructions` sent in the `initialize` response (MCP spec field,
+/// issue #138). This is the ONLY channel that reaches an agent BEFORE its first
+/// tool call, so it front-loads the what/when/when-not, the cold-start map, the
+/// escalation ladder, a search-budget hint, and the skill pointer.
+///
+/// Host support is unreliable (several clients ignore this field and some
+/// truncate it), so the critical lines are ALSO duplicated where they already
+/// live — tool descriptions and `suggested_next_actions`. This is an additive
+/// channel, never the sole home of load-bearing guidance. The most important
+/// lines (what this is / when to use it) come first so they survive a ~500-char
+/// truncation.
+pub const SERVER_INSTRUCTIONS: &str = "\
+Midnight Manual: hybrid (vector + keyword) search over the Midnight Network docs and code corpus — docs sites, SDK sources, and Compact examples — version-aware and trust-scored.
+
+Use it for ANY question about Midnight, Compact, or the Midnight SDK, even ones you think you already know: training data about Midnight is frequently stale, so verify here first. Do NOT use it for general programming questions unrelated to Midnight, and it is not a substitute for reading the user's own project files.
+
+Cold start (unsure what to query?): call `facets` with no arguments — the response carries a compact `corpus` overview (source counts by kind/attribution, top languages, version coverage, freshness, sample tags) plus the filter dimensions for `advanced_search`; call `list_sources` to see what material exists.
+
+Escalation ladder: one plain question → `search`; filters, multi-query fusion, or rerank control → `advanced_search` (call `facets` first to discover valid filter values); read a hit with `get_chunks`, widen via the neighbor and parent tools, then `get_document` / `get_document_chunks` for full context.
+
+Budget hint: if three searches haven't found it, change strategy — broaden terms, switch retrieval mode, or drop filters — rather than rephrasing the same query.
+
+For the full retrieval playbook, run `install_skill` to install the bundled Midnight search skills into your AI harness.";
+
 /// `initialize` response payload.
 #[derive(Debug, Serialize)]
 pub struct InitializeResult {
@@ -177,6 +201,10 @@ pub struct InitializeResult {
     /// Server identity.
     #[serde(rename = "serverInfo")]
     pub server_info: ServerInfo,
+    /// Free-form usage guidance for the agent (MCP `instructions` field). Sent
+    /// as [`SERVER_INSTRUCTIONS`]; `None` omits it from the wire.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<&'static str>,
 }
 
 /// Server identity block.

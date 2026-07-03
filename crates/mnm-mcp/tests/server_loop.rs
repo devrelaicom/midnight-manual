@@ -42,11 +42,45 @@ async fn end_to_end_round_trip_through_framed_io() {
             name: "midnight-manual-mcp",
             version: mnm_mcp::VERSION,
         },
+        instructions: Some(protocol::SERVER_INSTRUCTIONS),
     };
     let json = serde_json::to_value(&result).unwrap();
     assert_eq!(json["protocolVersion"], protocol::MCP_PROTOCOL_VERSION);
     assert_eq!(json["capabilities"]["tools"]["listChanged"], false);
     assert_eq!(json["serverInfo"]["name"], "midnight-manual-mcp");
+
+    // Issue #138: the initialize response carries the MCP `instructions` field
+    // (camelCase `instructions` on the wire) with the cold-start guidance.
+    let instructions = json["instructions"]
+        .as_str()
+        .expect("initialize carries an `instructions` string");
+    // Cold-start map points at the #139 facets corpus overview; escalation
+    // ladder + skill pointer are present; the current skill tool name is used.
+    assert!(instructions.contains("facets"), "instructions must map the facets cold start");
+    assert!(instructions.contains("corpus"), "instructions must mention the corpus overview");
+    assert!(
+        instructions.contains("advanced_search"),
+        "instructions must name the escalation ladder"
+    );
+    assert!(
+        instructions.contains("install_skill"),
+        "instructions must point at the current skill tool"
+    );
+    assert!(
+        !instructions.contains("install_search_skill"),
+        "instructions must not use the retired skill tool name"
+    );
+    // The most important lines (what this is / when to use) survive a ~500-char
+    // truncation by some hosts.
+    assert!(
+        instructions.len() >= 500,
+        "instructions should be substantive (front-loaded), got {} chars",
+        instructions.len()
+    );
+    assert!(
+        instructions[..500].contains("Midnight"),
+        "the first ~500 chars must be self-contained (what this is)"
+    );
 }
 
 /// Conformance guard at the server-loop level: an `initialize` request read in
@@ -82,6 +116,7 @@ async fn initialize_response_is_newline_framed_no_content_length() {
             name: "midnight-manual-mcp",
             version: mnm_mcp::VERSION,
         },
+        instructions: Some(protocol::SERVER_INSTRUCTIONS),
     };
     let response = protocol::Response::success(
         protocol::RequestId::Number(1),
@@ -217,6 +252,7 @@ async fn prompts_list_and_get_through_framed_io() {
             name: "midnight-manual-mcp",
             version: mnm_mcp::VERSION,
         },
+        instructions: Some(protocol::SERVER_INSTRUCTIONS),
     };
     let init_json = serde_json::to_value(&init_result).unwrap();
     assert_eq!(init_json["capabilities"]["prompts"]["listChanged"], false);
