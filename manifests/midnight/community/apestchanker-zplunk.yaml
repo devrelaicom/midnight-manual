@@ -1,0 +1,48 @@
+manifest_version: 1
+root:
+  name: apestchanker-zplunk
+  path: .
+  # ZKSplunk — anonymous critical-incident attestation contract + Node SDK integration
+  # (Splunk<->Midnight bridge). Index the Midnight-relevant subtrees; drop the Splunk-app
+  # binaries and non-Midnight assets.
+  include:
+    - "contract/**"
+    - "zkMonitor/**"
+    - "connector/**"
+    - "demoLand/**"
+    - "docs/**"
+    - "README.md"
+  exclude:
+    - "**/managed/**"
+    - "**/node_modules/**"
+    - "**/*.spl"
+    - "**/*.png"
+    - "**/*.jpg"
+    - "**/package-lock.json"
+  provenance:
+    attribution: community
+    verified: false
+    tags: [trust:low]
+    verification_notes: >-
+      Community-contributed repository; unverified and unaudited by the Midnight Foundation.
+      "ZKSplunk" — an anonymous critical-incident attestation contract
+      (contract/src/zksplunk.compact) plus a Node SDK integration (zkMonitor/, connector/)
+      bridging Splunk observability to Midnight. A multi-agent static review (2026-07-03) found
+      the CRYPTO SOUND and the SDK integration CURRENT + CORRECT: admin auth uses the
+      witness-secret derive-in-circuit + sealed-pin pattern (no ownPublicKey); operator
+      attestations use forge-proof anonymous HistoricMerkleTree membership (leaf bound to the
+      witness secret, path bound to leaf, root checked against historic roots) plus secret-bound,
+      domain-separated, replay-safe nullifiers, with disclosure discipline that leaks nothing about
+      operator identity; and the deploy/call/provider wiring was verified byte-for-byte against the
+      current published SDK type declarations (midnight-js 4.1.1, ledger-v8 8.1.0,
+      wallet-sdk-facade 4.0.1, pragma >= 0.23). Known caveats (do NOT copy uncritically): (1) the
+      aggregate attestation COUNT is Sybil-inflatable — the nullifier scope is
+      persistentHash(epoch, scopeTag) with scopeTag caller-chosen/unbound and does not bind
+      incidentClass, so a SINGLE registered operator can mint unlimited distinct nullifiers for the
+      same (epoch, class) and fabricate a fake multi-operator campaign; the "N distinct operators =
+      coordinated campaign" signal is NOT Sybil-resistant (bind the scope to (epoch, incidentClass)
+      to fix). (2) The networkId "cross-network replay prevention" comment is misleading — replay is
+      actually blocked by per-contract state isolation, not by binding networkId. (3)
+      zkMonitor/src/normalized-transaction.ts hand-rolls the SDK's finalizeRecipe() as a documented
+      preview-network workaround — treat it as a specific workaround, not the default path.
+      Apache-2.0. Treat as illustrative, not authoritative, and audit before production use.
