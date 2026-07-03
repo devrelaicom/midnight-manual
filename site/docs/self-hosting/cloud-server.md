@@ -202,7 +202,7 @@ The following variables configure server behaviour. Secrets should be set via `f
 |---|---|
 | `503` on `/v1/auth/challenge` or `/v1/auth/verify` | `MIDNIGHT_MANUAL_USER_STORE` or `MIDNIGHT_MANUAL_JWT_SECRET` unset. |
 | `503` on `/v1/auth/github/*` | Any of the four `MIDNIGHT_MANUAL_GITHUB_*` secrets missing. |
-| `409 embedding_model_mismatch` from a CLI | Client embedding-model id does not match the active corpus model. Run `mnm models pull` and retry. |
+| `409 embedding_model_mismatch` from a CLI | Client embedding-model id does not match the active corpus model. Run `mnm models active` to see the corpus's active wire id, then re-run with `--embedding-model <wire-id>` (or `--embedding-model auto`); use `mnm models migrate` to realign every source in bulk. |
 | `relation "chunk" does not exist` in logs | `pgvector` extension missing or `MIDNIGHT_MANUAL_AUTO_MIGRATE=false` and migrations not applied. |
 | `failed to resolve active embedding model` at boot | `embedding_model` table empty: migration `0006_seed_embedding_model.sql` did not apply. |
 

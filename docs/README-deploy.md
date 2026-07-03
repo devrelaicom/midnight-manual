@@ -452,7 +452,7 @@ operational gaps in the project's production-readiness audit.
 | --- | --- |
 | `503 service_unavailable` on `/v1/auth/challenge` or `/v1/auth/verify` | `MIDNIGHT_MANUAL_USER_STORE` or `MIDNIGHT_MANUAL_JWT_SECRET` unset. |
 | `503` on `/v1/auth/github/*` | Any of the four `MIDNIGHT_MANUAL_GITHUB_*` secrets missing (client ID, client secret, redirect URL, org). |
-| `409 embedding_model_mismatch` from a CLI | Client embedding-model id doesn't match the active corpus model. Run `mnm models pull` and retry. |
+| `409 embedding_model_mismatch` from a CLI | Client embedding-model id doesn't match the active corpus model. Run `mnm models active` to see the corpus's active wire id, then re-run with `--embedding-model <wire-id>` (or `--embedding-model auto`); use `mnm models migrate` to realign every source in bulk. |
 | `relation "chunk" does not exist` in server logs | pgvector extension missing (step 2 not run) or migrations disabled (`MIDNIGHT_MANUAL_AUTO_MIGRATE=false`). |
 | `failed to resolve active embedding model` at boot | The `embedding_model` table is empty. Migration `0006_seed_embedding_model.sql` should have populated it — confirm the migration ran. |
 
