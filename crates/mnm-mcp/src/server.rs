@@ -9,7 +9,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use mnm_telemetry::events::{
-    McpShutdown, McpStartup, McpToolCall, McpToolName, ModelState, Outcome, Rerank,
+    McpParamAliasRewrite, McpShutdown, McpStartup, McpToolCall, McpToolName, ModelState, Outcome,
+    Rerank,
 };
 use mnm_telemetry::{
     build as build_telemetry, BuildParams, Flusher, Surface, Telemetry, DEFAULT_FLUSH_TIMEOUT,
@@ -462,9 +463,21 @@ fn passthrough_failure(e: tools::PassthroughError) -> ToolFailure {
 // dispatch_tool (top-level, emits telemetry)
 // ---------------------------------------------------------------------------
 
-async fn dispatch_tool(id: RequestId, params: ToolCallParams, state: &ServerState) -> Response {
+async fn dispatch_tool(id: RequestId, mut params: ToolCallParams, state: &ServerState) -> Response {
     let started = Instant::now();
     let name_for_event = tool_name_for_event(&params.name);
+    // #143: rewrite the unambiguous parameter-alias slips (hallucinated key
+    // names, scalar/array shape mismatches) BEFORE any validator runs, and log
+    // each rewrite so the alias list can be tuned from real traffic. This runs
+    // ahead of the `rerank_on` read below so the read sees the corrected args.
+    let aliases = tools::rewrite_param_aliases(&params.name, &mut params.arguments);
+    if let Some(tool_name) = name_for_event {
+        for alias in aliases {
+            state
+                .telemetry
+                .emit(&McpParamAliasRewrite { tool_name, alias });
+        }
+    }
     // `rerank` is only meaningful to the search tools; for everything else the
     // field doesn't exist in the schema, so the telemetry value is false. Basic
     // `search` has no rerank arg at all (reranking always runs), and
@@ -693,8 +706,19 @@ async fn run_search_dispatch(params: &ToolCallParams, state: &ServerState) -> To
                 ),
                 security: state.cfg.security,
                 // response_format=concise (issue #137) drops the nested scores
-                // block from each projected result; detailed keeps it.
+                // block from each projected result; detailed keeps it. Read (Copy)
+                // BEFORE the moves below, which consume `parsed` on its last use.
                 concise: !parsed.include_scores,
+                // #142: echo the request so a zero-result render can build the
+                // relaxation ladder (which facet to drop, strict→permissive,
+                // fts→hybrid) and a ready-to-send corrected call. `parsed` is not
+                // used after this, so move its fields instead of cloning.
+                request: Some(render::SearchRequestEcho {
+                    filters: parsed.filters,
+                    mode: parsed.mode.to_owned(),
+                    version_match: parsed.version_match,
+                    queries: parsed.queries,
+                }),
             };
             let outcome = render::project_search(success.envelope, &opts);
             let telemetry = outcome.telemetry.clone();
@@ -1039,6 +1063,143 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             Some("body text"),
             "concise is NOT bodies-off — the content body survives"
+        );
+    }
+
+    /// #143 + #142 dispatch glue (review TA-i). Drives a real `advanced_search`
+    /// `tools/call` whose arguments carry the SCALAR `query` alias AND a facet
+    /// filter, through `handle_message`, against a mock returning ZERO results.
+    /// Two seams are proved at once, both of which a direct-call test misses:
+    /// (a) `dispatch_tool` ran the alias rewrite — else `{query:…}` reaches
+    /// `parse_advanced_search_args` and is REJECTED, so no ladder appears; and
+    /// (b) `run_search_dispatch` populated the `SearchRequestEcho` — else the
+    /// render treats the search as unfiltered and emits the generic broaden hint
+    /// instead of the facet-naming relaxation ladder. Deleting either seam turns
+    /// this red.
+    ///
+    /// Hermetic under `VOYAGE_API_KEY=`: `rerank:false` → Off placement (no
+    /// Voyage) and `mode:"fts"` skips embedding, so the only cloud hit is
+    /// `POST /v1/search`.
+    #[tokio::test]
+    async fn advanced_search_scalar_query_alias_and_filter_echo_reach_render() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/search"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [],
+                "search_metadata": { "total_candidates": 0, "filtered_by_confidence": 0 }
+            })))
+            .mount(&server)
+            .await;
+
+        let state =
+            test_state_with_cloud(mnm_core::injection::SecurityLevel::Disabled, &server.uri());
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": { "name": "advanced_search",
+                        "arguments": { "query": "how to compile", "mode": "fts", "rerank": false,
+                                       "filters": { "verified": true } } }
+        });
+        let body = serde_json::to_vec(&req).expect("serialize tools/call");
+        let out = handle_message(&body, &state)
+            .await
+            .expect("advanced_search yields a response");
+        let resp: serde_json::Value = serde_json::from_slice(&out).expect("parse response");
+
+        // The call SUCCEEDED (not an alias reject) — the rewrite ran.
+        assert!(
+            resp.pointer("/result/isError")
+                .and_then(serde_json::Value::as_bool)
+                != Some(true),
+            "scalar-query alias must be rewritten, not rejected: {resp}"
+        );
+        // The zero-result render surfaced the filtered relaxation ladder naming
+        // `verified` with a corrected call that drops it — proving the echo.
+        let actions = resp
+            .pointer("/result/structuredContent/suggested_next_actions")
+            .and_then(serde_json::Value::as_array)
+            .expect("suggested_next_actions present");
+        let ladder = actions
+            .iter()
+            .find(|a| {
+                a.get("tool").and_then(serde_json::Value::as_str) == Some("advanced_search")
+                    && a.pointer("/arguments/filters/verified").is_none()
+            })
+            .unwrap_or_else(|| {
+                panic!("filtered ladder action absent — echo not populated: {resp}")
+            });
+        assert!(
+            ladder
+                .get("description")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .contains("verified"),
+            "ladder names the facet it relaxes: {ladder}"
+        );
+        // And the corrected call still carries the real query (echoed, not templated).
+        assert_eq!(
+            ladder.pointer("/arguments/queries"),
+            Some(&serde_json::json!(["how to compile"])),
+            "corrected call echoes the real query"
+        );
+    }
+
+    /// #143 dispatch glue (review TA-ii). Drives `get_chunks {chunk_id:…}` through
+    /// `handle_message` with an ENABLED telemetry handle whose queue is a temp
+    /// file, then reads the queue: the compose (`chunk_id → id → ids`) must emit
+    /// exactly TWO `mcp_param_alias_rewrite` events. Guards the emit loop in
+    /// `dispatch_tool` (deleting it, or the compose, turns this red). The cloud
+    /// points at a discard port — the alias emit happens BEFORE the (failing)
+    /// wire call, and `emit` enqueues synchronously with no network or grace gate.
+    #[tokio::test]
+    async fn dispatch_emits_two_param_alias_events_for_get_chunks_chunk_id() {
+        use std::time::Duration;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let queue = tmp.path().join("id.queue.jsonl");
+        let telemetry = Telemetry::builder()
+            .app("midnight-manual")
+            .app_version("test")
+            .endpoint("https://telemetry.disabled.invalid")
+            .install_id_path(tmp.path().join("id"))
+            .queue_path(&queue)
+            .config_enabled(true)
+            .runtime_enabled(true)
+            .ci(false) // force non-CI so the handle is enabled even under CI
+            .grace(Duration::ZERO)
+            .build()
+            .expect("build enabled telemetry");
+        assert!(telemetry.is_enabled(), "telemetry must be enabled to observe emits");
+
+        let mut cfg = ServerConfig::with_defaults(std::env::temp_dir());
+        cfg.cloud_url = "http://127.0.0.1:9".to_owned();
+        let state = ServerState {
+            cfg,
+            cloud: Arc::new(CloudClient::new("http://127.0.0.1:9", None).expect("cloud")),
+            telemetry: Arc::new(telemetry),
+            started_at: Arc::new(Instant::now()),
+            tools_served: Arc::new(AtomicU32::new(0)),
+        };
+
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": { "name": "get_chunks",
+                        "arguments": { "chunk_id": "66666666-6666-6666-6666-666666666600" } }
+        });
+        let body = serde_json::to_vec(&req).expect("serialize tools/call");
+        let _ = handle_message(&body, &state).await; // cloud fails; alias emit already happened
+
+        let contents = std::fs::read_to_string(&queue).unwrap_or_default();
+        let alias_events = contents
+            .lines()
+            .filter(|l| l.contains("mcp_param_alias_rewrite"))
+            .count();
+        assert_eq!(
+            alias_events, 2,
+            "chunk_id → id → ids must emit TWO alias events; queue:\n{contents}"
         );
     }
 

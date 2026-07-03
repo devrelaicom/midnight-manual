@@ -11,8 +11,9 @@ use std::sync::Arc;
 
 use mnm_mcp::cloud_client::CloudClient;
 use mnm_mcp::tools::{
-    run_chunk_nav, run_chunk_neighbors, run_document_chunks, run_facets, run_get_chunks,
-    run_list_sources, run_passthrough_id, ChunkNavDirection, PassthroughError, PassthroughKind,
+    parse_advanced_search_args, parse_basic_search_args, rewrite_param_aliases, run_chunk_nav,
+    run_chunk_neighbors, run_document_chunks, run_facets, run_get_chunks, run_list_sources,
+    run_passthrough_id, ChunkNavDirection, PassthroughError, PassthroughKind,
 };
 use serde_json::json;
 use wiremock::matchers::{body_partial_json, method, path, query_param, query_param_is_missing};
@@ -1562,4 +1563,139 @@ async fn advanced_search_forwards_sort_by_and_min_confidence_to_v1_search() {
         .await
         .expect("wire must carry sort_by + min_confidence for the mock to match");
     assert!(success.envelope.get("results").is_some());
+}
+
+// ---------------------------------------------------------------------------
+// #143: pre-validation param-alias rewriting. Each unambiguous alias is
+// rewritten and the corrected call succeeds; the ambiguous multi-query case is
+// left for the validator's cross-pointer reject.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn alias_advanced_scalar_query_rewritten_then_parses() {
+    let mut args = json!({ "query": "how to compile" });
+    let applied = rewrite_param_aliases("advanced_search", &mut args);
+    assert_eq!(applied.len(), 1, "scalar query → queries fired");
+    let parsed = parse_advanced_search_args(&args).expect("rewritten args parse cleanly");
+    assert_eq!(parsed.queries, vec!["how to compile".to_owned()]);
+}
+
+#[test]
+fn alias_search_one_element_queries_rewritten_then_parses() {
+    let mut args = json!({ "queries": ["how to compile"] });
+    let applied = rewrite_param_aliases("search", &mut args);
+    assert_eq!(applied.len(), 1, "one-element queries → query fired");
+    let parsed = parse_basic_search_args(&args).expect("rewritten args parse cleanly");
+    assert_eq!(parsed.queries, vec!["how to compile".to_owned()]);
+}
+
+#[test]
+fn alias_search_multi_query_is_not_rewritten_and_still_rejects() {
+    // Ambiguous: a multi-query request belongs on advanced_search — a tool-choice
+    // error, not a spelling slip. The rewrite must be a no-op and the existing
+    // cross-pointer reject must still fire.
+    let mut args = json!({ "queries": ["a", "b"] });
+    let applied = rewrite_param_aliases("search", &mut args);
+    assert!(applied.is_empty(), "multi-element queries must not be collapsed");
+    let err = parse_basic_search_args(&args).expect_err("must still reject");
+    assert!(err.contains("advanced_search"), "reject still points at advanced_search: {err}");
+}
+
+#[tokio::test]
+async fn alias_chunk_id_renamed_to_id_then_parents_succeeds() {
+    let server = MockServer::start().await;
+    let id = "11111111-1111-1111-1111-111111111111";
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/chunks/{id}/parents")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "parents": [{ "id": "p1", "kind": "root", "name": "Root", "document_id": null }],
+            "source": { "slug": "s", "display_name": "S" }
+        })))
+        .mount(&server)
+        .await;
+    let client = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
+    // The agent used the hallucinated `chunk_id` key.
+    let mut args = json!({ "chunk_id": id });
+    let applied = rewrite_param_aliases("get_chunk_parents", &mut args);
+    assert_eq!(applied.len(), 1, "chunk_id → id rename fired");
+    assert_eq!(args["id"], id);
+    // The corrected call now dispatches successfully.
+    let v = run_passthrough_id(&args, &client, PassthroughKind::Parents)
+        .await
+        .unwrap();
+    assert_eq!(v["parents"][0]["name"], "Root");
+}
+
+#[tokio::test]
+async fn alias_document_id_renamed_to_id_then_document_succeeds() {
+    let server = MockServer::start().await;
+    let id = "22222222-2222-2222-2222-222222222222";
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/documents/{id}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": id, "source_path": "docs/intro.md", "source": { "display_name": "X" },
+            "total_chunks": 5
+        })))
+        .mount(&server)
+        .await;
+    let client = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
+    // Search results carry the field as `document_id`; an agent copies it verbatim.
+    let mut args = json!({ "document_id": id });
+    let applied = rewrite_param_aliases("get_document", &mut args);
+    assert_eq!(applied.len(), 1, "document_id → id rename fired");
+    assert_eq!(args["id"], id);
+    let v = run_passthrough_id(&args, &client, PassthroughKind::Document)
+        .await
+        .unwrap();
+    assert_eq!(v["id"], id);
+}
+
+#[tokio::test]
+async fn alias_get_chunks_single_id_promoted_then_batch_succeeds() {
+    let server = MockServer::start().await;
+    let id = "66666666-6666-6666-6666-666666666600";
+    Mock::given(method("GET"))
+        .and(path("/v1/chunks"))
+        .and(query_param("ids", id))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "chunks": [
+                { "id": id, "content": "alpha", "document": { "source_path": "docs/a.md" } }
+            ],
+            "missing": []
+        })))
+        .mount(&server)
+        .await;
+    let client = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
+    // Singular `id` string instead of the `ids` array.
+    let mut args = json!({ "id": id });
+    let applied = rewrite_param_aliases("get_chunks", &mut args);
+    assert_eq!(applied.len(), 1, "single id → ids array fired");
+    assert_eq!(args["ids"], json!([id]));
+    let v = run_get_chunks(&args, &client).await.unwrap();
+    assert_eq!(v["chunks"][0]["id"], id);
+}
+
+#[tokio::test]
+async fn alias_get_chunks_chunk_id_composes_through_to_ids_then_succeeds() {
+    let server = MockServer::start().await;
+    let id = "66666666-6666-6666-6666-666666666601";
+    Mock::given(method("GET"))
+        .and(path("/v1/chunks"))
+        .and(query_param("ids", id))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "chunks": [
+                { "id": id, "content": "beta", "document": { "source_path": "docs/b.md" } }
+            ],
+            "missing": []
+        })))
+        .mount(&server)
+        .await;
+    let client = Arc::new(CloudClient::new(&server.uri(), None).unwrap());
+    // Both mistakes at once: hallucinated key AND scalar-not-array.
+    let mut args = json!({ "chunk_id": id });
+    let applied = rewrite_param_aliases("get_chunks", &mut args);
+    assert_eq!(applied.len(), 2, "chunk_id → id → ids composes into two rewrites");
+    assert_eq!(args["ids"], json!([id]));
+    let v = run_get_chunks(&args, &client).await.unwrap();
+    assert_eq!(v["chunks"][0]["id"], id);
 }

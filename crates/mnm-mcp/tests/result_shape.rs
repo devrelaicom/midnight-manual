@@ -92,6 +92,7 @@ fn advanced_search_structured_conforms_to_output_schema() {
         skill_installed: true,
         security: mnm_core::injection::SecurityLevel::default(),
         concise: false,
+        request: None,
     };
     let result = mnm_mcp::render::project_search(env, &opts).into_result();
     let sc = result
@@ -129,6 +130,7 @@ fn advanced_search_concise_structured_conforms_to_output_schema() {
         skill_installed: true,
         security: mnm_core::injection::SecurityLevel::default(),
         concise: true,
+        request: None,
     };
     let sc = mnm_mcp::render::project_search(env, &opts)
         .into_result()
