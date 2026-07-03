@@ -1,0 +1,46 @@
+manifest_version: 1
+root:
+  name: jalal-1-shielded-integration-template
+  path: .
+  exclude:
+    # CRITICAL: stubVerifySignature() returns true → total signature-auth bypass (demo-only).
+    # Imported ONLY by XGBP; the confidential-token core has zero dependency on it. Do not surface.
+    - "contract/src/compact/multisig/CustodyMultisig.compact"
+    # generated / env / noise
+    - "**/managed/**"
+    - "**/artifacts/**"
+    - "**/dist/**"
+    - "**/node_modules/**"
+    - "**/package-lock.json"
+    - "infra/*.env"
+  provenance:
+    attribution: community
+    verified: false
+    tags: [trust:low]
+    verification_notes: >-
+      Community-contributed repository; unverified and unaudited by the Midnight Foundation.
+      A bespoke, expert-quality CONFIDENTIAL FUNGIBLE TOKEN integration template: amount-confidential
+      balances stored on-chain as exponential (lifted) ElGamal ciphertexts over Jubjub, with KYC/freeze
+      compliance and a custody-approval gate. A multi-agent static review (2026-07-03) found the
+      confidential-token CORE genuinely SOUND and CURRENT — a rare, correct reference: ElGamal.compact
+      implements exponential ElGamal correctly (subgroup-safe negation, DLOG-bounded decryption);
+      ConfidentialFungibleToken.compact binds account identity to a witness secret (re-derived and
+      checked on every debit — spoofing requires the victim's SK and EK), CRYPTOGRAPHICALLY PROVES
+      balance sufficiency via assertDecryptsTo before every debit (no underflow/inflation from a lying
+      witness), and never discloses a confidential amount; and the TypeScript SDK integration
+      (deploy/provider assembly/WalletFacade/ConfidentialFungibleToken callTx) was verified
+      byte-for-byte against the current published SDK (.d.ts) — midnight-js 4.1.1, ledger-v8 8.1.0,
+      compact-runtime 0.16.0, pragma >= 0.23. EXCLUDED from this index: contract/src/compact/multisig/
+      CustodyMultisig.compact — its stubVerifySignature() unconditionally returns true (a total
+      signature-auth bypass, self-labeled demo-only); it is imported only by XGBP.compact, which is
+      therefore a NON-PRODUCTION DEMO (its mint/freeze/KYC authority spine rests on that excluded stub).
+      Caveats (do NOT copy uncritically): (1) accountId = persistentHash([SK]) and the ElGamal scalar =
+      degradeToTransient(persistentHash([secret])) share the same untagged single-Bytes hash, so
+      reusing one secret for both SK and EK would make an account's balance publicly decryptable — use
+      DISTINCT SK/EK and domain-separate the derivations (the shipped demo correctly uses distinct
+      SK/EK + a CSPRNG randomness seed, so this is latent, not live). (2) The token/compliance
+      _mint/_burn/_freeze/_setKyc* circuits are ungated BY DESIGN — compose them behind a gating
+      wrapper; never deploy the module standalone. (3) The deploy script uses an advanced
+      manual/verifier-key-chunking flow (justified by this contract's block-size needs); the normal
+      path is the one-line deployContract(). MIT (SPDX in-file; OpenZeppelin Compact provenance).
+      Treat as illustrative, not authoritative, and audit before production use.
