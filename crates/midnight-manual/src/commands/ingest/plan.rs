@@ -185,7 +185,7 @@ pub async fn run(args: Args, server: Option<&str>, _json: bool) -> Result<()> {
     let report = super::run::assemble_report(
         "ingest plan",
         &args.source_slug,
-        "planned",
+        super::report::Outcome::Planned,
         None,
         None,
         embedding_model_for_report,

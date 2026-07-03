@@ -464,6 +464,158 @@ async fn aborts_run_when_upload_fails() {
     assert!(*abort_hit.lock().unwrap(), "CLI must invoke .../abort after upload failure");
 }
 
+/// Issue #136: an aborted `ingest run` MUST still emit an `IngestReport` to
+/// `--report-file` with `outcome: "aborted"`, the PLAN's intended stats, and the
+/// triggering error captured. Before the fix the abort path returned `Err`
+/// before any report was assembled, so automation could not distinguish "run
+/// aborted" from "run never happened" (the report file was simply absent).
+///
+/// NOTE: the numeric stats/documents here describe what the run INTENDED to
+/// commit, not what was persisted (the upload never succeeded) — see the
+/// `aborted` note on `IngestReport::outcome`.
+///
+/// Drives the upload-failure abort path (one of the four post-start failure
+/// paths): the PUT /documents mock returns 409, so `run_inner` aborts the run
+/// and returns an error — and, with this fix, writes the report first.
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // full abort flow + report-artifact assertions
+async fn aborted_run_writes_report_with_outcome_aborted() {
+    let server = MockServer::start().await;
+    let abort_hit = Arc::new(Mutex::new(false));
+
+    mount_embedding_mocks(&server).await;
+
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/v1/sources/[^/]+$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "slug": "docs",
+            "kind": "docs_site",
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path_regex(r"^/v1/admin/sources/[^/]+/ingest-runs$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ingest_run_id": "00000000-0000-0000-0000-000000000136",
+            "source_version_id": "00000000-0000-0000-0000-000000000136",
+            "source_version_revision": 1,
+        })))
+        .mount(&server)
+        .await;
+
+    // Upload fails hard → the CLI aborts the run and returns an error.
+    Mock::given(method("PUT"))
+        .and(path_regex(r"^/v1/admin/sources/[^/]+/ingest-runs/[^/]+/documents$"))
+        .respond_with(ResponseTemplate::new(409).set_body_json(json!({
+            "error": {"code": "run_aborted", "message": "fake"}
+        })))
+        .mount(&server)
+        .await;
+
+    let abort = Arc::clone(&abort_hit);
+    Mock::given(method("POST"))
+        .and(path_regex(r"^/v1/admin/sources/[^/]+/ingest-runs/[^/]+/abort$"))
+        .respond_with(move |_req: &Request| {
+            *abort.lock().unwrap() = true;
+            ResponseTemplate::new(200)
+        })
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    write_file(dir.path(), "a.md", "# A\n\nBody of A.");
+    let manifest_path = write_manifest(dir.path(), &["a.md"]);
+    let auth_path = write_admin_auth(dir.path());
+    let report_path = dir.path().join("reports/ingest.json");
+
+    let args = IngestArgs {
+        manifest: manifest_path,
+        source_slug: "docs".to_owned(),
+        revision: Some("rev-136".to_owned()),
+        embedding_model: DEFAULT_EMBEDDING_MODEL.to_owned(),
+        note: None,
+        source_root: Some(dir.path().to_path_buf()),
+        dry_run: false,
+        yes: false,
+        source_base_url: None,
+        batch_size: 50,
+        voyage_timeout_secs: None,
+        chunk_tokens: 400,
+        include: vec![],
+        exclude: vec![],
+        respect_gitignore: false,
+        disable_default_ignore_list: false,
+        strict: false,
+        max_file_size: 10 * 1024 * 1024,
+        max_line_bytes: mnm_content::chunk::DEFAULT_MAX_LINE_BYTES,
+        unsafe_no_global_limit: false,
+        no_code_embeddings: false,
+        report_file: Some(report_path.clone()),
+    };
+    let telemetry = noop_telemetry();
+
+    // json = false so the artifact is the sole output surface under test.
+    let err = midnight_manual::commands::ingest::run::run_with_paths(
+        args,
+        &server.uri(),
+        &auth_path,
+        None,
+        None,
+        &telemetry,
+        false,
+    )
+    .await
+    .unwrap_err();
+
+    // Exit/stderr behaviour unchanged: the run still fails with the upload error
+    // and the server run is still aborted.
+    let msg = format!("{err:#}");
+    assert!(msg.contains("upload documents"), "expected upload error: {msg}");
+    assert!(*abort_hit.lock().unwrap(), "CLI must abort the server run on failure");
+
+    // ── The ADDED artifact: a parseable report with outcome "aborted" ────────
+    assert!(report_path.exists(), "abort must write the --report-file artifact");
+    let raw = std::fs::read_to_string(&report_path).expect("report file readable");
+    let report: serde_json::Value =
+        serde_json::from_str(&raw).expect("report file must be valid JSON");
+
+    assert_eq!(report["schema_version"], 2, "report carries the v2 schema");
+    assert_eq!(report["command"], "ingest run");
+    assert_eq!(report["outcome"], "aborted", "aborted run must record outcome=aborted");
+
+    // The PLAN's intended stats are recorded (what the run set out to commit,
+    // NOT what was persisted — the upload never landed).
+    assert_eq!(report["stats"]["walked"], 1, "one file was walked");
+    assert_eq!(report["stats"]["new"], 1, "the walked file was classified new");
+    assert!(
+        report["stats"]["chunks_emitted"]
+            .as_u64()
+            .is_some_and(|n| n >= 1),
+        "the pre-upload plan's chunk total must survive into the aborted report"
+    );
+
+    // The conflict list field is present (empty here — the upload failed hard
+    // rather than returning per-document conflicts; the populated case is
+    // covered by the `aborted_report_carries_populated_conflicts` unit test).
+    assert!(report["conflicts"].is_array(), "conflicts list must be present");
+
+    // The per-document record survives; new docs are not embed-complete on abort.
+    assert_eq!(report["documents"][0]["path"], "a.md");
+    assert_eq!(report["documents"][0]["classification"], "new");
+    assert_eq!(report["documents"][0]["embed_complete"], false);
+
+    // The triggering error is captured in the dedicated `error` field, so
+    // automation can read WHY the run aborted without scraping stderr.
+    let captured = report["error"]
+        .as_str()
+        .expect("aborted report must set `error`");
+    assert!(
+        captured.contains("upload documents"),
+        "report.error must capture the triggering error: {captured}"
+    );
+}
+
 /// Regression test for the F-bug: a manifest declaring `published_url` at the
 /// root level must propagate that value through the resolver's inheritance into
 /// every `DocumentUpload.published_url` that arrives at the server.
