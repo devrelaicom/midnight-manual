@@ -2285,7 +2285,7 @@
         "readOnlyHint": true,
         "title": "Diagnostics"
       },
-      "description": "Diagnose the retrieval setup: cloud reachability, authentication and rate-limit state, VoyageAI key validity, and rerank configuration. Call when searches fail, return errors, or before starting a long session.",
+      "description": "Diagnose the retrieval setup: cloud reachability, authentication and rate-limit state, VoyageAI key validity, rerank configuration, and the active content-guarding level. Call when searches fail, return errors, or before starting a long session.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {},
@@ -2342,6 +2342,17 @@
           "reranker_loaded": {
             "type": "boolean"
           },
+          "security_level": {
+            "description": "Active client-side content-guard level (default moderate). Governs whether returned content is wrapped in <<UNTRUSTED-…>> blocks and, at strict, whether flagged items are removed. This is the *standing* configured level, always reported here; what the guard actually did to a given response appears in that response's own `security` object (present only when the guard acted). Ordered least→most aggressive: disabled < low < moderate < high < strict.",
+            "enum": [
+              "disabled",
+              "low",
+              "moderate",
+              "high",
+              "strict"
+            ],
+            "type": "string"
+          },
           "suggested_next_actions": {
             "items": {
               "properties": {
@@ -2390,6 +2401,7 @@
           "voyage",
           "reranker",
           "reranker_loaded",
+          "security_level",
           "suggested_next_actions"
         ],
         "type": "object"

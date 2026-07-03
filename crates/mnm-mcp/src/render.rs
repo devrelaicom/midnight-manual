@@ -1365,8 +1365,10 @@ pub fn project_status(env: Value) -> ToolOutcome {
         }
     );
     let summary = format!(
-        "Cloud {cloud}{cloud_ver}; auth: {auth}{rl}{tl}; Voyage key {}; reranker {reranker}.",
+        "Cloud {cloud}{cloud_ver}; auth: {auth}{rl}{tl}; Voyage key {}; reranker {reranker}; \
+         content guard {}.",
         s("voyage").replace('_', " "),
+        s("security_level"),
     );
     let trimmed = json!({
         "cloud": env.get("cloud").cloned().unwrap_or(Value::Null),
@@ -2359,7 +2361,8 @@ mod tests {
             },
             "voyage": "valid",
             "reranker": "rerank-2.5",
-            "reranker_loaded": false
+            "reranker_loaded": false,
+            "security_level": "moderate"
         })
     }
 
@@ -2378,6 +2381,13 @@ mod tests {
         );
         assert!(o.summary.contains("Voyage key valid"), "voyage: {}", o.summary);
         assert!(o.summary.contains("rerank-2.5 not loaded"), "reranker: {}", o.summary);
+        assert!(o.summary.contains("content guard moderate"), "security level: {}", o.summary);
+        // The full structured payload (not just the summary) carries the level.
+        assert_eq!(
+            o.structured.get("security_level").and_then(Value::as_str),
+            Some("moderate"),
+            "structuredContent must carry the active guard level"
+        );
         // Authenticated + valid key → nothing to suggest.
         assert!(o.suggested_next_actions.is_empty());
     }

@@ -145,7 +145,9 @@ async fn status_tool_works_without_model_load() {
     // server is unreachable. The Voyage key is passed explicitly (None →
     // proxy mode), so an exported VOYAGE_API_KEY cannot leak in.
     let cloud = mnm_mcp::CloudClient::new("http://127.0.0.1:9", None).unwrap();
-    let report = mnm_mcp::status::assemble(&cloud, None).await;
+    let report =
+        mnm_mcp::status::assemble(&cloud, None, mnm_core::injection::SecurityLevel::default())
+            .await;
     assert_eq!(report.reranker, "rerank-2.5");
     // The shape is well-formed regardless of whether sibling tests have
     // loaded models.
@@ -155,6 +157,8 @@ async fn status_tool_works_without_model_load() {
     assert_eq!(json["permission_level"], "read");
     assert_eq!(json["voyage"], "not_configured");
     assert!(json["reranker_loaded"].is_boolean());
+    // The resolved content-guard level is surfaced (default moderate here).
+    assert_eq!(json["security_level"], "moderate");
 }
 
 /// The public `tools/list` surface: all thirteen tools, in the canonical

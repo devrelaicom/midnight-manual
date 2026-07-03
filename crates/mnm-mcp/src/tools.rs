@@ -12,11 +12,13 @@
 //!   and the rerank toggle.
 //! - All other tools (`get_chunks` / `get_chunk_next` / `get_chunk_prev` /
 //!   `get_chunk_neighbors` / `get_chunk_parents` / `get_document` /
-//!   `get_document_chunks` / `list_sources`) —
-//!   pass-through to the cloud's read endpoints, returning the response JSON
-//!   verbatim. `get_chunks` batches 1-20 ids into one `/v1/chunks?ids=` call;
-//!   `get_chunk_neighbors` is the only one that fans out to three
-//!   cloud endpoints concurrently and bundles the results.
+//!   `get_document_chunks` / `list_sources` / `facets`) —
+//!   pass-through to the cloud's read + discovery endpoints, returning the
+//!   response JSON verbatim. `get_chunks` batches 1-20 ids into one
+//!   `/v1/chunks?ids=` call; `get_chunk_neighbors` is the only one that fans
+//!   out to three cloud endpoints concurrently and bundles the results;
+//!   `list_sources` and `facets` enumerate the corpus and its filter
+//!   dimensions.
 //! - Local install: `install_search_skill` (writes the advanced-search
 //!   `SKILL.md` into the user's AI harness(es)).
 
@@ -167,7 +169,7 @@ pub fn list() -> ToolsListResult {
             ToolDescription {
                 name: "status",
                 description:
-                    "Diagnose the retrieval setup: cloud reachability, authentication and rate-limit state, VoyageAI key validity, and rerank configuration. Call when searches fail, return errors, or before starting a long session.",
+                    "Diagnose the retrieval setup: cloud reachability, authentication and rate-limit state, VoyageAI key validity, rerank configuration, and the active content-guarding level. Call when searches fail, return errors, or before starting a long session.",
                 input_schema: json!({
                     "type": "object",
                     "properties": {},
@@ -1993,6 +1995,73 @@ mod tests {
         assert_eq!(v["annotations"]["readOnlyHint"], false);
         assert_eq!(v["annotations"]["idempotentHint"], true);
         assert_eq!(v["annotations"]["destructiveHint"], false);
+    }
+
+    /// The module-level prose in both `lib.rs` and `tools.rs` claims a fixed
+    /// tool count and lists every tool by name. This pins that prose against
+    /// the registered surface: the count word must be "Thirteen" and match
+    /// `list()`, and every registered tool must be named (backtick-wrapped)
+    /// somewhere in the enumeration bullets of *both* module doc blocks.
+    ///
+    /// Scope (stated honestly — issue #134 C3, round 2): this catches the real
+    /// regression — a tool added to the registry but left entirely
+    /// undocumented, or a count that no longer says 13. It does NOT verify a
+    /// name's syntactic position, so it cannot distinguish a name in the
+    /// canonical enumeration from a name in a descriptive prose mention: a tool
+    /// dropped from the canonical list but still named elsewhere in the same
+    /// doc would pass. A stricter positional/canonical-span check was
+    /// deliberately rejected — the two docs enumerate tools in three different,
+    /// irregular shapes (names before an em-dash, a bare comma list after
+    /// `(pass-through):`, and names inside an `(a / b / c)` group), and both
+    /// legitimately name tools in descriptive prose (e.g. "`advanced_search`
+    /// adds multi-query fusion"), so a robust span extractor would be brittle
+    /// and a single-mention rule would force deleting useful human-facing text.
+    #[test]
+    fn module_prose_enumerates_every_registered_tool() {
+        // The full `//!` doc block (used for the count-word assertion, which
+        // lives in the intro line, not a bullet).
+        fn module_doc(src: &str) -> String {
+            src.lines()
+                .filter_map(|l| l.trim_start().strip_prefix("//!"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+        // The bulleted region: category bullets (doc content ` - …`) and their
+        // indented continuation lines (` …`, 3+ leading spaces after `//!`).
+        // This excludes only the intro line and blank doc lines — it does NOT
+        // separate a canonical list entry from a descriptive prose mention
+        // (both are bullet/continuation lines); see this test's doc-comment.
+        fn enumeration_bullets(src: &str) -> String {
+            src.lines()
+                .filter_map(|l| l.trim_start().strip_prefix("//!"))
+                .filter(|c| c.starts_with(" - ") || c.starts_with("   "))
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+        let lib_doc = module_doc(include_str!("lib.rs"));
+        let tools_doc = module_doc(include_str!("tools.rs"));
+        let lib_list = enumeration_bullets(include_str!("lib.rs"));
+        let tools_list = enumeration_bullets(include_str!("tools.rs"));
+
+        let tools = list().tools;
+        assert_eq!(
+            tools.len(),
+            13,
+            "registered tool count changed — update the 'Thirteen tools' module prose"
+        );
+        assert!(lib_doc.contains("Thirteen tools"), "lib.rs prose must state the tool count");
+        assert!(tools_doc.contains("Thirteen tools"), "tools.rs prose must state the tool count");
+        // Sanity: the extractor actually captured a non-trivial enumeration
+        // (guards against a doc reformat silently emptying the span, which
+        // would make the per-name checks below vacuous).
+        assert!(lib_list.contains("`status`"), "lib.rs enumeration span not detected");
+        assert!(tools_list.contains("`status`"), "tools.rs enumeration span not detected");
+
+        for tool in &tools {
+            let needle = format!("`{}`", tool.name);
+            assert!(lib_list.contains(&needle), "lib.rs enumeration omits {needle}");
+            assert!(tools_list.contains(&needle), "tools.rs enumeration omits {needle}");
+        }
     }
 
     #[test]

@@ -349,6 +349,7 @@ fn all_passthrough_projectors_conform_to_their_output_schema() {
         voyage: mnm_mcp::status::VoyageState::Valid,
         reranker: "rerank-2.5",
         reranker_loaded: true,
+        security_level: mnm_core::injection::SecurityLevel::Moderate,
     };
     let status_env = serde_json::to_value(&status_report).expect("StatusReport serializes");
 
@@ -520,6 +521,47 @@ fn all_passthrough_projectors_conform_to_their_output_schema() {
             .expect("structuredContent present");
         assert_conforms(label, &sc, &schema);
     }
+}
+
+/// Issue #134 C3: `status` must surface the active content-guard level in
+/// structuredContent, typed as one of the five `SecurityLevel` wire strings,
+/// and the value must survive projection (not be dropped or hardcoded).
+#[test]
+fn status_structured_carries_active_security_level() {
+    let report = mnm_mcp::status::StatusReport {
+        mcp_version: "0.4.0",
+        cloud: mnm_mcp::status::CloudState::Reachable,
+        cloud_version: Some("0.4.2".to_owned()),
+        authenticated: false,
+        auth_type: "anonymous".to_owned(),
+        identity: None,
+        permission_level: "read".to_owned(),
+        rate_limit: None,
+        token_limits: None,
+        voyage: mnm_mcp::status::VoyageState::NotConfigured,
+        reranker: "rerank-2.5",
+        reranker_loaded: false,
+        // A non-default level so a dropped/hardcoded value would be caught.
+        security_level: mnm_core::injection::SecurityLevel::Strict,
+    };
+    let env = serde_json::to_value(&report).expect("StatusReport serializes");
+    let sc = mnm_mcp::render::project_status(env)
+        .into_result()
+        .structured_content
+        .expect("structuredContent present");
+
+    // Conforms to the advertised schema (which now *requires* security_level).
+    assert_conforms("status (security_level)", &sc, &mnm_mcp::schemas::status_output_schema());
+
+    let level = sc
+        .get("security_level")
+        .and_then(Value::as_str)
+        .expect("security_level present in structuredContent");
+    assert!(
+        ["disabled", "low", "moderate", "high", "strict"].contains(&level),
+        "security_level must be one of the five guard levels, got {level:?}"
+    );
+    assert_eq!(level, "strict", "the active resolved level must survive projection");
 }
 
 #[test]

@@ -587,7 +587,12 @@ async fn dispatch_tool_inner(
                     })?;
                 mnm_core::config::resolve_voyage_api_key(None, &core_cfg.models, &cfg_env)
             };
-            let report = crate::status::assemble(&state.cloud, voyage_key.as_deref()).await;
+            // `state.cfg.security` is the level resolved once at server start
+            // (`resolve_security_level`) and applied by the response guard, so
+            // reporting it means `status` never drifts from the active guard.
+            let report =
+                crate::status::assemble(&state.cloud, voyage_key.as_deref(), state.cfg.security)
+                    .await;
             let v = serde_json::to_value(&report).unwrap_or(serde_json::Value::Null);
             ok(render::project_status(v).into_result(), None)
         }
@@ -911,6 +916,67 @@ mod tests {
                 tool.name,
             );
         }
+    }
+
+    /// Build a `ServerState` for dispatch tests: telemetry disabled (no
+    /// filesystem/network I/O), the cloud pointed at a closed discard port so
+    /// `/readyz` + `/v1/me` fail fast, and the given content-guard level.
+    fn test_state(security: mnm_core::injection::SecurityLevel) -> ServerState {
+        let telemetry = build_telemetry(BuildParams {
+            app_version: "test".to_owned(),
+            endpoint: "https://telemetry.disabled.invalid".to_owned(),
+            install_id_path: None, // None disables telemetry — no I/O
+            config_enabled: false,
+            runtime_enabled: false,
+            flush_args: vec![],
+        });
+        let mut cfg = ServerConfig::with_defaults(std::env::temp_dir());
+        cfg.cloud_url = "http://127.0.0.1:9".to_owned(); // discard port → conn refused
+        cfg.security = security;
+        let cloud = CloudClient::new(&cfg.cloud_url, None).expect("build cloud client");
+        ServerState {
+            cfg,
+            cloud: Arc::new(cloud),
+            telemetry: Arc::new(telemetry),
+            started_at: Arc::new(Instant::now()),
+            tools_served: Arc::new(AtomicU32::new(0)),
+        }
+    }
+
+    /// The load-bearing #134 hop: the `status` dispatch branch threads
+    /// `state.cfg.security` (the level resolved once at startup) into the
+    /// report. Drive a real `tools/call` for `status` through `handle_message`
+    /// and assert the configured level surfaces verbatim in
+    /// `structuredContent.security_level`. Substituting a constant for
+    /// `state.cfg.security` at the call site MUST turn this red — that is the
+    /// exact drift class the test guards.
+    ///
+    /// Hermetic under the `VOYAGE_API_KEY=` gate: an empty key resolves to
+    /// `None` (proxy mode), so no Voyage network probe runs; the dead cloud
+    /// port makes the cloud probes fail fast without affecting the assertion.
+    #[tokio::test]
+    async fn status_dispatch_reports_configured_security_level() {
+        let state = test_state(mnm_core::injection::SecurityLevel::Strict);
+        let call = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": { "name": "status", "arguments": {} }
+        });
+        let body = serde_json::to_vec(&call).expect("serialize tools/call");
+        let out = handle_message(&body, &state)
+            .await
+            .expect("status request yields a response");
+        let resp: serde_json::Value = serde_json::from_slice(&out).expect("parse response");
+
+        let level = resp
+            .pointer("/result/structuredContent/security_level")
+            .and_then(serde_json::Value::as_str)
+            .expect("security_level present in status structuredContent");
+        assert_eq!(
+            level, "strict",
+            "status must report the level configured in ServerConfig, not a constant: {resp}"
+        );
     }
 
     /// `initialize` must advertise the prompts capability so clients query it.
