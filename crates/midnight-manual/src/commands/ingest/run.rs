@@ -165,18 +165,6 @@ pub struct Args {
     #[arg(long = "chunk-tokens", default_value_t = 1024)]
     pub chunk_tokens: u32,
 
-    /// Whitelist glob (repeatable).
-    ///
-    /// Fed into file-list filtering when directory discovery is used (follow-up).
-    #[arg(long)]
-    pub include: Vec<String>,
-
-    /// Exclude glob (repeatable), additive over defaults + gitignore.
-    ///
-    /// Fed into file-list filtering when directory discovery is used (follow-up).
-    #[arg(long)]
-    pub exclude: Vec<String>,
-
     /// Honour the repo's own .gitignore / .git/info/exclude during discovery
     /// (off by default — ingest is hermetic). Never reads the machine-global
     /// (core.excludesFile) or parent-directory ignore files.
@@ -2805,7 +2793,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_chunk_and_filter_flags() {
+    fn parses_chunk_and_walk_flags() {
         use clap::Parser as _;
         // Args derives ClapArgs (not Parser); wrap in a minimal Parser for
         // testing so try_parse_from is available.
@@ -2820,10 +2808,6 @@ mod tests {
             "s",
             "--chunk-tokens",
             "256",
-            "--include",
-            "*.rs",
-            "--exclude",
-            "gen_*",
             "--respect-gitignore",
             "--disable-default-ignore-list",
             "--max-file-size",
@@ -2833,11 +2817,38 @@ mod tests {
         .unwrap();
         let args = w.inner;
         assert_eq!(args.chunk_tokens, 256);
-        assert_eq!(args.include, vec!["*.rs".to_string()]);
-        assert_eq!(args.exclude, vec!["gen_*".to_string()]);
         assert!(args.respect_gitignore);
         assert!(args.disable_default_ignore_list);
         assert_eq!(args.max_file_size, 1_048_576);
+    }
+
+    /// `--include` / `--exclude` were accepted-but-ignored on `ingest run` (never
+    /// wired through the walker); they were removed in favour of the manifest's
+    /// own per-node `include:` / `exclude:` globs, which ARE authoritative
+    /// (issue #144). Pin their absence so they can't silently reappear: the
+    /// manifest is the source of truth for what gets ingested, and a
+    /// post-filter here would silently drop documents from the finalized version.
+    #[test]
+    fn ingest_run_rejects_removed_include_exclude_flags() {
+        use clap::error::ErrorKind;
+        use clap::Parser as _;
+        #[derive(Debug, clap::Parser)]
+        struct Wrap {
+            #[command(flatten)]
+            inner: Args,
+        }
+        for flag in ["--include", "--exclude"] {
+            // Assert the specific rejection KIND (not just `is_err`) so a future
+            // new required arg can't silently make this test vacuously pass.
+            let err =
+                Wrap::try_parse_from(["ingest-run", "--source-slug", "s", flag, "*.rs", "m.yaml"])
+                    .expect_err("removed flag must be rejected");
+            assert_eq!(
+                err.kind(),
+                ErrorKind::UnknownArgument,
+                "expected unknown-argument rejection for {flag}",
+            );
+        }
     }
 
     #[test]

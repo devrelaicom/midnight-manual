@@ -56,8 +56,8 @@ File lists are built with the [`ignore`](https://docs.rs/ignore) crate and follo
 1. `.git/` is always excluded.
 2. Built-in skips: `node_modules`, `target`, `vendor`, `dist`, `*.min.js`, and similar.
 3. `.gitignore` / `.ignore` rules in the repository.
-4. Your `--exclude` globs (passed at ingest time).
-5. Your `--include` whitelist (overrides exclusions for matching files).
+4. Your manifest node's `exclude:` globs.
+5. Your manifest node's `include:` globs — when set, a file must match one of them to be kept. This is a whitelist that narrows what's ingested; it does **not** rescue a file that an `exclude:` glob already dropped (exclude beats include).
 
 This means a standard Midnight project ingests cleanly without any manifest configuration: the chunker already knows to skip compiled output, lock files, and generated code.
 

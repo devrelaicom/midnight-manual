@@ -485,8 +485,6 @@ async fn ingest_source(
         // None → resolver falls back to VOYAGE_TIMEOUT_SECS env / config / default.
         voyage_timeout_secs: None,
         chunk_tokens: 1024,
-        include: Vec::new(),
-        exclude: Vec::new(),
         respect_gitignore: false,
         disable_default_ignore_list: false,
         // Migrate re-ingests already-validated content; degrade a chunker panic

@@ -30,5 +30,6 @@ root:
         - file: ...
 ```
 
-Files not listed in the manifest fall back to directory-tree inference unless
-the operator passes `--strict-manifest` to `mnm ingest`.
+The manifest is authoritative: only files reachable from it — via `file:`
+leaves or `path:` discovery — are ingested. There is no directory-tree fallback
+for files the manifest does not list.

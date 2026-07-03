@@ -23,6 +23,7 @@ Every ingest run produces a new `source_version` for a source slug. Versions hav
 | `building` | In progress; invisible to search. |
 | `active` | The single live version for this slug; served to all search queries. |
 | `inactive` | A prior version; retained per the source's `retention_count`. |
+| `aborted` | An ingest that failed before it was finalized to `active`; a partial version that was never promoted and is never served. It does not block the next run, so it is safe to re-run the ingest. The background sweep hard-deletes it automatically once it passes the abort grace window (default: 1 hour) — you normally need do nothing. |
 | `retired` | Marked for cleanup by the background sweep job. |
 
 Only one version per slug can be `active` at a time. Promoting a new revision demotes the current active to `inactive` automatically.
@@ -81,7 +82,7 @@ The named revision must currently be in `inactive` state. Requires an admin toke
 mnm versions retire old-source --revision 3
 ```
 
-A background sweep job retires stale and aborted versions after a grace window. Retirement is a one-way operation.
+A background sweep job hard-deletes stale versions that have aged out of their source's `retention_count` window, and separately hard-deletes `aborted` versions, each after its own grace window. Retirement is a one-way operation.
 
 ## Rate-limit overrides
 
