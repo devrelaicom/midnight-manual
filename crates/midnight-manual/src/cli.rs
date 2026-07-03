@@ -321,7 +321,7 @@ pub async fn run() -> Result<()> {
         Command::Tokenlimits(args) => {
             commands::tokenlimits::run(args, cli.server.as_deref(), cli.json).await
         }
-        Command::Manifest(args) => commands::manifest::run(args).await,
+        Command::Manifest(args) => commands::manifest::run(args, cli.json).await,
         Command::Chunks(args) => commands::chunks::run(args, cli.server.as_deref(), cli.json).await,
         Command::Documents(args) => {
             commands::documents::run(args, cli.server.as_deref(), cli.json).await
