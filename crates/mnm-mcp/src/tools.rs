@@ -26,6 +26,7 @@ use std::sync::Arc;
 
 use mnm_core::scoring_policy::ScoringPolicy;
 use mnm_embedding::{client as embed_client, contextualized, reranker, voyage};
+use mnm_telemetry::events::ParamAlias;
 use serde_json::json;
 use uuid::Uuid;
 
@@ -51,7 +52,7 @@ pub fn list() -> ToolsListResult {
             ToolDescription {
                 name: "search",
                 description:
-                    "Search the Midnight Network documentation and code corpus (docs, SDK references, Compact language material, code examples). Returns ranked excerpts with confidence scores and source attribution. Use it whenever you need facts about Midnight, Compact, or the Midnight SDK — even for things you think you already know, since model training data on Midnight is frequently stale; verify here first. Code-heavy queries (function names, API signatures, error strings from code) benefit from code_mode=exclusive; conceptual queries should keep the default. For multi-query strategies, facet filters, or rerank control, use advanced_search. In results, symbol_path is a flat list of symbol names (their order is not a containment hierarchy); the get_chunks family and get_document_chunks return the richer structured {kind, name, path} segments (path = ancestor symbol names, present for nested symbols).",
+                    "Search the Midnight Network documentation and code corpus (docs, SDK references, Compact language material, code examples). Returns ranked excerpts with confidence scores and source attribution. Use it whenever you need facts about Midnight, Compact, or the Midnight SDK — even for things you think you already know, since model training data on Midnight is frequently stale; verify here first. Code-heavy queries (function names, API signatures, error strings from code) benefit from code_mode=exclusive; conceptual queries should keep the default. For multi-query strategies, facet filters, or rerank control, use advanced_search. If 3 searches haven't found it, change strategy — broaden the query, switch mode, or switch to advanced_search for facet filters — rather than rephrasing the same query. In results, symbol_path is a flat list of symbol names (their order is not a containment hierarchy); the get_chunks family and get_document_chunks return the richer structured {kind, name, path} segments (path = ancestor symbol names, present for nested symbols).",
                 input_schema: search_input_schema(),
                 output_schema: Some(crate::schemas::search_output_schema()),
                 annotations: ToolAnnotations::read_only().with_title("Search corpus"),
@@ -59,7 +60,7 @@ pub fn list() -> ToolsListResult {
             ToolDescription {
                 name: "advanced_search",
                 description:
-                    "Full-control search over the Midnight corpus: fuse multiple queries (HyDE, expansion, step-back), restrict by facet filters, switch retrieval mode, and toggle reranking. Use when basic search comes up short or when the midnight-advanced-search skill prescribes a pattern. Call facets first to discover valid filter values. Result-shaping knobs: sort_by picks the ordering (trust = most authoritative first, score = cheap recon; a local rerank overrides it), min_confidence drops weak matches at the source, response_format=concise trims the scores block (bodies stay), rerank_model=rerank-2.5-lite for cheaper reranking. In results, symbol_path is a flat list of symbol names (their order is not a containment hierarchy); the get_chunks family and get_document_chunks return the richer structured {kind, name, path} segments (path = ancestor symbol names, present for nested symbols).",
+                    "Full-control search over the Midnight corpus: fuse multiple queries (HyDE, expansion, step-back), restrict by facet filters, switch retrieval mode, and toggle reranking. Use when basic search comes up short or when the midnight-advanced-search skill prescribes a pattern. Call facets first to discover valid filter values. Result-shaping knobs: sort_by picks the ordering (trust = most authoritative first, score = cheap recon; a local rerank overrides it), min_confidence drops weak matches at the source, response_format=concise trims the scores block (bodies stay), rerank_model=rerank-2.5-lite for cheaper reranking. If 3 searches haven't found it, change strategy — broaden the query, switch mode, or drop filters — rather than rephrasing the same query. In results, symbol_path is a flat list of symbol names (their order is not a containment hierarchy); the get_chunks family and get_document_chunks return the richer structured {kind, name, path} segments (path = ancestor symbol names, present for nested symbols).",
                 input_schema: advanced_search_input_schema(),
                 output_schema: Some(crate::schemas::search_output_schema()),
                 annotations: ToolAnnotations::read_only().with_title("Advanced search"),
@@ -1377,6 +1378,127 @@ pub fn parse_advanced_search_args(v: &serde_json::Value) -> Result<ParsedSearchA
     })
 }
 
+/// Rewrite the *unambiguous*, mechanical parameter-alias mistakes an agent is
+/// likely to make, in place, BEFORE the per-tool validators run (issue #143).
+///
+/// LLM clients frequently echo phrasing from a tool's prose ("the query", "the
+/// chunk_id") instead of the literal schema key, or pass one-item collections
+/// where a scalar belongs (and vice versa). Each such slip currently costs a
+/// full round-trip: the validator rejects it, the agent re-reads, retries. This
+/// pass fixes only the rewrites with a single unambiguous intent:
+///
+/// - `advanced_search`: scalar `query` → one-element `queries` array.
+/// - `search`: one-element `queries` array → scalar `query`.
+/// - chunk tools (`get_chunk_next/prev/neighbors/parents`, `get_chunks`):
+///   `chunk_id` → the canonical `id` (their `id` genuinely is a chunk id).
+/// - document tools (`get_document`, `get_document_chunks`): `document_id` → the
+///   canonical `id` (their `id` is a DOCUMENT id; that is the field search
+///   results actually carry, so it is the likely slip — `chunk_id` is NOT aliased
+///   here because a chunk id sent to a document endpoint is simply wrong).
+/// - `get_chunks`: a single `id` string → one-element `ids` array (and, since
+///   the rename runs first, a single `chunk_id` string composes through to `ids`).
+///
+/// Ambiguity is deliberately left for the validator to reject with its existing
+/// cross-pointing message. The load-bearing case: a *multi*-element `queries`
+/// passed to `search` is a tool-choice error (that request belongs on
+/// `advanced_search`), NOT a spelling slip — so it is never silently collapsed.
+/// Likewise, when both a canonical key and its alias are present, the alias is
+/// left untouched so the genuine conflict still surfaces.
+///
+/// Returns the list of aliases actually applied (usually 0 or 1; 2 only when a
+/// `get_chunks` `chunk_id` composes through the rename into `ids`) so the caller
+/// can log each rewrite to telemetry and tune the alias list from real traffic.
+#[must_use]
+pub fn rewrite_param_aliases(tool: &str, args: &mut serde_json::Value) -> Vec<ParamAlias> {
+    let Some(obj) = args.as_object_mut() else {
+        return Vec::new();
+    };
+    let mut applied = Vec::new();
+    match tool {
+        "advanced_search" => {
+            // `query` (string) → `queries: [query]`, but only when `queries` is
+            // absent. Both present is a real conflict → leave `query` so the
+            // validator rejects it with the "pass queries" pointer.
+            if !obj.contains_key("queries")
+                && matches!(obj.get("query"), Some(serde_json::Value::String(_)))
+            {
+                let q = obj.remove("query").expect("checked present");
+                obj.insert("queries".to_owned(), serde_json::Value::Array(vec![q]));
+                applied.push(ParamAlias::QueryToQueries);
+            }
+        }
+        "search" => {
+            // `queries: [one string]` → `query`, only when `query` is absent AND
+            // the array holds exactly one string. A multi-element array is a
+            // tool-choice mistake (belongs on `advanced_search`), so it is left
+            // for the validator's cross-pointer reject — never silently merged.
+            let one_string_query = !obj.contains_key("query")
+                && obj
+                    .get("queries")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|a| a.len() == 1 && a[0].is_string());
+            if one_string_query {
+                let Some(serde_json::Value::Array(mut arr)) = obj.remove("queries") else {
+                    unreachable!("checked as one-element string array above");
+                };
+                obj.insert("query".to_owned(), arr.remove(0));
+                applied.push(ParamAlias::QueriesToQuery);
+            }
+        }
+        // `get_chunks` accepts BOTH the `chunk_id` rename and the `id` → `ids`
+        // promotion; running the rename first lets a single `chunk_id` string
+        // compose all the way through to a one-element `ids` array. The promotion
+        // is gated on `chunk_id` being absent (it was consumed by the rename, or
+        // was never there), so a genuine `{chunk_id, id}` conflict is left to
+        // reject rather than silently resolving to `id`.
+        "get_chunks" => {
+            if !obj.contains_key("id")
+                && !obj.contains_key("ids")
+                && matches!(obj.get("chunk_id"), Some(serde_json::Value::String(_)))
+            {
+                let v = obj.remove("chunk_id").expect("checked present");
+                obj.insert("id".to_owned(), v);
+                applied.push(ParamAlias::ChunkIdToId);
+            }
+            if !obj.contains_key("ids")
+                && !obj.contains_key("chunk_id")
+                && matches!(obj.get("id"), Some(serde_json::Value::String(_)))
+            {
+                let v = obj.remove("id").expect("checked present");
+                obj.insert("ids".to_owned(), serde_json::Value::Array(vec![v]));
+                applied.push(ParamAlias::IdToIds);
+            }
+        }
+        // Single-id CHUNK tools: their `id` genuinely IS a chunk id, so a
+        // `chunk_id` slip renames to `id`.
+        "get_chunk_next" | "get_chunk_prev" | "get_chunk_neighbors" | "get_chunk_parents" => {
+            if !obj.contains_key("id")
+                && matches!(obj.get("chunk_id"), Some(serde_json::Value::String(_)))
+            {
+                let v = obj.remove("chunk_id").expect("checked present");
+                obj.insert("id".to_owned(), v);
+                applied.push(ParamAlias::ChunkIdToId);
+            }
+        }
+        // Single-id DOCUMENT tools: their `id` is a DOCUMENT id. Search results
+        // carry the field as `document_id`, so THAT is the likely slip — copying
+        // it into `get_document` yields `{document_id:…}`. A `chunk_id` here would
+        // be semantically wrong (a chunk id sent to a document endpoint 404s), so
+        // it is NOT aliased.
+        "get_document" | "get_document_chunks" => {
+            if !obj.contains_key("id")
+                && matches!(obj.get("document_id"), Some(serde_json::Value::String(_)))
+            {
+                let v = obj.remove("document_id").expect("checked present");
+                obj.insert("id".to_owned(), v);
+                applied.push(ParamAlias::DocumentIdToId);
+            }
+        }
+        _ => {}
+    }
+    applied
+}
+
 /// Parse the optional `sort_by` ordering key. Rejects any value outside the four
 /// documented keys (and any non-string) with a message that names them, so a
 /// typo never silently degrades to the server default. Returns a `'static`
@@ -2337,6 +2459,133 @@ mod tests {
         assert!(parse_advanced_search_args(&json!({"queries": []})).is_err());
         assert!(parse_advanced_search_args(&json!({"queries": [""]})).is_err());
         assert!(parse_advanced_search_args(&json!({"queries": [5]})).is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // rewrite_param_aliases (#143): mechanical, unambiguous slips only.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn rewrite_advanced_scalar_query_becomes_one_element_queries() {
+        let mut v = json!({ "query": "hello", "mode": "hybrid" });
+        let applied = rewrite_param_aliases("advanced_search", &mut v);
+        assert_eq!(applied, vec![ParamAlias::QueryToQueries]);
+        assert_eq!(v["queries"], json!(["hello"]));
+        assert!(v.get("query").is_none(), "the scalar key is consumed");
+        // The rewritten args now parse cleanly.
+        assert!(parse_advanced_search_args(&v).is_ok());
+    }
+
+    #[test]
+    fn rewrite_search_one_element_queries_becomes_scalar_query() {
+        let mut v = json!({ "queries": ["hello"], "mode": "fts" });
+        let applied = rewrite_param_aliases("search", &mut v);
+        assert_eq!(applied, vec![ParamAlias::QueriesToQuery]);
+        assert_eq!(v["query"], json!("hello"));
+        assert!(v.get("queries").is_none());
+        assert!(parse_basic_search_args(&v).is_ok());
+    }
+
+    #[test]
+    fn rewrite_search_multi_element_queries_is_left_for_the_reject() {
+        // Ambiguous: a multi-query request belongs on advanced_search. The alias
+        // pass must NOT collapse it — the validator's cross-pointer reject fires.
+        let mut v = json!({ "queries": ["a", "b"] });
+        let applied = rewrite_param_aliases("search", &mut v);
+        assert!(applied.is_empty(), "multi-element queries must not be rewritten");
+        assert_eq!(v["queries"], json!(["a", "b"]), "left untouched");
+        let err = parse_basic_search_args(&v).unwrap_err();
+        assert!(err.contains("advanced_search"), "reject still points at advanced_search: {err}");
+    }
+
+    #[test]
+    fn rewrite_conflicting_keys_are_left_for_the_reject() {
+        // Both canonical + alias present is a genuine conflict, not a slip.
+        let mut adv = json!({ "query": "a", "queries": ["b"] });
+        assert!(rewrite_param_aliases("advanced_search", &mut adv).is_empty());
+        assert!(parse_advanced_search_args(&adv).is_err());
+
+        let mut basic = json!({ "query": "a", "queries": ["b"] });
+        assert!(rewrite_param_aliases("search", &mut basic).is_empty());
+        assert!(parse_basic_search_args(&basic).is_err());
+    }
+
+    #[test]
+    fn rewrite_chunk_tools_rename_chunk_id_to_id() {
+        // Chunk tools: their `id` genuinely IS a chunk id → chunk_id renames.
+        for tool in [
+            "get_chunk_next",
+            "get_chunk_prev",
+            "get_chunk_neighbors",
+            "get_chunk_parents",
+        ] {
+            let mut v = json!({ "chunk_id": "abc" });
+            let applied = rewrite_param_aliases(tool, &mut v);
+            assert_eq!(applied, vec![ParamAlias::ChunkIdToId], "{tool}");
+            assert_eq!(v["id"], json!("abc"), "{tool}");
+            assert!(v.get("chunk_id").is_none(), "{tool}");
+        }
+    }
+
+    #[test]
+    fn rewrite_document_tools_rename_document_id_to_id() {
+        // Document tools: their `id` is a DOCUMENT id → document_id renames, and a
+        // chunk_id is NOT aliased (a chunk id sent to a document endpoint is wrong).
+        for tool in ["get_document", "get_document_chunks"] {
+            let mut v = json!({ "document_id": "d1" });
+            let applied = rewrite_param_aliases(tool, &mut v);
+            assert_eq!(applied, vec![ParamAlias::DocumentIdToId], "{tool}");
+            assert_eq!(v["id"], json!("d1"), "{tool}");
+            assert!(v.get("document_id").is_none(), "{tool}");
+
+            // chunk_id is left untouched (no rename) for document tools.
+            let mut w = json!({ "chunk_id": "c1" });
+            assert!(rewrite_param_aliases(tool, &mut w).is_empty(), "{tool}");
+            assert_eq!(w["chunk_id"], json!("c1"), "{tool}");
+            assert!(w.get("id").is_none(), "{tool}");
+        }
+    }
+
+    #[test]
+    fn rewrite_get_chunks_conflicting_chunk_id_and_id_is_left_for_the_reject() {
+        // {chunk_id, id} is a genuine conflict: the rename is skipped (id present)
+        // and the id→ids promotion is gated off (chunk_id present), so nothing is
+        // silently resolved and the validator rejects the missing `ids`.
+        let mut v = json!({ "chunk_id": "a", "id": "b" });
+        assert!(rewrite_param_aliases("get_chunks", &mut v).is_empty());
+        assert_eq!(v, json!({ "chunk_id": "a", "id": "b" }), "left untouched");
+    }
+
+    #[test]
+    fn rewrite_get_chunks_single_id_becomes_ids_array() {
+        let mut v = json!({ "id": "u1" });
+        let applied = rewrite_param_aliases("get_chunks", &mut v);
+        assert_eq!(applied, vec![ParamAlias::IdToIds]);
+        assert_eq!(v["ids"], json!(["u1"]));
+    }
+
+    #[test]
+    fn rewrite_get_chunks_chunk_id_composes_through_to_ids() {
+        // chunk_id → id (rename) → ids (promotion): both aliases fire, in order.
+        let mut v = json!({ "chunk_id": "u1" });
+        let applied = rewrite_param_aliases("get_chunks", &mut v);
+        assert_eq!(applied, vec![ParamAlias::ChunkIdToId, ParamAlias::IdToIds]);
+        assert_eq!(v["ids"], json!(["u1"]));
+        assert!(v.get("id").is_none() && v.get("chunk_id").is_none());
+    }
+
+    #[test]
+    fn rewrite_is_a_noop_for_correct_and_non_string_inputs() {
+        // Already-correct args: nothing to do.
+        let mut ok = json!({ "queries": ["a"] });
+        assert!(rewrite_param_aliases("advanced_search", &mut ok).is_empty());
+        // Non-string query on advanced_search is left for the validator.
+        let mut bad = json!({ "query": 5 });
+        assert!(rewrite_param_aliases("advanced_search", &mut bad).is_empty());
+        // Unknown tool / non-object args never panic.
+        let mut arr = json!([1, 2, 3]);
+        assert!(rewrite_param_aliases("search", &mut arr).is_empty());
+        assert!(rewrite_param_aliases("unknown_tool", &mut json!({ "query": "x" })).is_empty());
     }
 
     #[test]

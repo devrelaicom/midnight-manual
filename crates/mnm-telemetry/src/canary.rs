@@ -122,5 +122,18 @@ mod tests {
         );
     }
 
+    #[test]
+    fn mcp_param_alias_rewrite_is_clean() {
+        // Two closed enums only (tool + alias) — structurally leak-proof, but
+        // pin it against the corpus so a future field can't slip a query in.
+        assert_no_forbidden(
+            &McpParamAliasRewrite {
+                tool_name: McpToolName::AdvancedSearch,
+                alias: ParamAlias::QueryToQueries,
+            },
+            FORBIDDEN_LIST,
+        );
+    }
+
     const FORBIDDEN_LIST: &[&str] = super::FORBIDDEN;
 }

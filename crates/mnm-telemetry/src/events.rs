@@ -75,6 +75,27 @@ pub enum McpToolName {
     InstallSkill,
 }
 
+/// Which mechanical parameter-alias rewrite the MCP server applied (issue #143).
+///
+/// A closed enum — never a free-form key or value — so the alias-tuning
+/// telemetry stays structurally leak-proof.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ParamAlias {
+    /// `advanced_search`: a scalar `query` string was promoted to a one-element
+    /// `queries` array.
+    QueryToQueries,
+    /// `search`: a one-element `queries` array was collapsed to a scalar `query`.
+    QueriesToQuery,
+    /// A chunk tool's `chunk_id` was renamed to the canonical `id`.
+    ChunkIdToId,
+    /// A document tool's `document_id` was renamed to the canonical `id`.
+    DocumentIdToId,
+    /// `get_chunks`: a single `id` string was promoted to a one-element `ids`
+    /// array.
+    IdToIds,
+}
+
 /// Closed enum of CLI subcommand names. Adding a new noun-first subcommand
 /// requires a bump here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
@@ -185,6 +206,23 @@ pub struct Rerank {
 impl Event for Rerank {
     fn name(&self) -> Cow<'_, str> {
         "rerank".into()
+    }
+}
+
+/// One pre-validation parameter-alias rewrite was applied to a tool call.
+///
+/// Emitted (issue #143) so the unambiguous-alias list can be tuned from real
+/// traffic. Carries only the tool and the closed alias enum — no argument text.
+#[derive(Debug, Clone, Serialize)]
+pub struct McpParamAliasRewrite {
+    /// The tool whose arguments were rewritten.
+    pub tool_name: McpToolName,
+    /// Which mechanical alias fired.
+    pub alias: ParamAlias,
+}
+impl Event for McpParamAliasRewrite {
+    fn name(&self) -> Cow<'_, str> {
+        "mcp_param_alias_rewrite".into()
     }
 }
 
@@ -301,6 +339,14 @@ mod tests {
             "mcp_startup"
         );
         assert_eq!(McpShutdown { uptime_s: 1, tools_served: 2 }.name(), "mcp_shutdown");
+        assert_eq!(
+            McpParamAliasRewrite {
+                tool_name: McpToolName::Search,
+                alias: ParamAlias::QueriesToQuery,
+            }
+            .name(),
+            "mcp_param_alias_rewrite"
+        );
         assert_eq!(
             PullModels {
                 embedder_downloaded: false,

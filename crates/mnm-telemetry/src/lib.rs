@@ -15,8 +15,8 @@ pub use gauge_telemetry::common::Surface;
 pub use gauge_telemetry::{Flusher, Telemetry};
 
 pub use events::{
-    CliCommand, CliCommandName, IngestComplete, McpShutdown, McpStartup, McpToolCall, McpToolName,
-    ModelState, Outcome, PullModels, Rerank,
+    CliCommand, CliCommandName, IngestComplete, McpParamAliasRewrite, McpShutdown, McpStartup,
+    McpToolCall, McpToolName, ModelState, Outcome, ParamAlias, PullModels, Rerank,
 };
 
 /// Crate version, stamped at build time.
