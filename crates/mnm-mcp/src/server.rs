@@ -198,6 +198,7 @@ async fn handle_request(req: crate::protocol::Request, state: &ServerState) -> V
                     name: "midnight-manual-mcp",
                     version: crate::VERSION,
                 },
+                instructions: Some(crate::protocol::SERVER_INSTRUCTIONS),
             })
             .expect("serialize InitializeResult"),
         ),
@@ -992,8 +993,46 @@ mod tests {
                 prompts: PromptsCapability { list_changed: false },
             },
             server_info: ServerInfo { name: "x", version: "0" },
+            instructions: Some(crate::protocol::SERVER_INSTRUCTIONS),
         };
         let v = serde_json::to_value(&init).unwrap();
         assert_eq!(v["capabilities"]["prompts"]["listChanged"], false);
+    }
+
+    /// Issue #138: the REAL `initialize` handler must set the MCP `instructions`
+    /// field (server.rs, the `"initialize"` branch). Because that field is
+    /// `skip_serializing_if = Option::is_none`, a regression to `None` would drop
+    /// `instructions` from the wire — the exact #138 bug — while every
+    /// hand-constructed `InitializeResult` assertion stayed green. Driving
+    /// `handle_message` end-to-end is what catches it: flip the handler's
+    /// `instructions:` to `None` and this turns red.
+    ///
+    /// Hermetic under the `VOYAGE_API_KEY=` gate (same rationale as the status
+    /// dispatch test): `initialize` touches no cloud/Voyage path.
+    #[tokio::test]
+    async fn initialize_dispatch_sends_instructions() {
+        let state = test_state(mnm_core::injection::SecurityLevel::Moderate);
+        let req = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {}
+        });
+        let body = serde_json::to_vec(&req).expect("serialize initialize");
+        let out = handle_message(&body, &state)
+            .await
+            .expect("initialize yields a response");
+        let resp: serde_json::Value = serde_json::from_slice(&out).expect("parse response");
+
+        // The field must be PRESENT on the wire (skip_serializing_if would omit
+        // it if the handler regressed to None) and carry the cold-start guidance.
+        let instructions = resp
+            .pointer("/result/instructions")
+            .and_then(serde_json::Value::as_str)
+            .expect("initialize response carries /result/instructions on the wire");
+        assert!(
+            instructions.contains("corpus") && instructions.contains("install_skill"),
+            "instructions must reach the wire with the cold-start guidance: {resp}"
+        );
     }
 }

@@ -1275,18 +1275,32 @@ pub fn project_facets(env: Value) -> ToolOutcome {
         .collect();
     // `facets({facet})` is literal guidance for the calling agent (pass a
     // facet name), not a formatting placeholder.
+    // Cold-start corpus overview (issue #139): the no-arg response carries a
+    // compact `corpus` block. Looked up once here and used twice below — called
+    // out in the summary AND passed through verbatim into structuredContent (so
+    // agents get the "what exists here" affordance in both the prose and the
+    // fenced view).
+    let corpus = env.get("corpus").cloned();
     #[allow(clippy::literal_string_with_formatting_args)]
-    let summary = format!(
+    let mut summary = format!(
         "{} filter dimensions for advanced_search: {}. Open-set dimensions show samples — drill in with facets({{facet}}).",
         keys.len(),
         keys.join(", ")
     );
-    let trimmed = json!({ "dimensions": dims.iter().map(|f| json!({
+    if corpus.is_some() {
+        summary.push_str(
+            " Includes a `corpus` overview: source counts by kind/attribution, top languages, version coverage, freshness, and sample tags.",
+        );
+    }
+    let mut trimmed = json!({ "dimensions": dims.iter().map(|f| json!({
         "key": f.get("key").cloned().unwrap_or(Value::Null),
         "type": f.get("type").cloned().unwrap_or(Value::Null),
         "values": f.get("values").cloned().unwrap_or(Value::Null),
         "total": f.get("total").cloned().unwrap_or(Value::Null),
     })).collect::<Vec<_>>() });
+    if let Some(corpus) = corpus {
+        trimmed["corpus"] = corpus;
+    }
     // Concrete example from real corpus data: first dimension that has a
     // non-empty values array.
     let mut actions = Vec::new();

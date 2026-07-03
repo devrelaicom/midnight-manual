@@ -51,7 +51,7 @@ pub fn list() -> ToolsListResult {
             ToolDescription {
                 name: "search",
                 description:
-                    "Search the Midnight Network documentation and code corpus (docs, SDK references, Compact language material, code examples). Returns ranked excerpts with confidence scores and source attribution. Use it whenever you need facts about Midnight, Compact, or the Midnight SDK. Code-heavy queries (function names, API signatures, error strings from code) benefit from code_mode=exclusive; conceptual queries should keep the default. For multi-query strategies, facet filters, or rerank control, use advanced_search. In results, symbol_path is a flat list of symbol names (their order is not a containment hierarchy); the get_chunks family and get_document_chunks return the richer structured {kind, name, path} segments (path = ancestor symbol names, present for nested symbols).",
+                    "Search the Midnight Network documentation and code corpus (docs, SDK references, Compact language material, code examples). Returns ranked excerpts with confidence scores and source attribution. Use it whenever you need facts about Midnight, Compact, or the Midnight SDK — even for things you think you already know, since model training data on Midnight is frequently stale; verify here first. Code-heavy queries (function names, API signatures, error strings from code) benefit from code_mode=exclusive; conceptual queries should keep the default. For multi-query strategies, facet filters, or rerank control, use advanced_search. In results, symbol_path is a flat list of symbol names (their order is not a containment hierarchy); the get_chunks family and get_document_chunks return the richer structured {kind, name, path} segments (path = ancestor symbol names, present for nested symbols).",
                 input_schema: search_input_schema(),
                 output_schema: Some(crate::schemas::search_output_schema()),
                 annotations: ToolAnnotations::read_only().with_title("Search corpus"),
@@ -151,7 +151,7 @@ pub fn list() -> ToolsListResult {
             ToolDescription {
                 name: "facets",
                 description:
-                    "Discover the filter dimensions available to advanced_search and the values present in the corpus. Call without arguments for an overview; pass a facet name to page through all values of one dimension.",
+                    "Discover the filter dimensions available to advanced_search and the values present in the corpus. Call with no args for the corpus overview and filter dimensions — the response carries a compact `corpus` block (source counts by kind/attribution, top languages, version coverage, freshness, sample tags) for cold starts, plus the filter dimensions; pass a facet name to page through all values of one dimension.",
                 input_schema: json!({
                     "type": "object",
                     "properties": {

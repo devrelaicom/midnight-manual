@@ -367,6 +367,50 @@ pub fn facets_output_schema() -> Value {
                 "required": ["key"],
                 "additionalProperties": true
             } },
+            // Cold-start corpus overview (issue #139): a compact "what exists
+            // here" block, present ONLY in the no-arg overview response. Every
+            // list is server-capped to keep the block small.
+            "corpus": {
+                "type": "object",
+                "description": "Cold-start corpus overview (no-arg overview response only). A compact map of what the corpus contains — not an export; all lists are capped.",
+                "properties": {
+                    "sources": {
+                        "type": "object",
+                        "description": "Source composition. by_kind and by_attribution each sum to total.",
+                        "properties": {
+                            "total": { "type": "integer", "minimum": 0, "description": "Non-retired source count." },
+                            "by_kind": { "type": "object", "additionalProperties": { "type": "integer" },
+                                "description": "Source count keyed by source kind (docs_site/code_repo/standalone/mixed)." },
+                            "by_attribution": { "type": "object", "additionalProperties": { "type": "integer" },
+                                "description": "Source count keyed by representative (best) document attribution (foundation/partner/third_party/community/unknown)." }
+                        },
+                        "additionalProperties": true
+                    },
+                    "languages": { "type": "array", "items": { "type": "string" },
+                        "description": "Top languages by document count (capped)." },
+                    "version_coverage": { "type": "array", "items": {
+                        "type": "object",
+                        "properties": {
+                            "target": { "type": "string", "description": "Declared language/SDK target name (e.g. compact)." },
+                            "declared_constraints": { "type": "array", "items": { "type": "string" },
+                                "description": "Declared version constraints for this target, usable as advanced_search version_satisfies values (capped)." }
+                        },
+                        "required": ["target", "declared_constraints"],
+                        "additionalProperties": true
+                    }, "description": "Declared version constraints per target (capped)." },
+                    "freshness": {
+                        "type": "object",
+                        "properties": {
+                            "oldest_ingested_at": { "type": ["string", "null"], "description": "RFC3339; null when the corpus is empty." },
+                            "newest_ingested_at": { "type": ["string", "null"], "description": "RFC3339; null when the corpus is empty." }
+                        },
+                        "additionalProperties": true
+                    },
+                    "tags_sample": { "type": "array", "items": { "type": "string" },
+                        "description": "Sample of the most frequent tags (capped)." }
+                },
+                "additionalProperties": true
+            },
             // Drill-down shape.
             "facet": { "type": "string", "description": "The drilled-into dimension (drill-down responses only)." },
             "values": { "type": "array", "items": { "type": "string" },
