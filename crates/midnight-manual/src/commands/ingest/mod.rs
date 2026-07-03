@@ -37,6 +37,11 @@ pub struct Args {
 #[derive(Debug, Subcommand)]
 pub enum IngestCmd {
     /// Compute the ingest plan locally without starting a server-side run.
+    ///
+    /// Always hidden from `--help` (statically `hide = true`). Unlike the parent
+    /// `ingest` command — which `MIDNIGHT_MANUAL_SHOW_ADMIN_CMDS=1` un-hides via
+    /// [`crate::cli`]'s `ADMIN_SUBCOMMANDS` — this nested variant stays hidden
+    /// regardless of the toggle; it still runs when called by name.
     #[command(hide = true)]
     Plan(plan::Args),
     /// Execute an ingest against the cloud server.

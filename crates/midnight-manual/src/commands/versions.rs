@@ -5,10 +5,14 @@
 //! - `list <slug>` — `GET /v1/sources/:slug/versions`.
 //! - `show <slug> <revision>` — `GET /v1/sources/:slug/versions/:revision`.
 //!
-//! Admin sub-subcommands (hidden from `--help` by default per D23; still
-//! execute when called by name). All three resolve an admin bearer from
-//! `auth.toml`; if no token is available the command exits cleanly with a
-//! "run `mnm login` first" error.
+//! Admin sub-subcommands are **always** hidden from `--help` — each is
+//! statically `#[command(hide = true)]`. `MIDNIGHT_MANUAL_SHOW_ADMIN_CMDS=1`
+//! does NOT reveal them: that toggle only un-hides the top-level admin commands
+//! listed in [`crate::cli`]'s `ADMIN_SUBCOMMANDS` (and `versions` is not one of
+//! them — it stays visible for its public `list` / `show` reads), and the hide
+//! gate never recurses into nested variants. They still execute when called by
+//! name. All three resolve an admin bearer from `auth.toml`; if no token is
+//! available the command exits cleanly with a "run `mnm login` first" error.
 //!
 //! - `promote <slug> --revision N` — `POST /v1/admin/sources/:slug/versions/:N/promote`.
 //! - `rollback <slug>` — convenience: looks up the most recent prior

@@ -386,8 +386,26 @@ top-level command groups:
   validates a `hierarchy.yaml`. No server contact required, so these
   can be used against any docs source — including repos you don't
   have write access to.
-- `mnm ingest {plan,run}` — talks to the server. `plan` is a
-  dry-run; `run` does the real ingest.
+- `mnm ingest {plan,run}` — talks to the server. There are three
+  preview/apply modes, and they are not interchangeable:
+  - `mnm ingest plan` — a cheap **local** preview of the carry-forward
+    decision. Walks the manifest with the walker's *default* ceilings (it has
+    no `--chunk-tokens` / `--max-file-size` / `--max-line-bytes` flags) and,
+    when an admin token is available, reports new-vs-carried counts against the
+    server's prior inventory. Without a token it degrades to reporting every
+    document as "new" (a worst-case cost estimate). It also chunks every file
+    with the Markdown chunker — it does no per-language document-kind detection
+    — and ignores code-embedding carry, so for any source containing code both
+    its chunk counts and its new-vs-carried split are only approximate. Never
+    writes.
+  - `mnm ingest run --dry-run` — runs the **full** `run` configuration (every
+    tuning flag, real document-kind detection, code-embedding awareness) to
+    produce accurate chunk counts, but writes nothing and needs no auth or
+    server reachability. Because it skips the prior-inventory fetch it reports
+    every document as "new", so use it to preview *what gets chunked*, not the
+    carry split.
+  - `mnm ingest run` — the real ingest: starts a building version, embeds and
+    uploads every document, then finalizes it to `active`.
 
 > **Model-migration note.** If you ever update the active embedding model,
 > every source must be re-ingested before it returns hits under the new model

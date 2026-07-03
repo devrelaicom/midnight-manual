@@ -316,8 +316,6 @@ async fn code_ingest_smoke_persists_symbol_paths_and_packages() {
         batch_size: 50,
         voyage_timeout_secs: None,
         chunk_tokens: 400,
-        include: vec![],
-        exclude: vec![],
         respect_gitignore: false,
         disable_default_ignore_list: false,
         strict: false,

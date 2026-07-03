@@ -5,10 +5,14 @@
 //! - `list`  — list active sources (anonymous read of `GET /v1/sources`).
 //! - `show <slug>` — fetch one source (anonymous read of `GET /v1/sources/:slug`).
 //!
-//! Admin sub-subcommands (hidden from `--help` by default per D23 unless
-//! `MIDNIGHT_MANUAL_SHOW_ADMIN_CMDS=1`; they still execute when called by
-//! name). All four require an admin bearer in `auth.toml`; if none is
-//! available the command exits with a clear "run `mnm login` first" error.
+//! Admin sub-subcommands are **always** hidden from `--help` — each is
+//! statically `#[command(hide = true)]`. `MIDNIGHT_MANUAL_SHOW_ADMIN_CMDS=1`
+//! does NOT reveal them: that toggle only un-hides the top-level admin commands
+//! listed in [`crate::cli`]'s `ADMIN_SUBCOMMANDS` (and `sources` is not one of
+//! them — it stays visible for its public `list` / `show` reads), and the hide
+//! gate never recurses into nested variants. They still execute when called by
+//! name. All four require an admin bearer in `auth.toml`; if none is available
+//! the command exits with a clear "run `mnm login` first" error.
 //!
 //! - `create`   — `POST   /v1/admin/sources`.
 //! - `update`   — `PATCH  /v1/admin/sources/:slug`.
