@@ -48,7 +48,7 @@ mnm ingest run manifests/midnight/midnight-docs.yaml \
 also auto-creates the source on 404 with `--yes`, but explicit `sources create`
 is preferred so `kind`/`origin_url` are set.)
 
-## Index (122 sources)
+## Index (121 sources)
 
 > This index is generated from `sources.tsv` (slug / repo / branch / kind) and
 > each manifest's `root.provenance` (attribution / verified / trust). It is **not**
@@ -92,7 +92,6 @@ is preferred so `kind`/`origin_url` are set.)
 | midnight-cnight-to-dust-dapp | midnightntwrk/midnight-cnight-to-dust-dapp | main | mixed | Foundation | foundation | false | high |
 | midnight-zk | midnightntwrk/midnight-zk | main | code_repo | Foundation | foundation | true | high |
 | passport | midnightntwrk/passport | main | mixed | Foundation | foundation | false | high |
-| joacolinares-kyc-midnight | joacolinares/kyc-midnight | ramaJoaco | code_repo | Hackathon Winner | third_party | false | medium |
 
 ## Partner sources (`manifests/midnight/partner/`)
 
