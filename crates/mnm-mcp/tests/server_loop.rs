@@ -182,7 +182,7 @@ async fn tools_list_is_canonically_ordered() {
             "list_sources",
             "facets",
             "status",
-            "install_search_skill",
+            "install_skill",
         ]
     );
 }
@@ -240,8 +240,8 @@ async fn prompts_list_and_get_through_framed_io() {
         list_result
             .prompts
             .iter()
-            .any(|p| p.name == "add_advanced_search_skill"),
-        "prompts/list must include add_advanced_search_skill"
+            .any(|p| p.name == "add_midnight_skills"),
+        "prompts/list must include add_midnight_skills"
     );
 
     // ── prompts/get ──────────────────────────────────────────────────────────
@@ -250,7 +250,7 @@ async fn prompts_list_and_get_through_framed_io() {
         "id": 12,
         "method": "prompts/get",
         "params": {
-            "name": "add_advanced_search_skill",
+            "name": "add_midnight_skills",
             "arguments": { "harness": "cursor", "scope": "project" }
         }
     });
@@ -262,7 +262,7 @@ async fn prompts_list_and_get_through_framed_io() {
     assert_eq!(parsed["method"], "prompts/get");
 
     let get_params = protocol::PromptGetParams {
-        name: "add_advanced_search_skill".to_owned(),
+        name: "add_midnight_skills".to_owned(),
         arguments: serde_json::json!({ "harness": "cursor", "scope": "project" }),
     };
     let response = mnm_mcp::prompts::get(protocol::RequestId::Number(12), &get_params);
@@ -275,10 +275,7 @@ async fn prompts_list_and_get_through_framed_io() {
     let text = first["content"]["text"]
         .as_str()
         .expect("content.text must be a string");
-    assert!(
-        text.contains("install_search_skill"),
-        "instruction must reference install_search_skill"
-    );
+    assert!(text.contains("install_skill"), "instruction must reference install_skill");
 }
 
 #[tokio::test]

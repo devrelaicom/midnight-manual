@@ -24,6 +24,14 @@ pub enum SkillError {
         /// Comma-joined harness ids that were probed.
         probed: String,
     },
+    /// A `--skill` / `skill` selector named a skill that is not in the registry.
+    #[error("unknown skill `{name}` (known: {known})")]
+    UnknownSkill {
+        /// The unrecognized skill name.
+        name: String,
+        /// Comma-joined known skill names.
+        known: String,
+    },
     /// A filesystem write / read / delete failed.
     #[error("filesystem error at {path}: {source}")]
     Io {

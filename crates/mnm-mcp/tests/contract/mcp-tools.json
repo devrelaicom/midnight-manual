@@ -123,7 +123,7 @@
       "INSTALL_FAILED": {
         "description": "The skill file could not be written to the target harness directory.",
         "raised_by": [
-          "install_search_skill"
+          "install_skill"
         ],
         "retryable": true
       },
@@ -2413,9 +2413,9 @@
         "idempotentHint": true,
         "openWorldHint": false,
         "readOnlyHint": false,
-        "title": "Install search skill"
+        "title": "Install skill"
       },
-      "description": "Install (or update) the midnight-advanced-search skill — a retrieval playbook teaching effective corpus search patterns — into the user's AI harness(es). Use when search results are poor or the user asks for better search guidance.",
+      "description": "Install (or update) bundled Midnight skills — reusable playbooks that teach effective corpus search — into the user's AI harness(es). Pass `skill` to choose specific bundles by name; omit it to install every bundled skill. Use when search results are poor or the user asks for better guidance.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -2440,50 +2440,33 @@
               "project"
             ],
             "type": "string"
+          },
+          "skill": {
+            "description": "Skills to install, by name. Omit to install every bundled skill.",
+            "items": {
+              "enum": [
+                "midnight-advanced-search"
+              ],
+              "type": "string"
+            },
+            "type": "array"
           }
         },
         "type": "object"
       },
-      "name": "install_search_skill",
+      "name": "install_skill",
       "outputSchema": {
         "additionalProperties": true,
         "properties": {
           "detected": {
+            "description": "Harness ids written to (auto-detected, or forced via `harness`).",
             "items": {
               "type": "string"
             },
             "type": "array"
           },
-          "installed": {
-            "items": {
-              "additionalProperties": true,
-              "properties": {
-                "action": {
-                  "description": "What happened (e.g. created / updated).",
-                  "type": "string"
-                },
-                "harness": {
-                  "type": "string"
-                },
-                "path": {
-                  "type": "string"
-                },
-                "reload_step": {
-                  "type": "string"
-                },
-                "scope": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "harness",
-                "action"
-              ],
-              "type": "object"
-            },
-            "type": "array"
-          },
           "not_detected": {
+            "description": "Harness ids probed but not present (empty when `harness` was forced).",
             "items": {
               "type": "string"
             },
@@ -2496,8 +2479,51 @@
             ],
             "type": "string"
           },
-          "skill_name": {
-            "type": "string"
+          "skills": {
+            "items": {
+              "additionalProperties": true,
+              "properties": {
+                "installed": {
+                  "items": {
+                    "additionalProperties": true,
+                    "properties": {
+                      "action": {
+                        "description": "What happened (e.g. created / updated).",
+                        "type": "string"
+                      },
+                      "harness": {
+                        "type": "string"
+                      },
+                      "path": {
+                        "type": "string"
+                      },
+                      "reload_step": {
+                        "description": "User instruction to relay so the harness loads the skill (e.g. restart the session).",
+                        "type": "string"
+                      },
+                      "scope": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "harness",
+                      "action"
+                    ],
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "skill_name": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "skill_name",
+                "installed"
+              ],
+              "type": "object"
+            },
+            "type": "array"
           },
           "suggested_next_actions": {
             "items": {
@@ -2523,9 +2549,8 @@
           }
         },
         "required": [
-          "skill_name",
           "scope",
-          "installed",
+          "skills",
           "suggested_next_actions"
         ],
         "type": "object"

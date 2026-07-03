@@ -1,6 +1,6 @@
 [package]
 name = "mnm-skills"
-description = "Embedded advanced-search SKILL.md plus harness detection and idempotent install logic shared by the CLI and MCP server."
+description = "Registry of embedded Agent Skill bundles plus harness detection and idempotent install logic shared by the CLI and MCP server."
 
 version       = { workspace = true }
 edition       = { workspace = true }

@@ -446,7 +446,8 @@ pub struct SearchRenderOpts {
     pub reranker_used: Option<String>,
     /// `true` for advanced_search (keeps matched_queries; basic strips it).
     pub advanced: bool,
-    /// Whether the midnight-advanced-search skill is installed locally.
+    /// Whether the midnight-advanced-search skill (the nudge's specific target,
+    /// `mnm_skills::SEARCH_SKILL`) is installed locally.
     pub skill_installed: bool,
     /// Client-side prompt-injection guarding level (issue #103). Each result's
     /// `content` is guarded using its own attribution/verified trust metadata.
@@ -599,14 +600,21 @@ pub fn project_search(envelope: Value, opts: &SearchRenderOpts) -> ToolOutcome {
     // Low-candidate nudge: the corpus barely matched and the advanced-search
     // skill isn't installed — teach the agent how to get it.
     if total_candidates.unwrap_or(0) < FEW_CANDIDATES_THRESHOLD && !opts.skill_installed {
+        // The prose carries the exact argument the structured action uses, so an
+        // agent that follows the summary text (not the structured action)
+        // installs only the search skill — not all bundled skills — even once a
+        // second skill exists.
+        let nudge_args = json!({ "skill": [mnm_skills::SEARCH_SKILL] });
         summary.push_str(
             "\nFew candidates matched — the midnight-advanced-search skill teaches query \
-             patterns that find more (run install_search_skill).",
+             patterns that find more (run install_skill with ",
         );
+        summary.push_str(&nudge_args.to_string());
+        summary.push_str(").");
         suggested_next_actions.push(NextAction::call(
             "Install the midnight-advanced-search skill to learn higher-recall query patterns",
-            "install_search_skill",
-            json!({}),
+            "install_skill",
+            nudge_args,
         ));
     }
 
@@ -1396,44 +1404,81 @@ pub fn project_status(env: Value) -> ToolOutcome {
     ToolOutcome::new(summary, env, trimmed, actions)
 }
 
-/// `install_search_skill` (InstallReport as JSON).
+/// `install_skill` (InstallReport as JSON): a per-skill × per-harness install
+/// matrix. The report installs each selected skill (`skills[]`) into the shared
+/// set of `detected` harnesses.
 pub fn project_install(env: Value) -> ToolOutcome {
+    use std::collections::HashSet;
+
     let scope = env.get("scope").and_then(Value::as_str).unwrap_or("user");
-    let skill = env
-        .get("skill_name")
-        .and_then(Value::as_str)
-        .unwrap_or("midnight-advanced-search");
     let empty = vec![];
-    let installed = env
-        .get("installed")
+    let skills = env
+        .get("skills")
         .and_then(Value::as_array)
         .unwrap_or(&empty);
-    let names: Vec<&str> = installed
+
+    // Summary clauses: the skills touched and the harnesses they were written to
+    // (shared across skills; mirrors `detected`).
+    let skill_labels: Vec<String> = skills
         .iter()
-        .filter_map(|i| i.get("harness").and_then(Value::as_str))
+        .filter_map(|s| s.get("skill_name").and_then(Value::as_str))
+        .map(|n| format!("`{n}`"))
         .collect();
+    let harnesses: Vec<&str> = env
+        .get("detected")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let skills_clause = if skill_labels.is_empty() {
+        "no skills".to_owned()
+    } else {
+        skill_labels.join(", ")
+    };
+    let harness_clause = if harnesses.is_empty() {
+        "no harnesses".to_owned()
+    } else {
+        harnesses.join(", ")
+    };
     let summary = format!(
-        "Installed/updated `{skill}` for {} (scope: {scope}). The skill is NOT active yet — \
-         ask the user to restart their session or refresh their skills, then it will load automatically.",
-        if names.is_empty() { "no harnesses".to_owned() } else { names.join(", ") },
+        "Installed/updated {skills_clause} for {harness_clause} (scope: {scope}). NOT active yet — \
+         ask the user to restart their session or refresh their skills, then they load automatically.",
     );
+
+    // Trimmed: per-skill action matrix + detection. Full paths / reload steps
+    // stay in the raw structuredContent.
     let trimmed = json!({
-        "skill_name": skill, "scope": scope,
+        "scope": scope,
         "detected": env.get("detected").cloned().unwrap_or(json!([])),
         "not_detected": env.get("not_detected").cloned().unwrap_or(json!([])),
-        "actions": installed.iter().map(|i| json!({
-            "harness": i.get("harness").cloned().unwrap_or(Value::Null),
-            "action": i.get("action").cloned().unwrap_or(Value::Null),
+        "skills": skills.iter().map(|s| json!({
+            "skill_name": s.get("skill_name").cloned().unwrap_or(Value::Null),
+            "actions": s.get("installed").and_then(Value::as_array).map(|inst| inst.iter().map(|i| json!({
+                "harness": i.get("harness").cloned().unwrap_or(Value::Null),
+                "action": i.get("action").cloned().unwrap_or(Value::Null),
+            })).collect::<Vec<_>>()).unwrap_or_default(),
         })).collect::<Vec<_>>(),
     });
-    let actions = installed
-        .iter()
-        .filter_map(|i| {
-            let h = i.get("harness").and_then(Value::as_str)?;
-            let step = i.get("reload_step").and_then(Value::as_str)?;
-            Some(NextAction::user(format!("[{h}] Ask the user to: {step}")))
-        })
-        .collect();
+
+    // One reload action per harness (deduped across skills — the reload step is
+    // per harness, not per skill), in first-seen order.
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut actions = Vec::new();
+    for s in skills {
+        let Some(inst) = s.get("installed").and_then(Value::as_array) else {
+            continue;
+        };
+        for i in inst {
+            let (Some(h), Some(step)) = (
+                i.get("harness").and_then(Value::as_str),
+                i.get("reload_step").and_then(Value::as_str),
+            ) else {
+                continue;
+            };
+            if seen.insert(h.to_owned()) {
+                actions.push(NextAction::user(format!("[{h}] Ask the user to: {step}")));
+            }
+        }
+    }
     ToolOutcome::new(summary, env, trimmed, actions)
 }
 
@@ -1455,7 +1500,7 @@ pub enum ErrorKind {
     /// Authentication/authorization failed (HTTP 401/403). Not retryable
     /// without new credentials (401) or a higher tier (403).
     AuthFailed,
-    /// The `install_search_skill` tool failed to write the skill file.
+    /// The `install_skill` tool failed to write the skill file.
     InstallFailed,
 }
 
@@ -1668,12 +1713,23 @@ mod tests {
             ..basic_opts()
         };
         let o = super::project_search(envelope_with_candidates(2), &opts);
-        assert!(o.summary.contains("install_search_skill"), "summary must carry the nudge");
+        assert!(o.summary.contains("install_skill"), "summary must carry the nudge");
+        // Summary prose carries the same targeting payload as the structured action.
         assert!(
-            o.suggested_next_actions
-                .iter()
-                .any(|a| a.tool == Some("install_search_skill")),
-            "nudge must add an install_search_skill action"
+            o.summary
+                .contains("{\"skill\":[\"midnight-advanced-search\"]}"),
+            "nudge summary must name the search-skill argument: {}",
+            o.summary
+        );
+        let action = o
+            .suggested_next_actions
+            .iter()
+            .find(|a| a.tool == Some("install_skill"))
+            .expect("nudge must add an install_skill action");
+        assert_eq!(
+            action.arguments,
+            Some(json!({ "skill": ["midnight-advanced-search"] })),
+            "nudge must target the search skill specifically, not all skills"
         );
     }
 
@@ -1685,11 +1741,11 @@ mod tests {
         };
         let o = super::project_search(envelope_with_candidates(5), &opts);
         assert!(
-            !o.summary.contains("install_search_skill"),
+            !o.summary.contains("install_skill"),
             "exactly 5 candidates must NOT nudge (threshold is strict <5)"
         );
         let o = super::project_search(envelope_with_candidates(4), &opts);
-        assert!(o.summary.contains("install_search_skill"), "4 candidates must nudge");
+        assert!(o.summary.contains("install_skill"), "4 candidates must nudge");
     }
 
     #[test]
@@ -1705,7 +1761,7 @@ mod tests {
             meta.remove("total_candidates");
         }
         let o = super::project_search(env, &opts);
-        assert!(o.summary.contains("install_search_skill"));
+        assert!(o.summary.contains("install_skill"));
     }
 
     #[test]
@@ -1715,11 +1771,11 @@ mod tests {
             ..basic_opts()
         };
         let o = super::project_search(envelope_with_candidates(2), &opts);
-        assert!(!o.summary.contains("install_search_skill"));
+        assert!(!o.summary.contains("install_skill"));
         assert!(!o
             .suggested_next_actions
             .iter()
-            .any(|a| a.tool == Some("install_search_skill")));
+            .any(|a| a.tool == Some("install_skill")));
     }
 
     #[test]
@@ -1729,11 +1785,11 @@ mod tests {
             ..basic_opts()
         };
         let o = super::project_search(envelope_with_candidates(50), &opts);
-        assert!(!o.summary.contains("install_search_skill"));
+        assert!(!o.summary.contains("install_skill"));
         assert!(!o
             .suggested_next_actions
             .iter()
-            .any(|a| a.tool == Some("install_search_skill")));
+            .any(|a| a.tool == Some("install_skill")));
     }
 
     #[test]
@@ -1822,7 +1878,7 @@ mod tests {
         assert!(!o.summary.contains("corpus")); // no corpus model in the summary
                                                 // 3 candidates < 5 and the skill isn't installed → nudge only.
         assert_eq!(o.suggested_next_actions.len(), 1);
-        assert_eq!(o.suggested_next_actions[0].tool, Some("install_search_skill"));
+        assert_eq!(o.suggested_next_actions[0].tool, Some("install_skill"));
         let t = o.telemetry.unwrap();
         assert_eq!(t.result_count, 0);
         assert!(t.top_confidence_bucket.is_none());
@@ -2436,25 +2492,48 @@ mod tests {
         }
     }
 
-    /// An InstallReport env with two installed harnesses and one undetected.
+    /// An InstallReport env: one skill written into two harnesses, one undetected.
     fn install_env() -> Value {
         json!({
-            "skill_name": "midnight-advanced-search", "scope": "user",
-            "installed": [
-                { "harness": "claude-code", "scope": "user",
-                  "path": "/home/u/.claude/skills/midnight-advanced-search/SKILL.md",
-                  "action": "created", "reload_step": "restart Claude Code or run /skills reload" },
-                { "harness": "cursor", "scope": "user",
-                  "path": "/home/u/.cursor/skills/midnight-advanced-search/SKILL.md",
-                  "action": "updated", "reload_step": "restart Cursor" }
-            ],
+            "scope": "user",
             "detected": ["claude-code", "cursor"],
-            "not_detected": ["codex", "opencode"]
+            "not_detected": ["codex", "opencode"],
+            "skills": [{
+                "skill_name": "midnight-advanced-search",
+                "installed": [
+                    { "harness": "claude-code", "scope": "user",
+                      "path": "/home/u/.claude/skills/midnight-advanced-search/SKILL.md",
+                      "action": "created", "reload_step": "restart Claude Code or run /skills reload" },
+                    { "harness": "cursor", "scope": "user",
+                      "path": "/home/u/.cursor/skills/midnight-advanced-search/SKILL.md",
+                      "action": "updated", "reload_step": "restart Cursor" }
+                ]
+            }]
+        })
+    }
+
+    /// A two-skill env into the same single harness — exercises the per-skill
+    /// matrix and the per-harness reload dedupe.
+    fn install_env_two_skills() -> Value {
+        json!({
+            "scope": "user",
+            "detected": ["claude-code"],
+            "not_detected": ["codex", "opencode", "cursor"],
+            "skills": [
+                { "skill_name": "midnight-advanced-search", "installed": [
+                    { "harness": "claude-code", "scope": "user",
+                      "path": "/home/u/.claude/skills/midnight-advanced-search/SKILL.md",
+                      "action": "created", "reload_step": "restart Claude Code" } ] },
+                { "skill_name": "midnight-ingestion", "installed": [
+                    { "harness": "claude-code", "scope": "user",
+                      "path": "/home/u/.claude/skills/midnight-ingestion/SKILL.md",
+                      "action": "created", "reload_step": "restart Claude Code" } ] }
+            ]
         })
     }
 
     #[test]
-    fn project_install_summary_names_harnesses_and_refresh_instruction() {
+    fn project_install_summary_names_skills_harnesses_and_refresh_instruction() {
         let o = super::project_install(install_env());
         assert!(o.summary.contains("`midnight-advanced-search`"), "summary: {}", o.summary);
         assert!(o.summary.contains("claude-code, cursor"), "summary: {}", o.summary);
@@ -2486,36 +2565,52 @@ mod tests {
     }
 
     #[test]
-    fn project_install_trimmed_carries_detected_not_detected_and_actions() {
+    fn project_install_dedupes_reload_action_per_harness_across_skills() {
+        // Two skills into the same harness → ONE reload action for that harness.
+        let o = super::project_install(install_env_two_skills());
+        assert_eq!(o.suggested_next_actions.len(), 1, "reload is per harness, not per skill");
+        assert_eq!(
+            o.suggested_next_actions[0].description,
+            "[claude-code] Ask the user to: restart Claude Code"
+        );
+        // The summary names both skills.
+        assert!(o
+            .summary
+            .contains("`midnight-advanced-search`, `midnight-ingestion`"));
+    }
+
+    #[test]
+    fn project_install_trimmed_carries_detected_not_detected_and_per_skill_actions() {
         let o = super::project_install(install_env());
         assert_eq!(o.trimmed["detected"], json!(["claude-code", "cursor"]));
         assert_eq!(o.trimmed["not_detected"], json!(["codex", "opencode"]));
+        assert_eq!(o.trimmed["skills"][0]["skill_name"], "midnight-advanced-search");
         assert_eq!(
-            o.trimmed["actions"],
+            o.trimmed["skills"][0]["actions"],
             json!([
                 { "harness": "claude-code", "action": "created" },
                 { "harness": "cursor", "action": "updated" }
             ])
         );
         // Full report (paths, reload steps) stays in structuredContent.
-        assert!(o.trimmed["actions"][0].get("path").is_none());
+        assert!(o.trimmed["skills"][0]["actions"][0].get("path").is_none());
         assert_eq!(
-            o.structured["installed"][0]["path"],
+            o.structured["skills"][0]["installed"][0]["path"],
             "/home/u/.claude/skills/midnight-advanced-search/SKILL.md"
         );
     }
 
     #[test]
-    fn project_install_empty_installed_says_no_harnesses_with_no_actions() {
+    fn project_install_empty_says_no_harnesses_with_no_actions() {
         let env = json!({
-            "skill_name": "midnight-advanced-search", "scope": "user",
-            "installed": [], "detected": [],
-            "not_detected": ["claude-code", "codex", "opencode", "cursor"]
+            "scope": "user", "detected": [],
+            "not_detected": ["claude-code", "codex", "opencode", "cursor"],
+            "skills": [{ "skill_name": "midnight-advanced-search", "installed": [] }]
         });
         let o = super::project_install(env);
         assert!(o.summary.contains("for no harnesses"), "summary: {}", o.summary);
         assert!(o.suggested_next_actions.is_empty());
-        assert_eq!(o.trimmed["actions"], json!([]));
+        assert_eq!(o.trimmed["skills"][0]["actions"], json!([]));
     }
 
     #[test]

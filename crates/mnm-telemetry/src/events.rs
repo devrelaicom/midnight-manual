@@ -71,8 +71,8 @@ pub enum McpToolName {
     Facets,
     /// `status` tool.
     Status,
-    /// `install_search_skill` tool.
-    InstallSearchSkill,
+    /// `install_skill` tool.
+    InstallSkill,
 }
 
 /// Closed enum of CLI subcommand names. Adding a new noun-first subcommand

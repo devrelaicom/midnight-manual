@@ -499,17 +499,20 @@ fn all_passthrough_projectors_conform_to_their_output_schema() {
             mnm_mcp::schemas::facets_output_schema(),
         ),
         (
-            "install_search_skill (with detected)",
+            "install_skill (with detected)",
             mnm_mcp::render::project_install(serde_json::json!({
-                "skill_name": "midnight-advanced-search", "scope": "user",
-                "installed": [
-                    { "harness": "claude-code", "scope": "user",
-                      "path": "/home/u/.claude/skills/midnight-advanced-search/SKILL.md",
-                      "action": "created",
-                      "reload_step": "restart Claude Code or run /skills reload" }
-                ],
+                "scope": "user",
                 "detected": ["claude-code"],
-                "not_detected": ["codex", "opencode", "cursor"]
+                "not_detected": ["codex", "opencode", "cursor"],
+                "skills": [{
+                    "skill_name": "midnight-advanced-search",
+                    "installed": [
+                        { "harness": "claude-code", "scope": "user",
+                          "path": "/home/u/.claude/skills/midnight-advanced-search/SKILL.md",
+                          "action": "created",
+                          "reload_step": "restart Claude Code or run /skills reload" }
+                    ]
+                }]
             })),
             mnm_mcp::schemas::install_output_schema(),
         ),

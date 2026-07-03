@@ -1,9 +1,11 @@
-//! `mnm skills <subcommand>` — install / inspect / remove the advanced-search
-//! skill in the user's AI harness(es).
+//! `mnm skills <subcommand>` — install / inspect / remove the bundled Agent
+//! Skills in the user's AI harness(es). The set of skills is registry-driven
+//! (`mnm_skills::SKILLS`); `--skill <name>` (repeatable) selects specific
+//! bundles and the default (or `--all`) targets every bundled skill.
 
 use anyhow::{anyhow, Result};
 use clap::{Args as ClapArgs, Subcommand};
-use mnm_skills::{Harness, Scope};
+use mnm_skills::{Harness, Scope, SkillBundle};
 
 pub mod add;
 pub mod remove;
@@ -20,11 +22,12 @@ pub struct Args {
 /// Skills subcommands.
 #[derive(Debug, Subcommand)]
 pub enum SkillsCmd {
-    /// Install (or update) the advanced-search skill.
+    /// Install (or update) bundled skills (default: all).
     Add(add::Args),
-    /// Show where the skill is installed and whether it's current.
+    /// Show, per skill and harness, where each skill is installed and whether
+    /// it's current.
     Status(status::Args),
-    /// Remove the advanced-search skill.
+    /// Remove bundled skills (default: all).
     Remove(remove::Args),
 }
 
@@ -76,6 +79,18 @@ pub(super) fn parse_scope(raw: &str) -> Result<Scope> {
         .map_err(|bad| anyhow!("unknown scope `{bad}` (expected: user, project)"))
 }
 
+/// Resolve the `--skill` selector into bundles. An empty selector (neither
+/// `--skill` nor with `--all`, or `--all` alone) means every bundled skill,
+/// matching the MCP `install_skill` omit=all semantics.
+///
+/// # Errors
+///
+/// Returns an error naming the known skills if any `--skill` value is unknown.
+pub(super) fn parse_skills(names: &[String]) -> Result<Vec<&'static SkillBundle>> {
+    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    mnm_skills::select(&refs).map_err(|e| anyhow!(e.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -109,5 +124,27 @@ mod tests {
         assert_eq!(parse_scope("user").unwrap(), Scope::User);
         assert_eq!(parse_scope("project").unwrap(), Scope::Project);
         assert!(parse_scope("global").is_err());
+    }
+
+    #[test]
+    fn parse_skills_empty_is_all() {
+        let all = parse_skills(&[]).unwrap();
+        assert_eq!(all.len(), mnm_skills::SKILLS.len());
+    }
+
+    #[test]
+    fn parse_skills_named_selects_and_dedupes() {
+        let got = parse_skills(&[
+            "midnight-advanced-search".to_owned(),
+            "midnight-advanced-search".to_owned(),
+        ])
+        .unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].name, mnm_skills::SEARCH_SKILL);
+    }
+
+    #[test]
+    fn parse_skills_rejects_unknown() {
+        assert!(parse_skills(&["no-such-skill".to_owned()]).is_err());
     }
 }

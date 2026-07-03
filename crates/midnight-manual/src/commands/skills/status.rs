@@ -1,4 +1,4 @@
-//! `mnm skills status` — show install state per harness.
+//! `mnm skills status` — show install state per skill and per harness.
 
 use anyhow::Result;
 use clap::Args as ClapArgs;
@@ -24,23 +24,27 @@ pub fn run(args: &Args, json: bool) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(());
     }
-    println!("`{}` at {} scope:\n", report.skill_name, report.scope);
-    println!("  {:<12}  {:<9}  {:<10}  state", "harness", "detected", "installed");
-    for h in &report.harnesses {
-        let state = if !h.installed {
-            "—"
-        } else if h.up_to_date {
-            "up to date"
-        } else {
-            "stale"
-        };
-        println!(
-            "  {:<12}  {:<9}  {:<10}  {}",
-            h.harness,
-            yes_no(h.detected),
-            yes_no(h.installed),
-            state
-        );
+    println!("Skills at {} scope:\n", report.scope);
+    for skill in &report.skills {
+        println!("`{}`:", skill.skill_name);
+        println!("  {:<12}  {:<9}  {:<10}  state", "harness", "detected", "installed");
+        for h in &skill.harnesses {
+            let state = if !h.installed {
+                "—"
+            } else if h.up_to_date {
+                "up to date"
+            } else {
+                "stale"
+            };
+            println!(
+                "  {:<12}  {:<9}  {:<10}  {}",
+                h.harness,
+                yes_no(h.detected),
+                yes_no(h.installed),
+                state
+            );
+        }
+        println!();
     }
     Ok(())
 }
