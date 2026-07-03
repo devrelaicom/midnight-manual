@@ -562,7 +562,7 @@ async fn run_inner(
         let mut report = assemble_report(
             "ingest run",
             &args.source_slug,
-            "dry_run",
+            super::report::Outcome::DryRun,
             None,
             None,
             &embedding_model,
@@ -794,6 +794,27 @@ async fn run_inner(
         )
     });
 
+    // Every post-start failure below routes its abort + report emission through
+    // this shared context, so an aborted run ALWAYS produces an `IngestReport`
+    // (issue #136). Built once here (the run has started; all invariant state is
+    // resolved); the per-site `conflicts` / `total_tokens` and the triggering
+    // error are supplied at each call.
+    let abort_ctx = AbortCtx {
+        client: &client,
+        server_url,
+        source_slug: &args.source_slug,
+        run_id: start.ingest_run_id,
+        token: &token,
+        embedding_model: &embedding_model,
+        code_embedding_model: code_embedding_model.as_deref(),
+        started_at,
+        plan: &plan,
+        walk_skipped: walk_skipped.as_slice(),
+        oversize_skips: oversize_skips.as_slice(),
+        json,
+        report_file: args.report_file.as_deref(),
+    };
+
     for (i, (needs_embed, batch)) in tagged_batches.into_iter().enumerate() {
         let mut batch_docs = batch;
         // Only new-doc batches embed; carried batches (empty chunks) skip it.
@@ -804,9 +825,10 @@ async fn run_inner(
             match embed_batch(general_src, code_src, &mut batch_docs).await {
                 Ok(tokens) => total_tokens = total_tokens.saturating_add(tokens),
                 Err(e) => {
-                    abort_run(&client, server_url, &args.source_slug, start.ingest_run_id, &token)
-                        .await;
-                    return Err(e.context(format!("embed batch {}/{batch_count}", i + 1)));
+                    let err = e.context(format!("embed batch {}/{batch_count}", i + 1));
+                    return Err(
+                        abort_and_report(&abort_ctx, conflicts.clone(), total_tokens, err).await
+                    );
                 }
             }
         }
@@ -831,10 +853,11 @@ async fn run_inner(
                 conflicts.extend(r.conflicts);
             }
             Err(e) => {
-                abort_run(&client, server_url, &args.source_slug, start.ingest_run_id, &token)
-                    .await;
-                return Err(translate_upload_error(e, i + 1, batch_count, start.ingest_run_id)
-                    .context("upload documents"));
+                let err = translate_upload_error(e, i + 1, batch_count, start.ingest_run_id)
+                    .context("upload documents");
+                return Err(
+                    abort_and_report(&abort_ctx, conflicts.clone(), total_tokens, err).await
+                );
             }
         }
     }
@@ -862,9 +885,10 @@ async fn run_inner(
             let mut batch_docs = batch;
             reporter.batch(i + 1, retry_count, "re-embedding conflicted documents");
             if let Err(e) = embed_batch(general_src, code_src, &mut batch_docs).await {
-                abort_run(&client, server_url, &args.source_slug, start.ingest_run_id, &token)
-                    .await;
-                return Err(e.context(format!("re-embed retry batch {}/{retry_count}", i + 1)));
+                let err = e.context(format!("re-embed retry batch {}/{retry_count}", i + 1));
+                return Err(
+                    abort_and_report(&abort_ctx, conflicts.clone(), total_tokens, err).await
+                );
             }
             match upload_documents_with_split(
                 &client,
@@ -883,10 +907,11 @@ async fn run_inner(
                     conflicts.extend(r.conflicts);
                 }
                 Err(e) => {
-                    abort_run(&client, server_url, &args.source_slug, start.ingest_run_id, &token)
-                        .await;
-                    return Err(translate_upload_error(e, i + 1, retry_count, start.ingest_run_id)
-                        .context("upload re-embedded documents"));
+                    let err = translate_upload_error(e, i + 1, retry_count, start.ingest_run_id)
+                        .context("upload re-embedded documents");
+                    return Err(
+                        abort_and_report(&abort_ctx, conflicts.clone(), total_tokens, err).await
+                    );
                 }
             }
         }
@@ -900,16 +925,19 @@ async fn run_inner(
             .filter(|c| !is_intentional_drop(c))
             .collect();
         if !blocking.is_empty() {
-            abort_run(&client, server_url, &args.source_slug, start.ingest_run_id, &token).await;
             for c in &blocking {
                 tracing::error!(path = %c.path, reason = %c.reason, "unresolved upload conflict after retry");
             }
-            return Err(anyhow!(
+            let err = anyhow!(
                 "aborted run {}: {} document(s) still conflicted after re-embed retry; \
                  refusing to finalize an incomplete version",
                 start.ingest_run_id,
                 blocking.len(),
-            ));
+            );
+            // Emit the report with the FULL conflict list (the blocking ones are
+            // the value here). `conflicts.clone()` is an immutable borrow, so it
+            // coexists with the `blocking` references above.
+            return Err(abort_and_report(&abort_ctx, conflicts.clone(), total_tokens, err).await);
         }
     }
 
@@ -954,8 +982,11 @@ async fn run_inner(
     {
         Ok(r) => r,
         Err(e) => {
-            abort_run(&client, server_url, &args.source_slug, start.ingest_run_id, &token).await;
-            return Err(e.context("finalize ingest run"));
+            // Covers the server's finalize completeness-guard auto-abort (a
+            // count mismatch returns an error here) as well as any transport or
+            // auth failure on the finalize call.
+            let err = e.context("finalize ingest run");
+            return Err(abort_and_report(&abort_ctx, conflicts.clone(), total_tokens, err).await);
         }
     };
 
@@ -992,7 +1023,7 @@ async fn run_inner(
     let mut report = assemble_report(
         "ingest run",
         &args.source_slug,
-        "finalized",
+        super::report::Outcome::Finalized,
         Some(finalize.revision),
         finalize.demoted_revision,
         &embedding_model,
@@ -1099,6 +1130,127 @@ async fn abort_run(
         slug = url_encode(slug),
     );
     let _ = client.post(&url).bearer_auth(token).send().await;
+}
+
+/// Run-invariant state needed to emit an `aborted` [`super::report::IngestReport`]
+/// on any post-start failure path. Built once after the ingest run is started,
+/// then shared by every abort site (which supply the point-in-time `conflicts` /
+/// `voyage_tokens` and the triggering error). Every field is a borrow, so the
+/// context is cheap to construct and holds no owned data.
+struct AbortCtx<'a> {
+    client: &'a reqwest::Client,
+    server_url: &'a str,
+    source_slug: &'a str,
+    run_id: Uuid,
+    token: &'a str,
+    embedding_model: &'a str,
+    code_embedding_model: Option<&'a str>,
+    started_at: OffsetDateTime,
+    plan: &'a mnm_content::ingest::IngestPlan,
+    walk_skipped: &'a [mnm_content::ingest::SkippedFile],
+    oversize_skips: &'a [super::report::ReportSkip],
+    /// `--json`: emit the report JSON as a stdout line (mirrors `emit_report`).
+    json: bool,
+    /// `--report-file`: write the report artifact to this path.
+    report_file: Option<&'a Path>,
+}
+
+/// Render the abort artifacts for `report`, honouring the two flag axes, and
+/// return the `--json` stdout line (if `json` is set) for the caller to print.
+///
+/// Split out of [`abort_and_report`] so the flag-driven artifact SELECTION is
+/// unit-testable without capturing process stdout: the returned `Option<String>`
+/// is exactly what would be printed, and the file side-effect is observable on
+/// disk. A report-write failure is warned about but never propagated — on the
+/// abort path the original error must remain the process exit cause, so a
+/// report-write hiccup can't mask it (and, unlike the success path's
+/// `emit_report`, this never calls `process::exit`).
+fn render_abort_artifacts(
+    report: &super::report::IngestReport,
+    json: bool,
+    report_file: Option<&Path>,
+) -> Option<String> {
+    if let Some(path) = report_file {
+        if let Err(e) = super::report::write_atomic(path, report) {
+            eprintln!("warning: could not write report file {}: {e}", path.display());
+        }
+    }
+    json.then(|| serde_json::to_string(report).expect("IngestReport serializes infallibly"))
+}
+
+/// Format an abort error for the report's `error` field: the `{:#}` context
+/// chain, token-redacted (FR-019).
+///
+/// Because the abort report persists to a file, the error is scrubbed
+/// symmetrically with the server error bodies that `post_json`/`put_json`
+/// already redact — so a bearer echoed in an UPSTREAM error the abort path
+/// surfaces (e.g. an unredacted Voyage embed-failure body, which does NOT go
+/// through `put_json`) never lands in the artifact. Named rather than inlined so
+/// the redaction wiring is unit-testable and can't silently regress
+/// (`abort_error_string_redacts_token_like_substrings`).
+fn abort_error_string(err: &anyhow::Error) -> String {
+    redact_token_like(&format!("{err:#}"))
+}
+
+/// Request the server-side run be aborted, emit an `aborted`
+/// [`super::report::IngestReport`], then return the triggering `error` for the
+/// caller to propagate.
+///
+/// This is the single choke-point for every post-start failure path (embed,
+/// upload, residual-conflict, finalize), so the report is guaranteed to exist on
+/// abort — automation can no longer confuse "run aborted" with "run never
+/// happened" (issue #136). The report records the PLAN the run intended plus the
+/// real progress signals (`error`, `voyage_tokens`, `conflicts`,
+/// `embed_complete`); see [`super::report::IngestReport::outcome`] for exactly
+/// which fields reflect committed work.
+///
+/// Behaviour keeps the operator-facing surface unchanged:
+/// - honours `--json` (stdout report line) and `--report-file` (disk artifact);
+/// - does NOT print a human summary on the bare path (stdout stays empty as
+///   before — the error still surfaces on stderr via the returned `Err`);
+/// - the abort request itself is best-effort (fire-and-forget); if it fails the
+///   server-side version may linger, but that must not mask the real error.
+async fn abort_and_report(
+    ctx: &AbortCtx<'_>,
+    conflicts: Vec<mnm_core::ingest::UploadConflict>,
+    voyage_tokens: u64,
+    err: anyhow::Error,
+) -> anyhow::Error {
+    // Best-effort abort so the server run doesn't linger; fire-and-forget,
+    // matching the prior behaviour (a failed abort must not mask the real error).
+    abort_run(ctx.client, ctx.server_url, ctx.source_slug, ctx.run_id, ctx.token).await;
+
+    let finished_at = OffsetDateTime::now_utc();
+    let mut report = assemble_report(
+        "ingest run",
+        ctx.source_slug,
+        super::report::Outcome::Aborted,
+        None,
+        None,
+        ctx.embedding_model,
+        ctx.code_embedding_model,
+        ctx.started_at,
+        finished_at,
+        ctx.plan,
+        ctx.walk_skipped,
+        conflicts,
+        Vec::new(),
+        voyage_tokens,
+    );
+    // Oversize skips are surfaced on the success path too; include them so the
+    // aborted report's skipped_files is consistent with what a finalized run
+    // would have shown.
+    report
+        .skipped_files
+        .extend(ctx.oversize_skips.iter().cloned());
+    // Capture WHY the run aborted, token-redacted before it persists to the
+    // report file (see `abort_error_string`).
+    report.error = Some(abort_error_string(&err));
+
+    if let Some(line) = render_abort_artifacts(&report, ctx.json, ctx.report_file) {
+        println!("{line}");
+    }
+    err
 }
 
 fn url_encode(s: &str) -> String {
@@ -2341,7 +2493,7 @@ fn build_extracted(
 pub(super) fn assemble_report(
     command: &str,
     source_slug: &str,
-    outcome: &str,
+    outcome: super::report::Outcome,
     revision: Option<i32>,
     prior_revision: Option<i32>,
     embedding_model: &str,
@@ -2354,7 +2506,7 @@ pub(super) fn assemble_report(
     warnings: Vec<String>,
     voyage_tokens: u64,
 ) -> super::report::IngestReport {
-    use super::report::{IngestReport, ReportDoc, ReportSkip, ReportStats};
+    use super::report::{IngestReport, Outcome, ReportDoc, ReportSkip, ReportStats};
     use time::format_description::well_known::Rfc3339;
 
     let started_str = started_at
@@ -2388,7 +2540,7 @@ pub(super) fn assemble_report(
             // The CLI has no per-document server embed confirmation; for
             // finalized runs the embedding batch is committed as a whole, so
             // every new doc's embedding is complete iff the run was finalized.
-            embed_complete: outcome == "finalized",
+            embed_complete: outcome == Outcome::Finalized,
         })
         .chain(plan.carried_documents.iter().map(|d| ReportDoc {
             path: d.path.display().to_string(),
@@ -2425,7 +2577,7 @@ pub(super) fn assemble_report(
         prior_revision,
         embedding_model: embedding_model.to_owned(),
         code_embedding_model: code_embedding_model.map(ToOwned::to_owned),
-        outcome: outcome.to_owned(),
+        outcome: outcome.as_str().to_owned(),
         started_at: started_str,
         finished_at: finished_str,
         duration_ms,
@@ -2434,6 +2586,9 @@ pub(super) fn assemble_report(
         conflicts,
         skipped_files,
         warnings,
+        // Always `None` here; the abort path overwrites it with the triggering
+        // error via `abort_and_report`. Success/dry-run/plan leave it null.
+        error: None,
     }
 }
 
@@ -3486,6 +3641,107 @@ mod tests {
                 chunks_emitted,
             },
         }
+    }
+
+    /// M2 (issue #136): an aborted report must carry the POPULATED conflicts
+    /// list. The residual-conflict abort site is the only one that serializes a
+    /// non-empty list, and it is reached via a non-`Err` branch that is awkward
+    /// to trigger through wiremock — so pin the behaviour on `assemble_report`
+    /// directly, which is what every abort site funnels through.
+    #[test]
+    fn aborted_report_carries_populated_conflicts() {
+        use mnm_core::ingest::UploadConflict;
+        let plan = plan_with(vec![sample_planned_new("a.md")]);
+        let t = OffsetDateTime::now_utc();
+        let conflicts = vec![
+            UploadConflict::plain("a.md", "insert failed: db connection reset"),
+            UploadConflict::plain("b.md", "insert failed: constraint violation"),
+        ];
+        let report = assemble_report(
+            "ingest run",
+            "docs",
+            super::super::report::Outcome::Aborted,
+            None,
+            None,
+            "voyage-code-3@1",
+            None,
+            t,
+            t,
+            &plan,
+            &[],
+            conflicts,
+            Vec::new(),
+            0,
+        );
+        assert_eq!(report.outcome, "aborted");
+        assert_eq!(report.stats.conflicts, 2, "stats mirrors the conflict count");
+        assert_eq!(report.conflicts.len(), 2, "the full conflict list is retained");
+        let v = serde_json::to_value(&report).unwrap();
+        assert_eq!(v["conflicts"][0]["path"], "a.md");
+        assert_eq!(v["conflicts"][1]["path"], "b.md");
+        assert_eq!(v["stats"]["conflicts"], 2);
+    }
+
+    /// S1 (issue #136): the abort artifact selection honours `--json` (returns
+    /// the stdout report line) and `--report-file` (writes the file), and emits
+    /// nothing on the bare path. This exercises the exact branch the integration
+    /// test can't observe (process stdout) without capturing it.
+    #[test]
+    fn render_abort_artifacts_honours_json_and_report_file() {
+        let plan = plan_with(vec![sample_planned_new("a.md")]);
+        let t = OffsetDateTime::now_utc();
+        let mut report = assemble_report(
+            "ingest run",
+            "docs",
+            super::super::report::Outcome::Aborted,
+            None,
+            None,
+            "voyage-code-3@1",
+            None,
+            t,
+            t,
+            &plan,
+            &[],
+            Vec::new(),
+            Vec::new(),
+            0,
+        );
+        report.error = Some("boom: upload documents".into());
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("report.json");
+
+        // json = true, report_file = Some → returns the stdout line AND writes.
+        let line = render_abort_artifacts(&report, true, Some(&path)).expect("json line present");
+        let from_line: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(from_line["outcome"], "aborted");
+        let on_disk: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(on_disk["outcome"], "aborted");
+        assert_eq!(on_disk["error"], "boom: upload documents");
+
+        // json = false, report_file = None → no stdout line, nothing written.
+        assert!(render_abort_artifacts(&report, false, None).is_none());
+    }
+
+    /// S2 (issue #136): the abort report's `error` MUST route through
+    /// `redact_token_like` before it persists to disk. This matters for the
+    /// embed-failure path, whose upstream Voyage error body is NOT redirected
+    /// through `put_json`/`post_json` (which already scrub). Removing the
+    /// redaction in `abort_error_string` fails this test (verified non-vacuous).
+    #[test]
+    fn abort_error_string_redacts_token_like_substrings() {
+        // 46-char bearer-like blob (all alnum + `_`), space-delimited so
+        // `redact_token_like` treats it as one word and scrubs it.
+        let blob = "tok_0123456789abcdef0123456789abcdef0123456789";
+        assert!(blob.len() > 40, "blob must exceed the 40-char redaction threshold");
+        let err = anyhow!("embed batch 1/1: upstream rejected token {blob} please retry");
+        let scrubbed = abort_error_string(&err);
+        assert!(scrubbed.contains("[redacted]"), "token-like blob must be scrubbed: {scrubbed}");
+        assert!(
+            !scrubbed.contains(blob),
+            "raw token must not survive into the report: {scrubbed}"
+        );
     }
 
     #[test]

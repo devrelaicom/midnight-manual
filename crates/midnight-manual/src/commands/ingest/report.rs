@@ -16,7 +16,10 @@ pub struct ReportStats {
     pub carried: usize,
     /// Files deleted relative to the prior revision.
     pub deleted: usize,
-    /// Total chunks emitted to the store.
+    /// Total chunks the plan intended to upload. On a `finalized` run this is
+    /// what was stored; on an `aborted` run it is the PLANNED total and may
+    /// exceed what was actually committed (an early failure may have stored
+    /// none). See the `aborted` note on [`IngestReport::outcome`].
     pub chunks_emitted: usize,
     /// Number of documents that produced upload conflicts.
     pub conflicts: usize,
@@ -46,11 +49,49 @@ pub struct ReportSkip {
     pub reason: String,
 }
 
+/// The four terminal outcomes of an `ingest run` / `ingest plan` invocation.
+///
+/// This is the single source of truth for the `outcome` string: the emitted
+/// set is exactly [`Outcome::as_str`]'s exhaustive match, pinned by the
+/// `outcome_as_str_is_stable` drift-guard test. Keeping it an enum (rather than
+/// bare string literals at each call site) makes the compiler enforce that
+/// every producer emits a member of this set — the drift that let `aborted`
+/// sit as dead code (issue #136) can't recur.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    /// `ingest plan` preview — no upload.
+    Planned,
+    /// `ingest run --dry-run` — no upload.
+    DryRun,
+    /// `ingest run` uploaded and activated a new revision.
+    Finalized,
+    /// `ingest run` started but failed after run-start; see
+    /// [`IngestReport::outcome`] for what the report's stats do and don't mean.
+    Aborted,
+}
+
+impl Outcome {
+    /// The canonical snake_case wire string written to `outcome`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Planned => "planned",
+            Self::DryRun => "dry_run",
+            Self::Finalized => "finalized",
+            Self::Aborted => "aborted",
+        }
+    }
+}
+
 /// Canonical structured summary of a single `ingest run` or `ingest plan`
 /// invocation. Serialised to JSON for `--json` output and `--report-file`.
 #[derive(Debug, Clone, Serialize)]
 pub struct IngestReport {
-    /// Monotonic schema version; bump only on breaking field changes.
+    /// Monotonic schema version. Bump whenever the shape or emission contract
+    /// changes in a way a strict consumer could notice — this includes additive
+    /// fields and newly-emitted outcomes, not just removals/renames (v2 added
+    /// the always-present `error` field and began emitting `aborted`). See
+    /// [`Self::SCHEMA_VERSION`].
     pub schema_version: u32,
     /// Originating subcommand: `"ingest run"` or `"ingest plan"`.
     pub command: String,
@@ -64,7 +105,24 @@ pub struct IngestReport {
     pub embedding_model: String,
     /// Code-specific embedding model identifier, if separate.
     pub code_embedding_model: Option<String>,
-    /// Run outcome: `planned` | `dry_run` | `finalized` | `aborted`.
+    /// Run outcome. Emitted as the snake_case string of [`Outcome`], one of:
+    /// - `planned`   — `ingest plan` preview (no upload).
+    /// - `dry_run`   — `ingest run --dry-run` (no upload).
+    /// - `finalized` — `ingest run` uploaded and activated a new revision.
+    /// - `aborted`   — `ingest run` started but failed after run-start (embed,
+    ///   upload, residual-conflict, or finalize failure); the CLI then requested
+    ///   the server run be aborted (best-effort — if that request fails the
+    ///   server-side version may linger).
+    ///
+    /// IMPORTANT for `aborted` reports: the numeric [`stats`](Self::stats),
+    /// [`documents`](Self::documents), and [`skipped_files`](Self::skipped_files)
+    /// describe the PLAN the run intended to commit — NOT what was actually
+    /// persisted. An abort may have committed none of it (e.g. an embed failure
+    /// on the first batch stores zero chunks even though `stats.chunks_emitted`
+    /// is non-zero). Only [`error`](Self::error), `stats.voyage_tokens`, the
+    /// [`conflicts`](Self::conflicts) list (and `stats.conflicts`), and each
+    /// document's `embed_complete` (always `false` for new docs on abort)
+    /// reflect actual committed progress.
     pub outcome: String,
     /// RFC 3339 timestamp when the run started.
     pub started_at: String,
@@ -72,21 +130,37 @@ pub struct IngestReport {
     pub finished_at: String,
     /// Wall-clock duration in milliseconds.
     pub duration_ms: u128,
-    /// Aggregate statistics for this run.
+    /// Aggregate statistics for this run. On an `aborted` run these are the
+    /// PLAN's intended totals, not what was committed — see [`Self::outcome`].
     pub stats: ReportStats,
-    /// Per-document records for all processed files.
+    /// Per-document records for all processed files. On an `aborted` run this is
+    /// the PLANNED document set, not what was committed — see [`Self::outcome`].
     pub documents: Vec<ReportDoc>,
-    /// Upload conflicts surfaced by the server.
+    /// Upload conflicts surfaced by the server. Populated on the residual-
+    /// conflict abort path; unlike the other stats, this reflects real server
+    /// responses.
     pub conflicts: Vec<mnm_core::ingest::UploadConflict>,
-    /// Files that were skipped during the walk.
+    /// Files that were skipped during the walk (and planner). On an `aborted`
+    /// run this is the PLANNED skip set — see [`Self::outcome`].
     pub skipped_files: Vec<ReportSkip>,
     /// Non-fatal warnings accumulated during the run.
     pub warnings: Vec<String>,
+    /// The triggering error when `outcome == "aborted"`: the `anyhow` context
+    /// chain (`{:#}`) with bearer/token-like substrings scrubbed to `[redacted]`
+    /// and internal whitespace normalized (it persists to a report file, so it
+    /// is redacted symmetrically with server error bodies — FR-019). `None` on
+    /// every non-aborted outcome, so automation can distinguish "run aborted"
+    /// (`error` populated) from "run never happened" (no report file at all).
+    pub error: Option<String>,
 }
 
 impl IngestReport {
-    /// Schema version constant — use instead of bare `1` literals.
-    pub const SCHEMA_VERSION: u32 = 1;
+    /// Schema version constant — use instead of bare integer literals.
+    ///
+    /// - v1: original shape.
+    /// - v2: added the [`error`](Self::error) field and the `aborted` outcome is
+    ///   now emitted on every post-start failure path (issue #136).
+    pub const SCHEMA_VERSION: u32 = 2;
 
     /// Minimal all-fields-populated instance used only in unit tests.
     #[cfg(test)]
@@ -116,6 +190,7 @@ impl IngestReport {
             conflicts: vec![],
             skipped_files: vec![],
             warnings: vec![],
+            error: None,
         }
     }
 }
@@ -166,9 +241,23 @@ mod tests {
     fn report_serializes_with_schema_version_and_stats() {
         let r = IngestReport::sample();
         let v = serde_json::to_value(&r).unwrap();
-        assert_eq!(v["schema_version"], 1);
+        assert_eq!(v["schema_version"], 2);
         assert_eq!(v["stats"]["carried"], r.stats.carried);
         assert!(v["documents"].is_array());
+        // The `error` field is always present; null on non-aborted outcomes so
+        // consumers can test `report.error != null` unconditionally.
+        assert!(v["error"].is_null());
+    }
+
+    /// Drift guard: the emitted `outcome` set is exactly these four strings.
+    /// If a variant is added, the exhaustive `as_str` match forces an update
+    /// here, keeping the enum and the documented set in lockstep.
+    #[test]
+    fn outcome_as_str_is_stable() {
+        assert_eq!(Outcome::Planned.as_str(), "planned");
+        assert_eq!(Outcome::DryRun.as_str(), "dry_run");
+        assert_eq!(Outcome::Finalized.as_str(), "finalized");
+        assert_eq!(Outcome::Aborted.as_str(), "aborted");
     }
 
     #[test]
