@@ -56,6 +56,7 @@ fn make_args(query: &str) -> Args {
         extra_queries: vec![],
         queries_stdin: false,
         limit: 5,
+        min_confidence: None,
         embedding_model: DEFAULT_EMBEDDING_MODEL.to_owned(),
         rerank: "auto".to_owned(),
         rerank_model: None,

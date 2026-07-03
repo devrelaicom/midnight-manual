@@ -101,6 +101,12 @@ pub struct Args {
     #[arg(long, default_value_t = 10)]
     pub limit: u32,
 
+    /// Drop results below this blended-confidence floor [0, 1] before the limit
+    /// is applied (default: keep all). The count dropped is reported in the
+    /// response's `search_metadata.filtered_by_confidence`.
+    #[arg(long = "min-confidence")]
+    pub min_confidence: Option<f64>,
+
     /// Override the embedding-model wire id sent with the search request.
     /// When omitted (or set to `"auto"`), the CLI fetches the corpus's active
     /// model from `GET /v1/models/active` and uses that wire id. Only set
@@ -285,6 +291,10 @@ pub async fn run_with_paths(
     let (mode, filters) = build_filters(&args)?;
     validate_filters(&filters)?;
 
+    // Fail fast on an out-of-range confidence floor rather than letting the
+    // server clamp it silently (a typo like `--min-confidence 90` should error).
+    validate_min_confidence(args.min_confidence)?;
+
     // Which query embeddings this request needs — mirrors the server's
     // code_mode defaults client-side (D6: explicit parameter, never query
     // sniffing). The raw `args.code_mode` is still sent on the wire, so an
@@ -338,6 +348,7 @@ pub async fn run_with_paths(
         client_embedding_model,
         client_code_embedding_model,
         limit: args.limit,
+        min_confidence: args.min_confidence,
         placement,
         rerank_model,
         rerank_instructions: args.rerank_instructions.clone(),
@@ -872,6 +883,23 @@ fn validate_filters(filters: &mnm_retrieval::filters::SearchFilters) -> Result<(
     Ok(())
 }
 
+/// Fail fast on an out-of-range `--min-confidence` (issue #137). The floor is a
+/// blended-confidence value in `[0, 1]`; anything else is a typo the server would
+/// otherwise clamp silently. `None` (flag omitted) is always OK.
+///
+/// # Errors
+///
+/// Returns `anyhow::Error` when the value is outside `[0, 1]`.
+fn validate_min_confidence(min_confidence: Option<f64>) -> Result<()> {
+    if let Some(mc) = min_confidence {
+        anyhow::ensure!(
+            (0.0..=1.0).contains(&mc),
+            "--min-confidence must be within [0, 1] (got {mc})"
+        );
+    }
+    Ok(())
+}
+
 /// Everything [`build_search_request`] folds into the outgoing body. Grouped
 /// into a struct (like [`DispatchSearch`]) to keep the builder under the
 /// argument-count lint as fields accrue.
@@ -885,6 +913,9 @@ struct SearchRequestParts {
     client_code_embedding_model: Option<String>,
     /// Caller's result limit.
     limit: u32,
+    /// Confidence floor in `[0, 1]` (issue #137); `None` omits the wire key
+    /// (server default `0.0`, no filtering). Forwarded on every placement.
+    min_confidence: Option<f64>,
     /// Where reranking runs (`Local` widens the cloud pool + tells the server
     /// `none`; `Server` sends the model name; `Off` sends `none`).
     placement: mnm_core::config::RerankPlacement,
@@ -937,6 +968,7 @@ fn build_search_request(parts: SearchRequestParts) -> SearchRequest {
         client_embedding_model: parts.client_embedding_model,
         client_code_embedding_model: parts.client_code_embedding_model,
         limit: cloud_limit,
+        min_confidence: parts.min_confidence,
         mode: parts.mode,
         code_mode: parts.code_mode,
         version_match: parts.version_match,
@@ -1396,6 +1428,10 @@ pub struct SearchRequest {
     pub client_code_embedding_model: Option<String>,
     /// Maximum number of results.
     pub limit: u32,
+    /// Confidence floor in `[0, 1]` (issue #137). `None` omits the key on the
+    /// wire (server default `0.0`, no filtering).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_confidence: Option<f64>,
     /// Query mode (`hybrid` | `vector` | `fts`); serialized as the `mode` key,
     /// matching the cloud's snake_case `SearchMode` values.
     pub mode: String,
@@ -1759,6 +1795,7 @@ mod tests {
             extra_queries: texts(extra),
             queries_stdin: stdin,
             limit: 10,
+            min_confidence: None,
             embedding_model: DEFAULT_EMBEDDING_MODEL.to_owned(),
             rerank: "auto".to_owned(),
             rerank_model: None,
@@ -1880,6 +1917,7 @@ mod tests {
             client_embedding_model: "voyage-context-3@1".to_owned(),
             client_code_embedding_model: None,
             limit,
+            min_confidence: None,
             placement,
             rerank_model: mnm_core::rerank::RerankParam::Rerank25,
             rerank_instructions: None,
@@ -2088,6 +2126,81 @@ mod tests {
     }
 
     #[test]
+    fn min_confidence_flag_parses_and_wires_onto_request() {
+        use clap::Parser as _;
+
+        #[derive(clap::Parser)]
+        struct Probe {
+            #[command(flatten)]
+            inner: Args,
+        }
+
+        // Default: absent → None → omitted on the wire.
+        let p = Probe::parse_from(["search", "q"]);
+        assert!(p.inner.min_confidence.is_none());
+
+        // Present: parses as f64 and rides SearchRequestParts onto the wire body.
+        let p = Probe::parse_from(["search", "q", "--min-confidence", "0.4"]);
+        assert_eq!(p.inner.min_confidence, Some(0.4));
+        let req = build_search_request(SearchRequestParts {
+            queries: vec![QueryPair {
+                text: "q".into(),
+                vector: vec![],
+                code_vector: vec![],
+            }],
+            client_embedding_model: "m@1".into(),
+            client_code_embedding_model: None,
+            limit: 10,
+            min_confidence: p.inner.min_confidence,
+            placement: mnm_core::config::RerankPlacement::Off,
+            rerank_model: mnm_core::rerank::RerankParam::Rerank25,
+            rerank_instructions: None,
+            mode: "hybrid".into(),
+            code_mode: None,
+            version_match: None,
+            filters: SearchFilters::default(),
+        });
+        assert_eq!(req.min_confidence, Some(0.4));
+        let body = serde_json::to_value(&req).unwrap();
+        assert_eq!(body["min_confidence"], serde_json::json!(0.4));
+
+        // Omitted when None (server default 0.0, no filtering).
+        let none = build_search_request(SearchRequestParts {
+            queries: vec![QueryPair {
+                text: "q".into(),
+                vector: vec![],
+                code_vector: vec![],
+            }],
+            client_embedding_model: "m@1".into(),
+            client_code_embedding_model: None,
+            limit: 10,
+            min_confidence: None,
+            placement: mnm_core::config::RerankPlacement::Off,
+            rerank_model: mnm_core::rerank::RerankParam::Rerank25,
+            rerank_instructions: None,
+            mode: "hybrid".into(),
+            code_mode: None,
+            version_match: None,
+            filters: SearchFilters::default(),
+        });
+        let body = serde_json::to_value(&none).unwrap();
+        assert!(body.get("min_confidence").is_none(), "min_confidence omitted when unset");
+    }
+
+    #[test]
+    fn validate_min_confidence_rejects_out_of_range() {
+        // In range (and the None default) pass; out-of-range fails fast.
+        assert!(validate_min_confidence(None).is_ok());
+        assert!(validate_min_confidence(Some(0.0)).is_ok());
+        assert!(validate_min_confidence(Some(0.5)).is_ok());
+        assert!(validate_min_confidence(Some(1.0)).is_ok());
+        for bad in [-0.1, 1.5, 90.0] {
+            let err = validate_min_confidence(Some(bad)).expect_err("out of range must error");
+            assert!(err.to_string().contains("[0, 1]"), "message must name the valid range: {err}");
+        }
+    }
+
+    #[test]
     fn flags_map_to_filters_and_mode() {
         use clap::Parser as _;
         #[derive(clap::Parser)]
@@ -2151,6 +2264,7 @@ mod tests {
             client_embedding_model: "m@1".into(),
             client_code_embedding_model: None,
             limit: 10,
+            min_confidence: None,
             placement: RerankPlacement::Server,
             rerank_model: RerankParam::Rerank25,
             rerank_instructions: None,

@@ -51,12 +51,21 @@ pub struct SearchRequest {
     /// before forwarding, so the cloud receives a registry-conformant object.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub filters: Option<serde_json::Value>,
-    /// Cloud-side ordering key. When reranking locally, the MCP server asks for
-    /// `"score"` (RRF/relevance order) so the candidate pool the cross-encoder
-    /// reranks isn't pre-filtered by the cloud's confidence-first default
-    /// (US6). `None` lets the cloud apply its default (`confidence`).
+    /// Cloud-side ordering key (`confidence` | `trust` | `relevance` | `score`).
+    /// When reranking locally, the MCP server forces `"score"` (RRF/relevance
+    /// order) so the candidate pool the cross-encoder reranks isn't pre-filtered
+    /// by the cloud's confidence-first default (US6) — the local rerank then
+    /// re-orders the pool afterwards, overriding any caller `sort_by`. On the
+    /// server/off paths this carries the caller's explicit choice (issue #137).
+    /// `None` lets the cloud apply its default (`confidence`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sort_by: Option<&'static str>,
+    /// Confidence floor in `[0, 1]`: the cloud drops results whose blended
+    /// `confidence` is below this before applying `limit`, and reports the count
+    /// dropped as `search_metadata.filtered_by_confidence` (issue #137). `None`
+    /// (omitted) lets the cloud apply its default of `0.0` (no filtering).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_confidence: Option<f64>,
     /// Query mode forwarded to the cloud (`hybrid` | `vector` | `fts`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mode: Option<&'static str>,

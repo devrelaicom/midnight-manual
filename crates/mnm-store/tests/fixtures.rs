@@ -273,8 +273,17 @@ pub fn code_symbol_path() -> Vec<SymbolSegment> {
     ]
 }
 
+/// The markdown `heading_path` seeded on the code fixture's chunk. Non-empty so
+/// the document-overview outline (issue #141) can assert a real breadcrumb rides
+/// the skeleton alongside the primary symbol.
+#[must_use]
+pub fn code_heading_path() -> Vec<String> {
+    vec!["API".to_owned(), "Counter".to_owned()]
+}
+
 /// Insert a fresh source + `source_version` + one **code** document + one code
-/// chunk whose `symbol_path` is the structured [`code_symbol_path`].
+/// chunk whose `symbol_path` is the structured [`code_symbol_path`] and whose
+/// `heading_path` is [`code_heading_path`].
 ///
 /// Exercises the JSONB `chunk.symbol_path` write/read path that
 /// `document::list_chunks_window` (issue #132) relies on — the store's minimal
@@ -331,6 +340,7 @@ pub async fn ingest_code_chunk_doc(pool: &PgPool, slug: &str) -> MinimalDocFixtu
         .expect("insert chunk node");
 
     let symbol_path = code_symbol_path();
+    let heading_path = code_heading_path();
     let chunk_id = chunk::insert(
         pool,
         chunk::NewChunk {
@@ -344,7 +354,7 @@ pub async fn ingest_code_chunk_doc(pool: &PgPool, slug: &str) -> MinimalDocFixtu
             embedding: None,
             embedding_model_id: model_id,
             code_embedding: None,
-            heading_path: &[],
+            heading_path: &heading_path,
             symbol_path: &symbol_path,
             start_byte: 0,
             end_byte: 43,

@@ -59,7 +59,7 @@ pub fn list() -> ToolsListResult {
             ToolDescription {
                 name: "advanced_search",
                 description:
-                    "Full-control search over the Midnight corpus: fuse multiple queries (HyDE, expansion, step-back), restrict by facet filters, switch retrieval mode, and toggle reranking. Use when basic search comes up short or when the midnight-advanced-search skill prescribes a pattern. Call facets first to discover valid filter values. In results, symbol_path is a flat list of symbol names (their order is not a containment hierarchy); the get_chunks family and get_document_chunks return the richer structured {kind, name, path} segments (path = ancestor symbol names, present for nested symbols).",
+                    "Full-control search over the Midnight corpus: fuse multiple queries (HyDE, expansion, step-back), restrict by facet filters, switch retrieval mode, and toggle reranking. Use when basic search comes up short or when the midnight-advanced-search skill prescribes a pattern. Call facets first to discover valid filter values. Result-shaping knobs: sort_by picks the ordering (trust = most authoritative first, score = cheap recon; a local rerank overrides it), min_confidence drops weak matches at the source, response_format=concise trims the scores block (bodies stay), rerank_model=rerank-2.5-lite for cheaper reranking. In results, symbol_path is a flat list of symbol names (their order is not a containment hierarchy); the get_chunks family and get_document_chunks return the richer structured {kind, name, path} segments (path = ancestor symbol names, present for nested symbols).",
                 input_schema: advanced_search_input_schema(),
                 output_schema: Some(crate::schemas::search_output_schema()),
                 annotations: ToolAnnotations::read_only().with_title("Advanced search"),
@@ -116,7 +116,7 @@ pub fn list() -> ToolsListResult {
             ToolDescription {
                 name: "get_document",
                 description:
-                    "Fetch a document's metadata plus an ordered skeleton of its chunks (ids, positions, token counts — no bodies). Use to size up a document before reading it with get_document_chunks.",
+                    "Fetch a document's metadata plus an ordered skeleton of its chunks (ids, positions, token counts, headings/symbols — no bodies). Use it as the document's table of contents before reading windows with get_document_chunks. Each outline line ends with [#chunk_index, ~token_count]; pass that index as get_document_chunks(from=<index>) to jump straight to that window.",
                 input_schema: id_only_schema(),
                 output_schema: Some(crate::schemas::document_output_schema()),
                 annotations: ToolAnnotations::read_only().with_title("Document overview"),
@@ -286,6 +286,14 @@ fn advanced_search_input_schema() -> serde_json::Value {
                 "description": "Max results returned." },
             "rerank": { "type": "boolean", "default": true,
                 "description": "Apply VoyageAI reranking against the first query (server-side, or locally with your own VOYAGE_API_KEY). Disable for lowest latency." },
+            "rerank_model": { "type": "string", "enum": ["rerank-2.5", "rerank-2.5-lite"],
+                "description": "Which Voyage rerank model to use when rerank is on. rerank-2.5-lite is faster and materially cheaper per token — the recon / large-candidate-pool choice; keep rerank-2.5 (the default) for final-answer precision. Ignored when rerank=false. Honored on both the server and local-BYOK rerank paths." },
+            "sort_by": { "type": "string", "enum": ["confidence", "trust", "relevance", "score"],
+                "description": "Result ordering when NOT locally reranking. confidence (default): blended trust×relevance, the balanced pick. trust: most authoritative sources first, for provenance-sensitive answers. relevance: normalized query match only, ignoring trust. score: raw RRF fusion order, cheapest recon. NOTE: a local (BYOK) rerank re-orders the pool afterwards, so sort_by has no effect there — disable rerank to honor it." },
+            "min_confidence": { "type": "number", "minimum": 0, "maximum": 1,
+                "description": "Drop results below this blended-confidence floor [0,1] before limit is applied (default 0 = keep all). Raise it to suppress weak matches instead of over-fetching and post-filtering yourself; the count dropped is reported as search_metadata.filtered_by_confidence. The floor always gates on blended confidence, even when sort_by orders by trust/relevance/score — it is not the sort key." },
+            "response_format": { "type": "string", "enum": ["concise", "detailed"], "default": "detailed",
+                "description": "Result verbosity. detailed (default): each result keeps its full nested scores breakdown (rrf/vector/trust factors). concise: drop ONLY that scores block — every result still carries its full content body, ids, source_path, headings/symbols, plus the promoted top-level confidence + attribution. Reach for it when you don't need the raw scoring internals; it is NOT a bodies-off mode." },
             "version_match": { "type": "string", "enum": ["strict", "permissive"], "default": "permissive",
                 "description": "Version-filter semantics: permissive (default) biases ranking and drops only breaking mismatches among version-declaring content; strict hard-filters to satisfying content only." },
             "rerank_instructions": {
@@ -662,8 +670,13 @@ fn resolve_rerank_for_search(
     let placement =
         mnm_core::config::resolve_rerank_placement(None, rerank_cfg, env, voyage_key.is_some())
             .map_err(|e| SearchError::Cloud(e.to_string()))?;
-    let rerank_model = mnm_core::config::resolve_rerank_model(None, rerank_cfg, env)
-        .map_err(|e| SearchError::Cloud(e.to_string()))?;
+    // The tool's `rerank_model` (validated to one of the two model names) is the
+    // highest-precedence flag override, exactly like the CLI's `--rerank-model`.
+    // The resolved model rides both placements — Server (wire model name) and
+    // Local BYOK (the `rerank_results` model) — so the choice is honored on both.
+    let rerank_model =
+        mnm_core::config::resolve_rerank_model(parsed.rerank_model.as_deref(), rerank_cfg, env)
+            .map_err(|e| SearchError::Cloud(e.to_string()))?;
     let voyage_base_url = mnm_core::config::resolve_voyage_base_url(models_cfg, env);
     let effective = if parsed.rerank {
         placement
@@ -908,10 +921,14 @@ fn rerank_event_model(
 /// The Local path widens the cloud `limit` to [`RERANK_FETCH`] in relevance
 /// order (`sort_by = "score"`) so the client-side reranker can *promote* a chunk
 /// the cloud ranked below the caller's limit — not merely reorder the top-N
-/// (mirrors the CLI); [`rerank_results`] later truncates back to the limit.
-/// Server/Off use the caller's limit with the cloud's confidence ordering.
-/// Server sends the resolved model name (+ instructions); Local/Off send `none`
-/// (exactly one rerank pass, structurally — Local reranks client-side).
+/// (mirrors the CLI); [`rerank_results`] later truncates back to the limit. On
+/// the Local path the reranker re-orders the pool afterwards, so it *overrides*
+/// any caller `sort_by`; Server/Off use the caller's limit and forward the
+/// caller's explicit `sort_by` (issue #137), letting the cloud order the pool
+/// (Server orders after its inline rerank). The caller's `min_confidence` floor
+/// is forwarded on every path. Server sends the resolved model name
+/// (+ instructions); Local/Off send `none` (exactly one rerank pass,
+/// structurally — Local reranks client-side).
 fn build_search_request(
     parsed: &ParsedSearchArgs,
     effective: mnm_core::config::RerankPlacement,
@@ -923,9 +940,12 @@ fn build_search_request(
     use mnm_core::config::RerankPlacement;
     let local = matches!(effective, RerankPlacement::Local);
     let (cloud_limit, sort_by) = if local {
+        // Local: force score order for the over-fetched pool; the client rerank
+        // re-orders afterwards, so the caller's sort_by cannot take effect here.
         (RERANK_FETCH, Some("score"))
     } else {
-        (parsed.limit, None)
+        // Server/Off: forward the caller's explicit ordering (None → cloud default).
+        (parsed.limit, parsed.sort_by)
     };
     let (rerank, rerank_instructions) = match effective {
         RerankPlacement::Server => {
@@ -939,6 +959,7 @@ fn build_search_request(
         limit: cloud_limit,
         filters: parsed.filters.clone(),
         sort_by,
+        min_confidence: parsed.min_confidence,
         mode: Some(parsed.mode),
         // Forward only an explicit caller choice; `None` lets the cloud apply
         // its mode-derived default (on for hybrid/vector, off for fts).
@@ -1172,6 +1193,28 @@ pub struct ParsedSearchArgs {
     /// (basic search: always `None`). `None` defers to the server default
     /// (`permissive`).
     pub version_match: Option<String>,
+    /// Result ordering key (`confidence` | `trust` | `relevance` | `score`),
+    /// validated at parse time (basic search: always `None`). `None` defers to
+    /// the server default (`confidence`). Composed in `build_search_request`:
+    /// forwarded to the cloud on the server/off paths, but overridden by the
+    /// local-BYOK rerank (which re-orders the pool afterwards, issue #137).
+    pub sort_by: Option<&'static str>,
+    /// Confidence floor in `[0, 1]` (issue #137), validated at parse time (basic
+    /// search: always `None`). `None` omits the wire key (server default `0.0`,
+    /// no filtering).
+    pub min_confidence: Option<f64>,
+    /// Whether the per-result `scores` breakdown is kept in the projected
+    /// structuredContent. `response_format=detailed` (the default, and basic
+    /// search) keeps it (`true`); `concise` drops it (`false`), retaining the
+    /// promoted top-level `confidence` / `attribution` (issue #137). This shapes
+    /// the MCP-side projection only — the cloud always returns scores so the
+    /// promotion, summary, and telemetry can read them.
+    pub include_scores: bool,
+    /// Voyage rerank model override (`rerank-2.5` | `rerank-2.5-lite`), validated
+    /// at parse time (basic search: always `None`). `None` defers to the
+    /// env/config resolution. Honored on BOTH the server-side rerank and the
+    /// local-BYOK rerank paths (issue #137).
+    pub rerank_model: Option<String>,
 }
 
 /// Parse arguments for the basic `search` tool: `{query, mode?, limit?}`.
@@ -1217,6 +1260,12 @@ pub fn parse_basic_search_args(v: &serde_json::Value) -> Result<ParsedSearchArgs
         code_mode: parse_code_mode_arg(obj, mode)?,
         rerank_instructions: None,
         version_match: None,
+        // The basic tool exposes none of the advanced controls: default ordering,
+        // no confidence floor, full scores, default rerank model.
+        sort_by: None,
+        min_confidence: None,
+        include_scores: true,
+        rerank_model: None,
     })
 }
 
@@ -1295,6 +1344,11 @@ pub fn parse_advanced_search_args(v: &serde_json::Value) -> Result<ParsedSearchA
         }
     };
 
+    let sort_by = parse_sort_by_arg(obj)?;
+    let min_confidence = parse_min_confidence_arg(obj)?;
+    let include_scores = parse_response_format_arg(obj)?;
+    let rerank_model = parse_rerank_model_arg(obj)?;
+
     let filters = obj.get("filters").cloned();
 
     // Validate the filters object against the registry before forwarding (fail fast).
@@ -1316,7 +1370,93 @@ pub fn parse_advanced_search_args(v: &serde_json::Value) -> Result<ParsedSearchA
         code_mode: parse_code_mode_arg(obj, mode)?,
         rerank_instructions,
         version_match,
+        sort_by,
+        min_confidence,
+        include_scores,
+        rerank_model,
     })
+}
+
+/// Parse the optional `sort_by` ordering key. Rejects any value outside the four
+/// documented keys (and any non-string) with a message that names them, so a
+/// typo never silently degrades to the server default. Returns a `'static`
+/// string so it can ride the wire `SearchRequest.sort_by` directly.
+fn parse_sort_by_arg(
+    obj: &serde_json::Map<String, serde_json::Value>,
+) -> Result<Option<&'static str>, String> {
+    match obj.get("sort_by") {
+        None => Ok(None),
+        Some(serde_json::Value::String(s)) => match s.as_str() {
+            "confidence" => Ok(Some("confidence")),
+            "trust" => Ok(Some("trust")),
+            "relevance" => Ok(Some("relevance")),
+            "score" => Ok(Some("score")),
+            other => Err(format!(
+                "`sort_by` must be one of confidence|trust|relevance|score (got `{other}`)"
+            )),
+        },
+        Some(_) => Err("`sort_by` must be a string".to_owned()),
+    }
+}
+
+/// Parse + validate the optional `min_confidence` floor. Reject any present-but-
+/// not-number value, and any number outside `[0, 1]`, rather than clamping
+/// silently — a fail-fast, truthful contract (the cloud would clamp, hiding a
+/// typo like `min_confidence: 90`).
+fn parse_min_confidence_arg(
+    obj: &serde_json::Map<String, serde_json::Value>,
+) -> Result<Option<f64>, String> {
+    match obj.get("min_confidence") {
+        None => Ok(None),
+        Some(v) => {
+            let Some(n) = v.as_f64() else {
+                return Err("`min_confidence` must be a number".to_owned());
+            };
+            if !(0.0..=1.0).contains(&n) {
+                return Err(format!("`min_confidence` must be within [0, 1] (got {n})"));
+            }
+            Ok(Some(n))
+        }
+    }
+}
+
+/// Parse the optional `response_format` enum into the `include_scores` decision:
+/// `detailed` (default) keeps the per-result `scores` breakdown; `concise` drops
+/// it (keeping the promoted top-level `confidence` / `attribution`). Rejects any
+/// other value (and any non-string).
+fn parse_response_format_arg(
+    obj: &serde_json::Map<String, serde_json::Value>,
+) -> Result<bool, String> {
+    match obj.get("response_format") {
+        None => Ok(true),
+        Some(serde_json::Value::String(s)) => match s.as_str() {
+            "detailed" => Ok(true),
+            "concise" => Ok(false),
+            other => {
+                Err(format!("`response_format` must be `concise` or `detailed` (got `{other}`)"))
+            }
+        },
+        Some(_) => Err("`response_format` must be a string (`concise` or `detailed`)".to_owned()),
+    }
+}
+
+/// Parse the optional `rerank_model` enum (`rerank-2.5` | `rerank-2.5-lite`).
+/// Rejects any other value (and any non-string). Returned as the wire model name
+/// so it threads straight into `resolve_rerank_model` as the highest-precedence
+/// flag override.
+fn parse_rerank_model_arg(
+    obj: &serde_json::Map<String, serde_json::Value>,
+) -> Result<Option<String>, String> {
+    match obj.get("rerank_model") {
+        None => Ok(None),
+        Some(serde_json::Value::String(s)) if s == "rerank-2.5" || s == "rerank-2.5-lite" => {
+            Ok(Some(s.clone()))
+        }
+        Some(serde_json::Value::String(s)) => {
+            Err(format!("`rerank_model` must be `rerank-2.5` or `rerank-2.5-lite` (got `{s}`)"))
+        }
+        Some(_) => Err("`rerank_model` must be a string".to_owned()),
+    }
 }
 
 /// Honour an omitted `limit` as the default; reject any present-but-not-integer
@@ -2307,6 +2447,138 @@ mod tests {
         .is_ok());
     }
 
+    // --- #137 advanced_search controls: sort_by / min_confidence /
+    // --- response_format / rerank_model ------------------------------------
+
+    #[test]
+    fn advanced_sort_by_parsed_and_defaults_none() {
+        for v in ["confidence", "trust", "relevance", "score"] {
+            let p = parse_advanced_search_args(&json!({ "queries": ["q"], "sort_by": v })).unwrap();
+            assert_eq!(p.sort_by, Some(v), "sort_by={v} must parse through");
+        }
+        // Absent → None (defers to the cloud default ordering).
+        let p = parse_advanced_search_args(&json!({ "queries": ["q"] })).unwrap();
+        assert!(p.sort_by.is_none());
+    }
+
+    #[test]
+    fn advanced_sort_by_rejects_bad_value_and_non_string() {
+        let err = parse_advanced_search_args(&json!({ "queries": ["q"], "sort_by": "rank" }))
+            .unwrap_err();
+        assert!(err.contains("confidence") && err.contains("score"), "message was {err}");
+        assert!(parse_advanced_search_args(&json!({ "queries": ["q"], "sort_by": 1 })).is_err());
+    }
+
+    #[test]
+    fn advanced_min_confidence_parsed_and_range_checked() {
+        for v in [0.0, 0.5, 1.0] {
+            let p = parse_advanced_search_args(&json!({ "queries": ["q"], "min_confidence": v }))
+                .unwrap();
+            assert_eq!(p.min_confidence, Some(v));
+        }
+        // Absent → None (server default 0.0, no filtering).
+        let p = parse_advanced_search_args(&json!({ "queries": ["q"] })).unwrap();
+        assert!(p.min_confidence.is_none());
+        // Out of [0,1] and non-number are fail-fast, not clamped.
+        assert!(parse_advanced_search_args(&json!({ "queries": ["q"], "min_confidence": -0.1 }))
+            .is_err());
+        assert!(parse_advanced_search_args(&json!({ "queries": ["q"], "min_confidence": 1.5 }))
+            .is_err());
+        assert!(
+            parse_advanced_search_args(&json!({ "queries": ["q"], "min_confidence": "high" }))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn advanced_response_format_maps_to_include_scores() {
+        // detailed (default) keeps scores; concise drops them.
+        assert!(
+            parse_advanced_search_args(&json!({ "queries": ["q"] }))
+                .unwrap()
+                .include_scores
+        );
+        assert!(
+            parse_advanced_search_args(&json!({ "queries": ["q"], "response_format": "detailed" }))
+                .unwrap()
+                .include_scores
+        );
+        assert!(
+            !parse_advanced_search_args(&json!({ "queries": ["q"], "response_format": "concise" }))
+                .unwrap()
+                .include_scores
+        );
+        // Unknown / non-string are rejected.
+        assert!(parse_advanced_search_args(
+            &json!({ "queries": ["q"], "response_format": "brief" })
+        )
+        .is_err());
+        assert!(
+            parse_advanced_search_args(&json!({ "queries": ["q"], "response_format": 1 })).is_err()
+        );
+    }
+
+    #[test]
+    fn advanced_rerank_model_parsed_and_validated() {
+        for v in ["rerank-2.5", "rerank-2.5-lite"] {
+            let p = parse_advanced_search_args(&json!({ "queries": ["q"], "rerank_model": v }))
+                .unwrap();
+            assert_eq!(p.rerank_model.as_deref(), Some(v));
+        }
+        // Absent → None (defers to env/config resolution).
+        let p = parse_advanced_search_args(&json!({ "queries": ["q"] })).unwrap();
+        assert!(p.rerank_model.is_none());
+        // Unknown / non-string are rejected.
+        assert!(parse_advanced_search_args(
+            &json!({ "queries": ["q"], "rerank_model": "rerank-3" })
+        )
+        .is_err());
+        assert!(
+            parse_advanced_search_args(&json!({ "queries": ["q"], "rerank_model": 1 })).is_err()
+        );
+    }
+
+    #[test]
+    fn advanced_schema_exposes_137_controls_basic_does_not() {
+        let advanced = advanced_search_input_schema();
+        let props = &advanced["properties"];
+        assert_eq!(props["sort_by"]["enum"], json!(["confidence", "trust", "relevance", "score"]));
+        assert_eq!(props["min_confidence"]["minimum"], json!(0));
+        assert_eq!(props["min_confidence"]["maximum"], json!(1));
+        assert_eq!(props["response_format"]["enum"], json!(["concise", "detailed"]));
+        assert_eq!(props["response_format"]["default"], "detailed");
+        assert_eq!(props["rerank_model"]["enum"], json!(["rerank-2.5", "rerank-2.5-lite"]));
+
+        // The basic tool exposes none of the four (it is the simple surface).
+        let basic = search_input_schema();
+        for k in [
+            "sort_by",
+            "min_confidence",
+            "response_format",
+            "rerank_model",
+        ] {
+            assert!(basic["properties"].get(k).is_none(), "basic must not expose {k}");
+        }
+    }
+
+    #[test]
+    fn advanced_description_registers_the_137_knobs() {
+        let m = list();
+        let t = m
+            .tools
+            .iter()
+            .find(|t| t.name == "advanced_search")
+            .expect("advanced_search tool");
+        for needle in [
+            "sort_by",
+            "min_confidence",
+            "response_format",
+            "rerank_model",
+        ] {
+            assert!(t.description.contains(needle), "advanced description must mention {needle}");
+        }
+    }
+
     #[test]
     fn parse_rejects_unknown_mode_and_bad_filter() {
         let bad_mode = serde_json::json!({ "query": "x", "mode": "fuzzy" });
@@ -2496,6 +2768,10 @@ mod tests {
             code_mode: None,
             rerank_instructions: None,
             version_match: None,
+            sort_by: None,
+            min_confidence: None,
+            include_scores: true,
+            rerank_model: None,
         }
     }
 
@@ -2564,6 +2840,73 @@ mod tests {
         assert!(req.rerank_instructions.is_none());
     }
 
+    #[test]
+    fn build_search_request_forwards_sort_by_on_server_and_off_but_local_forces_score() {
+        // #137: the caller's sort_by rides the wire on server/off; the local
+        // rerank path forces score order (it re-orders the pool afterwards).
+        use mnm_core::config::RerankPlacement;
+        use mnm_core::rerank::RerankParam;
+        let mut parsed = parsed_args(true);
+        parsed.sort_by = Some("trust");
+
+        for placement in [RerankPlacement::Server, RerankPlacement::Off] {
+            let req = build_search_request(
+                &parsed,
+                placement,
+                RerankParam::Rerank25,
+                Vec::new(),
+                "m@1".to_owned(),
+                None,
+            );
+            assert_eq!(req.sort_by, Some("trust"), "{placement:?} must forward the caller sort_by");
+            assert_eq!(req.limit, 7);
+        }
+
+        let local = build_search_request(
+            &parsed,
+            RerankPlacement::Local,
+            RerankParam::Rerank25,
+            Vec::new(),
+            "m@1".to_owned(),
+            None,
+        );
+        assert_eq!(local.sort_by, Some("score"), "local must force score order (rerank re-orders)");
+        assert_eq!(local.limit, RERANK_FETCH);
+    }
+
+    #[test]
+    fn build_search_request_forwards_min_confidence_on_every_placement() {
+        use mnm_core::config::RerankPlacement;
+        use mnm_core::rerank::RerankParam;
+        let mut parsed = parsed_args(true);
+        parsed.min_confidence = Some(0.35);
+        for placement in [
+            RerankPlacement::Server,
+            RerankPlacement::Off,
+            RerankPlacement::Local,
+        ] {
+            let req = build_search_request(
+                &parsed,
+                placement,
+                RerankParam::Rerank25,
+                Vec::new(),
+                "m@1".to_owned(),
+                None,
+            );
+            assert_eq!(req.min_confidence, Some(0.35), "{placement:?} must forward min_confidence");
+        }
+        // Omitted by default (server applies its 0.0 default).
+        let none = build_search_request(
+            &parsed_args(true),
+            RerankPlacement::Server,
+            RerankParam::Rerank25,
+            Vec::new(),
+            "m@1".to_owned(),
+            None,
+        );
+        assert!(none.min_confidence.is_none());
+    }
+
     // --- resolve_rerank_for_search (guard + override) ----------------------
 
     #[derive(Default)]
@@ -2625,6 +2968,35 @@ mod tests {
         .unwrap();
         assert_eq!(placement, RerankPlacement::Local);
         assert_eq!(model.model_name(), Some("rerank-2.5"));
+    }
+
+    #[test]
+    fn resolve_rerank_model_honors_tool_param_over_env_and_config() {
+        // #137: the tool's `rerank_model` is the highest-precedence flag — it
+        // beats both MIDNIGHT_MANUAL_RERANK_MODEL and [rerank].model, and the
+        // resolved model rides BOTH placements (server wire + local BYOK).
+        use mnm_core::config::{RerankConfig, RerankPlacement};
+        let cfg = RerankConfig {
+            location: Some("local".to_owned()),
+            model: Some("rerank-2.5".to_owned()),
+        };
+        let env = FakeEnv::default().set("MIDNIGHT_MANUAL_RERANK_MODEL", "rerank-2.5");
+        let mut parsed = parsed_args(true);
+        parsed.rerank_model = Some("rerank-2.5-lite".to_owned());
+        let (placement, model, _) = resolve_rerank_for_search(
+            &parsed,
+            &cfg,
+            &mnm_core::config::ModelsConfig::default(),
+            Some("vk"),
+            &env,
+        )
+        .unwrap();
+        assert_eq!(placement, RerankPlacement::Local, "local BYOK path is selected");
+        assert_eq!(
+            model.model_name(),
+            Some("rerank-2.5-lite"),
+            "the tool rerank_model must win — and it is the model the local BYOK rerank uses"
+        );
     }
 
     #[test]

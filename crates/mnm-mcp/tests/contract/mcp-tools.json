@@ -369,7 +369,7 @@
         "readOnlyHint": true,
         "title": "Advanced search"
       },
-      "description": "Full-control search over the Midnight corpus: fuse multiple queries (HyDE, expansion, step-back), restrict by facet filters, switch retrieval mode, and toggle reranking. Use when basic search comes up short or when the midnight-advanced-search skill prescribes a pattern. Call facets first to discover valid filter values. In results, symbol_path is a flat list of symbol names (their order is not a containment hierarchy); the get_chunks family and get_document_chunks return the richer structured {kind, name, path} segments (path = ancestor symbol names, present for nested symbols).",
+      "description": "Full-control search over the Midnight corpus: fuse multiple queries (HyDE, expansion, step-back), restrict by facet filters, switch retrieval mode, and toggle reranking. Use when basic search comes up short or when the midnight-advanced-search skill prescribes a pattern. Call facets first to discover valid filter values. Result-shaping knobs: sort_by picks the ordering (trust = most authoritative first, score = cheap recon; a local rerank overrides it), min_confidence drops weak matches at the source, response_format=concise trims the scores block (bodies stay), rerank_model=rerank-2.5-lite for cheaper reranking. In results, symbol_path is a flat list of symbol names (their order is not a containment hierarchy); the get_chunks family and get_document_chunks return the richer structured {kind, name, path} segments (path = ancestor symbol names, present for nested symbols).",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -788,6 +788,12 @@
             "minimum": 1,
             "type": "integer"
           },
+          "min_confidence": {
+            "description": "Drop results below this blended-confidence floor [0,1] before limit is applied (default 0 = keep all). Raise it to suppress weak matches instead of over-fetching and post-filtering yourself; the count dropped is reported as search_metadata.filtered_by_confidence. The floor always gates on blended confidence, even when sort_by orders by trust/relevance/score — it is not the sort key.",
+            "maximum": 1,
+            "minimum": 0,
+            "type": "number"
+          },
           "mode": {
             "default": "hybrid",
             "description": "hybrid (default) fuses keyword + semantic; fts is keyword-only; vector is semantic-only.",
@@ -816,6 +822,33 @@
           "rerank_instructions": {
             "description": "Optional rerank instruction (max 400 chars). Guides relevance: emphasize aspects, filter document kinds, or disambiguate terms. Replaces the derived default instruction. Keep it terse — instruction tokens are multiplied by the candidate-pool size. See the midnight-advanced-search skill for guidance.",
             "maxLength": 400,
+            "type": "string"
+          },
+          "rerank_model": {
+            "description": "Which Voyage rerank model to use when rerank is on. rerank-2.5-lite is faster and materially cheaper per token — the recon / large-candidate-pool choice; keep rerank-2.5 (the default) for final-answer precision. Ignored when rerank=false. Honored on both the server and local-BYOK rerank paths.",
+            "enum": [
+              "rerank-2.5",
+              "rerank-2.5-lite"
+            ],
+            "type": "string"
+          },
+          "response_format": {
+            "default": "detailed",
+            "description": "Result verbosity. detailed (default): each result keeps its full nested scores breakdown (rrf/vector/trust factors). concise: drop ONLY that scores block — every result still carries its full content body, ids, source_path, headings/symbols, plus the promoted top-level confidence + attribution. Reach for it when you don't need the raw scoring internals; it is NOT a bodies-off mode.",
+            "enum": [
+              "concise",
+              "detailed"
+            ],
+            "type": "string"
+          },
+          "sort_by": {
+            "description": "Result ordering when NOT locally reranking. confidence (default): blended trust×relevance, the balanced pick. trust: most authoritative sources first, for provenance-sensitive answers. relevance: normalized query match only, ignoring trust. score: raw RRF fusion order, cheapest recon. NOTE: a local (BYOK) rerank re-orders the pool afterwards, so sort_by has no effect there — disable rerank to honor it.",
+            "enum": [
+              "confidence",
+              "trust",
+              "relevance",
+              "score"
+            ],
             "type": "string"
           },
           "version_match": {
@@ -1793,7 +1826,7 @@
         "readOnlyHint": true,
         "title": "Document overview"
       },
-      "description": "Fetch a document's metadata plus an ordered skeleton of its chunks (ids, positions, token counts — no bodies). Use to size up a document before reading it with get_document_chunks.",
+      "description": "Fetch a document's metadata plus an ordered skeleton of its chunks (ids, positions, token counts, headings/symbols — no bodies). Use it as the document's table of contents before reading windows with get_document_chunks. Each outline line ends with [#chunk_index, ~token_count]; pass that index as get_document_chunks(from=<index>) to jump straight to that window.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -1818,8 +1851,34 @@
                 "chunk_index": {
                   "type": "integer"
                 },
+                "heading_path": {
+                  "description": "Markdown heading breadcrumb (outermost first); absent for code/plaintext chunks.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
                 "id": {
                   "type": "string"
+                },
+                "symbol": {
+                  "additionalProperties": true,
+                  "description": "Primary code symbol for this chunk (the leading symbol_path segment); absent for prose chunks. The full structured symbol_path rides get_document_chunks / get_chunks.",
+                  "properties": {
+                    "kind": {
+                      "description": "Syntactic kind: impl, fn, class, key, …",
+                      "type": "string"
+                    },
+                    "name": {
+                      "description": "Identifier or label for the symbol.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "name"
+                  ],
+                  "type": "object"
                 },
                 "token_count": {
                   "type": "integer"

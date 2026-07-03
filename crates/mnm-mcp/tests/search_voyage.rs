@@ -371,6 +371,10 @@ fn single_query_args_with(
         code_mode,
         rerank_instructions: None,
         version_match: None,
+        sort_by: None,
+        min_confidence: None,
+        include_scores: true,
+        rerank_model: None,
     }
 }
 

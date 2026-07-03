@@ -28,6 +28,41 @@ async fn get_overview_returns_doc_plus_ordered_chunk_skeletons() {
         ov.chunks.iter().all(|c| c.token_count > 0),
         "every skeleton entry should carry a positive token_count"
     );
+    // Markdown fixture chunks carry no heading/symbol seed, so the outline
+    // breadcrumbs stay empty (and serialize away) — the plaintext-unchanged path.
+    assert!(
+        ov.chunks
+            .iter()
+            .all(|c| c.heading_path.is_empty() && c.symbol.is_none()),
+        "heading-less / prose skeleton entries must carry no outline breadcrumbs"
+    );
+}
+
+/// Issue #141: the overview skeleton is a document outline — each entry carries
+/// its `heading_path` (markdown breadcrumb) and, for code, the primary
+/// `{kind, name}` symbol. Exercises the JSONB `symbol_path` → primary-symbol
+/// collapse and the `text[]` `heading_path` passthrough on `get_overview`.
+#[tokio::test]
+async fn get_overview_skeleton_carries_heading_and_primary_symbol() {
+    let h = common::boot().await;
+    let fx = fixtures::ingest_code_chunk_doc(&h.pool, "overview-outline").await;
+
+    let ov = document::get_overview(&h.pool, fx.document_id)
+        .await
+        .unwrap();
+
+    assert_eq!(ov.chunks.len(), 1, "the code fixture inserts exactly one chunk");
+    let entry = &ov.chunks[0];
+    // The markdown heading breadcrumb rides the skeleton verbatim.
+    assert_eq!(entry.heading_path, fixtures::code_heading_path());
+    // Only the PRIMARY (leading) symbol segment is surfaced, as `{kind, name}`
+    // (the nested ancestor `path` is intentionally dropped — this is a TOC).
+    let symbol = entry
+        .symbol
+        .as_ref()
+        .expect("code chunk carries a primary symbol");
+    assert_eq!(symbol.kind, "impl");
+    assert_eq!(symbol.name, "Counter");
 }
 
 #[tokio::test]

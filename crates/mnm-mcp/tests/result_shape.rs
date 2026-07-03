@@ -91,6 +91,7 @@ fn advanced_search_structured_conforms_to_output_schema() {
         advanced: true,
         skill_installed: true,
         security: mnm_core::injection::SecurityLevel::default(),
+        concise: false,
     };
     let result = mnm_mcp::render::project_search(env, &opts).into_result();
     let sc = result
@@ -104,6 +105,44 @@ fn advanced_search_structured_conforms_to_output_schema() {
         "advanced flavor must keep matched_queries in structuredContent"
     );
     assert!(!result.is_error);
+}
+
+/// Issue #137: `response_format=concise` output must still conform to the
+/// advertised `search_output_schema` — the nested `scores` block is dropped, but
+/// the promoted `confidence` / `attribution` (which the schema *requires*) stay,
+/// so the schema truthfully describes both verbosities.
+#[test]
+fn advanced_search_concise_structured_conforms_to_output_schema() {
+    let env = serde_json::json!({
+        "corpus_embedding_model": "voyage-code-3@1",
+        "results": [{ "chunk_id": "a", "document_id": "b", "source_path": "docs/x.md",
+                      "source_slug": "s", "source_display_name": "S", "heading_path": ["H"],
+                      "symbol_path": [], "content": "c",
+                      "scores": { "confidence": 0.7, "trust_score": 0.8,
+                                  "matched_queries": [0, 1],
+                                  "confidence_factors": { "attribution": "community", "verified": false } } }],
+        "search_metadata": { "filtered_by_confidence": 3, "total_candidates": 20 }
+    });
+    let opts = mnm_mcp::render::SearchRenderOpts {
+        reranker_used: None,
+        advanced: true,
+        skill_installed: true,
+        security: mnm_core::injection::SecurityLevel::default(),
+        concise: true,
+    };
+    let sc = mnm_mcp::render::project_search(env, &opts)
+        .into_result()
+        .structured_content
+        .expect("structuredContent present");
+
+    assert_conforms("advanced_search (concise)", &sc, &mnm_mcp::schemas::search_output_schema());
+    // The nested scores block is gone; the promoted fields the schema requires stay.
+    assert!(
+        sc.pointer("/results/0/scores").is_none(),
+        "concise must drop the nested scores block from structuredContent"
+    );
+    assert_eq!(sc.pointer("/results/0/confidence").and_then(Value::as_f64), Some(0.7));
+    assert_eq!(sc.pointer("/results/0/attribution").and_then(Value::as_str), Some("community"));
 }
 
 /// Issue #132: `symbol_path` has two genuinely distinct wire shapes, and each
@@ -307,6 +346,77 @@ fn symbol_path_shapes_match_their_output_schemas() {
         !compiled_search.is_valid(&structured_in_search),
         "structured segments must NOT validate against the search (string-items) symbol_path schema"
     );
+}
+
+/// Issue #141: the `get_document` skeleton is a document outline. Its enriched
+/// shape — per-chunk `heading_path` (markdown) and primary `symbol` (code) — must
+/// conform to `document_output_schema` for BOTH document kinds, and both the
+/// breadcrumbs (structuredContent) and the rendered outline (text fence) must
+/// survive projection. Plaintext (heading-less, symbol-less) entries stay the
+/// pre-#141 shape.
+#[test]
+fn get_document_skeleton_outline_conforms_both_kinds() {
+    let schema = mnm_mcp::schemas::document_output_schema();
+
+    // A markdown document: chunks carry heading breadcrumbs, no symbols. A
+    // plaintext-style entry (no heading, no symbol) rides alongside unchanged.
+    let markdown = mnm_mcp::render::project_document(serde_json::json!({
+        "id": "d1", "source_path": "docs/intro.md", "language": "markdown",
+        "source": { "slug": "compact-docs", "display_name": "Compact Docs" },
+        "chunks": [
+            { "id": "a", "chunk_index": 0, "token_count": 120, "heading_path": ["Introduction"] },
+            { "id": "b", "chunk_index": 1, "token_count": 80,
+              "heading_path": ["Introduction", "Getting Started"] },
+            { "id": "c", "chunk_index": 2, "token_count": 40 }
+        ]
+    }))
+    .into_result();
+    let sc = markdown
+        .structured_content
+        .as_ref()
+        .expect("structuredContent present");
+    assert_conforms("get_document (markdown outline)", sc, &schema);
+    // Heading breadcrumbs survive into structuredContent.
+    assert_eq!(
+        sc.pointer("/chunks/1/heading_path/1")
+            .and_then(Value::as_str),
+        Some("Getting Started")
+    );
+    // The heading-less entry stays the bare skeleton shape (no breadcrumb keys).
+    assert!(sc.pointer("/chunks/2/heading_path").is_none());
+    assert!(sc.pointer("/chunks/2/symbol").is_none());
+    // The rendered outline reaches the text fence.
+    let text = match &markdown.content[0] {
+        mnm_mcp::protocol::ContentBlock::Text { text } => text,
+    };
+    assert!(
+        text.contains("Getting Started"),
+        "fence must render the heading outline: {text}"
+    );
+
+    // A code document: chunks carry the primary `{kind, name}` symbol.
+    let code = mnm_mcp::render::project_document(serde_json::json!({
+        "id": "d2", "source_path": "src/lib.rs", "language": "rust",
+        "source": { "slug": "sdk", "display_name": "SDK" },
+        "chunks": [
+            { "id": "e", "chunk_index": 0, "token_count": 200,
+              "heading_path": [], "symbol": { "kind": "impl", "name": "Counter" } },
+            { "id": "f", "chunk_index": 1, "token_count": 60,
+              "symbol": { "kind": "fn", "name": "increment" } }
+        ]
+    }))
+    .into_result();
+    let sc = code
+        .structured_content
+        .as_ref()
+        .expect("structuredContent present");
+    assert_conforms("get_document (code outline)", sc, &schema);
+    assert_eq!(sc.pointer("/chunks/0/symbol/kind").and_then(Value::as_str), Some("impl"));
+    assert_eq!(sc.pointer("/chunks/1/symbol/name").and_then(Value::as_str), Some("increment"));
+    let text = match &code.content[0] {
+        mnm_mcp::protocol::ContentBlock::Text { text } => text,
+    };
+    assert!(text.contains("impl Counter"), "fence must render the symbol outline: {text}");
 }
 
 /// Issue #139: the no-arg `facets` overview carries a compact `corpus` block.
