@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0](https://github.com/devrelaicom/midnight-manual/compare/v0.9.0...v0.10.0) - 2026-07-03
+
+### Added
+
+- *(mcp)* search controls on advanced_search + get_document outline ([#157](https://github.com/devrelaicom/midnight-manual/pull/157))
+- *(cli)* mnm manifest check --json structured issue output ([#145](https://github.com/devrelaicom/midnight-manual/pull/145)) ([#154](https://github.com/devrelaicom/midnight-manual/pull/154))
+- *(skills)* registry-driven multi-skill support (install_skill, --skill) ([#152](https://github.com/devrelaicom/midnight-manual/pull/152))
+- *(mcp)* param-alias rewriting + zero-result recovery and trust labels ([#158](https://github.com/devrelaicom/midnight-manual/pull/158))
+- *(mcp)* cold-start corpus overview in no-arg facets + server instructions ([#155](https://github.com/devrelaicom/midnight-manual/pull/155))
+
+### Fixed
+
+- *(cli)* drop unwired ingest --include/--exclude; fix stale docs ([#144](https://github.com/devrelaicom/midnight-manual/pull/144)) ([#156](https://github.com/devrelaicom/midnight-manual/pull/156))
+- *(ingest)* correct stale remediations, structural 409/413 match, tokenless-plan warning ([#140](https://github.com/devrelaicom/midnight-manual/pull/140)) ([#153](https://github.com/devrelaicom/midnight-manual/pull/153))
+- *(mcp)* list `facets` in tool prose; report content-guard level in `status` ([#151](https://github.com/devrelaicom/midnight-manual/pull/151))
+- *(ingest)* emit outcome=aborted IngestReport on every post-start failure ([#150](https://github.com/devrelaicom/midnight-manual/pull/150))
+- *(mcp)* make symbol_path outputSchema truthful across chunk-read endpoints ([#146](https://github.com/devrelaicom/midnight-manual/pull/146))
+- *(deps)* bump quick-xml to 0.41 to clear RUSTSEC-2026-0194/0195 ([#147](https://github.com/devrelaicom/midnight-manual/pull/147))
+- *(mcp)* add RATE_LIMITED and AUTH_FAILED error kinds (429/401/403) ([#149](https://github.com/devrelaicom/midnight-manual/pull/149))
+
 ## [0.9.0](https://github.com/devrelaicom/midnight-manual/compare/v0.8.0...v0.9.0) - 2026-07-01
 
 ### Fixed
