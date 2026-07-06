@@ -224,7 +224,11 @@ pub fn install(
             // Write every manifest file. The leaf is now a confirmed-real owned
             // dir, so only strictly-nested parents (e.g. `references/`) still need
             // creating — and under a real owned dir there is no pre-existing node
-            // to hijack, so `create_dir_all` is safe for those.
+            // to hijack, so `create_dir_all` is safe for those. (Residual: a
+            // same-principal attacker racing an `rmdir` + re-symlink of the
+            // just-created leaf before this first write could still be followed;
+            // full closure needs `openat`/`O_NOFOLLOW` — deferred follow-up off
+            // #172, see `ensure_owned_dir`.)
             for &(rel, body) in bundle.files {
                 let file = join_rel(&dir, rel);
                 if let Some(parent) = file.parent() {
@@ -308,6 +312,15 @@ enum OwnedDir {
 ///   second `AlreadyExists` means an attacker re-planted in the race window, so
 ///   we fail closed rather than follow it;
 /// * anything else (a regular file, a fifo, …) → fail closed.
+///
+/// **Scope boundary.** This guarantees `dir` is a real, owned directory *at the
+/// instant it returns* — NOT for the duration of the caller's subsequent write
+/// loop. A same-principal attacker with write access to `<skills_root>` could
+/// still `rmdir` the freshly-created empty leaf and re-plant a symlink before the
+/// first `fs::write` / nested `create_dir_all`, which would then follow it. Fully
+/// closing that window needs holding an fd on the dir and doing writes via the
+/// `openat`/`*at`-family with `O_NOFOLLOW` (e.g. `cap-std`); that is tracked as a
+/// deferred hardening follow-up off #172.
 ///
 /// The parent `<skills_root>` is not the attack surface (the leaf is), so it is
 /// created recursively to keep a first-ever install working.
