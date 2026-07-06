@@ -15,7 +15,7 @@
 //!   caller's bucket before the 401 is returned (issue #176 L14). Without this,
 //!   a client spamming `Authorization: Bearer <garbage>` would 401 for free and
 //!   never be charged against any rate-limit bucket. The rate-limit layer emits
-//!   the 401 (via [`unauthorized_response`]) once it has charged the request, so
+//!   the 401 (via `unauthorized_response`) once it has charged the request, so
 //!   the on-the-wire 401 shape is unchanged.
 //!
 //! The middleware is a no-op when auth isn't configured (i.e. the server
@@ -52,7 +52,7 @@ pub struct AuthContext {
 /// [`layer`] when an `Authorization` header is present but unusable (not UTF-8,
 /// not a `Bearer` token, or a JWT that fails verification). The inner
 /// [`rate_limit`](crate::middleware::rate_limit) layer charges the request,
-/// then converts this marker into the 401 via [`unauthorized_response`] so that
+/// then converts this marker into the 401 via `unauthorized_response` so that
 /// invalid-bearer floods are rate-limited rather than answered for free.
 #[derive(Debug, Clone, Copy)]
 pub struct BearerRejection {

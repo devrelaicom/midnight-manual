@@ -72,8 +72,12 @@ pub fn router() -> Router<AppState> {
 pub struct StartIngestRunRequest {
     /// CLI version that produced the run (FR-019 reproducibility).
     pub ingest_cli_version: String,
-    /// Embedding model wire id (`name@revision`). MUST match the corpus's
-    /// active model; otherwise the request 409s with `embedding_model_mismatch`.
+    /// Embedding model wire id (`name@revision`). Its model NAME must match the
+    /// corpus's active model; otherwise the request 409s with
+    /// `embedding_model_mismatch`. The check is by name only, NOT the full
+    /// `name@revision`: a same-name revision bump (e.g. `voyage-context-3@1` →
+    /// `@2`) is a supported per-source re-embed migration and is accepted, and a
+    /// bootstrapping first ingest (no active corpus yet) is unconstrained.
     pub embedding_model: String,
     /// Code-embedding model wire id for this run's code vectors. Omit/null ⇔
     /// code embeddings disabled for this version (D9 opt-out).
