@@ -15,8 +15,19 @@ pub const JSONRPC: &str = "2.0";
 /// MCP protocol version we declare in the `initialize` response.
 pub const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 
-/// Request id: per JSON-RPC 2.0, either a string or a number (or null in a
-/// notification, but we don't model that distinction here — see [`Notification`]).
+/// Request id: per JSON-RPC 2.0, either a string or a number.
+///
+/// [`RequestId::Null`] exists ONLY so an error response can carry `"id": null`
+/// when the request id can't be determined — JSON-RPC 2.0 mandates `null` for
+/// that case (§5.1). A well-formed request never carries a null id: the
+/// classifier in [`Incoming::classify`] rejects a request whose `id` is `null`
+/// (or a float / out-of-`i64`-range number) with [`ErrorCode::InvalidRequest`]
+/// rather than admitting it here (issue #173).
+///
+/// The untagged representation serializes `Number`/`String` as the bare scalar
+/// and `Null` as JSON `null`; deserialization tries the variants in order, so a
+/// non-integer / out-of-range number matches none and fails (the classifier
+/// relies on that to reject a malformed id).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum RequestId {
@@ -24,6 +35,9 @@ pub enum RequestId {
     Number(i64),
     /// String id.
     String(String),
+    /// Undetermined id, serialized as JSON `null`. Response-only — see the type
+    /// docs; a request is never classified with this variant.
+    Null,
 }
 
 /// Incoming JSON-RPC request from the client.
@@ -54,14 +68,149 @@ pub struct Notification {
     pub params: serde_json::Value,
 }
 
-/// JSON-RPC envelope: either a Request (with id) or a Notification (without).
-#[derive(Debug, Clone, Deserialize)]
-#[serde(untagged)]
+/// A classified incoming JSON-RPC message.
+///
+/// We classify by hand rather than with `#[serde(untagged)]` because the
+/// untagged fall-through silently reclassified a *request* whose `id` failed to
+/// deserialize (a bignum `> i64::MAX`, a non-integer float, or `null`) as a
+/// [`Notification`] and dropped it — leaving a strict client waiting forever
+/// (issue #173). Hand classification also lets malformed-JSON ([`ErrorCode::ParseError`])
+/// be told apart from well-formed-but-invalid requests ([`ErrorCode::InvalidRequest`]),
+/// which the untagged parse collapsed into a single parse error.
+#[derive(Debug)]
 pub enum Incoming {
     /// A regular request expecting a response.
     Request(Request),
-    /// A fire-and-forget notification.
+    /// A fire-and-forget notification (has a `method`, no `id`).
     Notification(Notification),
+    /// The message cannot be dispatched. `id` mirrors the request id when it can
+    /// be determined and is [`RequestId::Null`] otherwise (JSON-RPC 2.0 §5.1);
+    /// `code` is [`ErrorCode::ParseError`] for invalid JSON or
+    /// [`ErrorCode::InvalidRequest`] for a well-formed object that is not a valid
+    /// request. The caller turns this into an error [`Response`].
+    Invalid {
+        /// Id to echo (or [`RequestId::Null`] when undeterminable).
+        id: RequestId,
+        /// `-32700` (parse) or `-32600` (invalid request).
+        code: ErrorCode,
+        /// Operator-facing reason.
+        message: String,
+    },
+}
+
+/// Outcome of interpreting a message's `id` field.
+enum IdState {
+    /// A valid JSON-RPC id (string, or integer within `i64` range).
+    Valid(RequestId),
+    /// Present but not a valid id (a float, a number outside `i64` range,
+    /// `null`, a bool, an array, or an object).
+    Invalid,
+    /// No `id` field at all — a notification candidate.
+    Absent,
+}
+
+/// Interpret a raw `id` field into an [`IdState`]. A JSON-RPC id MUST be a
+/// string or an integer; everything else (float, out-of-range integer, `null`,
+/// bool, array, object) is [`IdState::Invalid`], and an absent field is
+/// [`IdState::Absent`].
+fn classify_id(id: Option<&serde_json::Value>) -> IdState {
+    match id {
+        None => IdState::Absent,
+        Some(serde_json::Value::String(s)) => IdState::Valid(RequestId::String(s.clone())),
+        // `as_i64` is `Some` only for an integer that fits `i64`; a float (e.g.
+        // `1.0`) or an out-of-range integer (bignum `> i64::MAX`) yields `None`.
+        Some(serde_json::Value::Number(n)) => n
+            .as_i64()
+            .map_or(IdState::Invalid, |i| IdState::Valid(RequestId::Number(i))),
+        Some(_) => IdState::Invalid,
+    }
+}
+
+impl Incoming {
+    /// Classify a raw framed message into a [`Request`], a [`Notification`], or
+    /// an [`Incoming::Invalid`] describing the correct JSON-RPC error.
+    ///
+    /// A message is a **request** when it has a string `method` and a valid `id`;
+    /// a **notification** when it has a string `method` and no `id`. A `method`
+    /// with an invalid `id`, or a valid `id` with no `method`, or any non-object
+    /// JSON, is [`Incoming::Invalid`]. Invalid JSON is a parse error.
+    #[must_use]
+    pub fn classify(body: &[u8]) -> Self {
+        let value: serde_json::Value = match serde_json::from_slice(body) {
+            Ok(v) => v,
+            Err(e) => {
+                return Self::Invalid {
+                    id: RequestId::Null,
+                    code: ErrorCode::ParseError,
+                    message: e.to_string(),
+                };
+            }
+        };
+
+        // A JSON-RPC request/notification is a JSON object. Anything else
+        // (array batch — unsupported — or a bare scalar) is invalid, id
+        // undeterminable.
+        let Some(obj) = value.as_object() else {
+            return Self::Invalid {
+                id: RequestId::Null,
+                code: ErrorCode::InvalidRequest,
+                message: "JSON-RPC message must be a JSON object".to_owned(),
+            };
+        };
+
+        // Own the `method` and classify the `id` up front so the `obj` borrow of
+        // `value` is released before the request arm moves `value` below.
+        let method = obj
+            .get("method")
+            .and_then(serde_json::Value::as_str)
+            .map(ToOwned::to_owned);
+        let id_state = classify_id(obj.get("id"));
+
+        match (method, id_state) {
+            // method + valid id → a request. `from_value` also enforces the rest
+            // of the envelope (e.g. `jsonrpc`); if that fails we still know the id.
+            (Some(_), IdState::Valid(id)) => match serde_json::from_value::<Request>(value) {
+                Ok(req) => Self::Request(req),
+                Err(e) => Self::Invalid {
+                    id,
+                    code: ErrorCode::InvalidRequest,
+                    message: e.to_string(),
+                },
+            },
+            // method, no id → a notification. Built directly (not via `from_value`)
+            // so a missing/odd `jsonrpc` on an id-less message never turns into a
+            // spurious error response — id-less messages get no response.
+            (Some(method), IdState::Absent) => Self::Notification(Notification {
+                jsonrpc: JSONRPC.to_owned(),
+                method,
+                params: value
+                    .get("params")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+            }),
+            // method present but the id is malformed (bignum/float/null/…): this
+            // is a request, so it MUST get a response — the bug was dropping it as
+            // a notification. The id is undeterminable, so `null` (issue #173).
+            (Some(_), IdState::Invalid) => Self::Invalid {
+                id: RequestId::Null,
+                code: ErrorCode::InvalidRequest,
+                message: "JSON-RPC request `id` must be a string or an integer within i64 range"
+                    .to_owned(),
+            },
+            // No usable `method`: a well-formed object that isn't a valid request.
+            // Echo the id when we have a valid one, else `null`.
+            (None, IdState::Valid(id)) => Self::Invalid {
+                id,
+                code: ErrorCode::InvalidRequest,
+                message: "JSON-RPC request is missing a string `method`".to_owned(),
+            },
+            (None, IdState::Invalid | IdState::Absent) => Self::Invalid {
+                id: RequestId::Null,
+                code: ErrorCode::InvalidRequest,
+                message: "JSON-RPC request is missing a string `method`".to_owned(),
+            },
+        }
+    }
 }
 
 /// Outgoing JSON-RPC response shape.
@@ -418,16 +567,119 @@ mod tests {
 
     #[test]
     fn incoming_distinguishes_request_from_notification() {
-        let req_json = r#"{"jsonrpc":"2.0","method":"tools/list","id":1}"#;
-        let n_json = r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
-        assert!(matches!(
-            serde_json::from_str::<Incoming>(req_json).unwrap(),
-            Incoming::Request(_)
-        ));
-        assert!(matches!(
-            serde_json::from_str::<Incoming>(n_json).unwrap(),
-            Incoming::Notification(_)
-        ));
+        let req_json = br#"{"jsonrpc":"2.0","method":"tools/list","id":1}"#;
+        let n_json = br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
+        match Incoming::classify(req_json) {
+            Incoming::Request(req) => assert_eq!(req.id, RequestId::Number(1)),
+            other => panic!("expected Request, got {other:?}"),
+        }
+        assert!(matches!(Incoming::classify(n_json), Incoming::Notification(_)));
+    }
+
+    #[test]
+    fn request_id_null_serializes_as_json_null() {
+        // The whole undetermined-id fix rests on this: the untagged unit variant
+        // must serialize to JSON `null`, not omit or `"Null"`.
+        assert_eq!(serde_json::to_value(RequestId::Null).unwrap(), serde_json::Value::Null);
+    }
+
+    #[test]
+    fn err_response_with_null_id_serializes_id_null() {
+        let r = Response::err(RequestId::Null, ErrorCode::ParseError, "bad json");
+        let v = serde_json::to_value(&r).unwrap();
+        // Present on the wire AND explicitly null (JSON-RPC 2.0 §5.1), not omitted.
+        assert!(v.as_object().unwrap().contains_key("id"));
+        assert_eq!(v["id"], serde_json::Value::Null);
+        assert_eq!(v["error"]["code"], -32700);
+    }
+
+    #[test]
+    fn classify_invalid_json_is_parse_error_with_null_id() {
+        // A truncated object is not valid JSON → ParseError (-32700), id null.
+        match Incoming::classify(b"{\"jsonrpc\":\"2.0\"") {
+            Incoming::Invalid { id, code, .. } => {
+                assert_eq!(id, RequestId::Null);
+                assert_eq!(code, ErrorCode::ParseError);
+            }
+            other => panic!("expected Invalid/ParseError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_wellformed_but_no_method_is_invalid_request() {
+        // Valid JSON object with no `method` is a well-formed-but-invalid request
+        // → InvalidRequest (-32600), NOT ParseError. Id undeterminable → null.
+        match Incoming::classify(br#"{"jsonrpc":"2.0"}"#) {
+            Incoming::Invalid { id, code, .. } => {
+                assert_eq!(id, RequestId::Null);
+                assert_eq!(code, ErrorCode::InvalidRequest);
+            }
+            other => panic!("expected Invalid/InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_no_method_with_valid_id_echoes_that_id() {
+        // When the id is determinable it must be echoed, not nulled.
+        match Incoming::classify(br#"{"jsonrpc":"2.0","id":7}"#) {
+            Incoming::Invalid { id, code, .. } => {
+                assert_eq!(id, RequestId::Number(7));
+                assert_eq!(code, ErrorCode::InvalidRequest);
+            }
+            other => panic!("expected Invalid/InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_bignum_id_request_is_invalid_not_notification() {
+        // The core #173 scenario: an id > i64::MAX must NOT fall through to a
+        // notification (which would drop it) — it is an InvalidRequest, id null.
+        let body = br#"{"jsonrpc":"2.0","id":12345678901234567890,"method":"tools/list"}"#;
+        match Incoming::classify(body) {
+            Incoming::Invalid { id, code, .. } => {
+                assert_eq!(id, RequestId::Null);
+                assert_eq!(code, ErrorCode::InvalidRequest);
+            }
+            other => panic!("bignum id must be Invalid, not {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_float_and_null_ids_are_invalid_requests() {
+        for body in [
+            br#"{"jsonrpc":"2.0","id":1.0,"method":"tools/list"}"#.as_slice(),
+            br#"{"jsonrpc":"2.0","id":null,"method":"tools/list"}"#.as_slice(),
+        ] {
+            match Incoming::classify(body) {
+                Incoming::Invalid { id, code, .. } => {
+                    assert_eq!(id, RequestId::Null, "body: {}", String::from_utf8_lossy(body));
+                    assert_eq!(code, ErrorCode::InvalidRequest);
+                }
+                other => panic!("non-integer id must be Invalid, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn classify_batch_array_is_invalid_request_with_null_id() {
+        // Valid JSON, but a top-level array (JSON-RPC batch — unsupported here) is
+        // not a request object → InvalidRequest (-32600), id undeterminable → null.
+        match Incoming::classify(br#"[{"jsonrpc":"2.0","method":"tools/list","id":1}]"#) {
+            Incoming::Invalid { id, code, .. } => {
+                assert_eq!(id, RequestId::Null);
+                assert_eq!(code, ErrorCode::InvalidRequest);
+            }
+            other => panic!("a JSON array must be Invalid/InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_string_id_request_round_trips() {
+        // String ids remain valid requests.
+        match Incoming::classify(br#"{"jsonrpc":"2.0","id":"abc","method":"tools/list"}"#) {
+            Incoming::Request(req) => assert_eq!(req.id, RequestId::String("abc".into())),
+            other => panic!("expected Request, got {other:?}"),
+        }
     }
 
     #[test]
