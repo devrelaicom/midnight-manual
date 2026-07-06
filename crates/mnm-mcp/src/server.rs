@@ -166,20 +166,19 @@ pub async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error + Se
 /// Decode and dispatch a single framed message. Returns `Some(response_bytes)`
 /// for a request and `None` for a notification.
 async fn handle_message(body: &[u8], state: &ServerState) -> Option<Vec<u8>> {
-    let incoming: Incoming = match serde_json::from_slice(body) {
-        Ok(v) => v,
-        Err(e) => {
-            warn!(error = %e, "parse error");
-            let resp = Response::err(RequestId::Number(0), ErrorCode::ParseError, e.to_string());
-            return Some(serde_json::to_vec(&resp).expect("serialize parse-err response"));
-        }
-    };
-
-    match incoming {
+    match Incoming::classify(body) {
         Incoming::Request(req) => Some(handle_request(req, state).await),
         Incoming::Notification(n) => {
             debug!(method = %n.method, "notification");
             None
+        }
+        // A request we can't dispatch (bad JSON, non-object, missing method, or a
+        // malformed id) still gets a JSON-RPC error response — never a silent
+        // drop — with `id: null` when the id can't be determined (issue #173).
+        Incoming::Invalid { id, code, message } => {
+            warn!(error = %message, code = code as i32, "invalid message");
+            let resp = Response::err(id, code, message);
+            Some(serde_json::to_vec(&resp).expect("serialize error response"))
         }
     }
 }
@@ -1290,5 +1289,64 @@ mod tests {
             instructions.contains("corpus") && instructions.contains("install_skill"),
             "instructions must reach the wire with the cold-start guidance: {resp}"
         );
+    }
+
+    /// Issue #173 (L8): a request whose `id` is a JSON number outside `i64`
+    /// range MUST get an error response, not be silently reclassified as a
+    /// notification and dropped (which hangs a strict client). Drive the exact
+    /// scenario from the issue through `handle_message` end-to-end: it returns
+    /// `Some(bytes)` (not `None`), the response is an `InvalidRequest` (-32600),
+    /// and `id` is `null` because the id can't be determined.
+    ///
+    /// Hermetic under the `VOYAGE_API_KEY=` gate: classification rejects the
+    /// message before any cloud/Voyage path is touched.
+    #[tokio::test]
+    async fn bignum_id_request_gets_error_response_not_dropped() {
+        let state = test_state(mnm_core::injection::SecurityLevel::Moderate);
+        let body = br#"{"jsonrpc":"2.0","id":12345678901234567890,"method":"tools/list"}"#;
+        let out = handle_message(body, &state)
+            .await
+            .expect("a request with an out-of-range id must get a response, not be dropped");
+        let resp: serde_json::Value = serde_json::from_slice(&out).expect("parse response");
+
+        assert_eq!(resp["error"]["code"], -32600, "must be InvalidRequest: {resp}");
+        assert_eq!(resp["id"], serde_json::Value::Null, "undetermined id → null: {resp}");
+        assert!(resp.get("result").is_none(), "error response carries no result: {resp}");
+    }
+
+    /// Issue #173 (L7): a parse error response must serialize `id` as `null`
+    /// (JSON-RPC 2.0 §5.1) with code `-32700` — not id `0`, which a client using
+    /// request id `0` would mis-attribute to its own in-flight call.
+    #[tokio::test]
+    async fn parse_error_response_uses_null_id_and_parse_code() {
+        let state = test_state(mnm_core::injection::SecurityLevel::Moderate);
+        // Truncated object — not valid JSON.
+        let out = handle_message(b"{\"jsonrpc\":\"2.0\"", &state)
+            .await
+            .expect("parse error must produce a response");
+        let resp: serde_json::Value = serde_json::from_slice(&out).expect("parse response");
+
+        assert_eq!(resp["error"]["code"], -32700, "must be ParseError: {resp}");
+        assert!(
+            resp.as_object().unwrap().contains_key("id") && resp["id"].is_null(),
+            "parse-error id must be present and null, not 0: {resp}"
+        );
+    }
+
+    /// Issue #173 (L7): a well-formed JSON object that is not a valid request
+    /// (no `method`) must return `InvalidRequest` (-32600), not `ParseError`.
+    #[tokio::test]
+    async fn wellformed_but_invalid_request_returns_invalid_request() {
+        let state = test_state(mnm_core::injection::SecurityLevel::Moderate);
+        let out = handle_message(br#"{"jsonrpc":"2.0"}"#, &state)
+            .await
+            .expect("invalid request must produce a response");
+        let resp: serde_json::Value = serde_json::from_slice(&out).expect("parse response");
+
+        assert_eq!(
+            resp["error"]["code"], -32600,
+            "well-formed-but-invalid must be InvalidRequest, not ParseError: {resp}"
+        );
+        assert!(resp["id"].is_null(), "undetermined id → null: {resp}");
     }
 }
