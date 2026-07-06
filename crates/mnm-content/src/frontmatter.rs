@@ -67,6 +67,29 @@ pub fn split(input: &str) -> FrontmatterSplit {
     FrontmatterSplit { frontmatter, provenance, body }
 }
 
+/// Build a frontmatter-free split for a non-Markdown document.
+///
+/// No frontmatter is extracted, provenance is defaulted, and the whole input
+/// becomes the body (with CRLF normalized to LF, matching how [`split`] hands
+/// back a frontmatter-less body).
+///
+/// Frontmatter extraction is a Markdown-only convention (FR-017). Running
+/// [`split`] on YAML/code files silently swallows a leading `---`-delimited
+/// block into the frontmatter column instead of the searchable body — routine
+/// content loss on multi-document or `---`-prefixed YAML (issue #161). The
+/// walker calls this for every non-Markdown [`DocumentKind`] so the body is
+/// preserved verbatim.
+///
+/// [`DocumentKind`]: mnm_core::types::DocumentKind
+#[must_use]
+pub fn passthrough(input: &str) -> FrontmatterSplit {
+    FrontmatterSplit {
+        frontmatter: None,
+        provenance: Provenance::default(),
+        body: input.replace("\r\n", "\n"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use mnm_core::provenance::Attribution;
@@ -123,5 +146,24 @@ mod tests {
         let r = split(input);
         assert!(r.frontmatter.is_none());
         assert_eq!(r.body, input);
+    }
+
+    #[test]
+    fn passthrough_keeps_leading_fenced_block_in_body() {
+        // A `---`-prefixed YAML doc that `split` would swallow into the
+        // frontmatter column survives intact through `passthrough` (issue #161).
+        let input =
+            "---\napiVersion: v1\nkind: Service\n---\napiVersion: apps/v1\nkind: Deployment\n";
+        let r = passthrough(input);
+        assert!(r.frontmatter.is_none());
+        assert_eq!(r.provenance, Provenance::default());
+        assert_eq!(r.body, input);
+    }
+
+    #[test]
+    fn passthrough_normalizes_crlf_like_split() {
+        let r = passthrough("---\r\nfoo: bar\r\n---\r\n");
+        assert_eq!(r.body, "---\nfoo: bar\n---\n");
+        assert!(r.frontmatter.is_none());
     }
 }
