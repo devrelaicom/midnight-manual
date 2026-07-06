@@ -39,6 +39,12 @@ pub struct HarnessInstall {
     pub path: PathBuf,
     /// What happened.
     pub action: InstallAction,
+    /// True when a pre-existing **symlink** at the owned skill-dir path was
+    /// dropped and replaced with a real directory before writing (its target
+    /// was left untouched). Surfaced so the replacement is never silent — a user
+    /// who intentionally symlinked the dir gets a signal instead of losing it
+    /// indistinguishably from a first-time `Created`.
+    pub replaced_symlink: bool,
     /// The "reload your skills" instruction for this harness.
     pub reload_step: String,
 }
@@ -204,17 +210,34 @@ pub fn install(
         let mut installed = Vec::with_capacity(targets.len());
         for &h in &targets {
             let dir = h.skill_dir(bundle.name, scope, &base);
-            let dir_existed = dir.exists();
-            let mut changed = false;
 
-            // Write every manifest file, creating parent dirs as needed.
+            // Materialise the owned dir as a *real* directory, fail-closed: a
+            // `create_dir_all` here would silently follow a symlink planted at
+            // the leaf and write the bundle into foreign storage. `ensure_owned_dir`
+            // creates it with the non-recursive `create_dir` (which never follows
+            // the final symlink) and refuses anything that is not our own dir.
+            let owned = ensure_owned_dir(&dir)?;
+            let dir_existed = matches!(owned, OwnedDir::Existed);
+            let replaced_symlink = matches!(owned, OwnedDir::Created { replaced_symlink: true });
+            let mut changed = replaced_symlink;
+
+            // Write every manifest file. The leaf is now a confirmed-real owned
+            // dir, so only strictly-nested parents (e.g. `references/`) still need
+            // creating — and under a real owned dir there is no pre-existing node
+            // to hijack, so `create_dir_all` is safe for those. (Residual: a
+            // same-principal attacker racing an `rmdir` + re-symlink of the
+            // just-created leaf before this first write could still be followed;
+            // full closure needs `openat`/`O_NOFOLLOW` — deferred follow-up off
+            // #172, see `ensure_owned_dir`.)
             for &(rel, body) in bundle.files {
                 let file = join_rel(&dir, rel);
                 if let Some(parent) = file.parent() {
-                    fs::create_dir_all(parent).map_err(|source| SkillError::Io {
-                        path: parent.to_path_buf(),
-                        source,
-                    })?;
+                    if parent != dir {
+                        fs::create_dir_all(parent).map_err(|source| SkillError::Io {
+                            path: parent.to_path_buf(),
+                            source,
+                        })?;
+                    }
                 }
                 let up_to_date = fs::read_to_string(&file)
                     .map(|c| c == body)
@@ -243,6 +266,7 @@ pub fn install(
                 scope: scope.as_str().to_owned(),
                 path: h.skill_file(bundle.name, scope, &base),
                 action,
+                replaced_symlink,
                 reload_step: h.reload_step().to_owned(),
             });
         }
@@ -258,6 +282,102 @@ pub fn install(
         not_detected,
         skills: skill_reports,
     })
+}
+
+/// Outcome of materialising a bundle's owned skill dir as a real directory.
+enum OwnedDir {
+    /// The dir was created fresh. `replaced_symlink` is true when a pre-existing
+    /// symlink at the path was dropped (its target left intact) to make room.
+    Created {
+        /// Whether a symlink squatting the owned-dir path was replaced.
+        replaced_symlink: bool,
+    },
+    /// A real directory already existed — the idempotent re-install / update case.
+    Existed,
+}
+
+/// Materialise `dir` as a *real* owned directory, fail-closed against a symlink
+/// planted (or re-planted) at the path.
+///
+/// The leaf is created with the non-recursive [`fs::create_dir`] (`mkdir`),
+/// which — unlike [`fs::create_dir_all`] — never follows a symlink at the final
+/// component: it returns `AlreadyExists` for a symlink, file, or dir alike. So a
+/// link left at `<skills_root>/<skill>` cannot redirect the write into foreign
+/// storage the way `create_dir_all` (which resolves an existing symlink via
+/// `is_dir()` and treats it as "already there") silently would.
+///
+/// On `AlreadyExists` we re-stat with [`fs::symlink_metadata`] (no follow):
+/// * a real directory → an ordinary re-install, proceed;
+/// * a symlink → drop the link (never its target) and re-create the real dir. A
+///   second `AlreadyExists` means an attacker re-planted in the race window, so
+///   we fail closed rather than follow it;
+/// * anything else (a regular file, a fifo, …) → fail closed.
+///
+/// **Scope boundary.** This guarantees `dir` is a real, owned directory *at the
+/// instant it returns* — NOT for the duration of the caller's subsequent write
+/// loop. A same-principal attacker with write access to `<skills_root>` could
+/// still `rmdir` the freshly-created empty leaf and re-plant a symlink before the
+/// first `fs::write` / nested `create_dir_all`, which would then follow it. Fully
+/// closing that window needs holding an fd on the dir and doing writes via the
+/// `openat`/`*at`-family with `O_NOFOLLOW` (e.g. `cap-std`); that is tracked as a
+/// deferred hardening follow-up off #172.
+///
+/// The parent `<skills_root>` is not the attack surface (the leaf is), so it is
+/// created recursively to keep a first-ever install working.
+///
+/// On Windows, `remove_file` fails on a *directory* symlink, which degrades to a
+/// fail-closed [`SkillError::Io`] rather than a clobber — still safe.
+fn ensure_owned_dir(dir: &std::path::Path) -> Result<OwnedDir, SkillError> {
+    if let Some(parent) = dir.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent).map_err(|source| SkillError::Io {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+    }
+    match fs::create_dir(dir) {
+        Ok(()) => Ok(OwnedDir::Created { replaced_symlink: false }),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            let ft = fs::symlink_metadata(dir)
+                .map_err(|source| SkillError::Io {
+                    path: dir.to_path_buf(),
+                    source,
+                })?
+                .file_type();
+            if ft.is_dir() {
+                return Ok(OwnedDir::Existed);
+            }
+            if !ft.is_symlink() {
+                // A regular file (or other non-dir node) squats the owned-dir
+                // path — refuse rather than write around it.
+                return Err(SkillError::Io {
+                    path: dir.to_path_buf(),
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::AlreadyExists,
+                        "owned skill dir path is occupied by a non-directory",
+                    ),
+                });
+            }
+            // Drop the symlink (its target is untouched) and re-create a real
+            // dir. A second `AlreadyExists` is a raced re-plant: fail closed.
+            fs::remove_file(dir).map_err(|source| SkillError::Io {
+                path: dir.to_path_buf(),
+                source,
+            })?;
+            match fs::create_dir(dir) {
+                Ok(()) => Ok(OwnedDir::Created { replaced_symlink: true }),
+                Err(source) => Err(SkillError::Io {
+                    path: dir.to_path_buf(),
+                    source,
+                }),
+            }
+        }
+        Err(source) => Err(SkillError::Io {
+            path: dir.to_path_buf(),
+            source,
+        }),
+    }
 }
 
 /// Write `body` to `path`, mapping any io failure to [`SkillError::Io`] with
@@ -806,6 +926,98 @@ mod tests {
             foreign.join("keep.md").exists(),
             "prune traversed a symlinked skill dir and deleted foreign data"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_does_not_write_through_symlinked_skill_dir() {
+        use std::os::unix::fs::symlink;
+        let (_tmp, env) = env_with_marker(Harness::ClaudeCode);
+        // A foreign dir the owned skill dir is symlinked at, holding a same-named
+        // file (SKILL.md) that the write phase would otherwise clobber.
+        let foreign = env.home.join("foreign-notes");
+        std::fs::create_dir_all(&foreign).unwrap();
+        std::fs::write(foreign.join("SKILL.md"), "precious").unwrap();
+
+        let skill_dir = Harness::ClaudeCode.skill_dir(SEARCH_SKILL, Scope::User, &env.home);
+        std::fs::create_dir_all(skill_dir.parent().unwrap()).unwrap();
+        symlink(&foreign, &skill_dir).unwrap();
+
+        let report = install(None, &search(), Scope::User, &env).unwrap();
+
+        // The foreign SKILL.md is untouched: the write did not follow the link.
+        assert_eq!(std::fs::read_to_string(foreign.join("SKILL.md")).unwrap(), "precious");
+        // The owned dir is now a real directory (link replaced) holding our file.
+        let meta = std::fs::symlink_metadata(&skill_dir).unwrap();
+        assert!(!meta.file_type().is_symlink(), "owned dir must no longer be a symlink");
+        assert!(meta.is_dir(), "owned dir must be a real directory");
+        assert_ne!(
+            std::fs::read_to_string(skill_dir.join("SKILL.md")).unwrap(),
+            "precious",
+            "SKILL.md must be the bundle's content, written into the owned dir"
+        );
+        // The replacement is reported, not silent.
+        assert!(
+            search_install(&report).installed[0].replaced_symlink,
+            "a dropped owned-dir symlink must be signalled in the report"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_refuses_when_owned_dir_is_a_regular_file() {
+        // A non-dir squatting the owned-dir path must fail closed — the same
+        // fail-closed branch a re-planted symlink hits on the second create_dir —
+        // rather than being written around.
+        let (_tmp, env) = env_with_marker(Harness::ClaudeCode);
+        let skill_dir = Harness::ClaudeCode.skill_dir(SEARCH_SKILL, Scope::User, &env.home);
+        std::fs::create_dir_all(skill_dir.parent().unwrap()).unwrap();
+        std::fs::write(&skill_dir, "not a directory").unwrap();
+
+        let err = install(None, &search(), Scope::User, &env).unwrap_err();
+        assert!(matches!(err, SkillError::Io { .. }), "expected fail-closed Io, got {err:?}");
+        // The squatting file is left exactly as-is — not clobbered.
+        assert_eq!(std::fs::read_to_string(&skill_dir).unwrap(), "not a directory");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_owned_dir_fresh_existing_and_symlink() {
+        use std::os::unix::fs::symlink;
+        let tmp = TempDir::new().unwrap();
+
+        // Fresh: created, no symlink replaced.
+        let fresh = tmp.path().join("root").join("skill");
+        assert!(matches!(
+            ensure_owned_dir(&fresh).unwrap(),
+            OwnedDir::Created { replaced_symlink: false }
+        ));
+        assert!(fresh.is_dir());
+
+        // Idempotent: a real dir already there → Existed.
+        assert!(matches!(ensure_owned_dir(&fresh).unwrap(), OwnedDir::Existed));
+
+        // Symlink: replaced with a real dir, target left intact, flag set.
+        let foreign = tmp.path().join("foreign");
+        std::fs::create_dir_all(&foreign).unwrap();
+        std::fs::write(foreign.join("keep"), "precious").unwrap();
+        let linked = tmp.path().join("root").join("linked");
+        symlink(&foreign, &linked).unwrap();
+        assert!(matches!(
+            ensure_owned_dir(&linked).unwrap(),
+            OwnedDir::Created { replaced_symlink: true }
+        ));
+        assert!(!std::fs::symlink_metadata(&linked)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(linked.is_dir());
+        assert_eq!(std::fs::read_to_string(foreign.join("keep")).unwrap(), "precious");
+
+        // Non-dir squatter → fail closed.
+        let file_path = tmp.path().join("root").join("afile");
+        std::fs::write(&file_path, "x").unwrap();
+        assert!(matches!(ensure_owned_dir(&file_path), Err(SkillError::Io { .. })));
     }
 
     #[test]

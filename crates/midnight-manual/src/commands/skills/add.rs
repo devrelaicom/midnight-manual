@@ -51,6 +51,12 @@ pub fn run(args: &Args, json: bool) -> Result<()> {
             };
             println!("  {} — {verb}", h.harness);
             println!("    path:   {}", h.path.display());
+            if h.replaced_symlink {
+                println!(
+                    "    warning: replaced a pre-existing symlink at the skill dir \
+                     with a real directory (its target was left untouched)"
+                );
+            }
             println!("    reload: {}", h.reload_step);
         }
         println!();

@@ -210,6 +210,11 @@ impl AuthFile {
 /// Write `body` to `path` via a tmp-then-rename dance so the file is
 /// atomically replaced and never observed half-written. On Unix the file
 /// is created with mode `0o600`.
+///
+/// The tmp is opened with `create_new` (`O_EXCL`), so a symlink planted at the
+/// predictable `<path>.toml.tmp` cannot redirect the write through the link and
+/// truncate its target. A stale tmp from a crashed prior run is cleared
+/// best-effort first (unlinking the name only — never a symlink's target).
 fn atomic_write(path: &Path, body: &str) -> Result<(), AuthFileError> {
     use std::io::Write as _;
     if let Some(parent) = path.parent() {
@@ -221,6 +226,8 @@ fn atomic_write(path: &Path, body: &str) -> Result<(), AuthFileError> {
         }
     }
     let tmp = path.with_extension("toml.tmp");
+    // Best-effort: clear a stale/planted tmp before the exclusive create below.
+    let _ = std::fs::remove_file(&tmp);
     let file_handle = open_restricted(&tmp)?;
     {
         let mut bw = std::io::BufWriter::new(file_handle);
@@ -244,9 +251,10 @@ fn atomic_write(path: &Path, body: &str) -> Result<(), AuthFileError> {
 #[cfg(unix)]
 fn open_restricted(path: &Path) -> Result<std::fs::File, AuthFileError> {
     use std::os::unix::fs::OpenOptionsExt as _;
+    // `create_new` (`O_EXCL`) refuses to follow a symlink planted at the tmp
+    // path; the caller unlinks a stale tmp best-effort just before this.
     std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(true)
+        .create_new(true)
         .write(true)
         .mode(0o600)
         .open(path)
@@ -259,9 +267,9 @@ fn open_restricted(path: &Path) -> Result<std::fs::File, AuthFileError> {
 #[cfg(not(unix))]
 fn open_restricted(path: &Path) -> Result<std::fs::File, AuthFileError> {
     // Platform permission model is the user's NTFS ACL / equivalent.
+    // `create_new` (`O_EXCL`) refuses to follow a symlink planted at the tmp path.
     std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(true)
+        .create_new(true)
         .write(true)
         .open(path)
         .map_err(|e| AuthFileError::Io {
@@ -503,5 +511,46 @@ expires_at = "2026-05-13T15:30:00Z"
             matches!(err, AuthFileError::InsecurePermissions { mode: 0o644, .. }),
             "expected InsecurePermissions, got {err:?}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_does_not_follow_symlinked_tmp() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.toml");
+        // Attacker plants the predictable tmp sibling as a symlink to a victim
+        // file, hoping the bearer token is written through it (or its target
+        // truncated). The exclusive create must refuse to follow the link.
+        let tmp = path.with_extension("toml.tmp");
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, b"original").unwrap();
+        symlink(&victim, &tmp).unwrap();
+
+        AuthFile::write_admin_token(&path, "aaron", "jwt", rfc("2026-05-14T01:30:00Z")).unwrap();
+
+        // The victim was neither written through nor truncated.
+        assert_eq!(std::fs::read(&victim).unwrap(), b"original");
+        // The auth file landed at the intended path and round-trips.
+        let loaded = AuthFile::read_optional(&path).unwrap().unwrap();
+        assert!(loaded.admin.is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_recovers_from_stale_tmp() {
+        // A crashed prior run can leave a regular-file tmp behind; the write must
+        // still succeed (best-effort unlink) rather than fail on O_EXCL.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.toml");
+        let tmp = path.with_extension("toml.tmp");
+        std::fs::write(&tmp, b"stale").unwrap();
+        AuthFile::write_admin_token(&path, "aaron", "jwt", rfc("2026-05-14T01:30:00Z")).unwrap();
+        assert!(AuthFile::read_optional(&path)
+            .unwrap()
+            .unwrap()
+            .admin
+            .is_some());
+        assert!(!tmp.exists(), "tmp must be consumed by the rename");
     }
 }
