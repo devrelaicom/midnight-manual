@@ -49,10 +49,19 @@ impl InputType {
 /// Errors returned by the Voyage HTTP client.
 #[derive(Debug, thiserror::Error)]
 pub enum VoyageError {
-    /// A transport-level error that is safe to retry: the request never reached
-    /// the server or was rejected before any work began (connection refused /
-    /// reset, DNS failure, …). Because no tokens were consumed, retrying the
-    /// identical batch cannot double-count against the shared cap.
+    /// A transport-level error other than a client-side timeout (which is split
+    /// out into [`VoyageError::Timeout`]) — connection refused, DNS failure, a
+    /// connection reset mid-request, and so on. `is_retryable` retries these.
+    ///
+    /// Retrying is only *fully* token-safe for failures that occur BEFORE the
+    /// request reaches the server (connection refused, DNS failure): nothing was
+    /// billed, so a retry cannot double-count. A connection **reset** is a
+    /// weaker case — it can land after the server already received and began
+    /// processing the batch (Voyage is known to stall and reset mid-request
+    /// under load), so retrying a reset does NOT fully close the double-bill
+    /// window; only request idempotency / server-side dedup would. Timeouts are
+    /// the common non-idempotent case and are split off as non-retryable, but a
+    /// mid-stream reset remains a residual risk (issue #164).
     #[error("voyage http error: {0}")]
     Http(String),
     /// A client-side timeout. Distinct from [`VoyageError::Http`] because the
