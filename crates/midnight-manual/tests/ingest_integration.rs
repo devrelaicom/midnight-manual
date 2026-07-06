@@ -271,6 +271,164 @@ async fn happy_path_posts_three_step_flow() {
     assert_eq!(first_vec.len(), 1024, "vector must be 1024-dim (voyage-code-3)");
 }
 
+/// A `re-embed required` conflict on a carried document triggers the re-embed
+/// retry loop, and the tokens billed by that re-embed MUST land in the run's
+/// `total_tokens` — the migration budget and the report both read it (#164).
+///
+/// The scenario is rigged so the ONLY embedding that happens is the retry: every
+/// walked document is classified carry-forward (its `document_hash` matches the
+/// mocked prior inventory), so the main upload loop embeds nothing. The first
+/// upload refuses to carry the doc with a `re-embed required` conflict; the
+/// retry re-chunks + re-embeds it (billing real tokens) and re-uploads cleanly.
+/// A non-zero `total_tokens` therefore proves the retry's `Ok(tokens)` is
+/// accumulated — before the fix it was discarded and this asserted zero.
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // full carry-forward + re-embed-retry mock flow
+async fn reembed_retry_tokens_are_counted_in_total() {
+    let server = MockServer::start().await;
+
+    // Model resolution (`auto` → `voyage-code-3@1`) + the embeddings proxy.
+    mount_embedding_mocks(&server).await;
+
+    // The doc carries forward only if its `document_hash` matches the prior
+    // inventory's entry for the same path, under the same embedding model.
+    let body = "# Carried\n\nStable body that survives unchanged.\n";
+    let content_hash = mnm_content::content_hash::document_hash(body);
+    let inventory = json!({
+        "embedding_model": "voyage-code-3@1",
+        "code_embedding_model": null,
+        "documents": [{
+            "source_path": "carried.md",
+            "content_hash": content_hash,
+            "document_id": "00000000-0000-0000-0000-000000000042",
+            "embed_complete": true,
+        }],
+    });
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/v1/admin/sources/[^/]+/active-version/documents$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(inventory))
+        .mount(&server)
+        .await;
+
+    // Source already exists (no create).
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/v1/sources/[^/]+$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "slug": "docs",
+            "kind": "docs_site",
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path_regex(r"^/v1/admin/sources/[^/]+/ingest-runs$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ingest_run_id": "00000000-0000-0000-0000-000000000001",
+            "source_version_id": "00000000-0000-0000-0000-000000000001",
+            "source_version_revision": 1,
+        })))
+        .mount(&server)
+        .await;
+
+    // Stateful PUT: first upload (the carried batch) refuses to carry the doc
+    // with a `re-embed required` conflict; the retry upload accepts it.
+    let put_calls = Arc::new(Mutex::new(0_usize));
+    let put_calls_c = Arc::clone(&put_calls);
+    Mock::given(method("PUT"))
+        .and(path_regex(r"^/v1/admin/sources/[^/]+/ingest-runs/[^/]+/documents$"))
+        .respond_with(move |_req: &Request| {
+            let mut n = put_calls_c.lock().unwrap();
+            *n += 1;
+            if *n == 1 {
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "accepted": 0,
+                    "carried": 0,
+                    "conflicts": [{
+                        "path": "carried.md",
+                        "reason": "no matching prior document — re-embed required",
+                    }],
+                }))
+            } else {
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "accepted": 1,
+                    "carried": 0,
+                    "conflicts": [],
+                }))
+            }
+        })
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path_regex(r"^/v1/admin/sources/[^/]+/ingest-runs/[^/]+/finalize$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "source_version_id": "00000000-0000-0000-0000-000000000001",
+            "revision": 1,
+            "is_active": true,
+            "demoted_revision": null,
+        })))
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    write_file(dir.path(), "carried.md", body);
+    let manifest_path = write_manifest(dir.path(), &["carried.md"]);
+    let auth_path = write_admin_auth(dir.path());
+
+    let args = IngestArgs {
+        manifest: manifest_path,
+        source_slug: "docs".to_owned(),
+        revision: Some("rev-2".to_owned()),
+        embedding_model: DEFAULT_EMBEDDING_MODEL.to_owned(),
+        note: None,
+        source_root: Some(dir.path().to_path_buf()),
+        dry_run: false,
+        yes: false,
+        source_base_url: None,
+        batch_size: 50,
+        voyage_timeout_secs: None,
+        chunk_tokens: 400,
+        respect_gitignore: false,
+        disable_default_ignore_list: false,
+        strict: false,
+        max_file_size: 10 * 1024 * 1024,
+        max_line_bytes: mnm_content::chunk::DEFAULT_MAX_LINE_BYTES,
+        unsafe_no_global_limit: false,
+        // Keep run_code_model = None so it matches the inventory's null code
+        // model (the model gate must pass for carry-forward to apply).
+        no_code_embeddings: true,
+        report_file: None,
+    };
+    let telemetry = noop_telemetry();
+
+    let stats = midnight_manual::commands::ingest::run::run_with_paths_stats(
+        args,
+        &server.uri(),
+        &auth_path,
+        None, // config_path → bypass discovery so no stray BYOK key resolves
+        None, // voyage_api_key → server-proxy embedding mode
+        &telemetry,
+        true,
+    )
+    .await
+    .expect("ingest run with re-embed retry should succeed");
+
+    // The carried doc took the retry path, so exactly two uploads happened.
+    assert_eq!(
+        *put_calls.lock().unwrap(),
+        2,
+        "expected the carried upload + the re-embed retry upload",
+    );
+    // Carried docs are not embedded in the main loop, so any tokens at all can
+    // only come from the re-embed retry. Before the fix these were dropped and
+    // this would be 0.
+    assert!(
+        stats.total_tokens > 0,
+        "re-embed retry tokens must be added to total_tokens (#164); got {}",
+        stats.total_tokens,
+    );
+}
+
 #[tokio::test]
 async fn dry_run_does_not_hit_the_server() {
     let server = MockServer::start().await;

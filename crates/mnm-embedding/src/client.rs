@@ -84,11 +84,18 @@ const MAX_EMBED_ATTEMPTS: usize = 3;
 /// (connection drops — including the HTTP/2 stalls and free-tier throttling
 /// Voyage exhibits under load), 429s, and 5xx are retryable; a 4xx (e.g. a 400
 /// over-limit batch, or a 401 auth failure) and decode errors are permanent.
+///
+/// A client-side [`VoyageError::Timeout`] is deliberately NOT retried: the
+/// request is not idempotent, so if the batch already reached the server and is
+/// still consuming tokens (or the response was merely lost after success), a
+/// retry would re-POST the identical batch and double-count those tokens
+/// against the site-wide cap — exactly when the service is already slow
+/// (issue #164). Surface the timeout instead of silently doubling the bill.
 const fn is_retryable(e: &VoyageError) -> bool {
     match e {
         VoyageError::Http(_) => true,
         VoyageError::Status { status, .. } => *status == 429 || *status >= 500,
-        VoyageError::Decode(_) => false,
+        VoyageError::Timeout(_) | VoyageError::Decode(_) => false,
     }
 }
 
@@ -117,7 +124,7 @@ async fn server_embed_once<I: serde::Serialize + Sync>(
     let resp = req
         .send()
         .await
-        .map_err(|e| VoyageError::Http(e.to_string()))?;
+        .map_err(|e| VoyageError::from_reqwest(&e))?;
     let status = resp.status();
     if !status.is_success() {
         return Err(VoyageError::Status {
@@ -406,6 +413,9 @@ mod tests {
     #[test]
     fn classifies_retryable_errors() {
         assert!(is_retryable(&VoyageError::Http("connection reset".into())));
+        // A client-side timeout is NOT retryable: the batch may already be
+        // consuming tokens server-side, so a retry would double-count (#164).
+        assert!(!is_retryable(&VoyageError::Timeout("client timeout".into())));
         assert!(is_retryable(&VoyageError::Status {
             status: 429,
             body: String::new()

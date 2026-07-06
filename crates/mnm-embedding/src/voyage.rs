@@ -49,9 +49,29 @@ impl InputType {
 /// Errors returned by the Voyage HTTP client.
 #[derive(Debug, thiserror::Error)]
 pub enum VoyageError {
-    /// A transport-level error (connection refused, timeout, …).
+    /// A transport-level error other than a client-side timeout (which is split
+    /// out into [`VoyageError::Timeout`]) — connection refused, DNS failure, a
+    /// connection reset mid-request, and so on. `is_retryable` retries these.
+    ///
+    /// Retrying is only *fully* token-safe for failures that occur BEFORE the
+    /// request reaches the server (connection refused, DNS failure): nothing was
+    /// billed, so a retry cannot double-count. A connection **reset** is a
+    /// weaker case — it can land after the server already received and began
+    /// processing the batch (Voyage is known to stall and reset mid-request
+    /// under load), so retrying a reset does NOT fully close the double-bill
+    /// window; only request idempotency / server-side dedup would. Timeouts are
+    /// the common non-idempotent case and are split off as non-retryable, but a
+    /// mid-stream reset remains a residual risk (issue #164).
     #[error("voyage http error: {0}")]
     Http(String),
+    /// A client-side timeout. Distinct from [`VoyageError::Http`] because the
+    /// request may already have reached the server and be consuming tokens
+    /// (Voyage keeps proving after our deadline elapses), so the lost response
+    /// does NOT mean no work was done. Retrying it would re-POST the identical
+    /// batch and bill the same tokens a second time, so it is treated as
+    /// non-retryable (issue #164).
+    #[error("voyage request timed out: {0}")]
+    Timeout(String),
     /// The server returned a non-2xx status code.
     #[error("voyage returned status {status}: {body}")]
     Status {
@@ -63,6 +83,27 @@ pub enum VoyageError {
     /// The response body could not be decoded as the expected JSON shape.
     #[error("voyage response decode error: {0}")]
     Decode(String),
+}
+
+impl VoyageError {
+    /// Classify a `reqwest` transport failure, separating a client-side timeout
+    /// (which may already have reached the server — not idempotent to retry)
+    /// from every other transport error (safe to retry).
+    ///
+    /// A connection-phase failure that never delivered the request body — a
+    /// refused/reset connection or DNS failure — is [`VoyageError::Http`]; a
+    /// request that timed out waiting for the response is [`VoyageError::Timeout`].
+    /// A *connect* timeout also reports `is_timeout()`, so it is conservatively
+    /// classed as a timeout too: giving up on the rare case where the server was
+    /// merely slow to accept the connection is the safe trade against ever
+    /// double-billing a batch the server did receive (issue #164).
+    pub(crate) fn from_reqwest(e: &reqwest::Error) -> Self {
+        if e.is_timeout() {
+            Self::Timeout(e.to_string())
+        } else {
+            Self::Http(e.to_string())
+        }
+    }
 }
 
 /// Output from a successful embedding call.
@@ -174,7 +215,7 @@ impl VoyageEmbedder {
             .json(&body)
             .send()
             .await
-            .map_err(|e| VoyageError::Http(e.to_string()))?;
+            .map_err(|e| VoyageError::from_reqwest(&e))?;
 
         let status = resp.status();
         if !status.is_success() {
@@ -295,7 +336,7 @@ impl VoyageReranker {
             })
             .send()
             .await
-            .map_err(|e| VoyageError::Http(e.to_string()))?;
+            .map_err(|e| VoyageError::from_reqwest(&e))?;
         let status = resp.status();
         if !status.is_success() {
             return Err(VoyageError::Status {
