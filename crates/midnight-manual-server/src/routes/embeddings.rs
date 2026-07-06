@@ -8,9 +8,10 @@
 //! Privacy: rejection responses (429 over-budget) carry only window/limit/reset
 //! metadata — never the submitted input text (Constitution VII).
 
+use std::net::SocketAddr;
 use std::path::Path;
 
-use axum::extract::State;
+use axum::extract::{ConnectInfo, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
@@ -183,6 +184,7 @@ async fn embeddings(
     Extension(req_id): Extension<RequestId>,
     headers: HeaderMap,
     auth: Option<Extension<AuthContext>>,
+    peer: Option<ConnectInfo<SocketAddr>>,
     Json(req): Json<EmbeddingsRequest>,
 ) -> Response {
     let rid = req_id.as_str();
@@ -294,8 +296,11 @@ async fn embeddings(
     }
 
     // 5. Resolve the token subject, tier, and effective limits for this caller.
-    let client_ip =
-        crate::middleware::rate_limit::client_ip(&headers, &state.cfg.rate_limit_client_ip_header);
+    let client_ip = crate::middleware::rate_limit::client_ip(
+        &headers,
+        &state.cfg.rate_limit_client_ip_header,
+        peer.map(|ConnectInfo(sa)| sa.ip()),
+    );
     let auth_ctx = auth.as_ref().map(|Extension(c)| c.clone());
     let (subject, tier, limits) = state.token_limiter.resolve(&client_ip, auth_ctx.as_ref());
 

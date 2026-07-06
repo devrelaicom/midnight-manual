@@ -6,7 +6,9 @@
 //! embedding token budget (rolling hourly/daily windows, `tokenlimit.rs`,
 //! charged by `POST /v1/embeddings`).
 
-use axum::extract::{Extension, State};
+use std::net::SocketAddr;
+
+use axum::extract::{ConnectInfo, Extension, State};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -39,6 +41,7 @@ async fn me(
     headers: HeaderMap,
     auth: Option<Extension<AuthContext>>,
     rl: Option<Extension<RateLimitContext>>,
+    peer: Option<ConnectInfo<SocketAddr>>,
 ) -> Response {
     let auth = auth.map(|Extension(a)| a);
     let (auth_type, identity, permission_level) =
@@ -76,8 +79,11 @@ async fn me(
     });
     // Embedding token budget: same resolve + non-consuming snapshot the
     // embeddings route uses (see `routes::embeddings` step 5).
-    let client_ip =
-        crate::middleware::rate_limit::client_ip(&headers, &state.cfg.rate_limit_client_ip_header);
+    let client_ip = crate::middleware::rate_limit::client_ip(
+        &headers,
+        &state.cfg.rate_limit_client_ip_header,
+        peer.map(|ConnectInfo(sa)| sa.ip()),
+    );
     let (subject, token_tier, limits) = state.token_limiter.resolve(&client_ip, auth.as_ref());
     let now = OffsetDateTime::now_utc().unix_timestamp();
     let usage = state.token_limiter.snapshot_for(&subject, limits, now);
