@@ -36,7 +36,9 @@
 //! URL, API keys, signing secrets, the on-disk auth tokens); it cannot redact a
 //! credential *minted at runtime* (e.g. an OAuth token fetched mid-request) since
 //! that value is not known when the scrubber is built. Dropping breadcrumbs above
-//! is the primary defense for those.
+//! is the primary defense for those. Redaction fails **closed**: if a secret is
+//! present but the scrubbed event cannot be re-serialized, [`scrub_event`] drops
+//! the event rather than transmit the secret in cleartext.
 
 use std::sync::Arc;
 
