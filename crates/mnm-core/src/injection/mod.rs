@@ -28,4 +28,7 @@ pub use normalize::{normalize, Normalized};
 pub use pattern::{detect, PatternMatch, PatternResult, Technique};
 pub use policy::{FailMode, InjectionPolicy, InjectionPolicyError, SCHEMA_VERSION};
 pub use report::{FlaggedWindow, ModelReport, ScanReport, Verdict};
-pub use security::{new_nonce, untrusted_inner, wrap_untrusted, SecurityLevel};
+pub use security::{
+    new_nonce, sanitize_inline_field, untrusted_inner, untrusted_inner_with_nonce, wrap_untrusted,
+    SecurityLevel,
+};
