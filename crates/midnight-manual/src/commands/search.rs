@@ -68,12 +68,14 @@ pub const DEFAULT_EMBEDDING_MODEL: &str = "auto";
 /// server's hard ceiling).
 const MAX_QUERIES: usize = 10;
 
-/// Candidate pool size requested from the cloud when reranking locally (mirrors
-/// the MCP `search` tool's constant of the same name). Local reranking needs a
-/// pool wider than the caller's `--limit` so the reranker can *promote* a chunk
-/// the cloud ranked below the cutoff — not merely reorder the caller's top-N.
-/// The reranker truncates back to `--limit` after scoring; the server's
-/// `/v1/search` accepts a `limit` up to 100, so 50 is within range.
+/// Candidate pool *floor* requested from the cloud when reranking locally
+/// (mirrors the MCP `search` tool's constant of the same name). Local reranking
+/// needs a pool wider than the caller's `--limit` so the reranker can *promote*
+/// a chunk the cloud ranked below the cutoff — not merely reorder the caller's
+/// top-N. The actual pool is `RERANK_FETCH.max(--limit)` so a `--limit` above 50
+/// is honoured rather than capped; the reranker truncates back to `--limit`
+/// after scoring. The server's `/v1/search` accepts a `limit` up to 100, so both
+/// 50 and any in-range `--limit` are within range.
 const RERANK_FETCH: u32 = 50;
 
 /// Args for `mnm search`.
@@ -939,11 +941,13 @@ struct SearchRequestParts {
 /// Build the outgoing `/v1/search` body, sizing the candidate pool and the
 /// `rerank` parameter for the resolved placement.
 ///
-/// On the `Local` path we widen the cloud `limit` to [`RERANK_FETCH`] and ask
-/// for relevance order (`sort_by = "score"`) so the client-side reranker can
-/// *promote* a chunk the cloud ranked below the caller's `limit` — not merely
-/// reorder the caller's top-N (this mirrors the MCP `search` tool);
-/// [`apply_rerank`] later truncates the reranked set back to `limit`. `Local`
+/// On the `Local` path we widen the cloud `limit` to at least [`RERANK_FETCH`]
+/// (`RERANK_FETCH.max(limit)`, so a `--limit` above the pool floor is honoured
+/// rather than silently capped) and ask for relevance order
+/// (`sort_by = "score"`) so the client-side reranker can *promote* a chunk the
+/// cloud ranked below the caller's `limit` — not merely reorder the caller's
+/// top-N (this mirrors the MCP `search` tool); [`apply_rerank`] later truncates
+/// the reranked set back to `limit`. `Local`
 /// and `Off` both send `rerank: "none"` (exactly one rerank pass, structurally);
 /// `Server` sends the resolved model name plus any instructions. `None`-valued
 /// `rerank` / `rerank_instructions` / `sort_by` are omitted on the wire
@@ -952,7 +956,10 @@ fn build_search_request(parts: SearchRequestParts) -> SearchRequest {
     use mnm_core::config::RerankPlacement;
     let local = matches!(parts.placement, RerankPlacement::Local);
     let (cloud_limit, sort_by) = if local {
-        (RERANK_FETCH, Some("score".to_owned()))
+        // Over-fetch so the local reranker can promote a below-cutoff candidate,
+        // but never fetch fewer than the caller asked for: `--limit > RERANK_FETCH`
+        // must still return `--limit` results after the reranker truncates back.
+        (RERANK_FETCH.max(parts.limit), Some("score".to_owned()))
     } else {
         (parts.limit, None)
     };
@@ -1950,6 +1957,27 @@ mod tests {
         assert_eq!(body["limit"], RERANK_FETCH);
         assert_eq!(body["sort_by"], "score");
         assert_eq!(body["rerank"], "none");
+    }
+
+    #[test]
+    fn build_request_local_honors_limit_above_pool_floor() {
+        // Regression for #170: a `--limit` above RERANK_FETCH must widen the
+        // cloud pool to the caller's limit, not silently cap it at 50 (which
+        // made `apply_rerank`'s later truncate a no-op and under-returned).
+        use mnm_core::config::RerankPlacement;
+        let q = vec![QueryPair {
+            text: "x".to_owned(),
+            vector: vec![0.0],
+            code_vector: Vec::new(),
+        }];
+        let over = RERANK_FETCH + 30; // 80 — inside the server's 100 ceiling.
+        let req = build_search_request(parts(q, over, RerankPlacement::Local));
+        assert_eq!(
+            req.limit, over,
+            "cloud pool must be at least --limit, not capped at RERANK_FETCH"
+        );
+        assert_eq!(req.sort_by.as_deref(), Some("score"));
+        assert_eq!(req.rerank.as_deref(), Some("none"));
     }
 
     #[test]

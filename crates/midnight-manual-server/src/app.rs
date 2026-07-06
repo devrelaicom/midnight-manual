@@ -285,12 +285,20 @@ pub fn resolved_embedders(
         resolve_embed_model_name("general", cfg.voyage_context_model.as_deref(), &corpus.name);
     let general_dim = u32::try_from(corpus.dim).unwrap_or(cfg.voyage_output_dimension);
     let voyage_ctx = cfg.voyage_api_key.as_ref().map(|k| {
-        std::sync::Arc::new(mnm_embedding::contextualized::ContextualizedVoyageEmbedder::new(
+        let mut e = mnm_embedding::contextualized::ContextualizedVoyageEmbedder::new(
             k,
             general_name,
             general_dim,
             dtype,
-        ))
+        );
+        // Honour a configured Voyage base URL (proxy/mirror, or a wiremock in
+        // tests) on the /v1/embeddings proxy path — otherwise it stays pinned to
+        // the hardcoded api.voyageai.com while the reranker uses the override
+        // (issue #170: split-brain config, untestable proxy).
+        if let Some(base) = cfg.voyage_base_url.as_deref() {
+            e = e.with_base_url(base);
+        }
+        std::sync::Arc::new(e)
     });
 
     // Code: resolved code-model name (authority) when present; otherwise the
@@ -306,9 +314,12 @@ pub fn resolved_embedders(
         .and_then(|c| u32::try_from(c.dim).ok())
         .unwrap_or(cfg.voyage_output_dimension);
     let voyage = cfg.voyage_api_key.as_ref().map(|k| {
-        std::sync::Arc::new(mnm_embedding::voyage::VoyageEmbedder::new(
-            k, code_name, code_dim, dtype,
-        ))
+        let mut e = mnm_embedding::voyage::VoyageEmbedder::new(k, code_name, code_dim, dtype);
+        // Same base-URL override as the general embedder above (issue #170).
+        if let Some(base) = cfg.voyage_base_url.as_deref() {
+            e = e.with_base_url(base);
+        }
+        std::sync::Arc::new(e)
     });
 
     (voyage, voyage_ctx)
@@ -506,9 +517,13 @@ pub fn build_with_limiter(
 
 #[cfg(test)]
 mod tests {
-    use super::{code_wire_name, proxy_dtype, resolve_embed_model_name};
+    use super::{code_wire_name, proxy_dtype, resolve_embed_model_name, resolved_embedders};
+    use crate::code_model::CodeModel;
     use crate::config::ServerConfig;
+    use crate::corpus_model::CorpusModel;
     use crate::routes::models::CORPUS_DTYPE;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     /// The proxy embedder dtype is sourced from the SAME `CORPUS_DTYPE` constant
     /// the `/v1/models/active` route reports, so the bytes the proxy produces and
@@ -569,5 +584,73 @@ mod tests {
     #[test]
     fn code_wire_name_without_at_returns_whole() {
         assert_eq!(code_wire_name("voyage-code-3"), "voyage-code-3");
+    }
+
+    /// Regression for #170: the `/v1/embeddings` proxy embedders must honour a
+    /// configured `voyage_base_url`, not stay pinned to `api.voyageai.com` while
+    /// only the reranker respects the override. Both proxy embedders are pointed
+    /// at a wiremock; each mock `.expect(1)` fails on drop if the request never
+    /// arrives (i.e. if the base URL wasn't threaded, the calls would hit the
+    /// hardcoded default host instead).
+    #[tokio::test]
+    async fn resolved_embedders_honor_configured_base_url() {
+        let server = MockServer::start().await;
+        // General (contextualized) embedder path.
+        Mock::given(method("POST"))
+            .and(path("/v1/contextualizedembeddings"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "object": "list",
+                "data": [{ "object": "list", "index": 0, "data": [
+                    { "object": "embedding", "index": 0, "embedding": [1.0, 1.0] }
+                ]}],
+                "model": "voyage-context-3",
+                "usage": { "total_tokens": 1 }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        // Code (flat) embedder path.
+        Mock::given(method("POST"))
+            .and(path("/v1/embeddings"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{ "embedding": [2.0, 2.0], "index": 0 }],
+                "model": "voyage-code-3",
+                "usage": { "total_tokens": 1 }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let cfg = ServerConfig {
+            voyage_api_key: Some("test-key".to_owned()),
+            voyage_base_url: Some(server.uri()),
+            ..ServerConfig::default()
+        };
+        let corpus = CorpusModel {
+            wire: "voyage-context-3@1".to_owned(),
+            name: "voyage-context-3".to_owned(),
+            id: uuid::Uuid::nil(),
+            dim: 2,
+        };
+        let code = CodeModel {
+            wire: "voyage-code-3@1".to_owned(),
+            name: "voyage-code-3".to_owned(),
+            id: uuid::Uuid::nil(),
+            dim: 2,
+        };
+
+        let (voyage, voyage_ctx) = resolved_embedders(&cfg, &corpus, Some(&code));
+        let voyage = voyage.expect("code embedder built when api key is set");
+        let voyage_ctx = voyage_ctx.expect("general embedder built when api key is set");
+
+        voyage_ctx
+            .embed_queries(vec!["q".to_owned()])
+            .await
+            .expect("general embedder hits the configured base url");
+        voyage
+            .embed(vec!["q".to_owned()], mnm_embedding::voyage::InputType::Document)
+            .await
+            .expect("code embedder hits the configured base url");
+        // Mock `.expect(1)` assertions are verified when `server` drops here.
     }
 }
