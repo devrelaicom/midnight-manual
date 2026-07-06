@@ -1522,9 +1522,10 @@ fn parse_sort_by_arg(
 }
 
 /// Parse + validate the optional `min_confidence` floor. Reject any present-but-
-/// not-number value, and any number outside `[0, 1]`, rather than clamping
-/// silently — a fail-fast, truthful contract (the cloud would clamp, hiding a
-/// typo like `min_confidence: 90`).
+/// not-number value, and any number outside `[0, 1]`, as a fail-fast, truthful
+/// contract. The server also rejects an out-of-range `min_confidence` with a
+/// 400, but validating here catches a typo like `min_confidence: 90` before the
+/// round-trip and surfaces it as a local argument error.
 fn parse_min_confidence_arg(
     obj: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<Option<f64>, String> {
