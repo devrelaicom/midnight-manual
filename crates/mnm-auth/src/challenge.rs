@@ -111,8 +111,13 @@ impl ChallengeStore {
     /// Self-defends against unbounded growth (issue #160): when the store is at
     /// its [`MAX_ENTRIES`] cap it first reclaims expired entries, then — if
     /// still full of live entries — evicts the soonest-to-expire one so the map
-    /// never exceeds the cap. The `O(n)` sweep only runs at the cap, so honest
-    /// churn pays it at most once per fill cycle rather than on every mint.
+    /// never exceeds the cap. The `O(n)` work (the `retain` sweep, plus the
+    /// `min_by_key` eviction scan) only runs while the store is at the cap:
+    /// under honest churn that's at most once per fill cycle, but under a
+    /// sustained flood that pins the store at the cap with nothing expiring,
+    /// every mint pays both scans under the lock. That's an accepted cost —
+    /// bounding memory is the priority, and the map size (hence the scan cost)
+    /// is itself capped.
     pub fn mint(
         &self,
         user_id: impl Into<String>,
