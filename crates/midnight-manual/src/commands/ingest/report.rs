@@ -164,7 +164,7 @@ impl IngestReport {
 
     /// Minimal all-fields-populated instance used only in unit tests.
     #[cfg(test)]
-    fn sample() -> Self {
+    pub(super) fn sample() -> Self {
         Self {
             schema_version: Self::SCHEMA_VERSION,
             command: "ingest run".into(),
