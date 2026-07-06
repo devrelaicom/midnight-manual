@@ -79,6 +79,40 @@ async fn byok_does_not_retry_400() {
 }
 
 #[tokio::test]
+async fn byok_does_not_retry_client_timeout() {
+    // A client-side timeout is not idempotent to retry: the batch may already
+    // have reached the server and be consuming tokens, so re-POSTing it would
+    // double-count against the shared cap (#164). The server holds the response
+    // past the client's 1s deadline; `.expect(1)` (verified on drop) pins that
+    // the client fires exactly ONE request — a retry would make it 2 and fail.
+    let voyage = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(std::time::Duration::from_secs(5))
+                .set_body_json(serde_json::json!({
+                    "data": [{ "embedding": vec![1.0_f32; 4], "index": 0 }],
+                    "model": "voyage-code-3",
+                    "usage": { "total_tokens": 3 }
+                })),
+        )
+        .expect(1)
+        .mount(&voyage)
+        .await;
+    let v = VoyageEmbedder::new("k", "voyage-code-3", 1024, "float")
+        .with_base_url(&voyage.uri())
+        .with_timeout_secs(1);
+    let err = embed_code(vec!["q".into()], InputType::Query, EmbedSource::Byok(&v))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, mnm_embedding::voyage::VoyageError::Timeout(_)),
+        "a client-side timeout must surface as VoyageError::Timeout, got {err:?}",
+    );
+}
+
+#[tokio::test]
 async fn server_mode_calls_v1_embeddings() {
     let srv = MockServer::start().await;
     Mock::given(method("POST"))

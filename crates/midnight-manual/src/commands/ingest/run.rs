@@ -872,11 +872,18 @@ async fn run_inner(
         for (i, batch) in retry_batches.into_iter().enumerate() {
             let mut batch_docs = batch;
             reporter.batch(i + 1, retry_count, "re-embedding conflicted documents");
-            if let Err(e) = embed_batch(general_src, code_src, &mut batch_docs).await {
-                let err = e.context(format!("re-embed retry batch {}/{retry_count}", i + 1));
-                return Err(
-                    abort_and_report(&abort_ctx, conflicts.clone(), total_tokens, err).await
-                );
+            // Re-embedding conflicted docs bills real Voyage tokens; fold them
+            // into `total_tokens` exactly as the main upload loop does (:814), or
+            // the run under-reports usage and under-counts the migration budget
+            // (#164). Do NOT discard the `Ok(tokens)`.
+            match embed_batch(general_src, code_src, &mut batch_docs).await {
+                Ok(tokens) => total_tokens = total_tokens.saturating_add(tokens),
+                Err(e) => {
+                    let err = e.context(format!("re-embed retry batch {}/{retry_count}", i + 1));
+                    return Err(
+                        abort_and_report(&abort_ctx, conflicts.clone(), total_tokens, err).await
+                    );
+                }
             }
             match upload_documents_with_split(
                 &client,

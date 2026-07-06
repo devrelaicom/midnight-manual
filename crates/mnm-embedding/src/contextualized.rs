@@ -118,7 +118,7 @@ impl ContextualizedVoyageEmbedder {
             .json(&body)
             .send()
             .await
-            .map_err(|e| VoyageError::Http(e.to_string()))?;
+            .map_err(|e| VoyageError::from_reqwest(&e))?;
 
         let status = resp.status();
         if !status.is_success() {
