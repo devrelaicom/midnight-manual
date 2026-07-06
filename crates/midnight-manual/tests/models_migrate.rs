@@ -55,6 +55,10 @@ async fn token_budget_stops_at_source_boundary() {
     assert_eq!(summary.tokens, 100);
     // The source that ran contributed its conflicts to the aggregate.
     assert_eq!(summary.conflicts, 2);
+    // A budget stop is NOT an error: `remaining` is populated but
+    // `aborted_on_error` stays `None`. This is exactly the distinction the
+    // error-stop test below relies on.
+    assert!(summary.aborted_on_error.is_none());
 }
 
 /// Pins the `>=` (not `>`) boundary: source 1 spends EXACTLY the budget
@@ -215,6 +219,20 @@ async fn mid_source_error_stops_and_records_remaining() {
     assert_eq!(summary.docs, 10);
     assert_eq!(summary.tokens, 100);
     assert_eq!(summary.conflicts, 4);
+    // The genuine failure is recorded as `aborted_on_error` — this is what
+    // `run_migrate` turns into a non-zero process exit, and what distinguishes
+    // this stop from the budget stop (which leaves `aborted_on_error` None
+    // while populating `remaining` identically).
+    let abort = summary
+        .aborted_on_error
+        .as_ref()
+        .expect("error stop records aborted_on_error");
+    assert_eq!(abort.slug, "src-2");
+    assert!(
+        abort.error.contains("429"),
+        "abort error preserves the failure detail: {}",
+        abort.error
+    );
 }
 
 /// Empty source list → empty summary, closure never called.

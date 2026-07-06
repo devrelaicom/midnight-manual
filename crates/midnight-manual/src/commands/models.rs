@@ -202,6 +202,18 @@ pub struct SourceOutcome {
     pub conflicts: u64,
 }
 
+/// A genuine per-source failure that halted a migration run — a git clone
+/// failure or an ingest `429`/limit abort. Distinct from a budget/`max-docs`
+/// stop: both populate [`MigrateSummary::remaining`] identically, so this is
+/// the field a caller consults to tell an error-stop from a benign stop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MigrateAbort {
+    /// The source whose ingest failed.
+    pub slug: String,
+    /// The failure detail (the `anyhow` chain rendered with `{:#}`).
+    pub error: String,
+}
+
 /// Outcome of a whole migration run.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MigrateSummary {
@@ -219,6 +231,14 @@ pub struct MigrateSummary {
     /// mid-source error halted the run (the failed source plus its untried
     /// tail). Empty when the whole list completed.
     pub remaining: Vec<String>,
+    /// `Some` only when a genuine per-source failure halted the run before the
+    /// list was exhausted. `None` for a clean completion OR a benign
+    /// budget/`max-docs` stop. Because a budget stop and an error stop populate
+    /// `remaining` identically, this is the ONLY signal that distinguishes them
+    /// — `run_migrate` propagates it as a non-zero exit and the `--json` output
+    /// surfaces it so `mnm models migrate && …` cannot read a broken run as
+    /// green.
+    pub aborted_on_error: Option<MigrateAbort>,
 }
 
 /// Drive the migration loop over `sources`, calling `ingest_one` for each, with
@@ -232,9 +252,11 @@ pub struct MigrateSummary {
 ///   before ingesting); the *next* source is the one that is skipped.
 /// - On `Ok(outcome)`: accrue `docs`/`tokens`, record the slug as migrated.
 /// - On `Err`: this is the mid-source limit/429 case. The ingest pipeline has
-///   already aborted (not finalized) the in-flight source, so we just log, push
-///   the failed source plus every untried source after it into `remaining`, and
-///   STOP.
+///   already aborted (not finalized) the in-flight source, so we log, record
+///   the failure in `aborted_on_error` (so it is distinguishable from a benign
+///   budget stop), push the failed source plus every untried source after it
+///   into `remaining`, and STOP. The caller (`run_migrate`) turns a set
+///   `aborted_on_error` into a non-zero process exit.
 ///
 /// The ingest is injected so this loop is unit-testable without git or HTTP.
 /// `ingest_one` is an `AsyncFnMut` (stable since Rust 1.85) so its returned
@@ -276,12 +298,19 @@ where
             }
             Err(e) => {
                 // The pipeline already aborted (not promoted) the in-flight
-                // source on a limit/429; we only stop and record what's left.
+                // source on a limit/429; record the failure, stop, and note
+                // what's left. `aborted_on_error` is what makes this genuine
+                // failure distinguishable from a benign budget stop above.
+                let detail = format!("{e:#}");
                 tracing::warn!(
                     slug = %src.slug,
-                    error = %format!("{e:#}"),
+                    error = %detail,
                     "models migrate: source ingest failed; aborting run (in-flight source was not finalized)"
                 );
+                summary.aborted_on_error = Some(MigrateAbort {
+                    slug: src.slug.clone(),
+                    error: detail,
+                });
                 summary
                     .remaining
                     .extend(sources[idx..].iter().map(|s| s.slug.clone()));
@@ -388,7 +417,20 @@ pub async fn run_migrate(
         })
         .await;
 
+    // Always print the summary first (both `--json` and human) so the operator
+    // sees exactly what migrated and what remains, THEN escalate a genuine
+    // per-source failure to a non-zero exit. Without this, an error-stop was
+    // indistinguishable from a budget stop and the process exited 0 — so
+    // `mnm models migrate && echo done` printed "done" on a half-finished run.
     println!("{}", format_migrate_output(&summary, &target_wire, json));
+    if let Some(abort) = &summary.aborted_on_error {
+        return Err(anyhow!(
+            "models migrate aborted on source `{}`: {} — {} source(s) not migrated",
+            abort.slug,
+            abort.error,
+            summary.remaining.len(),
+        ));
+    }
     Ok(())
 }
 
@@ -541,6 +583,18 @@ struct MigrateOutput<'a> {
     /// migrations — parity with the single-source `ingest` path's `conflict_count`.
     conflicts: u64,
     remaining: &'a [String],
+    /// `true` only when a genuine per-source failure (git clone failure or an
+    /// ingest `429`/limit abort) halted the run before the list was exhausted.
+    /// Always present so a machine consumer can tell an error-stop from a
+    /// benign budget/`max-docs` stop — both populate `remaining` identically.
+    /// The process also exits non-zero whenever this is `true`.
+    aborted_on_error: bool,
+    /// The source whose ingest failed. Present only when `aborted_on_error`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    aborted_slug: Option<&'a str>,
+    /// The failure detail for `aborted_slug`. Present only when `aborted_on_error`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    aborted_error: Option<&'a str>,
 }
 
 fn format_migrate_output(summary: &MigrateSummary, target_wire: &str, json: bool) -> String {
@@ -553,6 +607,9 @@ fn format_migrate_output(summary: &MigrateSummary, target_wire: &str, json: bool
             spent_tokens: summary.tokens,
             conflicts: summary.conflicts,
             remaining: &summary.remaining,
+            aborted_on_error: summary.aborted_on_error.is_some(),
+            aborted_slug: summary.aborted_on_error.as_ref().map(|a| a.slug.as_str()),
+            aborted_error: summary.aborted_on_error.as_ref().map(|a| a.error.as_str()),
         };
         return serde_json::to_string(&body).unwrap_or_default();
     }
@@ -576,6 +633,10 @@ fn format_migrate_output(summary: &MigrateSummary, target_wire: &str, json: bool
         for slug in &summary.migrated {
             writeln!(out, "  + {slug}").ok();
         }
+    }
+    // Surface a genuine failure prominently — it is why the exit is non-zero.
+    if let Some(abort) = &summary.aborted_on_error {
+        writeln!(out, "run ABORTED on source `{}`: {}", abort.slug, abort.error).ok();
     }
     if summary.remaining.is_empty() {
         write!(out, "all targeted sources are on {target_wire}").ok();
@@ -1020,6 +1081,7 @@ mod tests {
             tokens: 100,
             conflicts: 0,
             remaining: vec!["src-2".to_owned()],
+            aborted_on_error: None,
         };
         let s = format_migrate_output(&summary, "voyage-code-4@1", false);
         assert!(s.contains("voyage-code-4@1"));
@@ -1038,6 +1100,7 @@ mod tests {
             tokens: 100,
             conflicts: 3,
             remaining: Vec::new(),
+            aborted_on_error: None,
         };
         let s = format_migrate_output(&summary, "voyage-code-4@1", false);
         assert!(s.contains("3 conflicts"), "human summary surfaces the conflict total: {s}");
@@ -1051,6 +1114,7 @@ mod tests {
             tokens: 100,
             conflicts: 0,
             remaining: vec!["src-2".to_owned()],
+            aborted_on_error: None,
         };
         let s = format_migrate_output(&summary, "voyage-code-4@1", true);
         let v: serde_json::Value = serde_json::from_str(&s).unwrap();
@@ -1063,6 +1127,47 @@ mod tests {
         assert_eq!(v["conflicts"], 0);
         assert_eq!(v["migrated"][0], "src-1");
         assert_eq!(v["remaining"][0], "src-2");
+        // A benign budget/max-docs stop is NOT an error: `aborted_on_error` is
+        // always present (machine signal) and `false`, and the detail fields are
+        // omitted. This is what lets a consumer tell this stop from an error stop
+        // even though both populate `remaining`.
+        assert_eq!(v["aborted_on_error"], false);
+        assert!(v.get("aborted_slug").is_none());
+        assert!(v.get("aborted_error").is_none());
+    }
+
+    /// A genuine per-source failure sets `aborted_on_error` and surfaces the
+    /// failing slug + error in BOTH the human and `--json` output — the signal
+    /// that distinguishes an error-stop from a benign budget stop (the false-
+    /// success defect this issue closed).
+    #[test]
+    fn migrate_output_surfaces_abort_in_both_formats() {
+        let summary = MigrateSummary {
+            migrated: vec!["src-1".to_owned()],
+            docs: 10,
+            tokens: 100,
+            conflicts: 0,
+            remaining: vec!["src-2".to_owned(), "src-3".to_owned()],
+            aborted_on_error: Some(MigrateAbort {
+                slug: "src-2".to_owned(),
+                error: "429 Too Many Requests (token limit)".to_owned(),
+            }),
+        };
+
+        // Human: an explicit ABORTED line names the source and reason.
+        let human = format_migrate_output(&summary, "voyage-code-4@1", false);
+        assert!(human.contains("ABORTED on source `src-2`"), "human output was: {human}");
+        assert!(human.contains("429 Too Many Requests"), "human output was: {human}");
+
+        // JSON: `aborted_on_error` flips true and the detail fields appear.
+        let json = format_migrate_output(&summary, "voyage-code-4@1", true);
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["aborted_on_error"], true);
+        assert_eq!(v["aborted_slug"], "src-2");
+        assert_eq!(v["aborted_error"].as_str().unwrap(), "429 Too Many Requests (token limit)");
+        // The failed source and its untried tail are still reported as remaining.
+        assert_eq!(v["remaining"][0], "src-2");
+        assert_eq!(v["remaining"][1], "src-3");
     }
 
     /// The migrate `--json` output carries a non-zero aggregate `conflicts`
@@ -1076,6 +1181,7 @@ mod tests {
             tokens: 200,
             conflicts: 5,
             remaining: Vec::new(),
+            aborted_on_error: None,
         };
         let s = format_migrate_output(&summary, "voyage-code-4@1", true);
         let v: serde_json::Value = serde_json::from_str(&s).unwrap();
