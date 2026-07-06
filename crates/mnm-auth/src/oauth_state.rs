@@ -19,6 +19,20 @@
 //! for slow networks but small enough to bound replay attack surface.
 //!
 //! Storage is in-memory and per-process, mirroring [`crate::challenge`].
+//!
+//! # Bounded memory (issue #160)
+//!
+//! `GET /v1/auth/github/start` is unauthenticated, so a scanner (or ordinary
+//! users who never complete the redirect) can `mint` states that are never
+//! `consume`d. To keep the map from growing without bound, the store defends
+//! itself on `mint`: whenever it reaches [`MAX_ENTRIES`] it first reclaims
+//! expired entries, then — if still saturated with *live* entries — evicts the
+//! soonest-to-expire one to make room. This bounds peak memory to
+//! `MAX_ENTRIES` regardless of load and without depending on an external
+//! reaper cadence (which cannot cap growth *between* ticks). [`purge_expired`]
+//! remains available for callers that also want a periodic idle sweep.
+//!
+//! [`purge_expired`]: OAuthStateStore::purge_expired
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -33,6 +47,15 @@ pub const DEFAULT_TTL: Duration = Duration::minutes(10);
 /// Upper bound on state-token TTL. Anything wider is clamped to this on
 /// `mint` so a misconfiguration can't open a long-lived replay window.
 pub const MAX_TTL: Duration = Duration::minutes(15);
+
+/// Hard cap on outstanding OAuth-state entries (issue #160).
+///
+/// The endpoint is unauthenticated, so this bounds worst-case memory: a
+/// mint-and-abandon burst can never grow the map past this many entries. Sized
+/// far above any plausible count of genuinely-concurrent in-flight GitHub
+/// logins (dozens to low hundreds) while still capping memory at a few MiB.
+/// Configurable per-store via [`OAuthStateStore::with_max_entries`].
+pub const MAX_ENTRIES: usize = 50_000;
 
 /// One outstanding OAuth state entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +75,8 @@ pub struct OAuthState {
 #[derive(Debug)]
 pub struct OAuthStateStore {
     inner: Mutex<HashMap<String, OAuthState>>,
+    /// Hard cap on outstanding entries — see [`MAX_ENTRIES`].
+    max_entries: usize,
 }
 
 impl Default for OAuthStateStore {
@@ -61,16 +86,37 @@ impl Default for OAuthStateStore {
 }
 
 impl OAuthStateStore {
-    /// Build an empty store.
+    /// Build an empty store with the default [`MAX_ENTRIES`] cap.
     #[must_use]
     pub fn new() -> Self {
+        Self::with_max_entries(MAX_ENTRIES)
+    }
+
+    /// Build an empty store with an explicit outstanding-entry cap. Mainly for
+    /// tests (which want a tiny cap to exercise eviction cheaply) and any future
+    /// config-driven tuning. A `max_entries` of 0 is clamped to 1 so `mint`
+    /// always has room to insert the entry it just created.
+    #[must_use]
+    pub fn with_max_entries(max_entries: usize) -> Self {
         Self {
             inner: Mutex::new(HashMap::new()),
+            max_entries: max_entries.max(1),
         }
     }
 
     /// Mint a new state entry valid until `now + ttl`. `ttl` is clamped to
     /// [`MAX_TTL`].
+    ///
+    /// Self-defends against unbounded growth (issue #160): when the store is at
+    /// its [`MAX_ENTRIES`] cap it first reclaims expired entries, then — if
+    /// still full of live entries — evicts the soonest-to-expire one so the map
+    /// never exceeds the cap. The `O(n)` work (the `retain` sweep, plus the
+    /// `min_by_key` eviction scan) only runs while the store is at the cap:
+    /// under honest churn that's at most once per fill cycle, but under a
+    /// sustained flood that pins the store at the cap with nothing expiring,
+    /// every mint pays both scans under the lock. That's an accepted cost —
+    /// bounding memory is the priority, and the map size (hence the scan cost)
+    /// is itself capped.
     pub fn mint(&self, cli_port: Option<u16>, now: OffsetDateTime, ttl: Duration) -> OAuthState {
         let ttl = if ttl > MAX_TTL { MAX_TTL } else { ttl };
         let state = OAuthState {
@@ -79,6 +125,20 @@ impl OAuthStateStore {
             expires_at: now + ttl,
         };
         let mut guard = self.inner.lock().expect("oauth state store poisoned");
+        if guard.len() >= self.max_entries {
+            // Reclaim expired entries first (cheap win, and the common case
+            // under sustained mint-and-abandon load).
+            guard.retain(|_, s| s.expires_at > now);
+            // Still saturated with live entries → drop the soonest-to-expire so
+            // a burst that outpaces expiry can't push memory past the cap. The
+            // entry we're about to insert has the latest expiry, so it's never
+            // the victim.
+            if guard.len() >= self.max_entries {
+                if let Some(key) = soonest_expiry_key(&guard) {
+                    guard.remove(&key);
+                }
+            }
+        }
         guard.insert(state.state_id.clone(), state.clone());
         state
     }
@@ -122,6 +182,15 @@ impl OAuthStateStore {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+}
+
+/// Key of the entry with the earliest `expires_at` (the next one to lapse),
+/// or `None` when the map is empty. Used by [`OAuthStateStore::mint`] to pick
+/// an eviction victim when the store is saturated with live entries.
+fn soonest_expiry_key(map: &HashMap<String, OAuthState>) -> Option<String> {
+    map.iter()
+        .min_by_key(|(_, s)| s.expires_at)
+        .map(|(k, _)| k.clone())
 }
 
 /// All the ways an OAuth state lookup can fail.
@@ -204,5 +273,60 @@ mod tests {
         let a = store.mint(None, t0(), DEFAULT_TTL);
         let b = store.mint(None, t0(), DEFAULT_TTL);
         assert_ne!(a.state_id, b.state_id);
+    }
+
+    // Issue #160: the store must bound its own memory. A sustained
+    // mint-and-abandon burst (the scanner scenario) must never grow the map
+    // past the cap.
+    #[test]
+    fn mint_never_exceeds_hard_cap() {
+        let store = OAuthStateStore::with_max_entries(8);
+        for _ in 0..1000 {
+            store.mint(None, t0(), DEFAULT_TTL);
+        }
+        assert_eq!(store.len(), 8, "store must stay bounded at its cap");
+    }
+
+    // At the cap, minting first reclaims expired entries instead of evicting a
+    // live one — so an abandoned burst is cleaned up opportunistically.
+    #[test]
+    fn mint_reclaims_expired_before_evicting_at_cap() {
+        let store = OAuthStateStore::with_max_entries(4);
+        // Fill with short-lived entries.
+        for _ in 0..4 {
+            store.mint(None, t0(), Duration::seconds(10));
+        }
+        assert_eq!(store.len(), 4);
+        // Time advances past their expiry; the next mint should sweep all four
+        // expired entries and leave just the fresh one.
+        let later = t0() + Duration::seconds(30);
+        let fresh = store.mint(None, later, DEFAULT_TTL);
+        assert_eq!(store.len(), 1);
+        assert!(store.consume(&fresh.state_id, later).is_ok());
+    }
+
+    // When the store is saturated with *live* entries, the mint evicts the
+    // soonest-to-expire one and keeps the just-minted entry.
+    #[test]
+    fn mint_evicts_soonest_expiry_when_saturated_with_live_entries() {
+        let store = OAuthStateStore::with_max_entries(3);
+        // Three live entries with staggered expiries; the first has the
+        // soonest expiry and should be the eviction victim.
+        let soonest = store.mint(None, t0(), Duration::minutes(1));
+        let _mid = store.mint(None, t0(), Duration::minutes(5));
+        let _late = store.mint(None, t0(), Duration::minutes(9));
+        assert_eq!(store.len(), 3);
+
+        // A fourth live mint at the cap: no entry is expired, so the
+        // soonest-to-expire (`soonest`) is evicted to make room.
+        let newest = store.mint(None, t0(), DEFAULT_TTL);
+        assert_eq!(store.len(), 3);
+        assert_eq!(
+            store.consume(&soonest.state_id, t0()),
+            Err(OAuthStateError::NotFound),
+            "soonest-to-expire entry should have been evicted"
+        );
+        // The just-minted entry survives.
+        assert!(store.consume(&newest.state_id, t0()).is_ok());
     }
 }

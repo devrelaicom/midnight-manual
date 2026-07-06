@@ -21,6 +21,20 @@
 //! Storage is in-memory and per-process. v1 has a single cloud-server
 //! process; if we ever go multi-region we'll need a shared backend (Redis
 //! or a Postgres table) here.
+//!
+//! # Bounded memory (issue #160)
+//!
+//! `POST /v1/auth/challenge` mints an entry per request; a client that never
+//! reaches `verify` leaks it. Minting an admin challenge requires a known
+//! `user_id`, but there is no per-request rate limit by default, so an admin
+//! id plus a loop can still grow the map without bound. To defend itself, the
+//! store caps outstanding entries at [`MAX_ENTRIES`]: on `mint`, once at the
+//! cap it reclaims expired entries and, if still saturated with live ones,
+//! evicts the soonest-to-expire. This bounds peak memory regardless of load
+//! and without relying on an external reaper cadence. [`purge_expired`] stays
+//! available for callers that also want a periodic idle sweep.
+//!
+//! [`purge_expired`]: ChallengeStore::purge_expired
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -35,6 +49,14 @@ pub const NONCE_LEN: usize = 32;
 
 /// Maximum challenge TTL permitted by spec (FR-056: nonces with TTL ≤ 60s).
 pub const MAX_TTL: Duration = Duration::seconds(60);
+
+/// Hard cap on outstanding challenges (issue #160).
+///
+/// Minting is admin-gated, so legitimate concurrency is tiny (a handful of
+/// in-flight logins); this cap sits far above that while bounding worst-case
+/// memory under a mint-and-abandon burst. Configurable per-store via
+/// [`ChallengeStore::with_max_entries`].
+pub const MAX_ENTRIES: usize = 10_000;
 
 /// One outstanding challenge.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,6 +76,8 @@ pub struct Challenge {
 #[derive(Debug)]
 pub struct ChallengeStore {
     inner: Mutex<HashMap<String, Challenge>>,
+    /// Hard cap on outstanding entries — see [`MAX_ENTRIES`].
+    max_entries: usize,
 }
 
 impl Default for ChallengeStore {
@@ -63,16 +87,37 @@ impl Default for ChallengeStore {
 }
 
 impl ChallengeStore {
-    /// Build an empty store.
+    /// Build an empty store with the default [`MAX_ENTRIES`] cap.
     #[must_use]
     pub fn new() -> Self {
+        Self::with_max_entries(MAX_ENTRIES)
+    }
+
+    /// Build an empty store with an explicit outstanding-entry cap. Mainly for
+    /// tests (which want a tiny cap to exercise eviction cheaply) and any future
+    /// config-driven tuning. A `max_entries` of 0 is clamped to 1 so `mint`
+    /// always has room to insert the entry it just created.
+    #[must_use]
+    pub fn with_max_entries(max_entries: usize) -> Self {
         Self {
             inner: Mutex::new(HashMap::new()),
+            max_entries: max_entries.max(1),
         }
     }
 
     /// Mint a new challenge for `user_id`, valid until `now + ttl`. TTL is
     /// clamped to [`MAX_TTL`] per FR-056.
+    ///
+    /// Self-defends against unbounded growth (issue #160): when the store is at
+    /// its [`MAX_ENTRIES`] cap it first reclaims expired entries, then — if
+    /// still full of live entries — evicts the soonest-to-expire one so the map
+    /// never exceeds the cap. The `O(n)` work (the `retain` sweep, plus the
+    /// `min_by_key` eviction scan) only runs while the store is at the cap:
+    /// under honest churn that's at most once per fill cycle, but under a
+    /// sustained flood that pins the store at the cap with nothing expiring,
+    /// every mint pays both scans under the lock. That's an accepted cost —
+    /// bounding memory is the priority, and the map size (hence the scan cost)
+    /// is itself capped.
     pub fn mint(
         &self,
         user_id: impl Into<String>,
@@ -89,6 +134,20 @@ impl ChallengeStore {
             expires_at: now + ttl,
         };
         let mut guard = self.inner.lock().expect("challenge store poisoned");
+        if guard.len() >= self.max_entries {
+            // Reclaim expired entries first (cheap win, and the common case
+            // under sustained mint-and-abandon load).
+            guard.retain(|_, c| c.expires_at > now);
+            // Still saturated with live entries → drop the soonest-to-expire so
+            // a burst that outpaces expiry can't push memory past the cap. The
+            // entry we're about to insert has the latest expiry, so it's never
+            // the victim.
+            if guard.len() >= self.max_entries {
+                if let Some(key) = soonest_expiry_key(&guard) {
+                    guard.remove(&key);
+                }
+            }
+        }
         guard.insert(challenge.challenge_id.clone(), challenge.clone());
         challenge
     }
@@ -139,6 +198,15 @@ impl ChallengeStore {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+}
+
+/// Key of the entry with the earliest `expires_at` (the next one to lapse),
+/// or `None` when the map is empty. Used by [`ChallengeStore::mint`] to pick
+/// an eviction victim when the store is saturated with live entries.
+fn soonest_expiry_key(map: &HashMap<String, Challenge>) -> Option<String> {
+    map.iter()
+        .min_by_key(|(_, c)| c.expires_at)
+        .map(|(k, _)| k.clone())
 }
 
 /// All the ways a challenge lookup can fail.
@@ -225,5 +293,54 @@ mod tests {
         let b = store.mint("a", now, Duration::seconds(60));
         assert_ne!(a.nonce, b.nonce);
         assert_ne!(a.challenge_id, b.challenge_id);
+    }
+
+    // Issue #160: a mint-and-abandon burst must never grow the map past the
+    // cap.
+    #[test]
+    fn mint_never_exceeds_hard_cap() {
+        let store = ChallengeStore::with_max_entries(8);
+        let now = t0();
+        for _ in 0..1000 {
+            store.mint("admin", now, Duration::seconds(60));
+        }
+        assert_eq!(store.len(), 8, "store must stay bounded at its cap");
+    }
+
+    // At the cap, minting first reclaims expired entries instead of evicting a
+    // live one.
+    #[test]
+    fn mint_reclaims_expired_before_evicting_at_cap() {
+        let store = ChallengeStore::with_max_entries(4);
+        let now = t0();
+        for _ in 0..4 {
+            store.mint("admin", now, Duration::seconds(10));
+        }
+        assert_eq!(store.len(), 4);
+        let later = now + Duration::seconds(30);
+        let fresh = store.mint("admin", later, Duration::seconds(60));
+        assert_eq!(store.len(), 1);
+        assert!(store.consume(&fresh.challenge_id, later).is_ok());
+    }
+
+    // Saturated with live entries → the soonest-to-expire is evicted and the
+    // just-minted entry survives.
+    #[test]
+    fn mint_evicts_soonest_expiry_when_saturated_with_live_entries() {
+        let store = ChallengeStore::with_max_entries(3);
+        let now = t0();
+        let soonest = store.mint("admin", now, Duration::seconds(10));
+        let _mid = store.mint("admin", now, Duration::seconds(30));
+        let _late = store.mint("admin", now, Duration::seconds(59));
+        assert_eq!(store.len(), 3);
+
+        let newest = store.mint("admin", now, Duration::seconds(60));
+        assert_eq!(store.len(), 3);
+        assert_eq!(
+            store.consume(&soonest.challenge_id, now),
+            Err(ChallengeError::NotFound),
+            "soonest-to-expire entry should have been evicted"
+        );
+        assert!(store.consume(&newest.challenge_id, now).is_ok());
     }
 }
