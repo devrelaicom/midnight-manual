@@ -18,7 +18,7 @@
 
 use base64::engine::general_purpose::STANDARD_NO_PAD;
 use base64::Engine as _;
-use ed25519_dalek::{Signature, Signer as _, SigningKey, Verifier as _, VerifyingKey};
+use ed25519_dalek::{Signature, Signer as _, SigningKey, VerifyingKey};
 use thiserror::Error;
 
 /// Wire prefix for an Ed25519 public key in the user-store TOML.
@@ -120,18 +120,27 @@ pub fn encode_public_wire(bytes: &[u8; PUBLIC_KEY_LEN]) -> String {
 
 /// Verify a signature against the public key + message.
 ///
+/// Uses `verify_strict` (not the permissive `verify`): the strict path rejects
+/// the malleability classes RFC 8032 §5.1.7 leaves open — small-order `A`/`R`
+/// points and non-canonical encodings — that the non-strict path would accept.
+/// The current challenge-response flow consumes each nonce once, so this is
+/// defense-in-depth, but the hardened primitive should never accept a
+/// non-canonical or small-order signature.
+///
 /// # Errors
 ///
 /// Returns [`KeyError::BadSignature`] when the signature does not match the
-/// message under the supplied key. This is the canonical "wrong key / wrong
-/// signature / wrong message" failure mode.
+/// message under the supplied key, or fails strict validation. This is the
+/// canonical "wrong key / wrong signature / wrong message" failure mode.
 pub fn verify_signature(
     public: &VerifyingKey,
     msg: &[u8],
     signature: &[u8; SIGNATURE_LEN],
 ) -> Result<(), KeyError> {
     let sig = Signature::from_bytes(signature);
-    public.verify(msg, &sig).map_err(|_| KeyError::BadSignature)
+    public
+        .verify_strict(msg, &sig)
+        .map_err(|_| KeyError::BadSignature)
 }
 
 /// All the ways an Ed25519 operation can fail.
@@ -182,6 +191,38 @@ mod tests {
         let other = Keypair::generate();
         let sig = kp.sign(b"msg");
         let err = verify_signature(&other.verifying(), b"msg", &sig).unwrap_err();
+        assert!(matches!(err, KeyError::BadSignature));
+    }
+
+    // Defense-in-depth: `verify_signature` must use the strict verification
+    // path, which rejects small-order malleability vectors that the permissive
+    // `verify` accepts. Vector derived from first principles: public key
+    // A = the identity point (0, 1) — encoded `01 00…00` — with signature
+    // (R = identity, S = 0). The cofactorless equation `[S]B == R + [k]A`
+    // holds for any message (both sides collapse to the identity), so
+    // non-strict `verify` accepts, but `A` and `R` are small-order points that
+    // strict verification refuses.
+    #[test]
+    fn verify_signature_uses_strict_and_rejects_small_order() {
+        use ed25519_dalek::Verifier as _;
+
+        let mut pk = [0u8; PUBLIC_KEY_LEN];
+        pk[0] = 1; // compressed encoding of the identity point
+        let public = VerifyingKey::from_bytes(&pk).expect("identity is a valid point");
+
+        let mut sig_bytes = [0u8; SIGNATURE_LEN];
+        sig_bytes[0] = 1; // R = identity; S = 0
+        let sig = Signature::from_bytes(&sig_bytes);
+        let msg = b"small-order malleability vector";
+
+        // The pre-fix behaviour: non-strict `verify` accepts this forged sig.
+        assert!(
+            public.verify(msg, &sig).is_ok(),
+            "non-strict verify is expected to accept the small-order vector",
+        );
+
+        // The hardened primitive rejects it.
+        let err = verify_signature(&public, msg, &sig_bytes).unwrap_err();
         assert!(matches!(err, KeyError::BadSignature));
     }
 

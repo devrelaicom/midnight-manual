@@ -38,7 +38,8 @@ pub use keypair::{
     ED25519_WIRE_PREFIX, PUBLIC_KEY_LEN, SIGNATURE_LEN, SIGNING_KEY_LEN,
 };
 pub use oauth_state::{
-    OAuthState, OAuthStateError, OAuthStateStore, DEFAULT_TTL as OAUTH_STATE_DEFAULT_TTL,
+    generate_cli_nonce, OAuthState, OAuthStateError, OAuthStateStore,
+    DEFAULT_TTL as OAUTH_STATE_DEFAULT_TTL, MAX_CLI_STATE_LEN as OAUTH_STATE_MAX_CLI_STATE_LEN,
     MAX_TTL as OAUTH_STATE_MAX_TTL,
 };
 pub use role::{Role, Tier};

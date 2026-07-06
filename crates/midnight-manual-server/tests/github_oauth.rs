@@ -259,6 +259,74 @@ async fn callback_redirects_to_cli_port_when_present() {
     assert!(loc.contains("expires_at="));
 }
 
+// Issue #177: when the CLI supplies a `cli_state` nonce on start, the callback
+// echoes it back verbatim as `state=<nonce>` in the loopback redirect so the
+// CLI can bind the callback to the flow it initiated.
+#[tokio::test]
+async fn callback_echoes_cli_state_into_loopback_redirect() {
+    let h = common::boot().await;
+    let gh = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/login/oauth/access_token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "access_token": "gho_test_access"
+        })))
+        .mount(&gh)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/user"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"login": "aaron"})))
+        .mount(&gh)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/user/memberships/orgs/midnight-network"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"state": "active"})))
+        .mount(&gh)
+        .await;
+
+    let cfg = cfg_with_github_oauth(&gh.uri());
+    let app = app::build(h.pool.clone(), cfg).expect("build app");
+
+    let cli_nonce = "cli-nonce-xyz789";
+    let (_, headers, _) = get(
+        app.clone(),
+        &format!("/v1/auth/github/start?cli_port=54321&cli_state={cli_nonce}"),
+    )
+    .await;
+    let loc = headers.get("location").unwrap().to_str().unwrap();
+    let state = loc
+        .split("state=")
+        .nth(1)
+        .unwrap()
+        .split('&')
+        .next()
+        .unwrap();
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/auth/github/callback?code=abc&state={state}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let loc = resp
+        .headers()
+        .get("location")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(loc.starts_with("http://127.0.0.1:54321/oauth"));
+    assert!(
+        loc.contains(&format!("state={cli_nonce}")),
+        "loopback redirect must echo the CLI nonce, got: {loc}",
+    );
+}
+
 #[tokio::test]
 async fn callback_with_user_denial_returns_403() {
     let h = common::boot().await;
