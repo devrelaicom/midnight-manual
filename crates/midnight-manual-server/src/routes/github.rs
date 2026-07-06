@@ -3,7 +3,10 @@
 //! `GET /v1/auth/github/start`
 //!     Mints a CSRF state, redirects the user-agent to GitHub's authorize
 //!     URL. Optional `cli_port` query param is preserved in state so the
-//!     callback can redirect back to a CLI's local listener.
+//!     callback can redirect back to a CLI's local listener. Optional
+//!     `cli_state` (issue #177) is round-tripped verbatim into that loopback
+//!     redirect as `state=<nonce>` so the CLI can reject callbacks it didn't
+//!     initiate.
 //!
 //! `GET /v1/auth/github/callback`
 //!     Receives `code` + `state` from GitHub, consumes the state
@@ -25,6 +28,11 @@
 //!
 //! - `cli_port` redirects target `127.0.0.1` only. We refuse to redirect
 //!   to any other host even if someone tampers with the state store.
+//!
+//! - `cli_state` is opaque to us: the CLI generates it and is the only party
+//!   that validates it. We store it bounded (see `mint`) and echo it back
+//!   unchanged; it binds the loopback callback to the CLI that started the
+//!   flow (issue #177).
 //!
 //! - The access token GitHub mints for us never leaves the process — we
 //!   use it for the two API calls (`/user`, `/user/memberships/orgs/<org>`)
@@ -60,6 +68,12 @@ struct StartQuery {
     /// successful exchange.
     #[serde(default)]
     cli_port: Option<u16>,
+    /// Optional CLI-generated CSRF nonce (issue #177). Round-tripped verbatim
+    /// into the loopback redirect as `state=<nonce>` so the CLI can reject any
+    /// callback it didn't initiate. Sanitized (bounded/emptied) by
+    /// [`mnm_auth::OAuthStateStore::mint`].
+    #[serde(default)]
+    cli_state: Option<String>,
 }
 
 async fn start(
@@ -75,7 +89,7 @@ async fn start(
     let now = OffsetDateTime::now_utc();
     let entry = gh
         .states
-        .mint(q.cli_port, now, mnm_auth::OAUTH_STATE_DEFAULT_TTL);
+        .mint(q.cli_port, q.cli_state, now, mnm_auth::OAUTH_STATE_DEFAULT_TTL);
 
     // Build the authorize URL. We request `read:org` so the membership
     // probe succeeds; that's the minimum scope for `GET
@@ -248,20 +262,24 @@ async fn callback(
 
     if let Some(port) = oauth_state.cli_port {
         let exp_str = claims.exp.to_string();
-        let cli_url = match url::Url::parse_with_params(
-            &format!("http://127.0.0.1:{port}/oauth"),
-            &[
-                ("token", token.as_str()),
-                ("github_login", github_login.as_str()),
-                ("expires_at", exp_str.as_str()),
-            ],
-        ) {
-            Ok(u) => u,
-            Err(e) => {
-                tracing::error!(request_id = rid, error = %e, "build cli callback url");
-                return error::service_unavailable("cli callback url invalid", rid);
-            }
-        };
+        // Echo the CLI's CSRF nonce (issue #177) back as `state` so the CLI's
+        // loopback listener can reject any callback it didn't initiate.
+        let mut params = vec![
+            ("token", token.as_str()),
+            ("github_login", github_login.as_str()),
+            ("expires_at", exp_str.as_str()),
+        ];
+        if let Some(cli_state) = oauth_state.cli_state.as_deref() {
+            params.push(("state", cli_state));
+        }
+        let cli_url =
+            match url::Url::parse_with_params(&format!("http://127.0.0.1:{port}/oauth"), &params) {
+                Ok(u) => u,
+                Err(e) => {
+                    tracing::error!(request_id = rid, error = %e, "build cli callback url");
+                    return error::service_unavailable("cli callback url invalid", rid);
+                }
+            };
         return Redirect::to(cli_url.as_str()).into_response();
     }
 

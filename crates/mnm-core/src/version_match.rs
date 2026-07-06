@@ -137,8 +137,21 @@ fn representative(b: &Bound, is_upper: bool) -> Version {
             v.clone() // `<0.0.0` — empty interval; parse_request rejects it
         }
     } else {
-        // Step up: the next representable version.
-        Version::new(v.major, v.minor, v.patch + 1)
+        // Step up to the next representable version, rolling minor/major on
+        // component overflow. Components come from adversarial constraints and
+        // can be `u64::MAX`, so a bare `patch + 1` would panic (debug) or wrap
+        // (release); guard each `+ 1` with `< u64::MAX` (mirroring the
+        // step-down branch above) and saturate at `u64::MAX.u64::MAX.u64::MAX`
+        // when nothing greater is representable.
+        if v.patch < u64::MAX {
+            Version::new(v.major, v.minor, v.patch + 1)
+        } else if v.minor < u64::MAX {
+            Version::new(v.major, v.minor + 1, 0)
+        } else if v.major < u64::MAX {
+            Version::new(v.major + 1, 0, 0)
+        } else {
+            v.clone()
+        }
     }
 }
 
@@ -298,18 +311,25 @@ fn comparator_interval(c: &Comparator) -> Option<VersionInterval> {
     let base = Version::new(maj, min.unwrap_or(0), pat.unwrap_or(0));
     let lo_incl = |v: Version| Some(Bound { version: v, inclusive: true });
     let hi_excl = |v: Version| Some(Bound { version: v, inclusive: false });
-    let next_major = Version::new(maj + 1, 0, 0);
-    let next_minor = |j: u64| Version::new(maj, j + 1, 0);
+    // The `+ 1` steps below operate on components parsed straight from a
+    // third-party `version_constraint`, which can be up to `u64::MAX`. An
+    // unchecked increment would panic (debug) or wrap to a bogus interval
+    // (release, no `overflow-checks`). Compute them lazily with `checked_add`
+    // and propagate `None` — an unclassifiable constraint — on overflow rather
+    // than fabricating a wrapped bound. Lazy closures so an op that never
+    // needs the step (e.g. `<u64::MAX`) is unaffected.
+    let next_major = || Some(Version::new(maj.checked_add(1)?, 0, 0));
+    let next_minor = |j: u64| Some(Version::new(maj, j.checked_add(1)?, 0));
     Some(match c.op {
         Op::Exact => match (min, pat) {
             (Some(_), Some(_)) => VersionInterval::point(base),
             (Some(j), None) => VersionInterval {
                 lo: lo_incl(base),
-                hi: hi_excl(next_minor(j)),
+                hi: hi_excl(next_minor(j)?),
             },
             (None, _) => VersionInterval {
                 lo: lo_incl(base),
-                hi: hi_excl(next_major),
+                hi: hi_excl(next_major()?),
             },
         },
         Op::Greater => match (min, pat) {
@@ -321,11 +341,11 @@ fn comparator_interval(c: &Comparator) -> Option<VersionInterval> {
                 hi: None,
             },
             (Some(j), None) => VersionInterval {
-                lo: lo_incl(next_minor(j)),
+                lo: lo_incl(next_minor(j)?),
                 hi: None,
             },
             (None, _) => VersionInterval {
-                lo: lo_incl(next_major),
+                lo: lo_incl(next_major()?),
                 hi: None,
             },
         },
@@ -338,31 +358,31 @@ fn comparator_interval(c: &Comparator) -> Option<VersionInterval> {
             },
             (Some(j), None) => VersionInterval {
                 lo: None,
-                hi: hi_excl(next_minor(j)),
+                hi: hi_excl(next_minor(j)?),
             },
             (None, _) => VersionInterval {
                 lo: None,
-                hi: hi_excl(next_major),
+                hi: hi_excl(next_major()?),
             },
         },
         // `~` and `*`/`.x` desugar identically for the partial forms we accept.
         Op::Tilde | Op::Wildcard => match (min, pat) {
             (Some(j), _) => VersionInterval {
                 lo: lo_incl(base),
-                hi: hi_excl(next_minor(j)),
+                hi: hi_excl(next_minor(j)?),
             },
             (None, _) => VersionInterval {
                 lo: lo_incl(base),
-                hi: hi_excl(next_major),
+                hi: hi_excl(next_major()?),
             },
         },
         Op::Caret => {
             let hi = if maj > 0 {
-                next_major
+                next_major()?
             } else if min.unwrap_or(0) > 0 {
-                next_minor(min.unwrap_or(0))
+                next_minor(min.unwrap_or(0))?
             } else if pat.is_some() {
-                Version::new(0, 0, pat.unwrap_or(0) + 1)
+                Version::new(0, 0, pat.unwrap_or(0).checked_add(1)?)
             } else {
                 // ^0 == [0.0.0, 1.0.0)
                 Version::new(1, 0, 0)
@@ -446,6 +466,27 @@ mod tests {
         // range request vs range declared: intersection
         assert_eq!(classify(&req("^1.4"), Some(">=1.0, <2.0")), MatchClass::Satisfies);
         assert_eq!(classify(&req(">=2.0"), Some("^1.4")), MatchClass::Breaking);
+    }
+
+    #[test]
+    fn adversarial_version_constraints_do_not_wrap_or_panic() {
+        // Components parsed straight from a third-party `version_constraint`
+        // can reach `u64::MAX`; the `+ 1` steps must not panic (debug) or wrap
+        // (release). Each of these desugars through a distinct overflow site.
+        let big = u64::MAX;
+
+        // Caret major overflow (`comparator_interval` `next_major`): the
+        // declared interval is unclassifiable, not a wrapped/empty one.
+        assert_eq!(classify(&req("0.31"), Some(&format!("^{big}"))), MatchClass::Unknown,);
+        // Exact minor overflow (`next_minor`).
+        assert_eq!(classify(&req("0.31"), Some(&format!("=1.{big}"))), MatchClass::Unknown,);
+        // Caret 0.0.x patch overflow (the caret-arm `pat + 1`).
+        assert_eq!(classify(&req("0.31"), Some(&format!("^0.0.{big}"))), MatchClass::Unknown,);
+        // Exclusive-lower-bound patch overflow reachable through
+        // `representative`'s step-up (`>1.2.<u64::MAX>` with a low request).
+        // The declared floor's nearest member rolls to 1.3.0, so a 0.x request
+        // is a major mismatch → Breaking, and critically nothing panics.
+        assert_eq!(classify(&req("0.5"), Some(&format!(">1.2.{big}"))), MatchClass::Breaking,);
     }
 
     #[test]

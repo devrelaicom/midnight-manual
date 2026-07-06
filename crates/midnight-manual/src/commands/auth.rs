@@ -3,20 +3,24 @@
 //!
 //! ## `mnm auth github`
 //!
-//! 1. Bind a local listener on `127.0.0.1:0` to discover a free port.
+//! 1. Bind a local listener on `127.0.0.1:0` to discover a free port, and
+//!    generate a random `cli_state` nonce (issue #177).
 //!
 //! 2. Open the browser to
-//!    `<server>/v1/auth/github/start?cli_port=<port>`. The server mints a
-//!    state token and redirects the browser to GitHub's authorize URL.
+//!    `<server>/v1/auth/github/start?cli_port=<port>&cli_state=<nonce>`. The
+//!    server mints its own GitHub CSRF state, remembers our `cli_state`, and
+//!    redirects the browser to GitHub's authorize URL.
 //!
 //! 3. After GitHub redirects to the server's callback, the server
 //!    verifies org membership, mints a 30-day read-uplift JWT, and
 //!    redirects the browser back to
-//!    `http://127.0.0.1:<port>/oauth?token=…&github_login=…&expires_at=…`.
+//!    `http://127.0.0.1:<port>/oauth?token=…&github_login=…&expires_at=…&state=<nonce>`.
 //!
-//! 4. The CLI's local listener captures those query params, persists
-//!    the token to `auth.toml[read_uplift]`, prints a status line, and
-//!    exits.
+//! 4. The CLI's local listener captures those query params, **rejects any
+//!    callback whose `state` doesn't equal the nonce it generated** (so a
+//!    co-resident process that races the ephemeral port can't fixate an
+//!    attacker-chosen token), persists the token to `auth.toml[read_uplift]`,
+//!    prints a status line, and exits.
 //!
 //! ## `mnm auth status`
 //!
@@ -286,7 +290,14 @@ async fn github(
         .context("set local listener non-blocking")?;
     let listener = TokioTcpListener::from_std(listener).context("convert to tokio listener")?;
 
-    let authorize_url = format!("{server_url}/v1/auth/github/start?cli_port={port}");
+    // Generate a CSRF nonce and bind the callback to it (issue #177). The
+    // server round-trips this as `state=<nonce>` in the loopback redirect; the
+    // listener rejects any callback whose `state` doesn't match, so a
+    // co-resident process racing the ephemeral port can't inject its own token.
+    // `cli_state` is base64url, so it needs no URL-escaping in the query.
+    let cli_state = mnm_auth::generate_cli_nonce();
+    let authorize_url =
+        format!("{server_url}/v1/auth/github/start?cli_port={port}&cli_state={cli_state}");
     if args.no_browser {
         println!("# open this URL in your browser:");
         println!("{authorize_url}");
@@ -298,7 +309,7 @@ async fn github(
         println!("# opened browser; complete the GitHub login flow");
     }
 
-    let params = run_with_paths(&listener, Duration::from_secs(args.timeout_s.max(1)))
+    let params = run_with_paths(&listener, Duration::from_secs(args.timeout_s.max(1)), &cli_state)
         .await
         .context("wait for OAuth callback")?;
 
@@ -359,12 +370,19 @@ async fn github(
     Ok(())
 }
 
-/// Accept exactly one connection on `listener`, read the HTTP request line,
-/// parse `/oauth?…` query params, write a small success page, and return
-/// the parsed params. Times out after `deadline`.
+/// Accept connections on `listener` until one is a legitimate `/oauth?…`
+/// callback whose `state` query param equals `expected_state`, then write a
+/// small success page and return its parsed params. Times out after `deadline`.
+///
+/// Callbacks with a missing or mismatched `state` are rejected (issue #177):
+/// the listener answers `403` and keeps waiting for the real browser redirect,
+/// so a co-resident process that races the ephemeral port without knowing the
+/// CLI's nonce cannot fixate an attacker-chosen token. Non-`/oauth` paths
+/// (favicon / health probes) get a `404` and are likewise ignored.
 pub async fn run_with_paths(
     listener: &TokioTcpListener,
     deadline: Duration,
+    expected_state: &str,
 ) -> Result<HashMap<String, String>> {
     let accept = async {
         loop {
@@ -396,16 +414,35 @@ pub async fn run_with_paths(
             // /oauth callback.
             if target.starts_with("/oauth") {
                 let params = parse_query(&target);
-                // Best-effort respond so the browser sees a friendly page.
-                let body = b"<!doctype html><html><body><h1>You can close this tab.</h1><p>mnm has captured the auth token.</p></body></html>";
+                // Reject any callback whose nonce doesn't match the one we
+                // generated. The nonce is single-use and per-flow (a fresh
+                // 128-bit random value each run), so a plain compare is fine —
+                // there's no reusable secret for a timing oracle to attack.
+                let state_ok = params.get("state").map(String::as_str) == Some(expected_state);
+                if state_ok {
+                    // Best-effort respond so the browser sees a friendly page.
+                    let body = b"<!doctype html><html><body><h1>You can close this tab.</h1><p>mnm has captured the auth token.</p></body></html>";
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = socket.write_all(resp.as_bytes()).await;
+                    let _ = socket.write_all(body).await;
+                    let _ = socket.shutdown().await;
+                    return Ok::<_, anyhow::Error>(params);
+                }
+                // /oauth but wrong / missing state: could be a co-resident
+                // process racing the port. Reject and keep waiting.
+                tracing::warn!("rejected OAuth callback with missing/mismatched state nonce");
+                let body = b"state mismatch";
                 let resp = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    "HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                     body.len()
                 );
                 let _ = socket.write_all(resp.as_bytes()).await;
                 let _ = socket.write_all(body).await;
                 let _ = socket.shutdown().await;
-                return Ok::<_, anyhow::Error>(params);
+                continue;
             }
             // Not the right path; respond 404 and loop for the real one.
             let body = b"not found";
