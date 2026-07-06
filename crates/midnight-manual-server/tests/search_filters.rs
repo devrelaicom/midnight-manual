@@ -15,8 +15,10 @@ use axum::http::{Request, StatusCode};
 use axum::Router;
 use midnight_manual_server::{app, config::ServerConfig};
 use mnm_core::provenance::Provenance;
-use mnm_core::types::{ChunkStatus, DocumentKind, NodeKind, SourceKind};
-use mnm_store::entities::{chunk, document, embedding_model, node, source, source_version};
+use mnm_core::types::{ChunkStatus, DocumentKind, NodeKind, PackageKind, SourceKind};
+use mnm_store::entities::{
+    chunk, document, embedding_model, node, package, source, source_version,
+};
 use tower::ServiceExt as _;
 use uuid::Uuid;
 
@@ -368,4 +370,273 @@ async fn vector_mode_requires_vector_400() {
         StatusCode::BAD_REQUEST,
         "vector mode with no usable vector must be rejected"
     );
+}
+
+// --- NULL / absent-value survival under `none_of` filters (#162) -------------
+//
+// The unit tests in `routes::search` pin the *generated SQL text*; these seed
+// real rows and assert Postgres' *runtime three-valued logic* keeps the
+// absent-value row alive under an exclusion. The bug was that a nullable column
+// (`document.language`), a nullable FK over a LEFT JOIN (`document.package_id`),
+// or an absent JSONB key (`provenance.tags`, `skip_serializing_if`) evaluated
+// the `none_of` predicate to NULL and silently dropped the row.
+
+/// One document to seed inside a shared, active `source_version`. Each becomes a
+/// single ready chunk with its own embedding so both are retrieval candidates.
+struct Doc {
+    kind: DocumentKind,
+    language: Option<&'static str>,
+    /// `Some((kind, name))` attaches a `package` row; `None` leaves the FK NULL.
+    package: Option<(PackageKind, &'static str)>,
+    tags: &'static [&'static str],
+    content: &'static str,
+    seed: f32,
+}
+
+/// Seed both docs into one finalized (active) `source_version`, returning
+/// `(chunk_a, chunk_b)`. Randomized slug so parallel CI runs never collide.
+async fn seed_pair(pool: &sqlx::PgPool, a: &Doc, b: &Doc) -> (Uuid, Uuid) {
+    let model_id = embedding_model::upsert(pool, "voyage-code-3", 1, 1024, "voyageai")
+        .await
+        .unwrap();
+    let slug = format!("nullfilter-test-{}", Uuid::new_v4());
+    let source_id = source::insert(pool, &slug, "NullFilters", SourceKind::DocsSite, None, 5)
+        .await
+        .unwrap();
+    let (sv_id, _) = source_version::create_building(pool, source_id, model_id, None, "0.1.0", "h")
+        .await
+        .unwrap();
+    let root = node::insert(pool, sv_id, None, NodeKind::Root, "root", 0)
+        .await
+        .unwrap();
+
+    let mut ids = Vec::with_capacity(2);
+    for (order, spec) in [a, b].into_iter().enumerate() {
+        let order = i32::try_from(order).unwrap();
+        let name = format!("doc{order}");
+        let doc_node = node::insert(pool, sv_id, Some(root), NodeKind::Document, &name, order)
+            .await
+            .unwrap();
+        let package_id = match spec.package {
+            Some((kind, pkg_name)) => Some(
+                package::upsert(pool, sv_id, kind, pkg_name, None, None)
+                    .await
+                    .unwrap(),
+            ),
+            None => None,
+        };
+        let provenance = Provenance {
+            tags: spec.tags.iter().map(|t| (*t).to_owned()).collect(),
+            ..Provenance::default()
+        };
+        let content_hash = format!("{name}-doc");
+        let doc_id = document::insert(
+            pool,
+            document::NewDocument {
+                source_version_id: sv_id,
+                node_id: doc_node,
+                kind: spec.kind,
+                source_url: None,
+                published_url: None,
+                source_path: &name,
+                language: spec.language,
+                content_hash: &content_hash,
+                source_modified_at: None,
+                frontmatter: None,
+                provenance: &provenance,
+                package_id,
+                char_count: 0,
+                token_count: 0,
+            },
+        )
+        .await
+        .unwrap();
+        let chunk_node = node::insert(pool, sv_id, Some(doc_node), NodeKind::Chunk, &name, 0)
+            .await
+            .unwrap();
+        let chunk_id = chunk::insert(
+            pool,
+            chunk::NewChunk {
+                source_version_id: sv_id,
+                document_id: doc_id,
+                node_id: chunk_node,
+                chunk_index: 0,
+                total_chunks: 1,
+                content: spec.content,
+                content_hash: &content_hash,
+                embedding: Some(unit_vector(spec.seed)),
+                embedding_model_id: model_id,
+                code_embedding: None,
+                heading_path: &[],
+                symbol_path: &[],
+                start_byte: 0,
+                end_byte: i32::try_from(spec.content.len()).unwrap_or(0),
+                token_count: 8,
+                status: ChunkStatus::Ready,
+            },
+        )
+        .await
+        .unwrap();
+        ids.push(chunk_id);
+    }
+
+    // REQUIRED: flips is_active=true so retrieval considers these chunks.
+    source_version::finalize(pool, sv_id).await.unwrap();
+    (ids[0], ids[1])
+}
+
+/// Assert `results` does NOT contain `id` — the load-bearing "excluded" claim.
+fn assert_absent(v: &serde_json::Value, id: Uuid, msg: &str) {
+    let id_str = id.to_string();
+    for r in v["results"].as_array().expect("results array") {
+        assert_ne!(r["chunk_id"].as_str(), Some(id_str.as_str()), "{msg}");
+    }
+}
+
+#[tokio::test]
+async fn language_none_of_retains_null_language_row() {
+    // A NULL-`language` document (all prose/markdown) must SURVIVE an
+    // exclude-TypeScript filter; only the typescript doc is dropped. Pre-#162 the
+    // bare `d.language <> ALL(...)` was NULL for the prose row and dropped it too.
+    let h = common::boot().await;
+    let survivor = Doc {
+        kind: DocumentKind::Markdown,
+        language: None,
+        package: None,
+        tags: &[],
+        content: "ledger state privacy witnesses documentation",
+        seed: 0.10,
+    };
+    let excluded = Doc {
+        kind: DocumentKind::Code,
+        language: Some("typescript"),
+        package: None,
+        tags: &[],
+        content: "ledger state typescript deployContract example",
+        seed: 0.12,
+    };
+    let (null_chunk, ts_chunk) = seed_pair(&h.pool, &survivor, &excluded).await;
+    let app = app::build_resolved(h.pool.clone(), cfg())
+        .await
+        .expect("build app");
+
+    let (status, v) = post_search(
+        app,
+        serde_json::json!({
+            "query": "ledger state",
+            "vector": unit_vector(0.10),
+            "client_embedding_model": "voyage-code-3@1",
+            "code_mode": "off",
+            "limit": 100,
+            "filters": { "language": { "none_of": ["typescript"] } },
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        contains_chunk(&v, null_chunk),
+        "NULL-language doc must survive a `language.none_of` exclusion (#162)"
+    );
+    assert_absent(&v, ts_chunk, "the typescript doc must be excluded by language none_of");
+}
+
+#[tokio::test]
+async fn package_none_of_retains_packageless_row() {
+    // A packageless document (NULL `package_id` → all `p.*` NULL over the LEFT
+    // JOIN) must SURVIVE a package exclusion; only the package-attached doc is
+    // dropped. Pre-#162 the bare `NOT (p.kind = $ AND p.name = $)` was NULL for
+    // the packageless row and dropped it too.
+    let h = common::boot().await;
+    let survivor = Doc {
+        kind: DocumentKind::Markdown,
+        language: None,
+        package: None,
+        tags: &[],
+        content: "ledger state privacy witnesses documentation",
+        seed: 0.10,
+    };
+    let excluded = Doc {
+        kind: DocumentKind::Code,
+        language: Some("typescript"),
+        package: Some((PackageKind::Npm, "typescript")),
+        tags: &[],
+        content: "ledger state typescript deployContract example",
+        seed: 0.12,
+    };
+    let (free_chunk, pkg_chunk) = seed_pair(&h.pool, &survivor, &excluded).await;
+    let app = app::build_resolved(h.pool.clone(), cfg())
+        .await
+        .expect("build app");
+
+    let (status, v) = post_search(
+        app,
+        serde_json::json!({
+            "query": "ledger state",
+            "vector": unit_vector(0.10),
+            "client_embedding_model": "voyage-code-3@1",
+            "code_mode": "off",
+            "limit": 100,
+            "filters": {
+                "package": { "none_of": [{ "kind": "npm", "name": "typescript" }] }
+            },
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        contains_chunk(&v, free_chunk),
+        "packageless doc must survive a `package.none_of` exclusion (#162)"
+    );
+    assert_absent(&v, pkg_chunk, "the package-attached doc must be excluded by package none_of");
+}
+
+#[tokio::test]
+async fn tags_none_of_retains_untagged_row() {
+    // An untagged document (no `tags` key in provenance JSONB → SQL NULL) must
+    // SURVIVE a `tags.none_of` exclusion; only the tagged doc is dropped. Pre-#162
+    // the bare `NOT (d.provenance->'tags' ?| ...)` was NULL for the untagged row
+    // and dropped it too.
+    let h = common::boot().await;
+    let survivor = Doc {
+        kind: DocumentKind::Markdown,
+        language: Some("compact"),
+        package: None,
+        tags: &[],
+        content: "ledger state privacy witnesses documentation",
+        seed: 0.10,
+    };
+    let excluded = Doc {
+        kind: DocumentKind::Markdown,
+        language: Some("compact"),
+        package: None,
+        tags: &["deprecated"],
+        content: "ledger state deprecated legacy guidance",
+        seed: 0.12,
+    };
+    let (untagged_chunk, tagged_chunk) = seed_pair(&h.pool, &survivor, &excluded).await;
+    let app = app::build_resolved(h.pool.clone(), cfg())
+        .await
+        .expect("build app");
+
+    let (status, v) = post_search(
+        app,
+        serde_json::json!({
+            "query": "ledger state",
+            "vector": unit_vector(0.10),
+            "client_embedding_model": "voyage-code-3@1",
+            "code_mode": "off",
+            "limit": 100,
+            "filters": { "tags": { "none_of": ["deprecated"] } },
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        contains_chunk(&v, untagged_chunk),
+        "untagged doc must survive a `tags.none_of` exclusion (#162)"
+    );
+    assert_absent(&v, tagged_chunk, "the tagged doc must be excluded by tags none_of");
 }
