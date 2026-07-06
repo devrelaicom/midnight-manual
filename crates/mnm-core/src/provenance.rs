@@ -22,8 +22,13 @@ pub enum Attribution {
     ThirdParty,
     /// Community-contributed content with no explicit vetting.
     Community,
-    /// Attribution not set — lowest default trust.
+    /// Attribution not set, or an unrecognized/naturally-cased wire value —
+    /// lowest default trust. `#[serde(other)]` mirrors [`ContentType::Other`]
+    /// so an unknown value degrades gracefully to this variant instead of
+    /// failing deserialization of the entire [`Provenance`] struct (which would
+    /// wipe every sibling field via the consumer's `unwrap_or_default()`).
     #[default]
+    #[serde(other)]
     Unknown,
 }
 
@@ -193,14 +198,58 @@ mod tests {
     }
 
     #[test]
-    fn tolerates_unknown_attribution_via_default() {
-        // Forward-compatibility: server adds a new attribution variant; old
-        // CLI deserializing the response should still parse the document. We
-        // model this by deserializing a totally absent field which falls back
-        // to the Default impl.
+    fn absent_attribution_field_uses_default() {
+        // `#[serde(default)]` on the field: a totally absent `attribution` key
+        // falls back to the Default impl. (This is distinct from an unknown
+        // *value*, covered below — the old name conflated the two.)
         let v = serde_json::json!({});
         let p: Provenance = serde_json::from_value(v).unwrap();
         assert_eq!(p.attribution, Attribution::Unknown);
+    }
+
+    #[test]
+    fn unknown_attribution_value_falls_back_to_unknown() {
+        // `#[serde(other)]` on `Unknown`: an unrecognized wire value degrades to
+        // the field default rather than erroring.
+        let v = serde_json::json!({ "attribution": "supreme_overlord" });
+        let p: Provenance = serde_json::from_value(v).unwrap();
+        assert_eq!(p.attribution, Attribution::Unknown);
+    }
+
+    #[test]
+    fn unknown_attribution_value_preserves_sibling_fields() {
+        // Regression for #168: before the `#[serde(other)]` fallback, an unknown
+        // or naturally-cased attribution value (here PascalCase `Foundation`,
+        // which the snake_case rename does not accept) failed deserialization of
+        // the ENTIRE struct. The consumer's `unwrap_or_default()` then discarded
+        // every sibling field. The failure must now be isolated to `attribution`.
+        let v = serde_json::json!({
+            "attribution": "Foundation", // PascalCase — not the snake_case wire form
+            "verified": true,
+            "verified_by": "midnight-foundation",
+            "tags": ["quickstart"],
+        });
+        let p: Provenance = serde_json::from_value(v).unwrap();
+        assert_eq!(p.attribution, Attribution::Unknown, "unknown value degrades to Unknown");
+        assert!(p.verified, "verified must survive an unknown attribution");
+        assert_eq!(p.verified_by.as_deref(), Some("midnight-foundation"));
+        assert_eq!(p.tags, vec!["quickstart".to_string()]);
+    }
+
+    #[test]
+    fn known_attribution_values_still_deserialize() {
+        // The `#[serde(other)]` fallback must not swallow the real variants.
+        for (wire, expected) in [
+            ("foundation", Attribution::Foundation),
+            ("partner", Attribution::Partner),
+            ("third_party", Attribution::ThirdParty),
+            ("community", Attribution::Community),
+            ("unknown", Attribution::Unknown),
+        ] {
+            let v = serde_json::json!({ "attribution": wire });
+            let p: Provenance = serde_json::from_value(v).unwrap();
+            assert_eq!(p.attribution, expected, "wire={wire}");
+        }
     }
 
     #[test]
@@ -214,5 +263,9 @@ mod tests {
     fn attribution_serializes_snake_case() {
         let v = serde_json::to_value(Attribution::ThirdParty).unwrap();
         assert_eq!(v, serde_json::Value::String("third_party".into()));
+        // `#[serde(other)]` on `Unknown` must not affect serialization: a genuine
+        // Unknown still emits `"unknown"` (it round-trips, unlike a catch-all).
+        let u = serde_json::to_value(Attribution::Unknown).unwrap();
+        assert_eq!(u, serde_json::Value::String("unknown".into()));
     }
 }

@@ -17,7 +17,7 @@
 //! Tokenization uses the real BPE tokenizer via `crate::tokens::count` so
 //! chunk-size gating matches what the embedder actually sees.
 
-use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag};
+use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
 use crate::chunk::{Chunk, ChunkError, Chunker, ChunkerConfig};
 
@@ -69,7 +69,10 @@ impl Chunker for MarkdownChunker {
                 }
                 Event::Text(t) if in_heading.is_some() => heading_buf.push_str(&t),
                 Event::Code(t) if in_heading.is_some() => heading_buf.push_str(&t),
-                Event::End(_) if in_heading.is_some() => {
+                // Close only on the heading's OWN end tag. Matching `Event::End(_)`
+                // would close early on the first inline tag end (emphasis, strong,
+                // link…), truncating the captured heading text at that point.
+                Event::End(TagEnd::Heading(_)) if in_heading.is_some() => {
                     let level = in_heading.take().expect("inside heading");
                     stack.push((level, heading_buf.trim().to_owned()));
                     // Don't mutate current.heading_path here: the heading is the
@@ -433,6 +436,50 @@ mod tests {
         for (i, c) in chunks.iter().enumerate() {
             assert_eq!(c.chunk_index, u32::try_from(i).unwrap());
         }
+    }
+
+    // ── heading inline-formatting capture (#168) ────────────────────────────────
+
+    /// #168 regression: a heading containing an inline element (`**bold**`) must
+    /// record its FULL text in descendants' `heading_path`, not stop at the first
+    /// inline tag's `End` event. Before the fix this recorded `"Using bold"`,
+    /// dropping `" in practice"`.
+    #[test]
+    fn heading_with_inline_emphasis_captures_full_text() {
+        // `per_section_cfg()` keeps the H1 and its H2 child as separate chunks
+        // (each ~15-token body fits the 28-token budget alone; the pair exceeds
+        // the 25-token coalesce target), so the child records the H1 as an
+        // ancestor in its `heading_path`.
+        let md = "# Using **bold** in practice\n\n\
+                  this section body has roughly fifteen tokens of filler text here\n\n\
+                  ## child section\n\n\
+                  this section body has roughly fifteen tokens of filler text here\n";
+        let chunks = MarkdownChunker.chunk(md, &per_section_cfg()).unwrap();
+        assert!(
+            chunks
+                .iter()
+                .any(|c| c.heading_path.iter().any(|h| h == "Using bold in practice")),
+            "expected un-truncated heading 'Using bold in practice' in a heading_path, got {:#?}",
+            chunks.iter().map(|c| &c.heading_path).collect::<Vec<_>>()
+        );
+    }
+
+    /// Same defect via an inline link: `## The [API](url) reference` must capture
+    /// `"The API reference"`, not truncate at the link's `End` event.
+    #[test]
+    fn heading_with_inline_link_captures_full_text() {
+        let md = "# The [API](https://example.test) reference\n\n\
+                  this section body has roughly fifteen tokens of filler text here\n\n\
+                  ## child section\n\n\
+                  this section body has roughly fifteen tokens of filler text here\n";
+        let chunks = MarkdownChunker.chunk(md, &per_section_cfg()).unwrap();
+        assert!(
+            chunks
+                .iter()
+                .any(|c| c.heading_path.iter().any(|h| h == "The API reference")),
+            "expected un-truncated heading 'The API reference' in a heading_path, got {:#?}",
+            chunks.iter().map(|c| &c.heading_path).collect::<Vec<_>>()
+        );
     }
 
     // ── coalescing tests (the bug fix) ─────────────────────────────────────────
