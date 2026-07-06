@@ -2652,8 +2652,16 @@ pub(super) fn emit_report(
     if sel.write_file {
         if let Some(path) = report_file {
             if let Err(e) = super::report::write_atomic(path, report) {
+                // Warn and continue — never `process::exit`. On the finalized
+                // path the server has already activated the new revision, so a
+                // report-file write hiccup (e.g. the disk filled after the
+                // preflight probe passed) must NOT turn a committed success into
+                // a non-zero exit that also kills `run_with_paths_stats` before
+                // it emits the `IngestComplete` telemetry — automation would
+                // read that as a failure and re-ingest. This mirrors the abort
+                // path's `render_abort_artifacts`, which likewise only warns
+                // (#171).
                 eprintln!("warning: could not write report file {}: {e}", path.display());
-                std::process::exit(1);
             }
         }
     }
@@ -2827,6 +2835,40 @@ mod tests {
         assert!(args.respect_gitignore);
         assert!(args.disable_default_ignore_list);
         assert_eq!(args.max_file_size, 1_048_576);
+    }
+
+    /// `emit_report` must NEVER `process::exit` on a report-file write failure.
+    /// On the finalized path the server has already activated the new revision,
+    /// so a write hiccup has to warn-and-return (mirroring the abort path's
+    /// `render_abort_artifacts`) rather than turn a committed success into a
+    /// non-zero exit that also skips the `IngestComplete` telemetry (#171).
+    /// Before the fix this test aborted the whole test binary via
+    /// `process::exit(1)`; now control returns and the post-call assertion runs.
+    #[test]
+    fn emit_report_warns_and_returns_when_report_write_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        // Target a path whose "parent" is a regular file, so the atomic write's
+        // temp-file create fails with ENOTDIR — the same technique
+        // `report::write_atomic`'s own failure test uses.
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, b"").unwrap();
+        let report_path = blocker.join("out.json");
+
+        let report = crate::commands::ingest::report::IngestReport::sample();
+        let sel = ReportSelection {
+            json_stdout: false,
+            write_file: true,
+        };
+
+        // If `emit_report` still called `process::exit(1)`, control never
+        // returns and the binary dies; reaching the assertion proves it warned
+        // and returned instead.
+        emit_report(&report, &sel, Some(&report_path), String::new);
+
+        assert!(
+            !report_path.exists(),
+            "the write failed, so no report file should have been produced"
+        );
     }
 
     /// `--include` / `--exclude` were accepted-but-ignored on `ingest run` (never

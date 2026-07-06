@@ -7,7 +7,7 @@ use anyhow::{Context as _, Result};
 use clap::Args as ClapArgs;
 use mnm_content::ingest::{PlanBuilder, PriorState, WalkContext, Walker};
 use mnm_content::manifest::Manifest;
-use mnm_core::types::{DocumentKind, SourceKind};
+use mnm_core::types::SourceKind;
 use time::OffsetDateTime;
 
 /// Args for `mnm ingest plan`.
@@ -171,18 +171,8 @@ pub async fn run(
 
     let mut b = PlanBuilder::new(&args.source_slug, SourceKind::DocsSite, &revision, prior)
         .with_strict(args.strict);
-    for doc in walked {
-        let ctx = WalkContext {
-            path: doc.rel_path.clone(),
-            kind: DocumentKind::Markdown,
-            content: &doc.content,
-            split: &doc.split,
-            resolved: &doc.resolved,
-            // Task 10 fills machine-extracted provenance; empty for now.
-            extracted: mnm_core::provenance::Provenance::default(),
-            source_modified_at: doc.source_modified_at,
-            package: None,
-        };
+    for doc in &walked {
+        let ctx = plan_walk_context(doc);
         b.add_walked_document(&ctx)
             .with_context(|| format!("plan add {}", doc.rel_path.display()))?;
     }
@@ -227,6 +217,35 @@ pub async fn run(
         out
     });
     Ok(())
+}
+
+/// Build the [`WalkContext`] for one walked document, mirroring `ingest run`'s
+/// construction (`run.rs`) so the two agree on the chunker-selecting `kind`.
+///
+/// `kind` MUST come from `doc.resolved.kind`, not a hardcoded
+/// `DocumentKind::Markdown`: `dispatch_chunk` branches on `kind` (Markdown →
+/// markdown chunker, Code → code chunker), so hardcoding Markdown would chunk
+/// code files with the wrong chunker and report a chunk count that diverges
+/// from what `ingest run` produces (#171). Classification (new/carried/deleted)
+/// keys on the content hash and is unaffected — this is preview accuracy only.
+///
+/// `extracted` provenance and `package` are intentionally left at their
+/// defaults. Unlike `ingest run`, `ingest plan` uploads nothing and the plan
+/// report (`ReportDoc`) surfaces neither field, so computing them here — both of
+/// which touch the filesystem (manifest reads, package detection) — would be
+/// dead work in a preview command. `ingest run` fills them because it persists
+/// them to the server.
+fn plan_walk_context(doc: &mnm_content::ingest::WalkedDocument) -> WalkContext<'_> {
+    WalkContext {
+        path: doc.rel_path.clone(),
+        kind: doc.resolved.kind,
+        content: &doc.content,
+        split: &doc.split,
+        resolved: &doc.resolved,
+        extracted: mnm_core::provenance::Provenance::default(),
+        source_modified_at: doc.source_modified_at,
+        package: None,
+    }
 }
 
 /// The stderr line + report `warnings[]` entry emitted when `ingest plan` runs
@@ -380,6 +399,52 @@ pub(super) async fn fetch_prior_state(
             })
             .collect(),
     })
+}
+
+#[cfg(test)]
+mod plan_walk_context_tests {
+    use super::plan_walk_context;
+    use mnm_content::frontmatter;
+    use mnm_content::ingest::WalkedDocument;
+    use mnm_content::manifest::resolve::ResolvedLeaf;
+    use mnm_core::provenance::Provenance;
+    use mnm_core::types::DocumentKind;
+    use std::path::PathBuf;
+
+    fn walked(rel: &str, kind: DocumentKind, body: &str) -> WalkedDocument {
+        WalkedDocument {
+            rel_path: PathBuf::from(rel),
+            content: body.to_owned(),
+            split: frontmatter::passthrough(body),
+            resolved: ResolvedLeaf {
+                rel_path: PathBuf::from(rel),
+                kind,
+                name: None,
+                published_url: None,
+                source_url: None,
+                provenance_override: Provenance::default(),
+                no_extract: false,
+            },
+            source_modified_at: None,
+        }
+    }
+
+    /// `ingest plan` must thread the resolver-derived `kind` into the
+    /// `WalkContext`, matching `ingest run` — NOT hardcode `Markdown`. A hardcode
+    /// chunks code files with the markdown chunker (`dispatch_chunk` branches on
+    /// `kind`), diverging the preview's chunk count from the run (#171).
+    #[test]
+    fn threads_resolved_kind_not_hardcoded_markdown() {
+        let code = walked("src/lib.rs", DocumentKind::Code, "fn main() {}\n");
+        assert_eq!(
+            plan_walk_context(&code).kind,
+            DocumentKind::Code,
+            "a code document must carry Code kind, not a hardcoded Markdown"
+        );
+
+        let md = walked("docs/intro.md", DocumentKind::Markdown, "# Title\n");
+        assert_eq!(plan_walk_context(&md).kind, DocumentKind::Markdown);
+    }
 }
 
 #[cfg(test)]

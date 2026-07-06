@@ -773,8 +773,15 @@ pub struct ActiveCode {
     pub name: String,
     /// Monotonic revision; combined with `name` forms the wire id.
     pub revision: i32,
-    /// Embedding dimensionality.
-    #[serde(default)]
+    /// Embedding dimensionality. No `#[serde(default)]` — a missing `dim` must
+    /// be an explicit deserialize error, exactly like the general model's `dim`
+    /// above. A defaulted `0` slips through the identity resolvers'
+    /// `u32::try_from(c.dim).unwrap_or(models.voyage_output_dimension)` fallback
+    /// (`try_from(0)` is `Ok(0)`, so only a *negative* dim ever falls back),
+    /// producing a code embedder with `output_dimension = 0` instead of the
+    /// configured value (#171). The server always emits `dim` for a resolved
+    /// code model, so this is never seen in practice — the strict shape just
+    /// fails loudly rather than silently mis-dimensioning if that ever breaks.
     pub dim: i32,
     /// Provider tag (e.g. `voyageai`).
     #[serde(default)]
@@ -916,6 +923,24 @@ mod tests {
         assert_eq!(code.revision, 1);
         assert_eq!(code.dim, 1024);
         assert_eq!(code.provider, "voyageai");
+    }
+
+    /// A resolved code half MUST carry `dim`: it has no `#[serde(default)]`, so a
+    /// missing `dim` is an explicit deserialize error (matching the general
+    /// model's `dim`), NOT a silent `0`. A defaulted `0` slips through the
+    /// identity resolvers' `u32::try_from(c.dim).unwrap_or(configured_dim)`
+    /// fallback — `try_from(0)` is `Ok(0)`, so only a *negative* dim falls back —
+    /// yielding a code embedder with `output_dimension = 0` (#171).
+    #[test]
+    fn active_response_rejects_code_half_missing_dim() {
+        let r: Result<ActiveModelResponse, _> = serde_json::from_value(serde_json::json!({
+            "name": "voyage-context-3", "revision": 1, "dim": 1024, "provider": "voyageai",
+            "code": { "name": "voyage-code-3", "revision": 1, "provider": "voyageai" }
+        }));
+        assert!(
+            r.is_err(),
+            "a code half missing `dim` must fail to deserialize, not default to 0"
+        );
     }
 
     #[test]
