@@ -1603,7 +1603,14 @@ fn push_filter_predicates(
         qb.push_bind(f.tags.any_of.clone());
     }
     if !f.tags.none_of.is_empty() {
-        qb.push(" AND NOT (d.provenance->'tags' ?| ");
+        // COALESCE the tags array so untagged documents survive the exclusion.
+        // `Provenance.tags` is `skip_serializing_if = "Vec::is_empty"`, so an
+        // untagged document has NO `tags` key and `d.provenance->'tags'` is SQL
+        // NULL. `NOT (NULL ?| $none_of)` is NULL under three-valued logic, which
+        // would silently drop *every* untagged document from a `tags.none_of`
+        // filter (#162). Default the missing key to an empty JSONB array — which
+        // overlaps nothing, so `NOT (... ?| ...)` is TRUE and the row is kept.
+        qb.push(" AND NOT (COALESCE(d.provenance->'tags', '[]'::jsonb) ?| ");
         qb.push_bind(f.tags.none_of.clone());
         qb.push(")");
     }
@@ -2196,6 +2203,45 @@ mod tests {
         assert!(
             sql.contains("p.id IS NULL OR NOT (p.kind = "),
             "package none_of must retain NULL-package rows via `p.id IS NULL OR ...`; got: {sql}"
+        );
+    }
+
+    #[test]
+    fn tags_none_of_coalesces_so_untagged_rows_survive() {
+        // `Provenance.tags` is `skip_serializing_if = "Vec::is_empty"`, so an
+        // untagged document has no `tags` key and `d.provenance->'tags'` is NULL.
+        // The fix defaults the missing key to `'[]'::jsonb` so untagged rows
+        // survive a `tags.none_of` exclusion (#162).
+        let f = SearchFilters {
+            tags: SetMatch {
+                any_of: vec![],
+                none_of: vec!["deprecated".into()],
+            },
+            ..Default::default()
+        };
+        let sql = built_sql(&f);
+        assert!(
+            sql.contains("NOT (COALESCE(d.provenance->'tags', '[]'::jsonb) ?| "),
+            "tags none_of must COALESCE the missing key so untagged rows survive; got: {sql}"
+        );
+    }
+
+    #[test]
+    fn tags_any_of_does_not_coalesce() {
+        // The inclusion path leaves untagged (NULL-key) rows out — an untagged
+        // doc has none of the requested tags — so it must NOT be coalesced.
+        let f = SearchFilters {
+            tags: SetMatch {
+                any_of: vec!["tutorial".into()],
+                none_of: vec![],
+            },
+            ..Default::default()
+        };
+        let sql = built_sql(&f);
+        assert!(sql.contains("d.provenance->'tags' ?| "), "got: {sql}");
+        assert!(
+            !sql.contains("COALESCE(d.provenance->'tags'"),
+            "any_of must not coalesce (untagged rows should be excluded from an inclusion); got: {sql}"
         );
     }
 
