@@ -1,0 +1,66 @@
+manifest_version: 1
+root:
+  name: nel349-midnight-wallet-cli
+  # Mature, npm-published TypeScript Midnight wallet CLI + MCP server +
+  # server-side DApp-Connector. Value is the hand-written source (commands, lib,
+  # the MCP server), the published connector client package, and the agent-facing
+  # skill / JSON-output reference docs. Scoped children keep the 197 KB lockfile,
+  # demo media, the publishing note + gif, internal task-archive notes, the
+  # agent-workflow CLAUDE.md, and the measurement scripts out of the index. The
+  # contract-call code-generation helper (src/lib/contract/runner.ts) is
+  # DELIBERATELY NOT indexed — see below.
+  provenance:
+    attribution: community
+    verified: false
+    tags: [trust:low]
+    verification_notes: >-
+      Community-contributed repository; unverified and unaudited by the Midnight
+      Foundation. Passed a multi-agent static review (2026-07-02): a mature, published
+      (npm) TypeScript Midnight wallet CLI on the fully-current SDK (compact-runtime
+      0.16.0, midnight-js 4.1.1, ledger-v8 8.1.0, wallet-sdk 3.x/4.x) with STRONG CI +
+      test discipline (Node matrix, publish gate, 1000+ tests) — DApp/SDK review PASS,
+      CQ strong. Notably includes a rare, correct SERVER-SIDE DApp-Connector
+      (ConnectedAPI) implementation and well-documented current wallet-SDK bug
+      workarounds. Known caveats: the contract-call code-generation helper
+      (src/lib/contract/runner.ts) had an unescaped-circuit-name CODE-INJECTION bug and
+      has been EXCLUDED from this index — do not reproduce raw-interpolation codegen;
+      `contract deploy/call` silently ignores endpoint-override flags; the DApp-Connector
+      WS server lacks Origin validation; and the approval prompt approves on bare Enter —
+      do not copy those patterns. Apache-2.0. Treat as illustrative, not authoritative,
+      and audit before production use.
+  children:
+    - name: readme
+      file: README.md
+    - name: src
+      # Hand-written CLI implementation: commands/, lib/ (wallet facade, tx
+      # lifecycle, server-side DApp-Connector, heap-guard, tip-aware wallet
+      # cache), the MCP server, and the 68-file vitest suite. EXCLUDES
+      # lib/contract/runner.ts — its generateCallScript splices the --circuit
+      # name unescaped into generated JS that is written to disk and executed
+      # (code-injection / RCE reachable from the MCP contract_call tool); the
+      # pattern must never enter the corpus.
+      path: src/
+      exclude:
+        - "**/contract/runner.ts"
+      provenance:
+        content_type: example
+    - name: connector
+      # midnight-wallet-connector: the published DApp-side client library for the
+      # CLI's WebSocket JSON-RPC ConnectedAPI server.
+      path: packages/connector/src/
+      provenance:
+        content_type: example
+    # Agent-facing reference docs, included by file so the demo gif, the internal
+    # PUBLISHING.md release note, and the other repo chrome stay out of the index.
+    - name: docs-skill
+      file: docs/SKILL.md
+      provenance:
+        content_type: reference
+    - name: docs-skill-core
+      file: docs/SKILL-CORE.md
+      provenance:
+        content_type: reference
+    - name: docs-json-contract
+      file: docs/JSON_CONTRACT.md
+      provenance:
+        content_type: reference

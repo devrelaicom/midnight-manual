@@ -1,0 +1,13 @@
+manifest_version: 1
+root:
+  name: effectstream-zswap-presale
+  path: .
+  exclude:
+    # pgTyped-generated typed query wrappers (emitted from the sibling .sql via
+    # pgtypedconfig.json). The authored SQL/schema is auto-dropped by ext (.sql
+    # unrecognized); this is the only generated .ts artifact checked in.
+    - "**/*.queries.ts"
+  provenance:
+    attribution: partner
+    verified: false
+    tags: [trust:medium]

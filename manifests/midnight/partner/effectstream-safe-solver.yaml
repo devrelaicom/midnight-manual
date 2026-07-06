@@ -1,0 +1,18 @@
+manifest_version: 1
+root:
+  name: effectstream-safe-solver
+  path: .
+  exclude:
+    # Hardhat Ignition deployment artifacts (generated build-info / compiled
+    # artifact JSON / journal / deployed_addresses). Authored EVM source lives
+    # in evm-contracts/src + ignition/modules; the Midnight Compact contract
+    # lives in midnight-contracts/contract-midnight-data/src.
+    - "packages/shared/contracts/evm-contracts/ignition/deployments/**"
+    # Deployment-address records (just a {contractAddress} blob per network).
+    - "packages/shared/contracts/midnight-contracts/contract-midnight-data.*.json"
+    # pgTyped-generated typed query wrappers (emitted from the sibling .sql).
+    - "**/*.queries.ts"
+  provenance:
+    attribution: partner
+    verified: false
+    tags: [trust:medium]

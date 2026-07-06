@@ -1,0 +1,71 @@
+manifest_version: 1
+root:
+  name: nel349-midnight-kicks
+  # Large Unity/Android monorepo: value lives in the Compact contract, its
+  # functional test suite, the design docs, and the Kotlin on-chain client.
+  # Scoped children keep the game-asset binaries, Unity/Gradle chrome, and the
+  # UI/Compose glue out of the index. The companion INTENTIONALLY-VULNERABLE
+  # contract and its security test are deliberately NOT indexed (see below).
+  provenance:
+    attribution: community
+    verified: false
+    tags: [trust:low]
+    verification_notes: >-
+      Community-contributed repository; unverified and unaudited by the Midnight
+      Foundation. Passed a multi-agent static review (2026-07-02): the production
+      penalty.compact is a soundly-built ZK commit-reveal penalty-shootout referee —
+      correct witness-secret->domain-separated-hash->pinned identity (no ownPublicKey),
+      hiding commitments with choice disclosure correctly deferred to reveal, and a
+      correct timeout win-assignment; security review PASS, Compact-quality strong, CQ
+      strong (rigorous hand-rolled simulator test suite). Known caveats: a single fixed
+      deadline set by the joiner can strand a sudden-death match (liveness gap; no funds
+      at risk — the contract holds no stake), and commit nonce rotation is enforced only
+      client-side (nonce reuse across rounds is a privacy footgun). The companion
+      intentionally-vulnerable contract and its security test have been EXCLUDED from
+      this index (their code invites copying / overstates disclosure impact). Apache-2.0
+      (SPDX headers; no root LICENSE file). Treat as illustrative, not authoritative,
+      and audit before production use.
+  children:
+    - name: readme
+      file: README.md
+    - name: cli-feedback
+      file: CLI_FEEDBACK.md
+    - name: docs
+      # Design spec, project journal, and cloud-persistence / testing notes.
+      # docs/img/* (png/webp/jpg) auto-drop as unrecognized extensions.
+      path: docs/
+      provenance:
+        content_type: reference
+    - name: contract
+      # Production Compact contract + witnesses + the excellent functional
+      # simulator suite (penalty.test.ts, base-simulator.ts, penalty-simulator.ts,
+      # utils.ts, index.ts). EXCLUDES: the intentionally-vulnerable contract and
+      # its vulnerable witnesses/simulator (**/*vulnerable*), the security test
+      # (references the excluded vulnerable code and overstates disclosure impact),
+      # and the generated managed/ compiler output. The sibling midnight-level-db/
+      # (committed local private-state DB) and package-lock.json sit outside
+      # contract/src/ and are never walked.
+      path: contract/src/
+      exclude:
+        - "**/*vulnerable*"
+        - "**/security.test.ts"
+        - "**/managed/**"
+      provenance:
+        content_type: example
+    # Kotlin on-chain client — a rare Android/Midnight integration. Cherry-picked
+    # from app/ (mostly Compose UI/game glue) for the genuinely instructive files:
+    # ledger polling nuances (Vector<N,Uint<8>> zero-element serialization,
+    # queryLedgerState per-field) and the deploy -> call -> witness -> proving
+    # contract lifecycle.
+    - name: client-state-poller
+      file: app/src/main/kotlin/com/midnight/kicks/StatePoller.kt
+      provenance:
+        content_type: example
+    - name: client-match-manager
+      file: app/src/main/kotlin/com/midnight/kicks/MatchManager.kt
+      provenance:
+        content_type: example
+    - name: client-state-snapshot
+      file: app/src/main/kotlin/com/midnight/kicks/ContractStateSnapshot.kt
+      provenance:
+        content_type: example

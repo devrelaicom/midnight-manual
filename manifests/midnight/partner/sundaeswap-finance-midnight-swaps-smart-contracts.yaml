@@ -1,0 +1,8 @@
+manifest_version: 1
+root:
+  name: sundaeswap-finance-midnight-swaps-smart-contracts
+  path: .
+  provenance:
+    attribution: partner
+    verified: false
+    tags: [trust:medium]

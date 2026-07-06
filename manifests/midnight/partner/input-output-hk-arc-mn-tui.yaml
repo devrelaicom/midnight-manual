@@ -1,0 +1,8 @@
+manifest_version: 1
+root:
+  name: input-output-hk-arc-mn-tui
+  path: .
+  provenance:
+    attribution: partner
+    verified: false
+    tags: [trust:high]

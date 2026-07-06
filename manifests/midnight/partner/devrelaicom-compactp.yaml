@@ -1,0 +1,26 @@
+manifest_version: 1
+root:
+  name: devrelaicom-compactp
+  path: .
+  exclude:
+    # Vendored upstream Compact corpus used to validate the parser: 486 .compact
+    # source files copied from the compiler test-suite, plus expected .zkir
+    # outputs and the known-failures manifest — machine test data / duplicates
+    # of upstream, not this repo's authored answer.
+    - "tests/**"
+    # .compact inputs for the CLI integration tests (the harness .rs is kept;
+    # these fixtures are throwaway parse inputs).
+    - "crates/compactp/tests/fixtures/**"
+    # Generated cargo-public-api surface dumps (compactp_ast.txt is 256 KB) plus
+    # the auto-generated COVERAGE.md — machine-emitted API snapshots.
+    - "docs/public-api/**"
+    # Marketing landing page (html/js/css/svg/robots) + its design doc — site
+    # chrome, no Midnight/Compact answer content.
+    - "site/**"
+    - "docs/site/**"
+    # Internal fuzz-runner script — ship machinery.
+    - "scripts/**"
+  provenance:
+    attribution: partner
+    verified: false
+    tags: [trust:medium]

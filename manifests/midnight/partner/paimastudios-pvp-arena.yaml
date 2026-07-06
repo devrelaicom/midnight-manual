@@ -1,0 +1,14 @@
+manifest_version: 1
+root:
+  name: paimastudios-pvp-arena
+  path: .
+  exclude:
+    # Phaser game static assets: sprites/audio/fonts (unrecognized exts are
+    # already auto-dropped) plus guide.html, an in-game player guide that
+    # duplicates the root game-guide.md. Compact contracts + TS source live
+    # under backend/packages and frontend/src/{contract,api,phaser/src}.
+    - "frontend/src/phaser/public/**"
+  provenance:
+    attribution: partner
+    verified: false
+    tags: [trust:medium]

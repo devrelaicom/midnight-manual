@@ -48,7 +48,7 @@ mnm ingest run manifests/midnight/midnight-docs.yaml \
 also auto-creates the source on 404 with `--yes`, but explicit `sources create`
 is preferred so `kind`/`origin_url` are set.)
 
-## Index (82 sources)
+## Index (121 sources)
 
 > This index is generated from `sources.tsv` (slug / repo / branch / kind) and
 > each manifest's `root.provenance` (attribution / verified / trust). It is **not**
@@ -89,16 +89,19 @@ is preferred so `kind`/`origin_url` are set.)
 | servicedesk | midnightntwrk/servicedesk | main | docs_site | Foundation | foundation | false | high |
 | midnight-reserve-contracts | midnightntwrk/midnight-reserve-contracts | main | code_repo | Foundation | foundation | true | high |
 | night-token-distribution | midnightntwrk/night-token-distribution | main | code_repo | Foundation | foundation | true | high |
-| joacolinares-kyc-midnight | joacolinares/kyc-midnight | ramaJoaco | code_repo | Hackathon Winner | third_party | false | medium |
+| midnight-cnight-to-dust-dapp | midnightntwrk/midnight-cnight-to-dust-dapp | main | mixed | Foundation | foundation | false | high |
+| midnight-zk | midnightntwrk/midnight-zk | main | code_repo | Foundation | foundation | true | high |
+| passport | midnightntwrk/passport | main | mixed | Foundation | foundation | false | high |
 
 ## Partner sources (`manifests/midnight/partner/`)
 
 Formal partner-org repos. All are `attribution: partner`, `verified: false`.
-OpenZeppelin is `trust:high`; the rest are `trust:medium`. Manifests walk the
-whole repo (`path: .`, minus the walker's default skips) with targeted excludes
-for repo-specific noise (vendored submodules, animation/data blobs, duplicate
-trees); docs-only repos (`midnames-docs`, `webisoftsoftware-1am-midnight-skill`)
-are scoped to their content directories.
+OpenZeppelin and input-output-hk are `trust:high`; the rest are `trust:medium`.
+Manifests walk the whole repo (`path: .`, minus the walker's default skips) with
+targeted excludes for repo-specific noise (vendored submodules, animation/data
+blobs, duplicate trees); large multi-chain monorepos (`input-output-hk-lace`,
+`openzeppelin-adapters`) and docs-only repos (`midnames-docs`,
+`webisoftsoftware-1am-midnight-skill`) are scoped to their content directories.
 
 | slug | repo | branch | kind | owner | attribution | verified | trust |
 |------|------|--------|------|-------|-------------|----------|-------|
@@ -119,6 +122,25 @@ are scoped to their content directories.
 | midnames-deploy-receive-test | midnames/deploy-receive-test | main | code_repo | Partner | partner | false | medium |
 | midnames-did | midnames/did | main | code_repo | Partner | partner | false | medium |
 | midnames-did-frontend | midnames/did-frontend | main | code_repo | Partner | partner | false | medium |
+| input-output-hk-arc-mn-tui | input-output-hk/arc-mn-tui | main | code_repo | Partner | partner | false | high |
+| input-output-hk-lace | input-output-hk/lace | main | code_repo | Partner | partner | false | high |
+| paimastudios-midnight-game-2 | effectstream/dust-to-dust | main | code_repo | Partner | partner | false | medium |
+| paimastudios-pvp-arena | effectstream/kachina-colosseum | main | code_repo | Partner | partner | false | medium |
+| sundaeswap-finance-capacity-exchange | SundaeSwap-finance/capacity-exchange | main | code_repo | Partner | partner | false | medium |
+| sundaeswap-finance-midnight-swaps-smart-contracts | SundaeSwap-finance/midnight-swaps-smart-contracts | main | code_repo | Partner | partner | false | medium |
+| openzeppelin-adapters | OpenZeppelin/openzeppelin-adapters | main | code_repo | Partner | partner | false | high |
+| no-witness-labs-midday-sdk | no-witness-labs/midday-sdk | main | code_repo | Partner | partner | false | medium |
+| devrelaicom-compactp | devrelaicom/compactp | main | code_repo | Partner | partner | false | medium |
+| devrelaicom-midnight-expert | devrelaicom/midnight-expert | main | docs_site | Partner | partner | false | medium |
+| effectstream-block-kart-legends | effectstream/block-kart-legends | main | code_repo | Partner | partner | false | medium |
+| effectstream-go-fish | effectstream/go-fish | v2 | code_repo | Partner | partner | false | medium |
+| effectstream-mip-zswap-offer | effectstream/mip-zswap-offer | main | code_repo | Partner | partner | false | medium |
+| effectstream-nix-nax | effectstream/nix-nax | main | code_repo | Partner | partner | false | medium |
+| effectstream-safe-solver | effectstream/safe-solver | main | code_repo | Partner | partner | false | medium |
+| effectstream-social-wallet-2of3 | effectstream/social-wallet-2of3 | main | code_repo | Partner | partner | false | medium |
+| effectstream-werewolf-game | effectstream/werewolf-game | main | code_repo | Partner | partner | false | medium |
+| effectstream-zkir-wasm-experiment | effectstream/zkir-wasm-experiment | main | code_repo | Partner | partner | false | medium |
+| effectstream-zswap-presale | effectstream/zswap-presale | main | code_repo | Partner | partner | false | medium |
 
 ## Community sources (`manifests/midnight/community/`)
 
@@ -163,3 +185,21 @@ docs/skill repos.
 | nstanford5-example-battleship-simple | nstanford5/example-battleship-simple | master | code_repo | Community | community | false | low |
 | nstanford5-example-private-auction-reserve | nstanford5/example-private-auction-reserve | master | code_repo | Community | community | false | low |
 | nstanford5-example-private-party | nstanford5/example-private-party | main | code_repo | Community | community | false | low |
+| 0xstrong-anchorzk | 0xstrong/AnchorZK | main | code_repo | Community | community | false | low |
+| adamreynolds-io-compact-zkir-lint | adamreynolds-io/compact-zkir-lint | main | code_repo | Community | community | false | low |
+| adamreynolds-io-gsd-wallet | adamreynolds-io/gsd-wallet | main | code_repo | Community | community | false | low |
+| nel349-midnight-kicks | kuiralabs/midnight-kicks | main | code_repo | Community | community | false | low |
+| nel349-kuira-midnight-ffi | nel349/kuira-midnight-ffi | main | code_repo | Community | community | false | low |
+| nel349-midnight-wallet-cli | nel349/midnight-wallet-cli | main | code_repo | Community | community | false | low |
+| nftmakerio-midnight-dotnet-sdk | nftmakerio/midnight-dotnet-sdk | main | code_repo | Community | community | false | low |
+| apestchanker-midnight-agent-did-manager | apestchanker/midnight-agent-did-manager | main | code_repo | Community | community | false | low |
+| cadalt0-nightforge | cadalt0/NIGHTFORGE | main | code_repo | Community | community | false | low |
+| tusharpamnani-midnight-programs-list | tusharpamnani/midnight-programs-list | main | code_repo | Community | community | false | low |
+| mbs-midnight-technical-guides | mbs-midnight/technical-guides | main | docs_site | Community | community | false | low |
+| hbrazier01-airlog | hbrazier01/Airlog | main | code_repo | Community | community | false | low |
+| gutopro-nightroom | gutopro/nightroom | main | code_repo | Community | community | false | low |
+| jalal-1-mnf-se-examples | Jalal-1/mnf-se-examples | main | code_repo | Community | community | false | low |
+| kaleababayneh-kaamos | kaleababayneh/kaamos | main | code_repo | Community | community | false | low |
+| apestchanker-zplunk | apestchanker/zplunk | main | code_repo | Community | community | false | low |
+| jalal-1-shielded-integration-template | jalal-1/shielded-integration-template | main | code_repo | Community | community | false | low |
+| tomiin-midnight-sealed-bid-auction | tomiin/midnight-sealed-bid-auction | main | code_repo | Community | community | false | low |

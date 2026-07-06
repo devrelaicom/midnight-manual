@@ -12,3 +12,17 @@ root:
     attribution: community
     verified: false
     tags: [trust:medium]
+    verification_notes: >-
+      Community-contributed learning resource; unverified and unaudited by the Midnight
+      Foundation. "Compact by Example" — a Mintlify documentation site of bite-sized,
+      Solidity-by-example-style Compact tutorials: 11 basics/ lessons (hello-world, primitive
+      types, mappings, minting, transfer, burning, approval, allowance, access-control,
+      overflow protection, first app) and 3 applications/ (ERC-20, ERC-721, ERC-1155 token
+      patterns). Lessons are prose with embedded code in .mdx; the manifest indexes only the
+      .md/.mdx content (Mintlify docs.json/robots.txt and image/logo/favicon assets excluded).
+      Currency (reviewed 2026-07-03): actively maintained — a 2026-05-13 commit migrated all
+      tutorials to compiler 0.31 with keypair-based authorization and corrected disclose()
+      semantics, and lessons pin language_version >= 0.23 (current at review); a few incidental
+      references to older pragmas (0.22/0.16) remain. Educational reference only — not audited
+      and not deployable as-is. MIT. Treat as illustrative, not authoritative, and re-verify any
+      example against the current Compact toolchain before use.

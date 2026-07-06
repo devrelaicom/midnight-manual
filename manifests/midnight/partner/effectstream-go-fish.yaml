@@ -1,0 +1,20 @@
+manifest_version: 1
+root:
+  name: effectstream-go-fish
+  path: .
+  exclude:
+    # Hardhat/Ignition deployment artifacts for the Paima-L2 EVM side: emitted
+    # per-chain artifacts + solc build-info + deployed_addresses/journal JSON.
+    # Authored EVM source stays in evm/{contracts,ignition/modules,test}; the
+    # Midnight Compact contracts live in midnight/go-fish-contract/src.
+    - "packages/shared/contracts/evm/ignition/deployments/**"
+    # Deployment pointers: 91-byte { contractAddress } JSONs for the Midnight
+    # contract (mainnet + undeployed). Just a hex address, no source signal.
+    - "packages/shared/contracts/midnight/go-fish-contract.*.json"
+    # Public asset tree: favicons/webmanifest/game CSS plus the bundled
+    # midnight-prover BLS param blobs (multi-MB, no recognized extension).
+    - "frontend/public/**"
+  provenance:
+    attribution: partner
+    verified: false
+    tags: [trust:medium]

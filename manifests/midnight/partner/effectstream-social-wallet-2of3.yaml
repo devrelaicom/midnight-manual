@@ -1,0 +1,8 @@
+manifest_version: 1
+root:
+  name: effectstream-social-wallet-2of3
+  path: .
+  provenance:
+    attribution: partner
+    verified: false
+    tags: [trust:medium]

@@ -1,0 +1,62 @@
+manifest_version: 1
+root:
+  name: cadalt0-nightforge
+  # npm-published "Hardhat for Midnight" Node CLI (compile / wallet / proof-server
+  # / deploy). The high-value, VERIFIED-CORRECT references are all in src/: the
+  # ledger-v8 Intent-signing signRecipe 'proof'/'pre-proof' workaround
+  # (src/providers/factory.ts), the deployContract / CompiledContract builder
+  # chain and 6-provider assembly (src/deployer/*, src/providers/factory.ts) —
+  # a genuinely hard-to-get-right SDK reference confirmed against the official
+  # Midnight migration guide, on a current SDK. Style B curated: the vendored
+  # `submodules/walletsync/` tree is DELIBERATELY NOT indexed — it is a copy of the
+  # separately-published `midnightwalletsync` npm package AND hosts an
+  # UNAUTHENTICATED localhost HTTP signing server (a POST /dust/:alias CORS
+  # "simple request" lets any page open in the dev's browser during `nightforge
+  # sync` trigger a real signed DUST-conversion tx; /balance and /wallets leak
+  # addresses/balances). Never referencing it keeps that drive-by-transaction
+  # pattern out of the corpus. Lockfiles, node_modules/, dist/ (gitignored) are
+  # excluded as noise.
+  provenance:
+    attribution: community
+    verified: false
+    tags: [trust:low]
+    verification_notes: >-
+      Community-contributed repository; unverified and unaudited by the Midnight
+      Foundation. Passed a multi-agent static review (2026-07-02): a published (npm)
+      "Hardhat for Midnight" Node CLI whose ledger-v8 Intent signing (the signRecipe
+      'proof'/'pre-proof' workaround), deployContract/CompiledContract builder chain,
+      and 6-provider assembly are VERIFIED CORRECT against the official Midnight
+      migration guide — a genuinely useful, hard-to-get-right SDK reference — on a
+      current SDK. Known caveats: the vendored walletsync HTTP server (which ran an
+      UNAUTHENTICATED localhost signing endpoint vulnerable to cross-origin drive-by
+      transactions) has been EXCLUDED from this index; the private-state store uses a
+      HARDCODED fallback encryption password (do not copy); wallet seeds are stored in
+      plaintext (chmod 0600) and can be passed via a CLI flag (avoid); and the tool is
+      functionally DEPLOY-ONLY (no findDeployedContract, no callTx, constructor args
+      hardcoded []) with a confusing triple ledger-version (v4/v7/v8) scaffold. Treat
+      as illustrative, not authoritative, and audit before production use.
+  children:
+    - name: readme
+      file: README.md
+    - name: src
+      # Hand-written CLI implementation kept in full: providers/factory.ts
+      # (VERIFIED-CORRECT ledger-v8 Intent signing + 6-provider assembly),
+      # deployer/* (VERIFIED-CORRECT deployContract / CompiledContract chain),
+      # commands/, config/, utils/, wallet/. The vendored walletsync server lives
+      # under submodules/, not src/, so it is never reached by this node.
+      path: src/
+      provenance:
+        content_type: example
+    - name: docs
+      # Per-command usage guides + troubleshooting.
+      path: Docs/
+      provenance:
+        content_type: reference
+    - name: changelog
+      file: CHANGELOG.md
+      provenance:
+        content_type: reference
+    - name: contributing
+      file: CONTRIBUTING.md
+      provenance:
+        content_type: reference

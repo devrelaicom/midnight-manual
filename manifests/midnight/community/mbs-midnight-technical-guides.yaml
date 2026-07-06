@@ -1,0 +1,32 @@
+manifest_version: 1
+root:
+  name: mbs-midnight-technical-guides
+  path: .
+  # Docs repo: 5 original cross-ecosystem "X-to-Midnight" migration guides
+  # (Ethereum/Solana/Polkadot/Cosmos/Cardano) + README. midnight-for-ai-builders.md is
+  # EXCLUDED: a multi-agent static accuracy review (verified against the compiler + the
+  # published @midnight-ntwrk/midnight-js 4.1.1) found it teaches a FABRICATED SDK API
+  # (createMidnightClient()/buildTransaction()/submitTransaction() — non-existent), presented
+  # unhedged as literal getting-started code, plus several Compact compile errors.
+  exclude:
+    - "midnight-for-ai-builders.md"
+  provenance:
+    attribution: community
+    verified: false
+    tags: [trust:low]
+    verification_notes: >-
+      Community-contributed repository; unverified and unaudited by the Midnight Foundation.
+      Five original cross-ecosystem migration guides (Ethereum/Solana/Polkadot/Cosmos/Cardano
+      to Midnight) by an independent community author. A multi-agent static accuracy review
+      (2026-07-02, Compact/SDK snippets checked against the compiler and the published
+      @midnight-ntwrk/midnight-js 4.1.1) found the five migration guides plus README ACCURATE
+      and CURRENT: correct flat `export ledger` syntax (the guides explicitly reject the
+      deprecated block-ledger form), correct domain-separated persistentHash auth, ownPublicKey()
+      correctly taught as an anti-pattern (never as good practice), and current versions/pragma.
+      Two minor compiler-verified syntax slips remain (a C-style `for (let i=...)` loop in
+      ethereum-to-midnight.md — real form is `for (const i of 0..n)`; and a `sealed`-modifier
+      order slip in cardano-to-midnight.md — real form is `export sealed ledger`). The
+      AI-builders guide (midnight-for-ai-builders.md) is EXCLUDED from this index: it presented a
+      fabricated SDK API (createMidnightClient/buildTransaction, which does not exist in the real
+      package) as literal getting-started code. MIT. Treat as illustrative, not authoritative, and
+      audit before production use.

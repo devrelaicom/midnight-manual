@@ -1,0 +1,20 @@
+manifest_version: 1
+root:
+  name: passport
+  path: .
+  exclude:
+    # Git subtree vendored from LFDT-Nightstream/MVE-Planning — upstream-
+    # maintained reference material, not this repo's own content.
+    - "docs/reference/**"
+    # Git subtree vendored from input-output-hk/arc-nearfall-evaluation —
+    # upstream evaluation archive; also carries its own .claude skills and
+    # generated node keys / managed ZK artifacts.
+    - "experiments/nearfall-evaluation/**"
+    # Static GitHub Pages web artefacts: data-driven HTML/JS site chrome that
+    # renders the plan already captured as markdown under docs/plans/.
+    - "site/**"
+  provenance:
+    attribution: foundation
+    verified: false
+    verified_by: midnight-foundation
+    tags: [trust:high]

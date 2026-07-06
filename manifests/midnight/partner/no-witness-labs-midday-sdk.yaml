@@ -1,0 +1,15 @@
+manifest_version: 1
+root:
+  name: no-witness-labs-midday-sdk
+  path: .
+  exclude:
+    # Compact compiler build output (contract-info.json + compiled JS/.d.ts),
+    # machine-emitted from the .compact sources we keep — not authored source.
+    - "contracts/**/compiler/**"
+    - "contracts/**/contract/**"
+    # Changesets-generated release notes (root + per-example) — ship machinery.
+    - "**/CHANGELOG.md"
+  provenance:
+    attribution: partner
+    verified: false
+    tags: [trust:medium]

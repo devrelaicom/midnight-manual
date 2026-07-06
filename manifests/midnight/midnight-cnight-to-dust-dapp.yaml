@@ -1,0 +1,14 @@
+manifest_version: 1
+root:
+  name: midnight-cnight-to-dust-dapp
+  path: .
+  exclude:
+    # Compiled Aiken/Plutus contract blueprint (110KB machine-emitted blob).
+    - "public/contracts-new-aiken/plutus.json"
+    # Slack release-announcement blurb, not developer docs.
+    - "SLACK_MESSAGE.md"
+  provenance:
+    attribution: foundation
+    verified: false
+    verified_by: midnight-foundation
+    tags: [trust:high]

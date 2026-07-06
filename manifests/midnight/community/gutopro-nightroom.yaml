@@ -1,0 +1,30 @@
+manifest_version: 1
+root:
+  name: gutopro-nightroom
+  path: .
+  exclude:
+    - "package-lock.json"
+    - "yarn.lock"
+    - "**/managed/**"
+  provenance:
+    attribution: community
+    verified: false
+    tags: [trust:low]
+    verification_notes: >-
+      Community-contributed repository; unverified and unaudited by the Midnight Foundation.
+      An original privacy-preserving room-rental protocol on Midnight (current SDK: compact-runtime
+      0.15.0, midnight-js 4.0.4, ledger-v8 8.0.3; Apache-2.0). Indexed primarily as a demonstration
+      of the CORRECT owner-identity authorization pattern: a salted commitment (256-bit random
+      nonce as a secret salt, held off-chain and passed as a private circuit input) pinned at deploy
+      and re-derived from a private witness secret inside each circuit, domain-separated — the sound
+      alternative to the spoofable ownPublicKey() pattern; a static security review (2026-07-02)
+      confirmed the owner tax-ID commitment is genuinely HIDING and the auth is not spoofable, with
+      no token theft, no fresh-deploy brick, and no privacy break (no dealbreaker). Issues to NOT
+      copy, flagged by the review: (1) the 48h time-lock is asserted against a prover-controlled
+      `current_timestamp()` WITNESS, which provides no real time-lock security — use blockTime*
+      primitives instead; (2) the shipped client wiring hard-codes the guest secret to all-zero
+      bytes (the correct high-entropy createGuestPrivateState exists but is unwired), making deployed
+      guest booking-commitments publicly forgeable — the contract's commitment logic is sound, the
+      plumbing is broken; (3) the caution/booking "escrow" is notional bookkeeping with no token
+      operations (no funds actually move); booking dates/payment are stored public (identity-hiding
+      only). Treat as illustrative, not authoritative, and audit before production use.

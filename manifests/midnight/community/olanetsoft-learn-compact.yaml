@@ -5,6 +5,23 @@ root:
     attribution: community
     verified: false
     tags: [trust:medium]
+    verification_notes: >-
+      Community-contributed learning resource; unverified and unaudited by the Midnight
+      Foundation. "Learn Compact" — a comprehensive Rust-book-style course: an mdBook
+      (book/src, chapters ch00-ch21 covering getting started, the type system, compound and
+      user types, circuits, witnesses, control flow, expressions, ledger state, disclosure,
+      the standard library, modules, constructors, TypeScript integration, three guided
+      projects [counter, bulletin board, voting], plus common-mistakes, testing, and security
+      chapters), ~35 Rustlings-style graded exercises (exercises/ 01_basics-05_ledger with
+      solutions/), and runnable examples/ (counter, bulletin-board, voting). The manifest
+      indexes the README, book/src lessons, exercises, and examples (mdBook theme/static and
+      Netlify site config excluded). Currency (reviewed 2026-07-03): maintained — last synced
+      2026-04-21 "with the Midnight support matrix" — but targets compiler 0.30 and pins
+      permissive pragma floors (language_version >= 0.16-0.18), one compiler minor behind
+      current (0.31); the lower-bound pragmas still compile on newer toolchains, but re-verify
+      against the latest before relying on the examples. Educational reference only — not
+      audited. MIT. Treat as illustrative, not authoritative, and verify against the current
+      Compact toolchain before use.
   children:
     # Content only: book/src (mdBook lessons) + exercises/ and examples/
     # (runnable Compact + prose). Drops book/static, book/theme, scripts/, and
