@@ -1054,8 +1054,39 @@ async fn build_embedded_pairs(
             .as_ref()
             .map_or_else(|| format!("{}@1", models.code_embedding), |c| c.wire.clone())
     });
-    let pairs = parsed
-        .queries
+    let pairs = assemble_query_pairs(&parsed.queries, general_vectors, code_vectors)?;
+    Ok((pairs, active.general.wire, code_wire))
+}
+
+/// Zip each query text with its general + code embedding into a [`QueryPair`],
+/// enforcing the one-vector-per-query invariant *before* zipping.
+///
+/// `embed_general_queries` / `embed_code_queries` promise exactly one vector per
+/// input (the contract lives in `mnm_embedding`), and the no-embed paths build
+/// `vec![Vec::new(); n]` — so lengths always match in practice. A bare
+/// `zip(general).zip(code)` would silently truncate to the shortest input,
+/// dropping the trailing queries from the search if that invariant ever broke.
+/// This surfaces such a bug as a hard error instead of masking it (#174).
+///
+/// # Errors
+///
+/// Returns [`SearchError::Cloud`] if either vector count differs from the query
+/// count.
+fn assemble_query_pairs(
+    queries: &[String],
+    general_vectors: Vec<Vec<f32>>,
+    code_vectors: Vec<Vec<f32>>,
+) -> Result<Vec<QueryPair>, SearchError> {
+    let n = queries.len();
+    if general_vectors.len() != n || code_vectors.len() != n {
+        return Err(SearchError::Cloud(format!(
+            "embedding count mismatch: {n} queries but {} general / {} code vectors \
+             (one-vector-per-query invariant violated)",
+            general_vectors.len(),
+            code_vectors.len(),
+        )));
+    }
+    Ok(queries
         .iter()
         .zip(general_vectors)
         .zip(code_vectors)
@@ -1064,8 +1095,7 @@ async fn build_embedded_pairs(
             vector,
             code_vector,
         })
-        .collect();
-    Ok((pairs, active.general.wire, code_wire))
+        .collect())
 }
 
 /// Embed `queries` with the GENERAL model (voyage-context-3), returning one
@@ -2168,6 +2198,55 @@ pub async fn run_facets(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The happy path: equal vector counts zip in order, pairing each query with
+    /// its own general + code vector.
+    #[test]
+    fn assemble_query_pairs_zips_equal_lengths_in_order() {
+        let queries = vec!["a".to_owned(), "b".to_owned()];
+        let general = vec![vec![1.0_f32], vec![2.0]];
+        let code = vec![vec![10.0_f32], vec![20.0]];
+        let pairs = assemble_query_pairs(&queries, general, code).expect("equal lengths");
+        assert_eq!(pairs.len(), 2);
+        assert_eq!(pairs[0].text, "a");
+        assert_eq!(pairs[0].vector, vec![1.0]);
+        assert_eq!(pairs[0].code_vector, vec![10.0]);
+        assert_eq!(pairs[1].text, "b");
+        assert_eq!(pairs[1].vector, vec![2.0]);
+        assert_eq!(pairs[1].code_vector, vec![20.0]);
+    }
+
+    /// If the general embedder ever returns fewer vectors than queries, a bare
+    /// `zip` would silently drop the trailing query from the search. The length
+    /// check turns that latent data-loss bug into a surfaced error (#174).
+    #[test]
+    fn assemble_query_pairs_rejects_short_general_vectors() {
+        let queries = vec!["a".to_owned(), "b".to_owned(), "c".to_owned()];
+        let general = vec![vec![1.0_f32]]; // only 1 for 3 queries
+        let code = vec![vec![0.0_f32]; 3];
+        let err = assemble_query_pairs(&queries, general, code).expect_err("mismatch must error");
+        let SearchError::Cloud(msg) = err else {
+            panic!("expected SearchError::Cloud, got {err:?}");
+        };
+        assert!(msg.contains("embedding count mismatch"), "message was: {msg}");
+    }
+
+    /// Symmetric guard for the code half — a short code-vector list is caught too.
+    #[test]
+    fn assemble_query_pairs_rejects_short_code_vectors() {
+        let queries = vec!["a".to_owned(), "b".to_owned()];
+        let general = vec![vec![1.0_f32]; 2];
+        let code = vec![vec![0.0_f32]]; // only 1 for 2 queries
+        let err = assemble_query_pairs(&queries, general, code).expect_err("mismatch must error");
+        assert!(matches!(err, SearchError::Cloud(_)), "got {err:?}");
+    }
+
+    /// Zero queries is a valid empty search, not a mismatch.
+    #[test]
+    fn assemble_query_pairs_allows_empty() {
+        let pairs = assemble_query_pairs(&[], Vec::new(), Vec::new()).expect("empty is fine");
+        assert!(pairs.is_empty());
+    }
 
     /// `voyage_search_error` must route BYOK vs proxy to DIFFERENT recoveries:
     /// the credential and endpoint differ, so a BYOK auth failure that told the

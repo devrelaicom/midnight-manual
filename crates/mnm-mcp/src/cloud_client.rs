@@ -245,7 +245,17 @@ impl CloudClient {
     /// Returns [`CloudError::Transport`] if `base` is not a valid URL or if the
     /// underlying `reqwest::Client` cannot be built (TLS init failure, etc.).
     pub fn new(base: &str, bearer: Option<String>) -> Result<Self, CloudError> {
-        let base = Url::parse(base).map_err(|e| CloudError::Transport(e.to_string()))?;
+        let mut base = Url::parse(base).map_err(|e| CloudError::Transport(e.to_string()))?;
+        // Guarantee the base path ends in `/` so relative endpoint joins (RFC
+        // 3986 §5.2) preserve any reverse-proxy path prefix. `Url::parse` yields
+        // path `/mnm` (no trailing slash) for `https://host/mnm`; joining a
+        // relative `v1/search` onto that would replace the `mnm` segment and
+        // drop the prefix. Appending the slash first makes it `/mnm/`, so the
+        // prefix survives every join below (host-only bases already end in `/`).
+        if !base.path().ends_with('/') {
+            let with_slash = format!("{}/", base.path());
+            base.set_path(&with_slash);
+        }
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .user_agent(concat!("midnight-manual-mcp/", env!("CARGO_PKG_VERSION")))
@@ -280,7 +290,7 @@ impl CloudClient {
     /// non-2xx response, or [`CloudError::Decode`] for a body that fails to
     /// parse or is missing the top-level `name`/`revision` fields.
     pub async fn fetch_active_model(&self) -> Result<ActiveModels, CloudError> {
-        let v = self.get_json("/v1/models/active").await?;
+        let v = self.get_json("v1/models/active").await?;
         let general = parse_active_entry(&v).ok_or_else(|| {
             CloudError::Decode(
                 "/v1/models/active response missing `name`/`revision` field".to_owned(),
@@ -294,10 +304,7 @@ impl CloudClient {
 
     /// `POST /v1/search`.
     pub async fn search(&self, req: &SearchRequest) -> Result<serde_json::Value, CloudError> {
-        let url = self
-            .base
-            .join("/v1/search")
-            .map_err(|e| CloudError::Transport(e.to_string()))?;
+        let url = self.endpoint("v1/search")?;
         let mut rb = self.http.post(url).json(req);
         if let Some(b) = &self.bearer {
             rb = rb.bearer_auth(b);
@@ -329,7 +336,7 @@ impl CloudClient {
 
     /// `GET /v1/chunks/:id`.
     pub async fn get_chunk(&self, id: &str) -> Result<serde_json::Value, CloudError> {
-        let path = format!("/v1/chunks/{id}");
+        let path = format!("v1/chunks/{id}");
         self.get_json(&path).await
     }
 
@@ -339,7 +346,7 @@ impl CloudClient {
         id: &str,
         count: u32,
     ) -> Result<serde_json::Value, CloudError> {
-        let path = format!("/v1/chunks/{id}/next?count={count}");
+        let path = format!("v1/chunks/{id}/next?count={count}");
         self.get_json(&path).await
     }
 
@@ -349,13 +356,13 @@ impl CloudClient {
         id: &str,
         count: u32,
     ) -> Result<serde_json::Value, CloudError> {
-        let path = format!("/v1/chunks/{id}/prev?count={count}");
+        let path = format!("v1/chunks/{id}/prev?count={count}");
         self.get_json(&path).await
     }
 
     /// `GET /v1/chunks/:id/parents`.
     pub async fn get_chunk_parents(&self, id: &str) -> Result<serde_json::Value, CloudError> {
-        let path = format!("/v1/chunks/{id}/parents");
+        let path = format!("v1/chunks/{id}/parents");
         self.get_json(&path).await
     }
 
@@ -397,10 +404,7 @@ impl CloudClient {
     ///
     /// Propagates any [`CloudError`] from the transport / status mapping.
     pub async fn get_chunks(&self, ids: &[String]) -> Result<serde_json::Value, CloudError> {
-        let mut url = self
-            .base
-            .join("/v1/chunks")
-            .map_err(|e| CloudError::Transport(e.to_string()))?;
+        let mut url = self.endpoint("v1/chunks")?;
         url.query_pairs_mut().append_pair("ids", &ids.join(","));
         self.get_json_url(url).await
     }
@@ -415,10 +419,7 @@ impl CloudClient {
         &self,
         params: &[(&str, String)],
     ) -> Result<serde_json::Value, CloudError> {
-        let mut url = self
-            .base
-            .join("/v1/sources")
-            .map_err(|e| CloudError::Transport(e.to_string()))?;
+        let mut url = self.endpoint("v1/sources")?;
         url.query_pairs_mut()
             .extend_pairs(params.iter().map(|(k, v)| (*k, v.as_str())));
         self.get_json_url(url).await
@@ -426,7 +427,7 @@ impl CloudClient {
 
     /// `GET /v1/documents/:id`.
     pub async fn get_document(&self, id: &str) -> Result<serde_json::Value, CloudError> {
-        let path = format!("/v1/documents/{id}");
+        let path = format!("v1/documents/{id}");
         self.get_json(&path).await
     }
 
@@ -437,7 +438,7 @@ impl CloudClient {
         from: u32,
         limit: u32,
     ) -> Result<serde_json::Value, CloudError> {
-        let path = format!("/v1/documents/{id}/chunks?from={from}&limit={limit}");
+        let path = format!("v1/documents/{id}/chunks?from={from}&limit={limit}");
         self.get_json(&path).await
     }
 
@@ -450,10 +451,7 @@ impl CloudClient {
         &self,
         params: &[(&str, String)],
     ) -> Result<serde_json::Value, CloudError> {
-        let mut url = self
-            .base
-            .join("/v1/facets")
-            .map_err(|e| CloudError::Transport(e.to_string()))?;
+        let mut url = self.endpoint("v1/facets")?;
         url.query_pairs_mut()
             .extend_pairs(params.iter().map(|(k, v)| (*k, v.as_str())));
         self.get_json_url(url).await
@@ -465,7 +463,7 @@ impl CloudClient {
     ///
     /// Propagates any [`CloudError`] from the transport / status mapping.
     pub async fn get_me(&self) -> Result<serde_json::Value, CloudError> {
-        self.get_json("/v1/me").await
+        self.get_json("v1/me").await
     }
 
     /// `GET /readyz` — returns the HTTP status code (no body parsing).
@@ -475,10 +473,7 @@ impl CloudClient {
     /// Returns [`CloudError::Transport`] on connection failure only; any
     /// HTTP status (200 or not) is returned as data.
     pub async fn readyz(&self) -> Result<u16, CloudError> {
-        let url = self
-            .base
-            .join("/readyz")
-            .map_err(|e| CloudError::Transport(e.to_string()))?;
+        let url = self.endpoint("readyz")?;
         let resp = self
             .http
             .get(url)
@@ -488,11 +483,20 @@ impl CloudClient {
         Ok(resp.status().as_u16())
     }
 
+    /// Join a **relative** endpoint reference (no leading `/`) onto
+    /// [`Self::base`], which [`Self::new`] guarantees ends in `/`. A relative
+    /// reference preserves any base-URL path prefix; an absolute-path reference
+    /// (`/v1/...`) would replace the whole path per RFC 3986 §5.2 and silently
+    /// drop a configured mount point like `/mnm/`, 404-ing every call behind a
+    /// reverse-proxy prefix.
+    fn endpoint(&self, rel: &str) -> Result<Url, CloudError> {
+        self.base
+            .join(rel)
+            .map_err(|e| CloudError::Transport(e.to_string()))
+    }
+
     async fn get_json(&self, path: &str) -> Result<serde_json::Value, CloudError> {
-        let url = self
-            .base
-            .join(path)
-            .map_err(|e| CloudError::Transport(e.to_string()))?;
+        let url = self.endpoint(path)?;
         self.get_json_url(url).await
     }
 
@@ -650,6 +654,45 @@ mod tests {
     fn new_rejects_invalid_url() {
         let r = CloudClient::new("not-a-url", None);
         assert!(matches!(r, Err(CloudError::Transport(_))));
+    }
+
+    #[test]
+    fn endpoint_preserves_base_path_prefix() {
+        // A reverse-proxy mount at `/mnm` must survive endpoint joins. Both the
+        // slash-terminated and bare forms normalize to the same prefixed URL —
+        // an absolute-path `join("/v1/...")` would instead 404 by dropping `/mnm`.
+        for base in ["https://host.example/mnm/", "https://host.example/mnm"] {
+            let c = CloudClient::new(base, None).expect("client");
+            assert_eq!(
+                c.endpoint("v1/search").unwrap().as_str(),
+                "https://host.example/mnm/v1/search",
+                "base {base} lost its path prefix on a v1 join",
+            );
+            assert_eq!(
+                c.endpoint("readyz").unwrap().as_str(),
+                "https://host.example/mnm/readyz",
+                "base {base} lost its path prefix on a readyz join",
+            );
+        }
+    }
+
+    #[test]
+    fn endpoint_deep_prefix_and_query_string_are_preserved() {
+        // A multi-segment prefix and a query-bearing reference both survive.
+        let c = CloudClient::new("https://host.example/a/b", None).expect("client");
+        assert_eq!(
+            c.endpoint("v1/chunks/xyz/next?count=3").unwrap().as_str(),
+            "https://host.example/a/b/v1/chunks/xyz/next?count=3",
+        );
+    }
+
+    #[test]
+    fn endpoint_host_only_base_is_unaffected() {
+        // The production host-only base keeps working: there is no prefix to
+        // preserve, and the parsed path already ends in `/`.
+        let c = CloudClient::new("https://host.example", None).expect("client");
+        assert_eq!(c.endpoint("v1/search").unwrap().as_str(), "https://host.example/v1/search",);
+        assert_eq!(c.endpoint("readyz").unwrap().as_str(), "https://host.example/readyz",);
     }
 
     fn headers(pairs: &[(&'static str, &str)]) -> reqwest::header::HeaderMap {
