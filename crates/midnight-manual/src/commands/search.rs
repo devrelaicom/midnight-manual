@@ -68,12 +68,14 @@ pub const DEFAULT_EMBEDDING_MODEL: &str = "auto";
 /// server's hard ceiling).
 const MAX_QUERIES: usize = 10;
 
-/// Candidate pool size requested from the cloud when reranking locally (mirrors
-/// the MCP `search` tool's constant of the same name). Local reranking needs a
-/// pool wider than the caller's `--limit` so the reranker can *promote* a chunk
-/// the cloud ranked below the cutoff — not merely reorder the caller's top-N.
-/// The reranker truncates back to `--limit` after scoring; the server's
-/// `/v1/search` accepts a `limit` up to 100, so 50 is within range.
+/// Candidate pool *floor* requested from the cloud when reranking locally
+/// (mirrors the MCP `search` tool's constant of the same name). Local reranking
+/// needs a pool wider than the caller's `--limit` so the reranker can *promote*
+/// a chunk the cloud ranked below the cutoff — not merely reorder the caller's
+/// top-N. The actual pool is `RERANK_FETCH.max(--limit)` so a `--limit` above 50
+/// is honoured rather than capped; the reranker truncates back to `--limit`
+/// after scoring. The server's `/v1/search` accepts a `limit` up to 100, so both
+/// 50 and any in-range `--limit` are within range.
 const RERANK_FETCH: u32 = 50;
 
 /// Args for `mnm search`.
@@ -281,6 +283,15 @@ pub async fn run_with_paths(
     let (cfg, _) = mnm_core::config::Config::discover(config_path, &env)?;
     let voyage_key = mnm_core::config::resolve_voyage_api_key(voyage_api_key, &cfg.models, &env);
 
+    // Resolve the env-dependent Voyage base-url override up front (synchronously)
+    // into owned data. It feeds BOTH the BYOK query-embedders below and the
+    // client-side reranker in `DispatchSearch`, so a self-host/proxy/mirror user
+    // query-embeds and reranks against the SAME host (issue #170) — otherwise the
+    // reranker honoured the override while the query embedders stayed pinned to
+    // api.voyageai.com. Resolving to an owned value here also keeps the later
+    // `DispatchSearch` future `Send` (the `ConfigEnv` trait carries no `Sync`).
+    let voyage_base_url = mnm_core::config::resolve_voyage_base_url(&cfg.models, &env);
+
     // Resolve rerank placement + model and validate the instruction up front, so
     // a bad placement/key/instruction fails fast — before any embedding / network
     // work.
@@ -324,6 +335,7 @@ pub async fn run_with_paths(
         embed_general_queries(
             &texts,
             voyage_key.as_deref(),
+            voyage_base_url.as_deref(),
             &general_id,
             server_url,
             bearer.as_deref(),
@@ -333,8 +345,15 @@ pub async fn run_with_paths(
         vec![Vec::new(); texts.len()]
     };
     let code_vectors = if embed_code_query {
-        embed_code_queries(&texts, voyage_key.as_deref(), &code_id, server_url, bearer.as_deref())
-            .await?
+        embed_code_queries(
+            &texts,
+            voyage_key.as_deref(),
+            voyage_base_url.as_deref(),
+            &code_id,
+            server_url,
+            bearer.as_deref(),
+        )
+        .await?
     } else {
         vec![Vec::new(); texts.len()]
     };
@@ -359,13 +378,6 @@ pub async fn run_with_paths(
         version_match: args.version_match.clone(),
         filters,
     });
-
-    // Resolve the env-dependent Voyage base-url override up front (synchronously)
-    // into owned data. The `ConfigEnv` trait carries no `Sync` guarantee, so
-    // threading an `&impl ConfigEnv` borrow through the `.await` below would make
-    // this future non-`Send` for arbitrary impls; resolving to an owned value
-    // first keeps `DispatchSearch` env-free and its future `Send`.
-    let voyage_base_url = mnm_core::config::resolve_voyage_base_url(&cfg.models, &env);
 
     let result = dispatch_search(DispatchSearch {
         placement,
@@ -538,18 +550,25 @@ fn query_embed_needs(mode: &str, code_mode: Option<&str>) -> (bool, bool) {
 async fn embed_general_queries(
     texts: &[String],
     voyage_key: Option<&str>,
+    voyage_base_url: Option<&str>,
     identity: &mnm_core::embedder_identity::EmbedderIdentity,
     server_url: &str,
     bearer: Option<&str>,
 ) -> Result<Vec<Vec<f32>>> {
     let input_type = mnm_embedding::voyage::InputType::Query;
     let embedded = if let Some(key) = voyage_key {
-        let embedder = mnm_embedding::contextualized::ContextualizedVoyageEmbedder::new(
+        let mut embedder = mnm_embedding::contextualized::ContextualizedVoyageEmbedder::new(
             key,
             &identity.name,
             identity.dim,
             &identity.dtype,
         );
+        // Honour a self-host/proxy/mirror base URL so BYOK query-embedding hits
+        // the SAME host the client-side reranker uses (issue #170) — otherwise it
+        // stays pinned to the hardcoded api.voyageai.com.
+        if let Some(base) = voyage_base_url {
+            embedder = embedder.with_base_url(base);
+        }
         mnm_embedding::client::embed_general(
             texts.to_vec(),
             input_type,
@@ -589,18 +608,23 @@ async fn embed_general_queries(
 async fn embed_code_queries(
     texts: &[String],
     voyage_key: Option<&str>,
+    voyage_base_url: Option<&str>,
     identity: &mnm_core::embedder_identity::EmbedderIdentity,
     server_url: &str,
     bearer: Option<&str>,
 ) -> Result<Vec<Vec<f32>>> {
     let input_type = mnm_embedding::voyage::InputType::Query;
     let embedded = if let Some(key) = voyage_key {
-        let embedder = mnm_embedding::voyage::VoyageEmbedder::new(
+        let mut embedder = mnm_embedding::voyage::VoyageEmbedder::new(
             key,
             &identity.name,
             identity.dim,
             &identity.dtype,
         );
+        // Same base-URL override as the general query-embedder (issue #170).
+        if let Some(base) = voyage_base_url {
+            embedder = embedder.with_base_url(base);
+        }
         mnm_embedding::client::embed_code(
             texts.to_vec(),
             input_type,
@@ -939,11 +963,13 @@ struct SearchRequestParts {
 /// Build the outgoing `/v1/search` body, sizing the candidate pool and the
 /// `rerank` parameter for the resolved placement.
 ///
-/// On the `Local` path we widen the cloud `limit` to [`RERANK_FETCH`] and ask
-/// for relevance order (`sort_by = "score"`) so the client-side reranker can
-/// *promote* a chunk the cloud ranked below the caller's `limit` — not merely
-/// reorder the caller's top-N (this mirrors the MCP `search` tool);
-/// [`apply_rerank`] later truncates the reranked set back to `limit`. `Local`
+/// On the `Local` path we widen the cloud `limit` to at least [`RERANK_FETCH`]
+/// (`RERANK_FETCH.max(limit)`, so a `--limit` above the pool floor is honoured
+/// rather than silently capped) and ask for relevance order
+/// (`sort_by = "score"`) so the client-side reranker can *promote* a chunk the
+/// cloud ranked below the caller's `limit` — not merely reorder the caller's
+/// top-N (this mirrors the MCP `search` tool); [`apply_rerank`] later truncates
+/// the reranked set back to `limit`. `Local`
 /// and `Off` both send `rerank: "none"` (exactly one rerank pass, structurally);
 /// `Server` sends the resolved model name plus any instructions. `None`-valued
 /// `rerank` / `rerank_instructions` / `sort_by` are omitted on the wire
@@ -952,7 +978,10 @@ fn build_search_request(parts: SearchRequestParts) -> SearchRequest {
     use mnm_core::config::RerankPlacement;
     let local = matches!(parts.placement, RerankPlacement::Local);
     let (cloud_limit, sort_by) = if local {
-        (RERANK_FETCH, Some("score".to_owned()))
+        // Over-fetch so the local reranker can promote a below-cutoff candidate,
+        // but never fetch fewer than the caller asked for: `--limit > RERANK_FETCH`
+        // must still return `--limit` results after the reranker truncates back.
+        (RERANK_FETCH.max(parts.limit), Some("score".to_owned()))
     } else {
         (parts.limit, None)
     };
@@ -1953,6 +1982,27 @@ mod tests {
     }
 
     #[test]
+    fn build_request_local_honors_limit_above_pool_floor() {
+        // Regression for #170: a `--limit` above RERANK_FETCH must widen the
+        // cloud pool to the caller's limit, not silently cap it at 50 (which
+        // made `apply_rerank`'s later truncate a no-op and under-returned).
+        use mnm_core::config::RerankPlacement;
+        let q = vec![QueryPair {
+            text: "x".to_owned(),
+            vector: vec![0.0],
+            code_vector: Vec::new(),
+        }];
+        let over = RERANK_FETCH + 30; // 80 — inside the server's 100 ceiling.
+        let req = build_search_request(parts(q, over, RerankPlacement::Local));
+        assert_eq!(
+            req.limit, over,
+            "cloud pool must be at least --limit, not capped at RERANK_FETCH"
+        );
+        assert_eq!(req.sort_by.as_deref(), Some("score"));
+        assert_eq!(req.rerank.as_deref(), Some("none"));
+    }
+
+    #[test]
     fn build_request_server_keeps_limit_and_omits_sort_by() {
         use mnm_core::config::RerankPlacement;
         let q = vec![QueryPair {
@@ -2408,5 +2458,83 @@ mod tests {
         assert!(!p.applied);
         assert_eq!(p.reason, None);
         assert_eq!(p.billed_tokens, None);
+    }
+
+    /// Regression for #170: the BYOK query-embedders must honour a configured
+    /// `voyage_base_url`, matching the client-side reranker on the same code path
+    /// — otherwise a self-host/proxy/mirror user reranks against the override but
+    /// query-embeds against the hardcoded api.voyageai.com. Both the general
+    /// (contextualized) and code (flat) query-embedders are pointed at a wiremock;
+    /// each mock `.expect(1)` fails on drop if the base URL wasn't threaded (the
+    /// call would otherwise hit the default host and never reach the mock).
+    #[tokio::test]
+    async fn byok_query_embedders_honor_configured_base_url() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // General (contextualized) query-embed path → /v1/contextualizedembeddings.
+        Mock::given(method("POST"))
+            .and(path("/v1/contextualizedembeddings"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "object": "list",
+                "data": [{ "object": "list", "index": 0, "data": [
+                    { "object": "embedding", "index": 0, "embedding": [1.0, 1.0] }
+                ]}],
+                "model": "voyage-context-3",
+                "usage": { "total_tokens": 1 }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        // Code (flat) query-embed path → /v1/embeddings.
+        Mock::given(method("POST"))
+            .and(path("/v1/embeddings"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{ "embedding": [2.0, 2.0], "index": 0 }],
+                "model": "voyage-code-3",
+                "usage": { "total_tokens": 1 }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let base = server.uri();
+        let general_id = mnm_core::embedder_identity::EmbedderIdentity {
+            name: "voyage-context-3".to_owned(),
+            dim: 2,
+            dtype: "float".to_owned(),
+        };
+        let code_id = mnm_core::embedder_identity::EmbedderIdentity {
+            name: "voyage-code-3".to_owned(),
+            dim: 2,
+            dtype: "float".to_owned(),
+        };
+        let qs = texts(&["q"]);
+        // `server_url` is unused on the BYOK path (key is `Some`); a bogus value
+        // proves the request went to the configured base URL, not the server.
+        let general = embed_general_queries(
+            &qs,
+            Some("test-key"),
+            Some(&base),
+            &general_id,
+            "http://server.invalid",
+            None,
+        )
+        .await
+        .expect("general query-embed hits the configured base url");
+        assert_eq!(general.len(), 1);
+        let code = embed_code_queries(
+            &qs,
+            Some("test-key"),
+            Some(&base),
+            &code_id,
+            "http://server.invalid",
+            None,
+        )
+        .await
+        .expect("code query-embed hits the configured base url");
+        assert_eq!(code.len(), 1);
+        // Mock `.expect(1)` assertions are verified when `server` drops here.
     }
 }
