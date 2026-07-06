@@ -26,9 +26,10 @@ use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 /// arbitrary AI client, so we cap the per-message line length to refuse a
 /// runaway line. 16 MiB is well above any reasonable real-world payload (a
 /// 50-vector query at 1024 dims is ~600 KiB). The cap is enforced
-/// *incrementally* while reading (see [`read_line_capped`]), so a buggy client
-/// that streams a huge payload without a `\n` is refused before it can drive an
-/// unbounded allocation — not merely rejected after the whole line is buffered.
+/// *incrementally* while reading (see [`FrameReader::next_message`]), so a buggy
+/// client that streams a huge payload without a `\n` is refused before it can
+/// drive an unbounded allocation — not merely rejected after the whole line is
+/// buffered.
 pub const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 
 /// Tokio-friendly reader that yields one JSON message at a time over a
@@ -236,6 +237,34 @@ mod tests {
         let mut reader = FrameReader::new(&framed[..]);
         assert_eq!(reader.next_message().await.unwrap().as_deref(), Some(&body[..]));
         assert!(reader.next_message().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn exactly_max_body_bytes_is_accepted() {
+        // The `raw_cap = MAX_BODY_BYTES + 2` headroom in `read_line_capped`
+        // exists precisely so a body of *exactly* MAX_BODY_BYTES is accepted —
+        // with either LF or CRLF framing — while MAX_BODY_BYTES + 1 is rejected
+        // (see `oversize_line_is_rejected`). This regression-locks that off-by-one
+        // boundary rather than resting on hand-derivation (#174).
+        let body = vec![b'x'; MAX_BODY_BYTES];
+
+        // LF framing: body + '\n'.
+        let mut lf = body.clone();
+        lf.push(b'\n');
+        let msg = read_one(&lf)
+            .await
+            .expect("exactly-cap body (LF) must be accepted");
+        assert_eq!(msg.len(), MAX_BODY_BYTES);
+        assert_eq!(msg, body);
+
+        // CRLF framing: body + '\r\n' — the stripped body is still MAX_BODY_BYTES.
+        let mut crlf = body.clone();
+        crlf.extend_from_slice(b"\r\n");
+        let msg = read_one(&crlf)
+            .await
+            .expect("exactly-cap body (CRLF) must be accepted");
+        assert_eq!(msg.len(), MAX_BODY_BYTES);
+        assert_eq!(msg, body);
     }
 
     #[tokio::test]
