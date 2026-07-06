@@ -99,7 +99,7 @@ jobs:
 
       - name: Validate a random sample of manifests
         env:
-          SAMPLE: "8"
+          SAMPLE: "15"
         run: |
           set -uo pipefail
           mnm=target/debug/mnm
