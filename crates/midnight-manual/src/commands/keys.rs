@@ -150,19 +150,25 @@ fn format_toml_row(user_id: &str, public_wire: &str) -> String {
     s
 }
 
-#[cfg(unix)]
+/// Atomically write the 32-byte Ed25519 seed to `path` via a tmp-then-rename
+/// dance. On Unix the tmp is created with mode `0o600`.
+///
+/// The tmp is opened with `create_new` (`O_EXCL`), so a symlink or file planted
+/// at the predictable `<path>.private.tmp` cannot redirect or clobber the write:
+/// the open fails rather than following the link and truncating its target. A
+/// stale tmp from a crashed prior run is cleared best-effort first (unlinking
+/// the name only — for a symlink that drops the link, never its target), so
+/// recovery stays automatic while `O_EXCL` remains the actual guard against a
+/// re-plant in the race window between the unlink and the create.
 fn write_private_key(path: &std::path::Path, seed: &[u8; 32]) -> Result<()> {
     use std::io::Write as _;
-    use std::os::unix::fs::OpenOptionsExt as _;
     let tmp = path.with_extension("private.tmp");
+    // Best-effort: clear a stale/planted tmp before the exclusive create below.
+    // Any real problem (e.g. tmp is a non-empty dir) surfaces on the create.
+    let _ = std::fs::remove_file(&tmp);
     {
-        let mut f = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .mode(0o600)
-            .open(&tmp)
-            .with_context(|| format!("create {}", tmp.display()))?;
+        let mut f =
+            create_new_private_tmp(&tmp).with_context(|| format!("create {}", tmp.display()))?;
         f.write_all(seed)
             .with_context(|| format!("write {}", tmp.display()))?;
         f.flush()
@@ -173,25 +179,25 @@ fn write_private_key(path: &std::path::Path, seed: &[u8; 32]) -> Result<()> {
     Ok(())
 }
 
+/// Exclusively create the private-key tmp (`O_EXCL`) with mode `0o600`.
+#[cfg(unix)]
+fn create_new_private_tmp(tmp: &std::path::Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(tmp)
+}
+
+/// Exclusively create the private-key tmp (`O_EXCL`). Permissions follow the
+/// platform ACL model (no Unix mode bits available here).
 #[cfg(not(unix))]
-fn write_private_key(path: &std::path::Path, seed: &[u8; 32]) -> Result<()> {
-    use std::io::Write as _;
-    let tmp = path.with_extension("private.tmp");
-    {
-        let mut f = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(&tmp)
-            .with_context(|| format!("create {}", tmp.display()))?;
-        f.write_all(seed)
-            .with_context(|| format!("write {}", tmp.display()))?;
-        f.flush()
-            .with_context(|| format!("flush {}", tmp.display()))?;
-    }
-    std::fs::rename(&tmp, path)
-        .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
-    Ok(())
+fn create_new_private_tmp(tmp: &std::path::Path) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(tmp)
 }
 
 /// Load a 32-byte Ed25519 signing seed from disk, enforcing `0o600`.
@@ -277,6 +283,45 @@ mod tests {
         assert_eq!(mode, 0o600);
         let loaded = load_private_key(&path).unwrap();
         assert_eq!(loaded, seed);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_does_not_follow_symlinked_tmp() {
+        use std::os::unix::fs::{symlink, PermissionsExt as _};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.private");
+        // An attacker plants the predictable tmp sibling as a symlink to a
+        // world-readable victim file, hoping the seed is written through it.
+        let tmp = path.with_extension("private.tmp");
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, b"original").unwrap();
+        symlink(&victim, &tmp).unwrap();
+
+        let seed = [9u8; 32];
+        write_private_key(&path, &seed).unwrap();
+
+        // The seed was NOT written through the planted symlink into the victim.
+        assert_eq!(std::fs::read(&victim).unwrap(), b"original");
+        // And the key landed at the intended path, 0o600, with the right bytes.
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        assert_eq!(load_private_key(&path).unwrap(), seed);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_recovers_from_stale_tmp() {
+        // A crashed prior run can leave a regular-file tmp behind; the write
+        // must still succeed (best-effort unlink) rather than fail on O_EXCL.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.private");
+        let tmp = path.with_extension("private.tmp");
+        std::fs::write(&tmp, b"stale").unwrap();
+        let seed = [3u8; 32];
+        write_private_key(&path, &seed).unwrap();
+        assert_eq!(load_private_key(&path).unwrap(), seed);
+        assert!(!tmp.exists(), "tmp must be consumed by the rename");
     }
 
     #[cfg(unix)]

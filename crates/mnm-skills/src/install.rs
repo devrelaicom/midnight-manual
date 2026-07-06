@@ -204,6 +204,22 @@ pub fn install(
         let mut installed = Vec::with_capacity(targets.len());
         for &h in &targets {
             let dir = h.skill_dir(bundle.name, scope, &base);
+
+            // If the owned dir is a pre-existing symlink, remove the link (never
+            // its target) before writing. The write phase below follows symlinks,
+            // so `create_dir_all` / `write_file` would land straight in whatever
+            // foreign dir the link points at, clobbering same-named files there —
+            // while `prune_orphans` deliberately refuses to touch a symlinked dir.
+            // Dropping the link keeps both halves operating on a real, owned dir.
+            // (Removing the symlink unlinks the name only; the target is intact.)
+            if fs::symlink_metadata(&dir)
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false)
+            {
+                fs::remove_file(&dir)
+                    .map_err(|source| SkillError::Io { path: dir.clone(), source })?;
+            }
+
             let dir_existed = dir.exists();
             let mut changed = false;
 
@@ -805,6 +821,36 @@ mod tests {
         assert!(
             foreign.join("keep.md").exists(),
             "prune traversed a symlinked skill dir and deleted foreign data"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_does_not_write_through_symlinked_skill_dir() {
+        use std::os::unix::fs::symlink;
+        let (_tmp, env) = env_with_marker(Harness::ClaudeCode);
+        // A foreign dir the owned skill dir is symlinked at, holding a same-named
+        // file (SKILL.md) that the write phase would otherwise clobber.
+        let foreign = env.home.join("foreign-notes");
+        std::fs::create_dir_all(&foreign).unwrap();
+        std::fs::write(foreign.join("SKILL.md"), "precious").unwrap();
+
+        let skill_dir = Harness::ClaudeCode.skill_dir(SEARCH_SKILL, Scope::User, &env.home);
+        std::fs::create_dir_all(skill_dir.parent().unwrap()).unwrap();
+        symlink(&foreign, &skill_dir).unwrap();
+
+        install(None, &search(), Scope::User, &env).unwrap();
+
+        // The foreign SKILL.md is untouched: the write did not follow the link.
+        assert_eq!(std::fs::read_to_string(foreign.join("SKILL.md")).unwrap(), "precious");
+        // The owned dir is now a real directory (link replaced) holding our file.
+        let meta = std::fs::symlink_metadata(&skill_dir).unwrap();
+        assert!(!meta.file_type().is_symlink(), "owned dir must no longer be a symlink");
+        assert!(meta.is_dir(), "owned dir must be a real directory");
+        assert_ne!(
+            std::fs::read_to_string(skill_dir.join("SKILL.md")).unwrap(),
+            "precious",
+            "SKILL.md must be the bundle's content, written into the owned dir"
         );
     }
 
