@@ -1680,7 +1680,14 @@ fn push_text_set(
         qb.push(")");
     }
     if !set.none_of.is_empty() {
-        qb.push(format!(" AND {col} <> ALL("));
+        // COALESCE the column so a NULL value survives the exclusion. Without it,
+        // `NULL <> ALL($none_of)` evaluates to NULL under SQL three-valued logic
+        // and Postgres drops the row — so an "exclude TypeScript" filter over the
+        // nullable `document.language` column would silently drop *every*
+        // NULL-language document (all prose/markdown), not just TypeScript ones
+        // (#162). The `''` sentinel can never appear in `none_of` for a real
+        // value, so coalesced-NULL rows always pass. Mirrors `push_prov_set`.
+        qb.push(format!(" AND COALESCE({col}, '') <> ALL("));
         qb.push_bind(set.none_of.clone());
         qb.push(")");
     }
@@ -1764,11 +1771,18 @@ fn push_package(
         qb.push(")");
     }
     for p in &set.none_of {
-        qb.push(" AND NOT (p.kind = ");
+        // `p.*` is NULL for documents with a NULL `package_id` (the LEFT JOIN
+        // found no package). `NOT (NULL = $ AND NULL = $)` is NULL under SQL
+        // three-valued logic, so Postgres would silently drop *every* packageless
+        // document — all non-code content — from a `none_of` filter (#162). A row
+        // with no package can never match an excluded (kind, name), so guard the
+        // exclusion with `p.id IS NULL OR ...` to retain those rows; only rows
+        // that actually have a package are tested against the exclusion.
+        qb.push(" AND (p.id IS NULL OR NOT (p.kind = ");
         qb.push_bind(p.kind.clone());
         qb.push(" AND p.name = ");
         qb.push_bind(p.name.clone());
-        qb.push(")");
+        qb.push("))");
     }
 }
 
@@ -2123,7 +2137,10 @@ mod tests {
     }
 
     #[test]
-    fn language_none_of_emits_not_predicate() {
+    fn language_none_of_coalesces_so_null_rows_survive() {
+        // `document.language` is nullable, so a bare `d.language <> ALL($none_of)`
+        // is NULL (→ row dropped) for every prose/markdown document. The fix wraps
+        // the column in COALESCE so NULL-language rows survive an exclusion (#162).
         let f = SearchFilters {
             language: SetMatch {
                 any_of: vec![],
@@ -2132,7 +2149,54 @@ mod tests {
             ..Default::default()
         };
         let sql = built_sql(&f);
-        assert!(sql.contains("d.language") && sql.contains("<> ALL("), "got: {sql}");
+        assert!(
+            sql.contains("COALESCE(d.language, '') <> ALL("),
+            "language none_of must COALESCE the nullable column so NULL rows survive; got: {sql}"
+        );
+    }
+
+    #[test]
+    fn language_any_of_does_not_coalesce() {
+        // The inclusion path (`any_of`) intentionally leaves NULL rows out — a
+        // NULL language is not one of the requested values — so it must NOT be
+        // coalesced. Only the exclusion path (`none_of`) needs the guard.
+        let f = SearchFilters {
+            language: SetMatch {
+                any_of: vec!["rust".into()],
+                none_of: vec![],
+            },
+            ..Default::default()
+        };
+        let sql = built_sql(&f);
+        assert!(sql.contains("d.language = ANY("), "got: {sql}");
+        assert!(
+            !sql.contains("COALESCE(d.language"),
+            "any_of must not coalesce (NULL rows should be excluded from an inclusion); got: {sql}"
+        );
+    }
+
+    #[test]
+    fn package_none_of_retains_null_package_rows() {
+        // `document.package_id` is nullable and joined with a LEFT JOIN, so `p.*`
+        // is NULL for packageless docs. A bare `NOT (p.kind = $ AND p.name = $)`
+        // is NULL (→ row dropped) for every non-code document. The fix guards the
+        // exclusion with `p.id IS NULL OR ...` so packageless rows survive (#162).
+        use mnm_retrieval::filters::PackageMatch;
+        let f = SearchFilters {
+            package: SetMatch {
+                any_of: vec![],
+                none_of: vec![PackageMatch {
+                    kind: "npm".into(),
+                    name: "typescript".into(),
+                }],
+            },
+            ..Default::default()
+        };
+        let sql = built_sql(&f);
+        assert!(
+            sql.contains("p.id IS NULL OR NOT (p.kind = "),
+            "package none_of must retain NULL-package rows via `p.id IS NULL OR ...`; got: {sql}"
+        );
     }
 
     #[test]
