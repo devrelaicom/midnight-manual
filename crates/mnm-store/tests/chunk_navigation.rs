@@ -7,6 +7,8 @@ mod common;
 mod fixtures;
 
 use mnm_store::entities::chunk;
+use mnm_store::StoreError;
+use uuid::Uuid;
 
 #[tokio::test]
 async fn list_next_returns_chunks_after_anchor_in_order() {
@@ -59,4 +61,24 @@ async fn list_next_skips_embed_failed_chunks() {
     let rows = chunk::list_next(&h.pool, fx.chunk_ids[1], 3).await.unwrap();
     let idxs: Vec<i32> = rows.iter().map(|r| r.chunk.chunk_index).collect();
     assert_eq!(idxs, vec![3, 4]);
+}
+
+#[tokio::test]
+async fn list_next_unknown_anchor_is_not_found() {
+    let h = common::boot().await;
+    // No chunks with this id exist — must be NotFound, not Ok([]), so the route
+    // returns 404 instead of masking a bad id as an empty 200 (issue #175).
+    let err = chunk::list_next(&h.pool, Uuid::new_v4(), 5)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, StoreError::NotFound), "got {err:?}");
+}
+
+#[tokio::test]
+async fn list_prev_unknown_anchor_is_not_found() {
+    let h = common::boot().await;
+    let err = chunk::list_prev(&h.pool, Uuid::new_v4(), 5)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, StoreError::NotFound), "got {err:?}");
 }

@@ -7,7 +7,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::voyage::{
-    voyage_http_client, InputType, Usage, VoyageError, DEFAULT_BASE_URL, DEFAULT_EMBED_TIMEOUT_SECS,
+    verify_index_permutation, voyage_http_client, InputType, Usage, VoyageError, DEFAULT_BASE_URL,
+    DEFAULT_EMBED_TIMEOUT_SECS,
 };
 
 /// Output of a contextualized group-embedding call.
@@ -137,7 +138,12 @@ impl ContextualizedVoyageEmbedder {
                 parsed.data.len()
             )));
         }
+        // Restore group order, then verify the group `index` values are an
+        // exact 0..n permutation before mapping positionally — the count check
+        // above guarantees the length, but not that the indices aren't
+        // duplicated/out-of-range (issue #175).
         parsed.data.sort_by_key(|g| g.index);
+        verify_index_permutation(parsed.data.iter().map(|g| g.index), "embedding groups")?;
         let mut out_groups = Vec::with_capacity(parsed.data.len());
         for (gi, mut g) in parsed.data.into_iter().enumerate() {
             if g.data.len() != expected[gi] {
@@ -147,7 +153,9 @@ impl ContextualizedVoyageEmbedder {
                     g.data.len()
                 )));
             }
+            // Same permutation guard, one level down, for the chunk vectors.
             g.data.sort_by_key(|d| d.index);
+            verify_index_permutation(g.data.iter().map(|d| d.index), &format!("group {gi}"))?;
             out_groups.push(g.data.into_iter().map(|d| d.embedding).collect());
         }
         Ok(GroupEmbedOutput {
@@ -282,5 +290,66 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, VoyageError::Decode(_)));
+    }
+
+    /// Correct group count but a duplicated group `index` (`[0, 0]` for two
+    /// groups) must be rejected, not silently mapped to a misaligned order
+    /// (issue #175).
+    #[tokio::test]
+    async fn rejects_duplicate_group_index() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/contextualizedembeddings"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "object": "list",
+                "data": [
+                    { "object": "list", "index": 0, "data": [
+                        { "object": "embedding", "index": 0, "embedding": [1.0, 1.0] }
+                    ]},
+                    { "object": "list", "index": 0, "data": [
+                        { "object": "embedding", "index": 0, "embedding": [2.0, 2.0] }
+                    ]}
+                ],
+                "model": "voyage-context-3",
+                "usage": { "total_tokens": 4 }
+            })))
+            .mount(&server)
+            .await;
+        let e = ContextualizedVoyageEmbedder::new("k", "voyage-context-3", 2, "float")
+            .with_base_url(&server.uri());
+        let err = e
+            .embed_groups(vec![vec!["a".into()], vec!["b".into()]], InputType::Document)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, VoyageError::Decode(_)), "got {err:?}");
+    }
+
+    /// Correct chunk count within a group but a duplicated chunk `index`
+    /// (`[0, 0]`) must be rejected (issue #175).
+    #[tokio::test]
+    async fn rejects_duplicate_chunk_index() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/contextualizedembeddings"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "object": "list",
+                "data": [
+                    { "object": "list", "index": 0, "data": [
+                        { "object": "embedding", "index": 0, "embedding": [1.0, 1.0] },
+                        { "object": "embedding", "index": 0, "embedding": [2.0, 2.0] }
+                    ]}
+                ],
+                "model": "voyage-context-3",
+                "usage": { "total_tokens": 4 }
+            })))
+            .mount(&server)
+            .await;
+        let e = ContextualizedVoyageEmbedder::new("k", "voyage-context-3", 2, "float")
+            .with_base_url(&server.uri());
+        let err = e
+            .embed_groups(vec![vec!["a".into(), "b".into()]], InputType::Document)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, VoyageError::Decode(_)), "got {err:?}");
     }
 }

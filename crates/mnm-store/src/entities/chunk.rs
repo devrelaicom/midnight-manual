@@ -326,6 +326,26 @@ pub async fn list_for_carry_forward(
     rows.into_iter().map(TryInto::try_into).collect()
 }
 
+/// Return [`StoreError::NotFound`] when no `chunk` row has this id.
+///
+/// [`list_next`] / [`list_prev`] build on a CTE that cross-joins the anchor
+/// row; for an unknown anchor that CTE is empty and `fetch_all` yields
+/// `Ok(vec![])` — indistinguishable from a valid first/last chunk that simply
+/// has no neighbours. When a neighbour query comes back empty, those functions
+/// use this to disambiguate an unknown anchor (→ `NotFound`, matching their
+/// documented contract and the route's 404) from a genuine boundary chunk.
+async fn ensure_chunk_exists(pool: &PgPool, id: Uuid) -> Result<()> {
+    let found: Option<(i32,)> = sqlx::query_as("SELECT 1 FROM chunk WHERE id = $1")
+        .bind(id)
+        .fetch_optional(pool)
+        .await?;
+    if found.is_some() {
+        Ok(())
+    } else {
+        Err(StoreError::NotFound)
+    }
+}
+
 /// List the next `count` chunks after `anchor` in the same document,
 /// ordered by `chunk_index` ascending. Skips `embed_failed` chunks.
 ///
@@ -358,6 +378,12 @@ pub async fn list_next(pool: &PgPool, anchor: Uuid, count: usize) -> Result<Vec<
     .bind(count)
     .fetch_all(pool)
     .await?;
+    // An empty result is ambiguous: the anchor may be unknown, or it may be a
+    // valid last chunk. Only in that case do the extra existence check so an
+    // unknown id surfaces as NotFound (issue #175).
+    if rows.is_empty() {
+        ensure_chunk_exists(pool, anchor).await?;
+    }
     rows.into_iter().map(TryInto::try_into).collect()
 }
 
@@ -396,6 +422,11 @@ pub async fn list_prev(pool: &PgPool, anchor: Uuid, count: usize) -> Result<Vec<
     .bind(count)
     .fetch_all(pool)
     .await?;
+    // Empty is ambiguous (unknown anchor vs. valid first chunk); disambiguate
+    // to NotFound for an unknown id (issue #175).
+    if rows.is_empty() {
+        ensure_chunk_exists(pool, anchor).await?;
+    }
     rows.reverse();
     rows.into_iter().map(TryInto::try_into).collect()
 }
