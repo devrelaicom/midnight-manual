@@ -189,10 +189,19 @@ async fn search_returns_nearest_chunk_first() {
         top_sim > 0.99,
         "top result must be a 0.10-seed-neighbour of the 0.11 query, got similarity {top_sim}"
     );
-    let a_present = results
+    let a_result = results
         .iter()
-        .any(|r| r["chunk_id"].as_str() == Some(a.to_string().as_str()));
-    assert!(a_present, "this test's chunk_a must appear in the results");
+        .find(|r| r["chunk_id"].as_str() == Some(a.to_string().as_str()))
+        .expect("this test's chunk_a must appear in the results");
+    // #165: the scoring loop now MOVES each row's fields into the result instead
+    // of cloning. Assert chunk_a's content survived the move intact — a durable
+    // guard against a field-mapping regression (e.g. `content` accidentally
+    // taking another moved String field such as `source_path`).
+    assert_eq!(
+        a_result["content"].as_str(),
+        Some("alpha chunk content about midnight network"),
+        "chunk_a content must round-trip through the move refactor unchanged"
+    );
     assert!(v["search_metadata"]["per_query"].is_array());
 }
 
@@ -281,6 +290,46 @@ async fn search_returns_400_on_empty_queries() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn search_returns_400_on_out_of_range_min_confidence() {
+    // #165: an out-of-range `min_confidence` is a 400, not silently clamped to
+    // 1.0 (which would drop every candidate and return an empty page with no
+    // error). Rejected at the request boundary before any retrieval work, so no
+    // seed is needed. `5.0` stands in for the class (also NaN / +inf).
+    let h = common::boot().await;
+    let app = app::build_resolved(h.pool.clone(), cfg())
+        .await
+        .expect("build app");
+
+    let body = serde_json::json!({
+        "queries": [{ "text": "zswap", "vector": unit_vector(0.1) }],
+        "client_embedding_model": "voyage-code-3@1",
+        "min_confidence": 5.0,
+    });
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/search")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(resp.into_body(), 4096).await.unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(v["error"]["code"], "invalid_request");
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("min_confidence"),
+        "error names the offending parameter: {v}"
+    );
 }
 
 #[tokio::test]

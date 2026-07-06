@@ -171,6 +171,16 @@ const fn max_limit() -> u32 {
     100
 }
 
+/// Whether a `min_confidence` value is an acceptable confidence floor (#165).
+/// Valid floors lie within the closed unit interval; `RangeInclusive::contains`
+/// also rejects `NaN` and `±inf` (each compares `false` against the bounds), so
+/// an out-of-range value is a `400` rather than being silently clamped up to
+/// `1.0` — which would make the downstream `retain(confidence >= floor)` drop
+/// nearly every candidate and return an empty page with no error signal.
+fn min_confidence_valid(v: f64) -> bool {
+    (0.0..=1.0).contains(&v)
+}
+
 /// Whether result-set overlap dedup runs. Default on; set `MNM_SEARCH_DEDUP=0`
 /// (or `false`) to disable as an escape hatch.
 fn dedup_enabled() -> bool {
@@ -453,6 +463,23 @@ async fn search(
         );
     }
     let limit = req.limit.min(max_limit()).max(1);
+
+    // Reject an out-of-range `min_confidence` rather than clamping it (#165).
+    // Silently clamping e.g. `5.0` or `1e400` (parses to +inf) up to `1.0` makes
+    // the later `retain(confidence >= floor)` drop nearly everything and returns
+    // an empty result set with no signal that the parameter was invalid.
+    if !min_confidence_valid(req.min_confidence) {
+        return error::into_response(
+            CoreError::builder(ErrorCode::InvalidRequest)
+                .message(format!(
+                    "min_confidence {} is out of range; must be within [0.0, 1.0]",
+                    req.min_confidence
+                ))
+                .remediation("supply a min_confidence between 0.0 and 1.0 (inclusive)")
+                .build(),
+            rid,
+        );
+    }
 
     // Validate the filter object at the boundary (registry-backed closed-set
     // checks, range ordering, semver parseability). A bad filter is a 400.
@@ -806,7 +833,7 @@ async fn search(
     // Batch-fetch every fused candidate joined with its document (provenance +
     // freshness) and source_version (ingest timestamp).
     let fused_ids: Vec<Uuid> = fused.iter().map(|(id, _)| *id).collect();
-    let rows = match fetch_scoring_rows(&state.pool, &fused_ids).await {
+    let mut rows = match fetch_scoring_rows(&state.pool, &fused_ids).await {
         Ok(rows) => rows,
         Err(e) => {
             tracing::warn!(request_id = rid, error = %e, "scoring-row fetch failed");
@@ -818,10 +845,14 @@ async fn search(
     let now = OffsetDateTime::now_utc();
 
     // Score each candidate in fused order. Rows missing (deleted since the
-    // candidate fetch) are skipped.
+    // candidate fetch) are skipped. We `remove` (rather than `get`) each row so
+    // its `content` and metadata are *moved* into the `ScoredCandidate` below
+    // instead of cloned — `fused` keys are unique (RRF fuses on a HashMap), so
+    // no candidate is consumed twice, and `rows` never co-holds a second copy of
+    // the full candidate text (#165: avoids a ~2× resident hold of the pool).
     let mut scored: Vec<ScoredCandidate> = Vec::with_capacity(fused.len());
     for (chunk_id, rrf_score) in fused {
-        let Some(row) = rows.get(&chunk_id) else {
+        let Some(row) = rows.remove(&chunk_id) else {
             continue;
         };
         // Version-bearing facets (FR-033, spec §3): classify, then drop per
@@ -852,7 +883,7 @@ async fn search(
         );
         scored.push(ScoredCandidate {
             chunk_id,
-            content: row.content.clone(),
+            content: row.content,
             document_id: row.document_id,
             source_version_id: row.source_version_id,
             chunk_index: row.chunk_index,
@@ -866,13 +897,13 @@ async fn search(
             relevance,
             score,
             rerank_score: None,
-            source_slug: row.source_slug.clone(),
-            source_display_name: row.source_display_name.clone(),
-            source_path: row.source_path.clone(),
-            published_url: row.published_url.clone(),
-            source_url: row.source_url.clone(),
-            heading_path: row.heading_path.clone(),
-            symbol_path: row.symbol_path.clone(),
+            source_slug: row.source_slug,
+            source_display_name: row.source_display_name,
+            source_path: row.source_path,
+            published_url: row.published_url,
+            source_url: row.source_url,
+            heading_path: row.heading_path,
+            symbol_path: row.symbol_path,
         });
     }
 
@@ -909,7 +940,9 @@ async fn search(
     };
 
     // Drop candidates below the confidence floor before applying `limit` (#10).
-    let min_confidence = req.min_confidence.clamp(0.0, 1.0);
+    // `min_confidence` was validated to be within [0.0, 1.0] at the boundary
+    // (out-of-range is a 400), so no clamp is needed here (#165).
+    let min_confidence = req.min_confidence;
     let before = scored.len();
     scored.retain(|c| c.score.confidence >= min_confidence);
     let filtered_by_confidence = before - scored.len();
@@ -1961,7 +1994,8 @@ mod code_mode_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        normalize_queries, CodeMode, QueryPair, ScoredCandidate, SearchMode, SearchRequest, SortBy,
+        min_confidence_valid, normalize_queries, CodeMode, QueryPair, ScoredCandidate, SearchMode,
+        SearchRequest, SortBy,
     };
     use mnm_core::provenance::Attribution;
     use mnm_core::scoring::{ConfidenceFactors, RelevanceSource, ScoreResult};
@@ -2043,6 +2077,31 @@ mod tests {
         assert!(normalize_queries(&req(Vec::new(), None, None), CodeMode::On)
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn min_confidence_accepts_the_closed_unit_interval() {
+        // Boundaries and interior are valid floors.
+        assert!(min_confidence_valid(0.0));
+        assert!(min_confidence_valid(1.0));
+        assert!(min_confidence_valid(0.5));
+        // The historic default (serde `#[serde(default)]` f64) stays valid.
+        assert!(min_confidence_valid(f64::default()));
+    }
+
+    #[test]
+    fn min_confidence_rejects_out_of_range_values() {
+        // The prior code silently clamped these to 1.0 and returned an empty
+        // page; now they are a 400 (#165). NaN and ±inf all compare false
+        // against the bounds, so `contains` rejects them too — `1e400` from the
+        // wire parses to +inf and must not be accepted.
+        assert!(!min_confidence_valid(5.0));
+        assert!(!min_confidence_valid(1.000_001));
+        assert!(!min_confidence_valid(-0.000_001));
+        assert!(!min_confidence_valid(-1.0));
+        assert!(!min_confidence_valid(f64::INFINITY));
+        assert!(!min_confidence_valid(f64::NEG_INFINITY));
+        assert!(!min_confidence_valid(f64::NAN));
     }
 
     #[test]

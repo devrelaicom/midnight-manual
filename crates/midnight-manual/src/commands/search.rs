@@ -291,8 +291,10 @@ pub async fn run_with_paths(
     let (mode, filters) = build_filters(&args)?;
     validate_filters(&filters)?;
 
-    // Fail fast on an out-of-range confidence floor rather than letting the
-    // server clamp it silently (a typo like `--min-confidence 90` should error).
+    // Fail fast on an out-of-range confidence floor before any network work. The
+    // server also rejects out-of-range `min_confidence` with a 400, but catching
+    // it here turns a typo like `--min-confidence 90` into an immediate,
+    // offline error rather than a round-trip.
     validate_min_confidence(args.min_confidence)?;
 
     // Which query embeddings this request needs — mirrors the server's
