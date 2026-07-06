@@ -18,12 +18,17 @@ pub struct Args {
 }
 
 /// Run the `chunks prev` subcommand.
-pub async fn run(args: Args, server: Option<&str>, json: bool) -> Result<()> {
+pub async fn run(
+    args: Args,
+    server: Option<&str>,
+    config: Option<&std::path::Path>,
+    json: bool,
+) -> Result<()> {
     // Reuse next::Args shape — they're identical.
     let next_args = super::next::Args {
         chunk_id: args.chunk_id,
         count: args.count,
         full: args.full,
     };
-    super::run_chunk_list(next_args, server, json, "prev").await
+    super::run_chunk_list(next_args, server, config, json, "prev").await
 }

@@ -34,8 +34,13 @@ struct ServiceStartResponse {
 /// Returns an error on transport failure, a non-2xx response, a response body
 /// that does not parse, or when no admin bearer can be resolved from
 /// `auth.toml`.
-pub async fn run(_args: ServiceStartArgs, server: Option<&str>, json: bool) -> Result<()> {
-    let server_url = crate::shared::resolve_server_url(server);
+pub async fn run(
+    _args: ServiceStartArgs,
+    server: Option<&str>,
+    config: Option<&std::path::Path>,
+    json: bool,
+) -> Result<()> {
+    let server_url = crate::shared::resolve_server_url(server, config);
     let token = crate::commands::ratelimits::require_admin_token_from(&mnm_core::config::StdEnv)?;
 
     // The server long-polls up to ~120s for the model to load; allow headroom.

@@ -18,8 +18,13 @@ pub struct Args {
 }
 
 /// Run the `chunks next` subcommand.
-pub async fn run(args: Args, server: Option<&str>, json: bool) -> Result<()> {
-    super::run_chunk_list(args, server, json, "next").await
+pub async fn run(
+    args: Args,
+    server: Option<&str>,
+    config: Option<&std::path::Path>,
+    json: bool,
+) -> Result<()> {
+    super::run_chunk_list(args, server, config, json, "next").await
 }
 
 pub(super) fn render_chunks(body: &str, full: bool) -> anyhow::Result<()> {

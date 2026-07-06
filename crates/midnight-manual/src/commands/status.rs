@@ -20,20 +20,22 @@ pub struct Args {}
 pub async fn run(
     _args: Args,
     server: Option<&str>,
+    config: Option<&std::path::Path>,
     voyage_api_key_flag: Option<&str>,
     json: bool,
 ) -> Result<()> {
-    let url = crate::shared::resolve_server_url(server);
+    let url = crate::shared::resolve_server_url(server, config);
     let bearer = crate::shared::resolve_read_uplift_token();
     let cloud = CloudClient::new(&url, bearer)
         .map_err(|e| anyhow::anyhow!("cloud client init failed: {e}"))?;
     // Same resolution the embed-capable commands use (flag > env > config) for
     // the Voyage key, plus the content-guard level resolved exactly as
     // `mnm mcp serve` does — so `mnm status` reports the level an MCP session
-    // would actually run at.
+    // would actually run at. Honour the explicit `--config` path so the
+    // reported key/level match the config the rest of the command targets.
     let (voyage_key, security_level) = {
         let cfg_env = mnm_core::config::StdEnv;
-        let (core_cfg, _) = mnm_core::config::Config::discover(None, &cfg_env)?;
+        let (core_cfg, _) = mnm_core::config::Config::discover(config, &cfg_env)?;
         let voyage_key = mnm_core::config::resolve_voyage_api_key(
             voyage_api_key_flag,
             &core_cfg.models,

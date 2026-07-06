@@ -70,7 +70,12 @@ pub struct Args {
 /// Returns `anyhow::Error` if the manifest cannot be read, the source tree
 /// walk fails, or the plan builder encounters a duplicate path.
 #[allow(clippy::too_many_lines)]
-pub async fn run(args: Args, server: Option<&str>, _json: bool) -> Result<()> {
+pub async fn run(
+    args: Args,
+    server: Option<&str>,
+    config: Option<&Path>,
+    _json: bool,
+) -> Result<()> {
     let started_at = OffsetDateTime::now_utc();
 
     // Fail fast before any work if the report path is not writable.
@@ -78,7 +83,7 @@ pub async fn run(args: Args, server: Option<&str>, _json: bool) -> Result<()> {
         super::report::preflight(rp).context("report-file preflight")?;
     }
 
-    let server_url = crate::shared::resolve_server_url(server);
+    let server_url = crate::shared::resolve_server_url(server, config);
     let body = std::fs::read_to_string(&args.manifest)
         .with_context(|| format!("read manifest at {}", args.manifest.display()))?;
     let manifest = Manifest::parse(&body).context("parse manifest")?;

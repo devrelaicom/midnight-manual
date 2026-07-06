@@ -170,7 +170,7 @@ fn render_human_includes_guard_level() {
 async fn run_against_dead_port_returns_err() {
     // Port 9 (discard) is closed: connection refused → CloudState::Unreachable
     // → `run` must return Err so scripts get a non-zero exit code.
-    let err = run(Args {}, Some("http://127.0.0.1:9"), None, true)
+    let err = run(Args {}, Some("http://127.0.0.1:9"), None, None, true)
         .await
         .expect_err("unreachable cloud must be a hard error");
     assert!(err.to_string().contains("unreachable"), "error should name the failure: {err}");

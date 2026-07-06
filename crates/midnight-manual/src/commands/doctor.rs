@@ -92,11 +92,16 @@ pub struct CorpusSourceStatus {
 ///
 /// Returns an error if config discovery fails. Corpus-fetch failures are
 /// surfaced in the rendered report (and do not fail the command).
-pub async fn run(args: Args, json: bool) -> Result<()> {
+pub async fn run(
+    args: Args,
+    server: Option<&str>,
+    config: Option<&std::path::Path>,
+    json: bool,
+) -> Result<()> {
     let emit_json = json || args.json;
 
     let env = mnm_core::config::StdEnv;
-    let (cfg, path) = mnm_core::config::Config::discover(None, &env)?;
+    let (cfg, path) = mnm_core::config::Config::discover(config, &env)?;
     let marker = mnm_core::paths::telemetry_marker_path(&env);
     let env_disabled = optout::env_disabled(&env);
     let marker_present = marker.as_deref().is_some_and(optout::marker_present);
@@ -114,7 +119,11 @@ pub async fn run(args: Args, json: bool) -> Result<()> {
     };
 
     let admin_token = resolve_admin_token(env);
-    let server_url = cfg.server.url.trim_end_matches('/').to_owned();
+    // Honour the `--server` flag (else the discovered config's `[server].url`).
+    // Previously this used `cfg.server.url` unconditionally, so `--server` was
+    // ignored and the admin bearer could be sent to the wrong host (issue #163,
+    // folds M7).
+    let server_url = crate::shared::resolve_server_url_from(server, &cfg);
     let corpus = if let Some(token) = admin_token.as_deref() {
         match fetch_corpus_report(&server_url, token).await {
             Ok(r) => Some(r),

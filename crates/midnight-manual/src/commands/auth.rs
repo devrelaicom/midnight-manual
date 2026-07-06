@@ -85,9 +85,14 @@ pub struct GithubArgs {
 /// Returns an error when the OAuth flow fails, when the local listener
 /// cannot bind, when the server cannot be reached, or when `auth.toml`
 /// cannot be written.
-pub async fn run(args: Args, server_flag: Option<&str>, json: bool) -> Result<()> {
+pub async fn run(
+    args: Args,
+    server_flag: Option<&str>,
+    config: Option<&std::path::Path>,
+    json: bool,
+) -> Result<()> {
     match args.cmd {
-        AuthCmd::Github(a) => github(a, server_flag, json).await,
+        AuthCmd::Github(a) => github(a, server_flag, config, json).await,
         AuthCmd::Status => status(json),
         AuthCmd::Logout => logout(json),
     }
@@ -261,8 +266,13 @@ struct GithubOutput<'a> {
     dry_run: bool,
 }
 
-async fn github(args: GithubArgs, server_flag: Option<&str>, json: bool) -> Result<()> {
-    let server_url = crate::shared::resolve_server_url(server_flag);
+async fn github(
+    args: GithubArgs,
+    server_flag: Option<&str>,
+    config: Option<&std::path::Path>,
+    json: bool,
+) -> Result<()> {
+    let server_url = crate::shared::resolve_server_url(server_flag, config);
     let auth_path = auth_path()?;
 
     // Bind a local listener on a free port. We use a std listener first so

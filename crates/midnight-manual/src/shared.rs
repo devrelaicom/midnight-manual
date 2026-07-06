@@ -4,6 +4,8 @@
 //! `commands/sources.rs` so `login`, `users`, and any future write-side
 //! command can share the same precedence walk.
 
+use std::path::Path;
+
 use mnm_core::error::Error as CoreError;
 use serde::Deserialize;
 use time::OffsetDateTime;
@@ -58,19 +60,22 @@ pub fn decode_error_envelope(body: &str) -> Option<CoreError> {
 ///
 /// This is the discovery-performing convenience wrapper: it runs
 /// [`Config::discover`](mnm_core::config::Config::discover) itself when no flag
-/// is supplied. Callers that have *already* discovered a config should prefer
-/// [`resolve_server_url_from`] so a single config read backs every derived
-/// value (avoids a TOCTOU desync + a redundant file read).
+/// is supplied, honouring the caller-threaded `--config` path (`config_path`)
+/// so a `[server].url` in an explicit config file influences the resolved
+/// endpoint (issue #163). Callers that have *already* discovered a config
+/// should prefer [`resolve_server_url_from`] so a single config read backs
+/// every derived value (avoids a TOCTOU desync + a redundant file read).
 #[must_use]
-pub fn resolve_server_url(flag: Option<&str>) -> String {
+pub fn resolve_server_url(flag: Option<&str>, config_path: Option<&Path>) -> String {
     if let Some(s) = flag {
         return s.trim_end_matches('/').to_owned();
     }
     let env = mnm_core::config::StdEnv;
-    // Best-effort: this convenience wrapper is only reached with no pre-discovered
-    // cfg; the authoritative loud discover already ran in `cli::run`. Callers that
-    // have a cfg should use `resolve_server_url_from` instead.
-    let (cfg, _) = mnm_core::config::Config::discover(None, &env).unwrap_or_default();
+    // Best-effort re-read: the authoritative loud discover (which surfaces a
+    // missing/malformed `--config`) already ran in `cli::run` before dispatch,
+    // so this same-path re-read succeeds. Passing `config_path` (not `None`) is
+    // what makes the explicit `--config` file's `[server].url` take effect.
+    let (cfg, _) = mnm_core::config::Config::discover(config_path, &env).unwrap_or_default();
     resolve_server_url_from(flag, &cfg)
 }
 
@@ -107,14 +112,28 @@ mod tests {
 
     #[test]
     fn flag_wins_and_strips_trailing_slash() {
-        let url = resolve_server_url(Some("http://localhost:8080/"));
+        let url = resolve_server_url(Some("http://localhost:8080/"), None);
         assert_eq!(url, "http://localhost:8080");
     }
 
     #[test]
     fn flag_passthrough_when_no_trailing_slash() {
-        let url = resolve_server_url(Some("http://localhost:8080"));
+        let url = resolve_server_url(Some("http://localhost:8080"), None);
         assert_eq!(url, "http://localhost:8080");
+    }
+
+    /// With no `--server` flag, an explicit `--config` file's `[server].url`
+    /// governs the resolved endpoint. Regression test for issue #163: the
+    /// resolver used to hard-code `None` for the config path, so `--config`
+    /// never influenced the server URL.
+    #[test]
+    fn explicit_config_governs_url_when_no_flag() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg_path = dir.path().join("staging.toml");
+        std::fs::write(&cfg_path, "[server]\nurl = \"https://staging.example/\"\n")
+            .expect("write config");
+        let url = resolve_server_url(None, Some(cfg_path.as_path()));
+        assert_eq!(url, "https://staging.example");
     }
 
     /// The server's `{ error: { … }, request_id }` envelope decodes into the

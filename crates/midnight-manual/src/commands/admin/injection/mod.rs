@@ -54,9 +54,14 @@ pub struct ScoreArgs {
 ///
 /// Returns an error on network failure, non-2xx responses, response-parse
 /// failures, or when no admin bearer can be resolved from `auth.toml`.
-pub async fn run(args: Args, server: Option<&str>, json: bool) -> Result<()> {
+pub async fn run(
+    args: Args,
+    server: Option<&str>,
+    config: Option<&std::path::Path>,
+    json: bool,
+) -> Result<()> {
     match args.cmd {
-        InjectionCmd::ServiceStart(a) => service_start::run(a, server, json).await,
-        InjectionCmd::Score(a) => score::run(a, server, json).await,
+        InjectionCmd::ServiceStart(a) => service_start::run(a, server, config, json).await,
+        InjectionCmd::Score(a) => score::run(a, server, config, json).await,
     }
 }

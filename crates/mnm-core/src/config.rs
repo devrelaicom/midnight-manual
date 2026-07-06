@@ -179,40 +179,83 @@ pub struct SecurityConfig {
 }
 
 impl Config {
-    /// Discover and load a config from `--config` (`explicit_path`), then the
-    /// `MIDNIGHT_MANUAL_CONFIG` env var, then the XDG location.
+    /// Discover and load a config. Precedence (D17/D18): the explicit
+    /// `--config <file>` flag (`explicit_path`) > the `MIDNIGHT_MANUAL_CONFIG`
+    /// env var > the XDG-discovered `$XDG_CONFIG_HOME/midnight-manual/config.toml`.
     ///
-    /// If no file is found, returns [`Config::default`]. Returns the loaded
-    /// config and the path the loader resolved (or `None` if defaulted).
+    /// **A config path the user specified must exist.** Both the `--config`
+    /// flag and the `MIDNIGHT_MANUAL_CONFIG` env var are authoritative: if the
+    /// path they name does not exist, this fails loud with
+    /// [`ConfigError::NotFound`] rather than silently defaulting. Silent
+    /// fallback would resolve `[server].url` to the compiled-in production
+    /// endpoint, so a typo'd config path could point read/admin commands at the
+    /// wrong host (issue #163). The CLI wires `--config` to the same env var
+    /// (`#[arg(env = "MIDNIGHT_MANUAL_CONFIG")]`), so at the binary level a
+    /// set-but-missing env var also arrives via `explicit_path` — both routes
+    /// are loud, and this function enforces it on the env route directly too.
+    ///
+    /// Only the *conventional* XDG location is best-effort: its absence is the
+    /// ordinary "no config file" case. A fully unconfigured environment (no
+    /// flag, no env var, no XDG file) yields [`Config::default`] silently. An
+    /// empty `MIDNIGHT_MANUAL_CONFIG` is treated as unset.
+    ///
+    /// Returns the loaded config and the path the loader resolved (or `None`
+    /// when nothing was found and defaults were used).
     ///
     /// # Errors
     ///
-    /// Returns [`ConfigError::Read`] if the file is unreadable, or
-    /// [`ConfigError::Parse`] if the TOML is malformed.
+    /// Returns [`ConfigError::NotFound`] if a user-specified path (flag or env
+    /// var) does not exist, [`ConfigError::Read`] if a resolved file is
+    /// unreadable, or [`ConfigError::Parse`] if the TOML is malformed.
     pub fn discover(
         explicit_path: Option<&Path>,
         env: &impl ConfigEnv,
     ) -> Result<(Self, Option<PathBuf>), ConfigError> {
-        let path = explicit_path.map(Path::to_path_buf).or_else(|| {
-            env.var("MIDNIGHT_MANUAL_CONFIG")
-                .map(PathBuf::from)
-                .or_else(|| xdg_config_path(env))
-        });
+        // A user-specified config path — the `--config` flag or the
+        // `MIDNIGHT_MANUAL_CONFIG` env var — is authoritative and must exist.
+        // Never let a missing one fall through to defaults; that would silently
+        // target the production server (issue #163).
+        if let Some(p) = explicit_path {
+            return Self::load_required(p);
+        }
+        if let Some(p) = env
+            .var("MIDNIGHT_MANUAL_CONFIG")
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+        {
+            return Self::load_required(&p);
+        }
 
-        match path {
-            Some(p) if p.exists() => {
-                let body = std::fs::read_to_string(&p).map_err(|e| ConfigError::Read {
-                    path: p.clone(),
-                    message: e.to_string(),
-                })?;
-                let cfg: Self = toml::from_str(&body).map_err(|e| ConfigError::Parse {
-                    path: p.clone(),
-                    message: e.to_string(),
-                })?;
-                Ok((cfg, Some(p)))
-            }
+        // Only the conventional XDG location is best-effort: absence is normal.
+        match xdg_config_path(env) {
+            Some(p) if p.exists() => Self::load(&p),
             Some(_) | None => Ok((Self::default(), None)),
         }
+    }
+
+    /// Load a *required* config path (one the user named via the `--config` flag
+    /// or the `MIDNIGHT_MANUAL_CONFIG` env var): a missing file is a loud
+    /// [`ConfigError::NotFound`], never a silent default.
+    fn load_required(path: &Path) -> Result<(Self, Option<PathBuf>), ConfigError> {
+        if !path.exists() {
+            return Err(ConfigError::NotFound { path: path.to_path_buf() });
+        }
+        Self::load(path)
+    }
+
+    /// Read + parse a config file that is known to exist. Shared by the required
+    /// and XDG-discovered load paths so both surface identical `Read` / `Parse`
+    /// errors.
+    fn load(path: &Path) -> Result<(Self, Option<PathBuf>), ConfigError> {
+        let body = std::fs::read_to_string(path).map_err(|e| ConfigError::Read {
+            path: path.to_path_buf(),
+            message: e.to_string(),
+        })?;
+        let cfg: Self = toml::from_str(&body).map_err(|e| ConfigError::Parse {
+            path: path.to_path_buf(),
+            message: e.to_string(),
+        })?;
+        Ok((cfg, Some(path.to_path_buf())))
     }
 }
 
@@ -544,6 +587,15 @@ pub fn resolve_log_level(
 /// All the ways config discovery can fail.
 #[derive(Debug, Error)]
 pub enum ConfigError {
+    /// An explicitly-supplied `--config <path>` does not exist. Distinct from
+    /// [`ConfigError::Read`]: the file was never opened. Failing here (rather
+    /// than defaulting) prevents a typo'd `--config` from silently targeting
+    /// the compiled-in production server (issue #163).
+    #[error("config file `{}` not found", path.display())]
+    NotFound {
+        /// The explicit path that did not exist.
+        path: PathBuf,
+    },
     /// I/O failure reading the resolved config file.
     #[error("failed to read config file `{}`: {message}", path.display())]
     Read {
@@ -642,6 +694,49 @@ mod tests {
         let env = FakeEnv::default();
         let err = Config::discover(Some(&path), &env).unwrap_err();
         assert!(matches!(err, ConfigError::Parse { .. }));
+    }
+
+    /// A `--config` flag pointing at a non-existent file must fail loud rather
+    /// than silently defaulting (which would target the production server).
+    /// Regression test for issue #163.
+    #[test]
+    fn explicit_missing_path_is_loud_not_defaulted() {
+        let tmp = tempdir();
+        let missing = tmp.path().join("typo.toml");
+        let env = FakeEnv::default();
+        let err = Config::discover(Some(&missing), &env).unwrap_err();
+        match err {
+            ConfigError::NotFound { path } => assert_eq!(path, missing),
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+    }
+
+    /// A set-but-missing `MIDNIGHT_MANUAL_CONFIG` env-var path is authoritative
+    /// and fails loud — it must NOT silently default to the production server.
+    /// The CLI wires `--config` to this same env var, so at the binary level a
+    /// missing env-var path reaches `discover` via `explicit_path`; this covers
+    /// the internal env branch so the function contract matches end-to-end.
+    /// (Regression for the reviewer's finding on issue #163.)
+    #[test]
+    fn env_var_missing_path_is_loud() {
+        let tmp = tempdir();
+        let missing = tmp.path().join("nope.toml");
+        let env = FakeEnv::default().set("MIDNIGHT_MANUAL_CONFIG", missing.to_str().unwrap());
+        let err = Config::discover(None, &env).unwrap_err();
+        match err {
+            ConfigError::NotFound { path } => assert_eq!(path, missing),
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+    }
+
+    /// An empty `MIDNIGHT_MANUAL_CONFIG` is treated as unset (not a missing
+    /// path), so it falls through to XDG/defaults rather than erroring.
+    #[test]
+    fn empty_env_var_is_treated_as_unset() {
+        let env = FakeEnv::default().set("MIDNIGHT_MANUAL_CONFIG", "");
+        let (cfg, path) = Config::discover(None, &env).unwrap();
+        assert!(path.is_none());
+        assert_eq!(cfg, Config::default());
     }
 
     fn tempdir() -> tempfile::TempDir {

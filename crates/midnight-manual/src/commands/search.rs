@@ -234,7 +234,7 @@ pub async fn run(
     telemetry: &Telemetry,
     json: bool,
 ) -> Result<()> {
-    let server_url = crate::shared::resolve_server_url(server_flag);
+    let server_url = crate::shared::resolve_server_url(server_flag, config_path);
     let cfg_env = mnm_core::config::StdEnv;
     let auth_path = mnm_core::paths::auth_file_path(&cfg_env);
     run_with_paths(

@@ -58,7 +58,7 @@ pub async fn run(
     json: bool,
 ) -> Result<()> {
     match args.cmd {
-        IngestCmd::Plan(a) => plan::run(a, server, json).await,
+        IngestCmd::Plan(a) => plan::run(a, server, config_path, json).await,
         IngestCmd::Run(a) => {
             run::run(a, server, config_path, voyage_api_key, telemetry, json).await
         }
