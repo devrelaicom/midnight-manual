@@ -260,7 +260,11 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .context("bind listener")?;
-    axum::serve(listener, app)
+    // `into_make_service_with_connect_info` surfaces the socket peer address as
+    // a `ConnectInfo<SocketAddr>` extension. The rate-limit middleware and the
+    // token-limiter routes key off it when the trusted proxy header is absent,
+    // instead of a spoofable `X-Forwarded-For` (issue #176 L15).
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
         .with_graceful_shutdown(shutdown_signal())
         .await
         .context("serve")?;

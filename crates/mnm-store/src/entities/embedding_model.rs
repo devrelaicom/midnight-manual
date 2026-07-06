@@ -52,6 +52,34 @@ pub async fn get_active(pool: &PgPool) -> Result<EmbeddingModel> {
     Ok(row.into())
 }
 
+/// Return the general embedding model of the currently-active corpus, i.e. the
+/// model shared by the most-recently-ingested active `source_version`, or
+/// `None` when no source version is active yet.
+///
+/// Unlike [`get_active`], this does NOT fall back to the newest-registered
+/// model: it reports `None` precisely when there is no active corpus to match
+/// against. The ingest-run guard (`start_ingest_run`) uses that distinction to
+/// allow a bootstrapping first ingest (and the deactivate-then-reingest corpus
+/// migration path) while still rejecting a run whose general model diverges
+/// from an existing active corpus.
+///
+/// # Errors
+///
+/// Returns [`crate::error::StoreError`] if the query fails.
+pub async fn get_active_corpus_model(pool: &PgPool) -> Result<Option<EmbeddingModel>> {
+    let row = sqlx::query_as::<_, EmbeddingModelRow>(
+        "SELECT em.id, em.name, em.revision, em.dim, em.provider, em.created_at \
+         FROM embedding_model em \
+         JOIN source_version sv ON sv.embedding_model_id = em.id \
+         WHERE sv.is_active = true \
+         ORDER BY sv.ingested_at DESC NULLS LAST, em.created_at DESC \
+         LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(Into::into))
+}
+
 /// Look up the embedding_model row by its primary key.
 ///
 /// # Errors

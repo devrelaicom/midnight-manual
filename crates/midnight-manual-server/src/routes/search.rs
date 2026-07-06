@@ -9,7 +9,9 @@
 //! (server key, charged to the caller's token budget), degrading to RRF order
 //! on any failure (spec §1). Confidence scoring blends trust × relevance.
 
-use axum::extract::{Extension, State};
+use std::net::SocketAddr;
+
+use axum::extract::{ConnectInfo, Extension, State};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
@@ -376,10 +378,14 @@ async fn search(
     rl: Option<Extension<RateLimitContext>>,
     headers: axum::http::HeaderMap,
     auth: Option<Extension<crate::middleware::bearer::AuthContext>>,
+    peer: Option<ConnectInfo<SocketAddr>>,
     Json(req): Json<SearchRequest>,
 ) -> Response {
     let rid = req_id.as_str();
     let rl_ctx = rl.as_ref().map(|Extension(c)| c);
+    // Socket peer IP, used to key the token limiter when the trusted proxy
+    // header is absent (issue #176 L15). Threaded into `rerank_stage`.
+    let peer_ip = peer.map(|ConnectInfo(sa)| sa.ip());
 
     // Which retrieval halves this mode runs (loop-invariant).
     let run_vector = matches!(req.mode, SearchMode::Hybrid | SearchMode::Vector);
@@ -927,6 +933,7 @@ async fn search(
             &queries,
             &headers,
             auth.as_ref().map(|Extension(c)| c),
+            peer_ip,
             model,
             rerank_param,
             &mut scored,
@@ -1029,6 +1036,7 @@ async fn rerank_stage(
     queries: &[QueryPair],
     headers: &axum::http::HeaderMap,
     auth: Option<&crate::middleware::bearer::AuthContext>,
+    peer: Option<std::net::IpAddr>,
     model: &'static str,
     param: mnm_core::rerank::RerankParam,
     scored: &mut [ScoredCandidate],
@@ -1089,8 +1097,11 @@ async fn rerank_stage(
     let docs: Vec<String> = scored.iter().map(|c| c.content.clone()).collect();
 
     // Gate-then-charge against the shared Voyage token budget (spec §2).
-    let client_ip =
-        crate::middleware::rate_limit::client_ip(headers, &state.cfg.rate_limit_client_ip_header);
+    let client_ip = crate::middleware::rate_limit::client_ip(
+        headers,
+        &state.cfg.rate_limit_client_ip_header,
+        peer,
+    );
     let (subject, _tier, limits) = state.token_limiter.resolve(&client_ip, auth);
     let now = OffsetDateTime::now_utc().unix_timestamp();
     let estimate = param.billed_tokens(rerank_token_estimate(&composed, &docs));

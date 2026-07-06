@@ -858,14 +858,12 @@ async fn embedded_upload_wrong_dim_is_400() {
 }
 
 #[tokio::test]
-async fn embedded_upload_unresolved_corpus_is_503() {
-    // When the corpus model is unresolved, the server cannot validate an
-    // embedded chunk's dimension and must 503 rather than guess a width.
-    // `app::build` leaves the corpus model `None` (the sibling embedded-upload
-    // tests use `build_resolved`), so this is the regression cover for the
-    // unresolved-corpus guard on the upload path — it fires before the
-    // run-model lookup, so the otherwise-valid model/dim below never matter.
-    // (The search path has its own unresolved-corpus 503 test.)
+async fn embedded_upload_validates_dim_against_run_model_without_resolved_corpus() {
+    // Issue #176 L16: the embedded-upload dimension check keys off the RUN's
+    // model (looked up from the DB), NOT the AppState corpus snapshot. So an
+    // unresolved corpus (`app::build` leaves `corpus_model` = None) no longer
+    // 503s the upload — the run model's dim is authoritative. A correctly-sized
+    // vector is accepted and the chunk lands `ready`.
     let h = common::boot().await;
     let kp = Keypair::generate();
     let cfg = cfg_with_auth(user_store_for("aaron", &kp), vec![7u8; 32]);
@@ -874,8 +872,9 @@ async fn embedded_upload_unresolved_corpus_is_503() {
     let (slug, _) = seed_source(&h.pool).await;
     let run = start_run_with_model(app.clone(), &slug, &token).await;
 
+    // Correct dim (voyage-code-3 is 1024) → accepted despite the unresolved corpus.
     let (status, body) = json_call(
-        app,
+        app.clone(),
         "PUT",
         &format!("/v1/admin/sources/{slug}/ingest-runs/{run}/documents"),
         Some(&token),
@@ -885,6 +884,115 @@ async fn embedded_upload_unresolved_corpus_is_503() {
         })),
     )
     .await;
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
-    assert_eq!(body["error"]["code"], "service_unavailable");
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let statuses: Vec<String> =
+        sqlx::query_scalar("SELECT status FROM chunk WHERE source_version_id = $1")
+            .bind(Uuid::parse_str(&run).unwrap())
+            .fetch_all(&h.pool)
+            .await
+            .unwrap();
+    assert_eq!(statuses, vec!["ready".to_string()], "chunk should be ready, got {statuses:?}");
+
+    // A wrong dim is still rejected — validated against the run model's dim.
+    let (status, body) = json_call(
+        app,
+        "PUT",
+        &format!("/v1/admin/sources/{slug}/ingest-runs/{run}/documents"),
+        Some(&token),
+        Some(json!({
+            "embedding_model": "voyage-code-3@1",
+            "documents": [embedded_document_payload("b.md", "y", 3)],
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"]["code"], "invalid_request");
+}
+
+/// Issue #176 L16: once a corpus is active on a given general model,
+/// `start_ingest_run` must 409 a run whose general model diverges from it
+/// (e.g. the code model used as the general model), while still allowing a
+/// same-name revision bump (a supported per-source re-embed migration).
+#[tokio::test]
+async fn start_run_enforces_active_corpus_model() {
+    let h = common::boot().await;
+    let kp = Keypair::generate();
+    let cfg = cfg_with_auth(user_store_for("aaron", &kp), vec![7u8; 32]);
+    let app = app::build(h.pool.clone(), cfg).expect("build app");
+    let token = mint_admin_token(app.clone(), "aaron", &kp).await;
+
+    // Migrations seed the @1 rows; add voyage-context-3@2 for the bump case.
+    embedding_model::upsert(&h.pool, "voyage-context-3", 1, 1024, "voyageai")
+        .await
+        .unwrap();
+    embedding_model::upsert(&h.pool, "voyage-context-3", 2, 1024, "voyageai")
+        .await
+        .unwrap();
+    embedding_model::upsert(&h.pool, "voyage-code-3", 1, 1024, "voyageai")
+        .await
+        .unwrap();
+
+    // 1. Establish an active corpus on voyage-context-3@1 via source A.
+    let (slug_a, _) = seed_source(&h.pool).await;
+    let (status, body) = json_call(
+        app.clone(),
+        "POST",
+        &format!("/v1/admin/sources/{slug_a}/ingest-runs"),
+        Some(&token),
+        Some(json!({"ingest_cli_version": "test", "embedding_model": "voyage-context-3@1"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "bootstrapping first ingest must be allowed: {body}");
+    let run_a = body["ingest_run_id"].as_str().unwrap().to_owned();
+    let (status, _) = json_call(
+        app.clone(),
+        "PUT",
+        &format!("/v1/admin/sources/{slug_a}/ingest-runs/{run_a}/documents"),
+        Some(&token),
+        Some(json!({"documents": [sample_document_payload("a.md", "# A")]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, fin) = json_call(
+        app.clone(),
+        "POST",
+        &format!("/v1/admin/sources/{slug_a}/ingest-runs/{run_a}/finalize"),
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "finalize A: {fin}");
+    assert_eq!(fin["is_active"], true);
+
+    // 2. A new source started with the code model (different NAME) is refused.
+    let (slug_b, _) = seed_source(&h.pool).await;
+    let (status, body) = json_call(
+        app.clone(),
+        "POST",
+        &format!("/v1/admin/sources/{slug_b}/ingest-runs"),
+        Some(&token),
+        Some(json!({"ingest_cli_version": "test", "embedding_model": "voyage-code-3@1"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "code-as-general must 409: {body}");
+    assert_eq!(body["error"]["code"], "embedding_model_mismatch");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("voyage-context-3@1"),
+        "409 message must name the active model: {body}"
+    );
+
+    // 3. A same-NAME revision bump is allowed (supported re-embed migration).
+    let (status, body) = json_call(
+        app,
+        "POST",
+        &format!("/v1/admin/sources/{slug_b}/ingest-runs"),
+        Some(&token),
+        Some(json!({"ingest_cli_version": "test", "embedding_model": "voyage-context-3@2"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "same-name revision bump must be allowed: {body}");
 }

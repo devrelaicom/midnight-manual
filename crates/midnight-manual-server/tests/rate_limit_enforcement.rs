@@ -260,6 +260,76 @@ async fn cidr_override_raises_the_limit() {
 }
 
 #[tokio::test]
+async fn invalid_bearer_flood_is_charged() {
+    // Issue #176 L14: a present-but-invalid bearer used to 401 BEFORE the rate
+    // limiter ran, so a `Bearer garbage` flood was never charged. Now the bearer
+    // layer defers and the limiter charges the request first. With an anon floor
+    // of 2, the first two invalid-bearer requests are charged (and 401), and the
+    // third is throttled (429) — proving the flood is now rate-limited.
+    let h = common::boot().await;
+    let kp = Keypair::generate();
+    let user = format!("admin-{}", Uuid::new_v4().simple());
+    let cfg = enabled_auth_cfg(2, admin_user_store(&user, &kp));
+    let limiter = RateLimiter::from_config(&cfg);
+    let token_limiter = TokenUsageLimiter::from_config(&cfg);
+    let app = app::build_with_limiter(
+        h.pool.clone(),
+        cfg,
+        limiter,
+        std::sync::Arc::new(std::sync::RwLock::new(None)),
+        token_limiter,
+        None,
+        None,
+        std::sync::Arc::new(std::sync::RwLock::new(None)),
+    )
+    .expect("build");
+    let ip = unique_ip();
+    let (s1, _, b1) = send(app.clone(), "GET", "/v1/sources", &ip, Some("garbage")).await;
+    let (s2, _, _) = send(app.clone(), "GET", "/v1/sources", &ip, Some("garbage")).await;
+    let (s3, headers, b3) = send(app, "GET", "/v1/sources", &ip, Some("garbage")).await;
+    assert_eq!(s1, StatusCode::UNAUTHORIZED, "invalid bearer → 401: {b1}");
+    assert_eq!(b1["error"]["code"], "unauthorized");
+    assert_eq!(s2, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        s3,
+        StatusCode::TOO_MANY_REQUESTS,
+        "invalid-bearer flood must be throttled: {b3}"
+    );
+    assert!(headers.contains_key("retry-after"), "retry-after present on the 429");
+    assert_eq!(b3["error"]["code"], "rate_limited");
+}
+
+#[tokio::test]
+async fn invalid_bearer_401s_even_when_rate_limiting_disabled() {
+    // With rate limiting OFF (the default), the deferred bearer rejection must
+    // still produce a 401 rather than being served as an anonymous read.
+    let h = common::boot().await;
+    let kp = Keypair::generate();
+    let user = format!("admin-{}", Uuid::new_v4().simple());
+    let cfg = ServerConfig {
+        user_store_body: Some(admin_user_store(&user, &kp)),
+        jwt_secret: Some(vec![7u8; 32]),
+        ..Default::default()
+    };
+    let limiter = RateLimiter::from_config(&cfg); // None — disabled
+    let token_limiter = TokenUsageLimiter::from_config(&cfg);
+    let app = app::build_with_limiter(
+        h.pool.clone(),
+        cfg,
+        limiter,
+        std::sync::Arc::new(std::sync::RwLock::new(None)),
+        token_limiter,
+        None,
+        None,
+        std::sync::Arc::new(std::sync::RwLock::new(None)),
+    )
+    .expect("build");
+    let (s, _, b) = send(app, "GET", "/v1/sources", &unique_ip(), Some("garbage")).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED, "{b}");
+    assert_eq!(b["error"]["code"], "unauthorized");
+}
+
+#[tokio::test]
 async fn admin_token_gets_the_top_tier() {
     let h = common::boot().await;
     let kp = Keypair::generate();

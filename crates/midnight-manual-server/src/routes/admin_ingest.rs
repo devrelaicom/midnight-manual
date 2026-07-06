@@ -72,8 +72,12 @@ pub fn router() -> Router<AppState> {
 pub struct StartIngestRunRequest {
     /// CLI version that produced the run (FR-019 reproducibility).
     pub ingest_cli_version: String,
-    /// Embedding model wire id (`name@revision`). MUST match the corpus's
-    /// active model; otherwise the request 409s with `embedding_model_mismatch`.
+    /// Embedding model wire id (`name@revision`). Its model NAME must match the
+    /// corpus's active model; otherwise the request 409s with
+    /// `embedding_model_mismatch`. The check is by name only, NOT the full
+    /// `name@revision`: a same-name revision bump (e.g. `voyage-context-3@1` →
+    /// `@2`) is a supported per-source re-embed migration and is accepted, and a
+    /// bootstrapping first ingest (no active corpus yet) is unconstrained.
     pub embedding_model: String,
     /// Code-embedding model wire id for this run's code vectors. Omit/null ⇔
     /// code embeddings disabled for this version (D9 opt-out).
@@ -311,6 +315,41 @@ async fn start_ingest_run(
         }
     };
 
+    // Enforce the documented active-model contract (issue #176 L16): the run's
+    // general model MUST match the corpus's active model. `get_by_name_revision`
+    // above only proves the model is *registered*; a registered-but-wrong model
+    // (e.g. the code model used as the general model) would otherwise pass, and
+    // finalize would promote a source embedded in a different vector space,
+    // breaking cross-source similarity for that source.
+    //
+    // We compare by model NAME, not full identity, so a same-name revision bump
+    // stays allowed — that is a supported per-source re-embed migration (see the
+    // `model_change_forces_full_reembed` E2E). A whole-corpus migration to a new
+    // model name deactivates every source_version first, so
+    // `get_active_corpus_model` returns `None` and the new model is permitted;
+    // likewise the bootstrapping first ingest (no active corpus yet).
+    match embedding_model::get_active_corpus_model(&state.pool).await {
+        Ok(Some(active)) if active.name != model.name => {
+            return error::into_response(
+                CoreError::builder(ErrorCode::EmbeddingModelMismatch)
+                    .message(format!(
+                        "embedding model `{}` does not match the corpus's active model `{}@{}`",
+                        req.embedding_model, active.name, active.revision
+                    ))
+                    .remediation(
+                        "start the run with the corpus's active model (see `mnm models active`)",
+                    )
+                    .build(),
+                rid,
+            );
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!(request_id = rid, op = "start_ingest_run", error = %e, "active corpus model lookup failed");
+            return error::service_unavailable("active corpus model lookup failed", rid);
+        }
+    }
+
     // Resolve the optional code-embedding model the same way (D1/D9): absent ⇔
     // code embeddings disabled for this version.
     let code_model_id =
@@ -475,32 +514,17 @@ async fn upload_documents(
     // unit-tested). Only the run-model lookup needs the DB; we gate on
     // `has_embeddings` so text-only batches skip the lookup entirely.
     //
-    // The expected dimension is the corpus model's dim (resolved into AppState,
-    // re-resolved after each ingest finalize) — NOT a hardcoded literal. Voyage
-    // vectors are 1024-dim; a hardcoded 768 would 400 every valid upload. If the
-    // corpus model is unresolved we 503, matching how /v1/search behaves with no
-    // resolved model rather than guessing a dimension.
+    // BOTH the declared-model identity AND the expected dimension key off the
+    // RUN's model (issue #176 L16), not the AppState corpus snapshot: the run
+    // model is the authoritative dimension for the vectors this run will store,
+    // and `start_ingest_run` has already enforced that the run's general model
+    // agrees with the corpus's active model. Keying the dim off the run model
+    // also means we no longer depend on the corpus model being resolved.
     let has_embeddings = req
         .documents
         .iter()
         .any(|d| d.chunks.iter().any(|c| c.embedding.is_some()));
     if has_embeddings {
-        let expected_dim = {
-            let snapshot = state
-                .corpus_model
-                .read()
-                .expect("corpus_model lock poisoned")
-                .clone();
-            match snapshot {
-                Some(cm) => cm.dim,
-                None => {
-                    return error::service_unavailable(
-                        "server has no resolved corpus_model; cannot validate embedding dimension",
-                        rid,
-                    );
-                }
-            }
-        };
         let run_model = match embedding_model::get_by_id(&state.pool, sv.embedding_model_id).await {
             Ok(m) => m,
             Err(e) => {
@@ -508,6 +532,7 @@ async fn upload_documents(
                 return error::service_unavailable("run model lookup failed", rid);
             }
         };
+        let expected_dim = usize::try_from(run_model.dim).unwrap_or(0);
         let expected = format!("{}@{}", run_model.name, run_model.revision);
         if let Err(e) = check_embedded_batch(
             &req.documents,
