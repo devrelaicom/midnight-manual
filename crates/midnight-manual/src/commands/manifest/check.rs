@@ -38,7 +38,8 @@ enum IssueKind {
     DuplicateFile,
     /// A `file:` reference does not exist on disk under the base.
     MissingFile,
-    /// A resolved leaf has no matching sitemap URL (advisory; needs `--sitemap`).
+    /// A resolved leaf has no matching sitemap URL. Advisory by default; a
+    /// blocking issue under `--strict`. Needs `--sitemap` to be evaluated.
     UnmatchedUrl,
 }
 
@@ -47,10 +48,11 @@ enum IssueKind {
 struct Issue {
     /// Which closed category this issue belongs to.
     kind: IssueKind,
-    /// `true` when this issue gates `ok` / the exit code. Blocking for
+    /// `true` when this issue gates `ok` / the exit code. Always blocking for
     /// `unsafe_path` / `duplicate_file` / `missing_file` / `parse_error`;
-    /// `false` for the advisory `unmatched_url`. This makes the contract
-    /// self-describing: `ok == !issues.any(|i| i.blocking)` and the fix-set is
+    /// `unmatched_url` is advisory (`false`) by default and blocking (`true`)
+    /// under `--strict`. This makes the contract self-describing:
+    /// `ok == !issues.any(|i| i.blocking)` and the fix-set is
     /// `issues.filter(|i| i.blocking)`.
     blocking: bool,
     /// The offending path (repo-relative file, or the manifest for `parse_error`).
@@ -102,10 +104,11 @@ struct CheckReport {
     /// when many manifests share the basename `hierarchy.yaml`).
     manifest: String,
     /// Every issue found. Blocking categories (`unsafe_path` / `duplicate_file`
-    /// / `missing_file`) plus the advisory `unmatched_url`; each carries a
-    /// `blocking` discriminator. Note: `unsafe_path` / `duplicate_file` are
-    /// reported first-match (`validate()` short-circuits, at most one per run);
-    /// `missing_file` / `unmatched_url` are exhaustive.
+    /// / `missing_file`) plus `unmatched_url` (advisory by default, blocking
+    /// under `--strict`); each carries a `blocking` discriminator. Note:
+    /// `unsafe_path` / `duplicate_file` are reported first-match (`validate()`
+    /// short-circuits, at most one per run); `missing_file` / `unmatched_url`
+    /// are exhaustive.
     issues: Vec<Issue>,
     /// Sitemap coverage, or `null` when `--sitemap` was not supplied (or its
     /// fetch failed under `--json`, which degrades to `null` rather than error).
@@ -160,16 +163,34 @@ pub async fn run(args: Args, json: bool) -> Result<()> {
         ));
     }
 
-    // The blocking count gates `ok` / the exit code, exactly as before. Advisory
-    // `unmatched_url` findings never flip it (they don't fail the non-JSON path).
-    let blocking = issues.len();
+    // Sitemap coverage: prints the human line (non-JSON) or returns a summary.
+    // In both paths it appends `unmatched_url` issues to `structured` when they
+    // matter — always under `--json`, and under `--strict` where each is marked
+    // blocking. No `--sitemap` → nothing to report.
+    let coverage =
+        sitemap_coverage(&manifest, &base, &args.sitemap, json, args.strict, &mut structured)
+            .await?;
 
-    // Sitemap coverage: prints the human line (non-JSON) or returns a summary and
-    // pushes `unmatched_url` issues (JSON). No `--sitemap` → nothing to report.
-    let coverage = sitemap_coverage(&manifest, &base, &args.sitemap, json, &mut structured).await?;
+    // The blocking count gates `ok` / the exit code. It is derived from
+    // `structured` (the single source of truth) so `--strict`-escalated
+    // `unmatched_url` findings are counted: previously `--strict` was declared
+    // but never read, so an unmatched-URL coverage gate silently passed. Without
+    // `--strict`, `unmatched_url` stays advisory and the count is unchanged.
+    let blocking = structured.iter().filter(|i| i.blocking).count();
 
     if json {
         return emit_json(&args.manifest, blocking, structured, coverage);
+    }
+
+    // Non-JSON: mirror any `--strict`-escalated `unmatched_url` findings into the
+    // human issue list so the coverage gate produces a non-zero exit AND names
+    // each offending leaf (parity with the `--json` path's blocking set).
+    if args.strict {
+        for i in &structured {
+            if i.kind == IssueKind::UnmatchedUrl {
+                issues.push(format!("unmatched url: {} ({})", i.path, i.detail));
+            }
+        }
     }
 
     if issues.is_empty() {
@@ -183,13 +204,20 @@ pub async fn run(args: Args, json: bool) -> Result<()> {
 }
 
 /// Resolve the manifest, compute sitemap coverage, and either print the legacy
-/// human coverage line (non-JSON) or append `unmatched_url` issues and return a
-/// [`SitemapCoverage`] (JSON). Returns `None` when `--sitemap` was not supplied.
+/// human coverage line (non-JSON) or return a [`SitemapCoverage`] (JSON).
+///
+/// Appends an `unmatched_url` [`Issue`] to `structured` for every leaf with no
+/// sitemap match whenever `json || strict`. The issue is **blocking** when
+/// `strict` is set (so `--strict` escalates the coverage gate to a non-zero
+/// exit) and **advisory** otherwise (preserving the default JSON contract).
+///
+/// Returns `None` when `--sitemap` was not supplied.
 async fn sitemap_coverage(
     manifest: &Manifest,
     base: &Path,
     specs: &[String],
     json: bool,
+    strict: bool,
     structured: &mut Vec<Issue>,
 ) -> Result<Option<SitemapCoverage>> {
     if specs.is_empty() {
@@ -224,15 +252,20 @@ async fn sitemap_coverage(
             .is_some_and(|u| sitemap_urls.iter().any(|s| s.as_str() == u));
         if hit {
             matched += 1;
-        } else if json {
-            structured.push(Issue::advisory(
-                IssueKind::UnmatchedUrl,
-                leaf.rel_path.display().to_string(),
-                leaf.published_url.as_ref().map_or_else(
-                    || "leaf has no published_url".to_owned(),
-                    |u| format!("no sitemap match for {u}"),
-                ),
-            ));
+        } else if json || strict {
+            // Record the finding when it will be consumed: always under `--json`
+            // (for the report), and under `--strict` (to gate the exit, in both
+            // output modes). `--strict` makes it blocking; otherwise advisory.
+            let path = leaf.rel_path.display().to_string();
+            let detail = leaf.published_url.as_ref().map_or_else(
+                || "leaf has no published_url".to_owned(),
+                |u| format!("no sitemap match for {u}"),
+            );
+            structured.push(if strict {
+                Issue::blocking(IssueKind::UnmatchedUrl, path, detail)
+            } else {
+                Issue::advisory(IssueKind::UnmatchedUrl, path, detail)
+            });
         }
     }
 

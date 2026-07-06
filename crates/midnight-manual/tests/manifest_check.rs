@@ -363,6 +363,101 @@ fn json_sitemap_load_failure_degrades_to_null_but_non_json_errors() {
     assert!(!out.status.success(), "non-json path must still surface the load error");
 }
 
+// ---------------------------------------------------------------------------
+// `--strict`: an unmatched sitemap URL escalates from advisory to blocking
+// (issue #169 — the flag was declared but never read).
+// ---------------------------------------------------------------------------
+
+/// Write a valid single-leaf manifest whose `published_url` will NOT appear in
+/// the test sitemap, isolating `unmatched_url` as the only possible finding.
+fn write_unmatched_fixture(base: &Path) -> std::path::PathBuf {
+    std::fs::write(base.join("a.md"), "# A").unwrap();
+    let m_path = base.join("hierarchy.yaml");
+    std::fs::write(
+        &m_path,
+        "manifest_version: 1\nroot:\n  children:\n    - file: a.md\n      published_url: https://ex.com/a\n",
+    )
+    .unwrap();
+    let sm = base.join("sitemap.xml");
+    write_sitemap(&sm, "https://ex.com/other"); // deliberately does not match /a
+    m_path
+}
+
+#[test]
+fn json_without_strict_unmatched_url_is_advisory_and_passes() {
+    // Baseline: with a matching-free sitemap but no `--strict`, the unmatched
+    // leaf is advisory — `ok` stays true and the command exits 0.
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path();
+    let m_path = write_unmatched_fixture(base);
+    let sm = base.join("sitemap.xml");
+
+    let out = check(&[
+        m_path.as_os_str(),
+        os("--sitemap"),
+        sm.as_os_str(),
+        os("--json"),
+    ]);
+    assert!(out.status.success(), "advisory unmatched_url must not fail without --strict");
+    let v: Value = serde_json::from_slice(&out.stdout).expect("stdout is one JSON document");
+    assert_eq!(v["ok"], Value::Bool(true));
+    let unmatched = issue_of(&v, "unmatched_url");
+    assert_eq!(unmatched["blocking"], Value::Bool(false));
+    assert_eq!(v["sitemap_coverage"]["matched"], 0);
+    assert_eq!(v["sitemap_coverage"]["total"], 1);
+}
+
+#[test]
+fn json_strict_escalates_unmatched_url_to_blocking() {
+    // With `--strict`, the same unmatched leaf becomes blocking: `ok` flips to
+    // false and the process exits non-zero.
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path();
+    let m_path = write_unmatched_fixture(base);
+    let sm = base.join("sitemap.xml");
+
+    let out = check(&[
+        m_path.as_os_str(),
+        os("--sitemap"),
+        sm.as_os_str(),
+        os("--json"),
+        os("--strict"),
+    ]);
+    assert!(!out.status.success(), "--strict must fail on an unmatched sitemap URL");
+    let v: Value = serde_json::from_slice(&out.stdout).expect("stdout is one JSON document");
+    assert_eq!(v["ok"], Value::Bool(false));
+    let unmatched = issue_of(&v, "unmatched_url");
+    assert_eq!(unmatched["blocking"], Value::Bool(true), "--strict escalates unmatched_url");
+    assert_eq!(unmatched["path"], "a.md");
+}
+
+#[test]
+fn non_json_strict_fails_on_unmatched_url_but_passes_without() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path();
+    let m_path = write_unmatched_fixture(base);
+    let sm = base.join("sitemap.xml");
+
+    // Without `--strict`: the coverage line still prints and the command exits 0.
+    let out = check(&[m_path.as_os_str(), os("--sitemap"), sm.as_os_str()]);
+    assert!(out.status.success(), "no --strict -> unmatched URL is advisory, exit 0");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("sitemap coverage: 0/1"), "stderr was: {stderr}");
+
+    // With `--strict`: exit non-zero and the offending leaf is named on stderr.
+    let out = check(&[
+        m_path.as_os_str(),
+        os("--sitemap"),
+        sm.as_os_str(),
+        os("--strict"),
+    ]);
+    assert!(!out.status.success(), "--strict must fail the human path too");
+    assert!(out.stdout.is_empty(), "human path must not write to stdout");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("sitemap coverage: 0/1"), "coverage line still prints: {stderr}");
+    assert!(stderr.contains("unmatched url: a.md"), "strict names the leaf: {stderr}");
+}
+
 #[test]
 fn help_lists_all_issue_kinds() {
     // Lock the documented closed vocabulary against drift (contract-test style).
