@@ -16,12 +16,15 @@
 
 use std::path::{Path, PathBuf};
 
+use mnm_core::types::DocumentKind;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use time::OffsetDateTime;
 
 use crate::chunk::{DEFAULT_MAX_FILE_BYTES, DEFAULT_MAX_LINE_BYTES};
-use crate::frontmatter::{split as split_frontmatter, FrontmatterSplit};
+use crate::frontmatter::{
+    passthrough as passthrough_frontmatter, split as split_frontmatter, FrontmatterSplit,
+};
 use crate::manifest::resolve::FilterRunOptions;
 use crate::manifest::Manifest;
 
@@ -257,7 +260,17 @@ pub fn walk(
             });
             continue;
         };
-        let split = split_frontmatter(&content);
+        // Frontmatter extraction is a Markdown-only convention (FR-017). Running
+        // it on YAML/code files silently swallows a leading `---`-delimited block
+        // into the frontmatter column instead of the searchable body — routine
+        // content loss on multi-document or `---`-prefixed YAML (issue #161). Gate
+        // the split on the resolved `DocumentKind` and pass every other kind
+        // through verbatim.
+        let split = if leaf.kind == DocumentKind::Markdown {
+            split_frontmatter(&content)
+        } else {
+            passthrough_frontmatter(&content)
+        };
         let modified = meta.modified().ok().map(OffsetDateTime::from);
         documents.push(WalkedDocument {
             rel_path: leaf.rel_path.clone(),
@@ -390,6 +403,62 @@ mod tests {
         assert!(docs[0].split.provenance.verified);
         assert!(docs[0].split.frontmatter.is_some());
         assert_eq!(docs[0].split.body, "# Title\n\nBody.\n");
+    }
+
+    #[test]
+    fn multi_document_yaml_keeps_both_documents_in_body() {
+        // A two-document YAML manifest (the common Kubernetes/CI case). The
+        // leading `Deployment` doc must NOT be swallowed into frontmatter — both
+        // documents have to survive into the chunked body (issue #161). `.yaml`
+        // resolves to DocumentKind::Code, so frontmatter extraction is skipped.
+        let dir = tempdir();
+        let yaml =
+            "---\napiVersion: apps/v1\nkind: Deployment\n---\napiVersion: v1\nkind: Service\n";
+        write_file(dir.path(), "manifests.yaml", yaml);
+        let manifest = Manifest::parse(&manifest_yaml(&["manifests.yaml"])).unwrap();
+        let walker = Walker::new(manifest, dir.path().to_path_buf());
+        let outcome = walker.walk().unwrap();
+        assert!(outcome.skipped.is_empty());
+        let doc = &outcome.documents[0];
+        assert_eq!(doc.resolved.kind, DocumentKind::Code);
+        // Nothing was diverted into the frontmatter JSONB column.
+        assert!(doc.split.frontmatter.is_none());
+        // The entire file (both documents) is the searchable body.
+        assert_eq!(doc.split.body, yaml);
+        assert!(doc.split.body.contains("kind: Deployment"));
+        assert!(doc.split.body.contains("kind: Service"));
+    }
+
+    #[test]
+    fn single_fenced_yaml_body_is_not_emptied() {
+        // A single `---`-fenced YAML file: `split` would strip it to an empty
+        // body, dropping the whole file as EmptyNoChunks. Passthrough keeps the
+        // content so it still has a searchable body (issue #161).
+        let dir = tempdir();
+        write_file(dir.path(), "config.yml", "---\nfoo: bar\n---\n");
+        let manifest = Manifest::parse(&manifest_yaml(&["config.yml"])).unwrap();
+        let walker = Walker::new(manifest, dir.path().to_path_buf());
+        let outcome = walker.walk().unwrap();
+        let doc = &outcome.documents[0];
+        assert_eq!(doc.resolved.kind, DocumentKind::Code);
+        assert!(doc.split.frontmatter.is_none());
+        assert_eq!(doc.split.body, "---\nfoo: bar\n---\n");
+        assert!(!doc.split.body.is_empty());
+    }
+
+    #[test]
+    fn markdown_frontmatter_is_still_extracted_after_gating() {
+        // The Markdown path is unchanged: a `.md` file's frontmatter is still
+        // parsed into provenance and the JSONB column, with the body stripped.
+        let dir = tempdir();
+        write_file(dir.path(), "doc.md", "---\nverified: true\n---\n# Title\n\nBody.\n");
+        let manifest = Manifest::parse(&manifest_yaml(&["doc.md"])).unwrap();
+        let walker = Walker::new(manifest, dir.path().to_path_buf());
+        let doc = &walker.walk().unwrap().documents[0];
+        assert_eq!(doc.resolved.kind, DocumentKind::Markdown);
+        assert!(doc.split.frontmatter.is_some());
+        assert!(doc.split.provenance.verified);
+        assert_eq!(doc.split.body, "# Title\n\nBody.\n");
     }
 
     #[test]
