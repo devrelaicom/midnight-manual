@@ -18,9 +18,11 @@
 //!
 //! 4. The CLI's local listener captures those query params, **rejects any
 //!    callback whose `state` doesn't equal the nonce it generated** (so a
-//!    co-resident process that races the ephemeral port can't fixate an
-//!    attacker-chosen token), persists the token to `auth.toml[read_uplift]`,
-//!    prints a status line, and exits.
+//!    *blind* local racer — one that must guess or race the ephemeral port
+//!    without knowing the nonce — can't fixate an attacker-chosen token; this
+//!    does NOT stop an attacker who can read the nonce from the process's argv,
+//!    see the `github` browser-open step for that caveat), persists the token
+//!    to `auth.toml[read_uplift]`, prints a status line, and exits.
 //!
 //! ## `mnm auth status`
 //!
@@ -292,8 +294,15 @@ async fn github(
 
     // Generate a CSRF nonce and bind the callback to it (issue #177). The
     // server round-trips this as `state=<nonce>` in the loopback redirect; the
-    // listener rejects any callback whose `state` doesn't match, so a
-    // co-resident process racing the ephemeral port can't inject its own token.
+    // listener rejects any callback whose `state` doesn't match. Scope: this
+    // defeats a *blind* local racer — an attacker who must guess/race the
+    // ephemeral port without knowing the nonce. It is NOT a defense against a
+    // co-resident process that can read this process's argv: the nonce is
+    // passed as a literal argument to the browser opener below (and printed to
+    // stdout in the `--no-browser` / open-failure paths), so anything that can
+    // read `ps` or `/proc/<pid>/cmdline` can read it directly and forge a
+    // matching callback. Closing that gap needs a PKCE-style challenge or a
+    // file/pipe handoff instead of argv — tracked as a follow-up.
     // `cli_state` is base64url, so it needs no URL-escaping in the query.
     let cli_state = mnm_auth::generate_cli_nonce();
     let authorize_url =
@@ -376,9 +385,12 @@ async fn github(
 ///
 /// Callbacks with a missing or mismatched `state` are rejected (issue #177):
 /// the listener answers `403` and keeps waiting for the real browser redirect,
-/// so a co-resident process that races the ephemeral port without knowing the
-/// CLI's nonce cannot fixate an attacker-chosen token. Non-`/oauth` paths
-/// (favicon / health probes) get a `404` and are likewise ignored.
+/// so a *blind* local racer — one that must guess or race the ephemeral port
+/// without knowing the CLI's nonce — cannot fixate an attacker-chosen token.
+/// (This does not stop a co-resident process that can read the nonce from the
+/// `mnm` process's argv; the nonce is handed to the browser opener on a command
+/// line.) Non-`/oauth` paths (favicon / health probes) get a `404` and are
+/// likewise ignored.
 pub async fn run_with_paths(
     listener: &TokioTcpListener,
     deadline: Duration,

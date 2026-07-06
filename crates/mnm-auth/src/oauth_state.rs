@@ -72,8 +72,11 @@ pub const MAX_CLI_STATE_LEN: usize = 128;
 /// CLI sends this as `cli_state` on `GET /v1/auth/github/start`; the server
 /// round-trips it into the `http://127.0.0.1:<port>/oauth?…&state=<nonce>`
 /// redirect; and the CLI rejects any loopback callback whose `state` doesn't
-/// match. A co-resident process that races the ephemeral port without knowing
-/// the nonce therefore cannot fixate an attacker-chosen token.
+/// match. Scope: this defeats a *blind* local racer — one that must guess or
+/// race the ephemeral port without knowing the nonce. It does NOT defend
+/// against an attacker who can read the nonce from the `mnm` process's argv or
+/// stdout (the CLI passes it to the browser opener as a command-line argument);
+/// closing that gap needs a PKCE-style or file/pipe handoff.
 #[must_use]
 pub fn generate_cli_nonce() -> String {
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
