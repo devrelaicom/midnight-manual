@@ -535,4 +535,22 @@ expires_at = "2026-05-13T15:30:00Z"
         let loaded = AuthFile::read_optional(&path).unwrap().unwrap();
         assert!(loaded.admin.is_some());
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_recovers_from_stale_tmp() {
+        // A crashed prior run can leave a regular-file tmp behind; the write must
+        // still succeed (best-effort unlink) rather than fail on O_EXCL.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.toml");
+        let tmp = path.with_extension("toml.tmp");
+        std::fs::write(&tmp, b"stale").unwrap();
+        AuthFile::write_admin_token(&path, "aaron", "jwt", rfc("2026-05-14T01:30:00Z")).unwrap();
+        assert!(AuthFile::read_optional(&path)
+            .unwrap()
+            .unwrap()
+            .admin
+            .is_some());
+        assert!(!tmp.exists(), "tmp must be consumed by the rename");
+    }
 }
