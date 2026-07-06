@@ -245,11 +245,15 @@ pub async fn run() -> Result<()> {
 
     let result = match cli.cmd {
         Command::Version => commands::version::run(cli.json),
-        Command::Doctor(args) => commands::doctor::run(args, cli.json).await,
+        Command::Doctor(args) => {
+            commands::doctor::run(args, cli.server.as_deref(), cli.config.as_deref(), cli.json)
+                .await
+        }
         Command::Status(args) => {
             commands::status::run(
                 args,
                 cli.server.as_deref(),
+                cli.config.as_deref(),
                 cli.voyage_api_key.as_deref(),
                 cli.json,
             )
@@ -266,12 +270,17 @@ pub async fn run() -> Result<()> {
             )
             .await
         }
-        Command::Facets(args) => commands::facets::run(args, cli.server.as_deref(), cli.json).await,
+        Command::Facets(args) => {
+            commands::facets::run(args, cli.server.as_deref(), cli.config.as_deref(), cli.json)
+                .await
+        }
         Command::Sources(args) => {
-            commands::sources::run(args, cli.server.as_deref(), cli.json).await
+            commands::sources::run(args, cli.server.as_deref(), cli.config.as_deref(), cli.json)
+                .await
         }
         Command::Versions(args) => {
-            commands::versions::run(args, cli.server.as_deref(), cli.json).await
+            commands::versions::run(args, cli.server.as_deref(), cli.config.as_deref(), cli.json)
+                .await
         }
         Command::Config(args) => {
             commands::config::run(
@@ -298,12 +307,18 @@ pub async fn run() -> Result<()> {
             )
             .await
         }
-        Command::Auth(args) => commands::auth::run(args, cli.server.as_deref(), cli.json).await,
+        Command::Auth(args) => {
+            commands::auth::run(args, cli.server.as_deref(), cli.config.as_deref(), cli.json).await
+        }
         Command::Telemetry(args) => commands::telemetry::run(&args, cli.json),
         Command::Keys(args) => commands::keys::run(args, cli.json),
-        Command::Login(args) => commands::login::run(args, cli.server.as_deref(), cli.json).await,
+        Command::Login(args) => {
+            commands::login::run(args, cli.server.as_deref(), cli.config.as_deref(), cli.json).await
+        }
         Command::Users(args) => commands::users::run(args, cli.json),
-        Command::Admin(args) => commands::admin::run(args, cli.server.as_deref(), cli.json).await,
+        Command::Admin(args) => {
+            commands::admin::run(args, cli.server.as_deref(), cli.config.as_deref(), cli.json).await
+        }
         Command::Ingest(args) => {
             commands::ingest::run(
                 args,
@@ -316,15 +331,21 @@ pub async fn run() -> Result<()> {
             .await
         }
         Command::Ratelimits(args) => {
-            commands::ratelimits::run(args, cli.server.as_deref(), cli.json).await
+            commands::ratelimits::run(args, cli.server.as_deref(), cli.config.as_deref(), cli.json)
+                .await
         }
         Command::Tokenlimits(args) => {
-            commands::tokenlimits::run(args, cli.server.as_deref(), cli.json).await
+            commands::tokenlimits::run(args, cli.server.as_deref(), cli.config.as_deref(), cli.json)
+                .await
         }
         Command::Manifest(args) => commands::manifest::run(args, cli.json).await,
-        Command::Chunks(args) => commands::chunks::run(args, cli.server.as_deref(), cli.json).await,
+        Command::Chunks(args) => {
+            commands::chunks::run(args, cli.server.as_deref(), cli.config.as_deref(), cli.json)
+                .await
+        }
         Command::Documents(args) => {
-            commands::documents::run(args, cli.server.as_deref(), cli.json).await
+            commands::documents::run(args, cli.server.as_deref(), cli.config.as_deref(), cli.json)
+                .await
         }
         Command::Skills(args) => commands::skills::run(args, cli.json),
     };

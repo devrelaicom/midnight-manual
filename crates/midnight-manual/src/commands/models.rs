@@ -105,8 +105,8 @@ pub async fn run(
 ) -> Result<()> {
     match args.cmd {
         ModelsCmd::Pull(p) => run_pull(p, config_path, telemetry, json).await,
-        ModelsCmd::Active(_) => run_active(server_flag, json).await,
-        ModelsCmd::Status(_) => run_status(server_flag, json).await,
+        ModelsCmd::Active(_) => run_active(server_flag, config_path, json).await,
+        ModelsCmd::Status(_) => run_status(server_flag, config_path, json).await,
         ModelsCmd::Migrate(m) => {
             run_migrate(m, server_flag, config_path, voyage_api_key, telemetry, json).await
         }
@@ -142,15 +142,23 @@ async fn run_pull(
     Ok(())
 }
 
-async fn run_active(server_flag: Option<&str>, json: bool) -> Result<()> {
-    let server_url = crate::shared::resolve_server_url(server_flag);
+async fn run_active(
+    server_flag: Option<&str>,
+    config_path: Option<&Path>,
+    json: bool,
+) -> Result<()> {
+    let server_url = crate::shared::resolve_server_url(server_flag, config_path);
     let parsed = fetch_active(&server_url).await?;
     println!("{}", format_active_output(&parsed, json));
     Ok(())
 }
 
-async fn run_status(server_flag: Option<&str>, json: bool) -> Result<()> {
-    let server_url = crate::shared::resolve_server_url(server_flag);
+async fn run_status(
+    server_flag: Option<&str>,
+    config_path: Option<&Path>,
+    json: bool,
+) -> Result<()> {
+    let server_url = crate::shared::resolve_server_url(server_flag, config_path);
     // Determine the active wire id from the corpus.
     let active = fetch_active(&server_url).await?;
     let wire = format!("{}@{}", active.name, active.revision);
@@ -308,7 +316,7 @@ pub async fn run_migrate(
     telemetry: &Telemetry,
     json: bool,
 ) -> Result<()> {
-    let server_url = crate::shared::resolve_server_url(server_flag);
+    let server_url = crate::shared::resolve_server_url(server_flag, config_path);
 
     // Resolve the TARGET wire id: explicit --to, else the corpus active model.
     let target_wire = if let Some(to) = args.to.clone() {

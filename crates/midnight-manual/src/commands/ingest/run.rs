@@ -228,7 +228,7 @@ pub async fn run(
     telemetry: &mnm_telemetry::Telemetry,
     json: bool,
 ) -> Result<()> {
-    let server_url = crate::shared::resolve_server_url(server_flag);
+    let server_url = crate::shared::resolve_server_url(server_flag, config_path);
     let env = mnm_core::config::StdEnv;
     let auth_path = mnm_core::paths::auth_file_path(&env)
         .ok_or_else(|| anyhow!("could not resolve auth.toml path (set XDG_CONFIG_HOME or HOME)"))?;

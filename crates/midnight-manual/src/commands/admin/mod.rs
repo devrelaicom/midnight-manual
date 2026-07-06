@@ -32,8 +32,13 @@ pub enum AdminCmd {
 ///
 /// Returns an error on network failure, non-2xx responses, argument-parse
 /// failures, or when no admin bearer can be resolved from `auth.toml`.
-pub async fn run(args: Args, server: Option<&str>, json: bool) -> Result<()> {
+pub async fn run(
+    args: Args,
+    server: Option<&str>,
+    config: Option<&std::path::Path>,
+    json: bool,
+) -> Result<()> {
     match args.cmd {
-        AdminCmd::Injection(a) => injection::run(a, server, json).await,
+        AdminCmd::Injection(a) => injection::run(a, server, config, json).await,
     }
 }

@@ -24,10 +24,15 @@ pub enum DocumentsCmd {
 }
 
 /// Dispatcher for documents namespace.
-pub async fn run(args: Args, server: Option<&str>, json: bool) -> Result<()> {
+pub async fn run(
+    args: Args,
+    server: Option<&str>,
+    config: Option<&std::path::Path>,
+    json: bool,
+) -> Result<()> {
     match args.cmd {
-        DocumentsCmd::Show(a) => show::run(a, server, json).await,
-        DocumentsCmd::Chunks(a) => chunks::run(a, server, json).await,
+        DocumentsCmd::Show(a) => show::run(a, server, config, json).await,
+        DocumentsCmd::Chunks(a) => chunks::run(a, server, config, json).await,
     }
 }
 

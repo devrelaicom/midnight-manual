@@ -12,8 +12,13 @@ pub struct Args {
 }
 
 /// Run the `documents show` subcommand.
-pub async fn run(args: Args, server: Option<&str>, json: bool) -> Result<()> {
-    let server_url = crate::shared::resolve_server_url(server);
+pub async fn run(
+    args: Args,
+    server: Option<&str>,
+    config: Option<&std::path::Path>,
+    json: bool,
+) -> Result<()> {
+    let server_url = crate::shared::resolve_server_url(server, config);
     let url = format!("{server_url}/v1/documents/{}", args.document_id);
     let body = super::fetch(&url).await?;
     if json {

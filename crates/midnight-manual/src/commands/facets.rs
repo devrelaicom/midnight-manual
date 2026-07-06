@@ -18,8 +18,13 @@ pub struct Args {}
 ///
 /// Returns an error on network failure, a non-2xx response, or a body that
 /// does not parse as JSON.
-pub async fn run(_args: Args, server: Option<&str>, json: bool) -> Result<()> {
-    let server_url = crate::shared::resolve_server_url(server);
+pub async fn run(
+    _args: Args,
+    server: Option<&str>,
+    config: Option<&std::path::Path>,
+    json: bool,
+) -> Result<()> {
+    let server_url = crate::shared::resolve_server_url(server, config);
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()

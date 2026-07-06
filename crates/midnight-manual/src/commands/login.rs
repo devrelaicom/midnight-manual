@@ -50,7 +50,12 @@ pub struct Args {
 /// Returns an error when the local keypair cannot be loaded, when the
 /// challenge / verify HTTP round-trip fails, or when the token cannot be
 /// persisted to `auth.toml`.
-pub async fn run(args: Args, server_flag: Option<&str>, json: bool) -> Result<()> {
+pub async fn run(
+    args: Args,
+    server_flag: Option<&str>,
+    config: Option<&std::path::Path>,
+    json: bool,
+) -> Result<()> {
     if args.user_id.trim().is_empty() {
         return Err(anyhow!("--user-id must be non-empty"));
     }
@@ -64,7 +69,7 @@ pub async fn run(args: Args, server_flag: Option<&str>, json: bool) -> Result<()
     let auth_path = mnm_core::paths::auth_file_path(&env)
         .ok_or_else(|| anyhow!("could not resolve auth.toml path (set XDG_CONFIG_HOME or HOME)"))?;
 
-    let server_url = crate::shared::resolve_server_url(server_flag);
+    let server_url = crate::shared::resolve_server_url(server_flag, config);
 
     run_with_paths(&args.user_id, &private_path, &auth_path, &server_url, args.dry_run, json).await
 }

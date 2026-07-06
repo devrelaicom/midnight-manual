@@ -1,5 +1,7 @@
 //! `mnm chunks <subcommand>` dispatcher.
 
+use std::path::Path;
+
 use anyhow::{Context as _, Result};
 use clap::{Args as ClapArgs, Subcommand};
 
@@ -30,12 +32,17 @@ pub enum ChunksCmd {
 }
 
 /// Dispatcher for chunks namespace.
-pub async fn run(args: Args, server: Option<&str>, json: bool) -> Result<()> {
+pub async fn run(
+    args: Args,
+    server: Option<&str>,
+    config: Option<&Path>,
+    json: bool,
+) -> Result<()> {
     match args.cmd {
-        ChunksCmd::Show(a) => show::run(a, server, json).await,
-        ChunksCmd::Next(a) => next::run(a, server, json).await,
-        ChunksCmd::Prev(a) => prev::run(a, server, json).await,
-        ChunksCmd::Neighbors(a) => neighbors::run(a, server, json).await,
+        ChunksCmd::Show(a) => show::run(a, server, config, json).await,
+        ChunksCmd::Next(a) => next::run(a, server, config, json).await,
+        ChunksCmd::Prev(a) => prev::run(a, server, config, json).await,
+        ChunksCmd::Neighbors(a) => neighbors::run(a, server, config, json).await,
     }
 }
 
@@ -44,10 +51,11 @@ pub async fn run(args: Args, server: Option<&str>, json: bool) -> Result<()> {
 pub(super) async fn run_chunk_list(
     args: next::Args,
     server: Option<&str>,
+    config: Option<&Path>,
     json: bool,
     dir: &str,
 ) -> Result<()> {
-    let server_url = crate::shared::resolve_server_url(server);
+    let server_url = crate::shared::resolve_server_url(server, config);
     let url = format!("{server_url}/v1/chunks/{}/{}?count={}", args.chunk_id, dir, args.count);
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
