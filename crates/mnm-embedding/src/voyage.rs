@@ -106,6 +106,33 @@ impl VoyageError {
     }
 }
 
+/// Verify that a response's per-item `index` values form an exact
+/// `0..len` permutation.
+///
+/// [`VoyageEmbedder::embed`] and
+/// [`ContextualizedVoyageEmbedder::embed_groups`](crate::contextualized::ContextualizedVoyageEmbedder::embed_groups)
+/// restore input order by sorting on `index` and then mapping positionally.
+/// That is only sound when the returned indices are exactly `{0..len-1}`: a
+/// response with the right *count* but a duplicated or out-of-range `index`
+/// (e.g. `[0, 0, 2]` for `len == 3`) sorts to a misaligned mapping, silently
+/// handing one input another's vector while dropping a third. Callers sort
+/// first, then pass the sorted indices here — after a stable sort a valid
+/// permutation has `index == position` at every slot.
+pub(crate) fn verify_index_permutation(
+    sorted_indices: impl IntoIterator<Item = usize>,
+    what: &str,
+) -> Result<(), VoyageError> {
+    for (position, index) in sorted_indices.into_iter().enumerate() {
+        if index != position {
+            return Err(VoyageError::Decode(format!(
+                "{what}: response `index` values are not a 0..n permutation \
+                 (position {position} maps to index {index})"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Output from a successful embedding call.
 #[derive(Debug, Clone)]
 pub struct EmbedOutput {
@@ -236,8 +263,13 @@ impl VoyageEmbedder {
         }
 
         // Voyage may return data items out of order; sort by index to restore
-        // the original input ordering before returning.
+        // the original input ordering before returning. The count check above
+        // guarantees length n, so after the sort a valid response has
+        // `index == position` at every slot — verify the permutation before
+        // mapping so a duplicated/out-of-range index can't silently misalign
+        // vectors (issue #175).
         parsed.data.sort_by_key(|d| d.index);
+        verify_index_permutation(parsed.data.iter().map(|d| d.index), "embeddings")?;
 
         Ok(EmbedOutput {
             vectors: parsed.data.into_iter().map(|d| d.embedding).collect(),
@@ -359,5 +391,67 @@ impl VoyageReranker {
                 .collect(),
             total_tokens: parsed.usage.total_tokens,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// A valid response whose `data` items are deliberately OUT of order pins
+    /// the index-based reordering: index 1 first, index 0 second.
+    #[tokio::test]
+    async fn embed_restores_order_from_out_of_order_response() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/embeddings"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [
+                    { "object": "embedding", "index": 1, "embedding": [2.0, 2.0] },
+                    { "object": "embedding", "index": 0, "embedding": [1.0, 1.0] },
+                ],
+                "model": "voyage-code-3",
+                "usage": { "total_tokens": 7 },
+            })))
+            .mount(&server)
+            .await;
+
+        let e = VoyageEmbedder::new("k", "voyage-code-3", 2, "float").with_base_url(&server.uri());
+        let out = e
+            .embed(vec!["a".into(), "b".into()], InputType::Document)
+            .await
+            .unwrap();
+        assert_eq!(out.vectors, vec![vec![1.0, 1.0], vec![2.0, 2.0]]);
+        assert_eq!(out.total_tokens, 7);
+    }
+
+    /// A response with the correct *count* but a duplicated `index`
+    /// (`[0, 0, 2]` for n=3) must be rejected as a decode error rather than
+    /// silently misaligning the returned vectors (issue #175).
+    #[tokio::test]
+    async fn embed_rejects_non_permutation_index() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/embeddings"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [
+                    { "object": "embedding", "index": 0, "embedding": [1.0, 1.0] },
+                    { "object": "embedding", "index": 0, "embedding": [9.0, 9.0] },
+                    { "object": "embedding", "index": 2, "embedding": [2.0, 2.0] },
+                ],
+                "model": "voyage-code-3",
+                "usage": { "total_tokens": 9 },
+            })))
+            .mount(&server)
+            .await;
+
+        let e = VoyageEmbedder::new("k", "voyage-code-3", 2, "float").with_base_url(&server.uri());
+        let err = e
+            .embed(vec!["a".into(), "b".into(), "c".into()], InputType::Document)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, VoyageError::Decode(_)), "got {err:?}");
     }
 }

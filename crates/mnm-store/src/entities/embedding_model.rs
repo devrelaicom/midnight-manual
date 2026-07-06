@@ -4,7 +4,7 @@ use mnm_core::types::EmbeddingModel;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::error::Result;
+use crate::error::{Result, StoreError};
 
 /// Look up an embedding_model row by `name` + `revision`.
 ///
@@ -96,13 +96,22 @@ pub async fn get_by_id(pool: &PgPool, id: Uuid) -> Result<EmbeddingModel> {
     Ok(row.into())
 }
 
-/// Insert an embedding_model row, returning the newly-minted id. Idempotent
-/// on (name, revision): an existing row returns its existing id.
+/// Insert an embedding_model row, returning the newly-minted id.
+///
+/// Idempotent on `(name, revision)`: an existing row returns its existing id,
+/// but **only when the incoming `dim` and `provider` match the stored row**.
+///
+/// `(name, revision)` is the model's identity, yet `dim`/`provider` are part of
+/// its contract: silently returning a stored row whose `dim` differs from the
+/// argument would only surface as a failure later, at pgvector insert time. So
+/// a divergence is rejected up front rather than swallowed (issue #175).
 ///
 /// # Errors
 ///
-/// Returns [`crate::error::StoreError::CheckViolation`] if `dim` or `revision` violate the
-/// table's CHECK constraints (revision >= 1, 64 <= dim <= 4096).
+/// Returns [`crate::error::StoreError::CheckViolation`] if `dim` or `revision`
+/// violate the table's CHECK constraints (revision >= 1, 64 <= dim <= 4096), or
+/// if an existing `(name, revision)` row's `dim`/`provider` differs from the
+/// arguments.
 pub async fn upsert(
     pool: &PgPool,
     name: &str,
@@ -110,10 +119,16 @@ pub async fn upsert(
     dim: i32,
     provider: &str,
 ) -> Result<Uuid> {
-    let row: (Uuid,) = sqlx::query_as(
+    // `DO UPDATE SET name = EXCLUDED.name` is a no-op that exists only so
+    // `RETURNING` fires on conflict; crucially it leaves `dim`/`provider` at
+    // their stored values. So the RETURNING'd `dim`/`provider` are the existing
+    // row's on a conflict and the just-inserted ones on a fresh insert —
+    // comparing them to the arguments detects a silent divergence for an
+    // existing identity.
+    let (id, stored_dim, stored_provider): (Uuid, i32, String) = sqlx::query_as(
         "INSERT INTO embedding_model (name, revision, dim, provider) VALUES ($1, $2, $3, $4) \
          ON CONFLICT (name, revision) DO UPDATE SET name = EXCLUDED.name \
-         RETURNING id",
+         RETURNING id, dim, provider",
     )
     .bind(name)
     .bind(revision)
@@ -121,7 +136,14 @@ pub async fn upsert(
     .bind(provider)
     .fetch_one(pool)
     .await?;
-    Ok(row.0)
+    if stored_dim != dim || stored_provider != provider {
+        return Err(StoreError::CheckViolation(format!(
+            "embedding_model ({name}, revision {revision}) already exists with \
+             dim={stored_dim}/provider={stored_provider}; refusing to reuse it for \
+             dim={dim}/provider={provider}"
+        )));
+    }
+    Ok(id)
 }
 
 #[derive(sqlx::FromRow)]
