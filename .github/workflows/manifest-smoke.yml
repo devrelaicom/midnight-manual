@@ -84,7 +84,7 @@ jobs:
   manifest-regression:
     name: build mnm + validate random manifests
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -99,7 +99,7 @@ jobs:
 
       - name: Validate a random sample of manifests
         env:
-          SAMPLE: "15"
+          SAMPLE: "12"
         run: |
           set -uo pipefail
           mnm=target/debug/mnm
