@@ -34,13 +34,18 @@
 //! every known secret from the serialized event body — both its verbatim and its
 //! JSON-escaped form. Every outgoing structured log passes through
 //! [`scrub::scrub_log`], which applies the same value-redaction to the serialized
-//! log body/attributes. Note this covers secrets *configured at startup* (DSN, DB
-//! URL, API keys, signing secrets, the on-disk auth tokens); it cannot redact a
-//! credential *minted at runtime* (e.g. an OAuth token fetched mid-request) since
-//! that value is not known when the scrubber is built. Dropping breadcrumbs above
-//! is the primary defense for those. Redaction fails **closed**: if a secret is
-//! present but the scrubbed event or log cannot be re-serialized, the scrubber
-//! drops the payload rather than transmit the secret in cleartext.
+//! log body/attributes. Every outgoing metric passes through
+//! [`scrub::scrub_metric`], which first strips any attribute key outside
+//! [`scrub::METRIC_ATTR_ALLOWLIST`] (metric attributes are free-form key/value
+//! pairs, so this closed allow-list is the structural defense against a
+//! free-form-string leak) and then applies the same value-redaction. Note this
+//! covers secrets *configured at startup* (DSN, DB URL, API keys, signing
+//! secrets, the on-disk auth tokens); it cannot redact a credential *minted at
+//! runtime* (e.g. an OAuth token fetched mid-request) since that value is not
+//! known when the scrubber is built. Dropping breadcrumbs above is the primary
+//! defense for those. Redaction fails **closed**: if a secret is present but the
+//! scrubbed event, log, or metric cannot be re-serialized, the scrubber drops
+//! the payload rather than transmit the secret in cleartext.
 
 use std::sync::Arc;
 
@@ -177,9 +182,14 @@ pub fn init(
         .var(ENVIRONMENT_ENV)
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| opts.default_environment.to_owned());
-    // Cloned (not moved) here so `opts.secrets` is still available below for
-    // `before_send_log`'s own closure.
-    let secrets = opts.secrets.clone();
+    // `secrets` is captured by three closures below (`before_send`,
+    // `before_send_log`, `before_send_metric`), initialized in source order.
+    // Rust moves each closure's captures in order, so every closure but the
+    // last must `.clone()`; only the final one may take the move (a `.clone()`
+    // on the last would trip `clippy::redundant_clone` under `-D warnings`).
+    // No clone is needed here: `opts.secrets` is not read anywhere else, so
+    // this is a plain move out of `opts`.
+    let secrets = opts.secrets;
     let admin_user_id = opts.admin_user_id;
     let enable_traces = opts.enable_traces;
     let traces_sample_rate = opts.traces_sample_rate;
@@ -199,16 +209,18 @@ pub fn init(
         })),
         enable_logs: opts.enable_logs,
         enable_metrics: opts.enable_metrics,
-        before_send: Some(Arc::new(move |event| {
-            scrub_event(event, &secrets, admin_user_id.as_deref())
+        before_send: Some(Arc::new({
+            let secrets = secrets.clone();
+            move |event| scrub_event(event, &secrets, admin_user_id.as_deref())
         })),
         before_send_log: Some(Arc::new({
-            // Final use of `opts.secrets` — move, no clone needed.
-            let secrets = opts.secrets;
+            let secrets = secrets.clone();
             move |log| scrub::scrub_log(log, &secrets)
         })),
-        // TODO(Task 3): replace this stub with `scrub::scrub_metric` once it lands.
-        before_send_metric: Some(Arc::new(Some)),
+        before_send_metric: Some(Arc::new({
+            // Final use of `secrets` — move, no clone needed.
+            move |metric| scrub::scrub_metric(metric, &secrets)
+        })),
         ..Default::default()
     });
     // Tag every event/transaction from this process with its surface.

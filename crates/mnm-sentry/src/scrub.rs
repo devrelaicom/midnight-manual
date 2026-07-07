@@ -135,6 +135,69 @@ pub fn scrub_log(log: sentry::protocol::Log, secrets: &[String]) -> Option<sentr
     }
 }
 
+/// Attribute keys a metric is permitted to carry. Anything else is a potential
+/// free-form-string leak and is stripped. Keep this list closed and reviewed.
+pub const METRIC_ATTR_ALLOWLIST: &[&str] = &[
+    "topic",
+    "outcome",
+    "surface",
+    "mode",
+    "reranker",
+    "code_mode",
+];
+
+/// `before_send_metric` body: enforce the attribute-key allow-list, then apply
+/// the same fail-closed secret redaction as [`scrub_event`]/[`scrub_log`].
+///
+/// The allow-list is a structural defense: metric attributes are free-form
+/// key/value pairs, so anything not in [`METRIC_ATTR_ALLOWLIST`] is dropped
+/// *before* redaction runs, closing off arbitrary-string leaks (e.g. a
+/// `raw_query` attribute) that value-redaction alone cannot catch. Same
+/// fail-closed strategy as [`scrub_log`]: serialize, replace every
+/// known-secret needle, reparse. If reparse fails, the metric is DROPPED
+/// (`None`) rather than risk shipping a secret. Metrics with no configured
+/// secrets are returned unchanged (still allow-list-filtered).
+#[must_use]
+pub fn scrub_metric(
+    mut metric: sentry::protocol::Metric,
+    secrets: &[String],
+) -> Option<sentry::protocol::Metric> {
+    metric
+        .attributes
+        .retain(|k, _| METRIC_ATTR_ALLOWLIST.contains(&k.as_ref()));
+
+    let relevant: Vec<&String> = secrets.iter().filter(|s| s.len() >= 8).collect();
+    if relevant.is_empty() {
+        return Some(metric);
+    }
+    let mut json = match serde_json::to_string(&metric) {
+        Ok(j) => j,
+        Err(error) => {
+            tracing::warn!(%error, "sentry scrub: metric serialize failed; dropping to avoid leak");
+            return None;
+        }
+    };
+    let mut changed = false;
+    for s in relevant {
+        for needle in secret_needles(s) {
+            if json.contains(needle.as_str()) {
+                json = json.replace(needle.as_str(), "[REDACTED]");
+                changed = true;
+            }
+        }
+    }
+    if !changed {
+        return Some(metric);
+    }
+    match serde_json::from_str::<sentry::protocol::Metric>(&json) {
+        Ok(scrubbed) => Some(scrubbed),
+        Err(error) => {
+            tracing::warn!(%error, "sentry scrub: redacted metric failed to reparse; dropping");
+            None
+        }
+    }
+}
+
 /// The strings to search for when redacting `secret` from a serialized event:
 /// the verbatim value plus its JSON-escaped form (without the surrounding quotes
 /// serde adds), so a secret containing `"` or `\` is caught in the escaped event
@@ -386,5 +449,42 @@ mod tests {
             "a redacted log that cannot re-parse must be dropped (fail closed), \
              not returned unscrubbed"
         );
+    }
+
+    #[test]
+    fn scrub_metric_drops_unlisted_string_attributes_and_redacts_secrets() {
+        let secret = "db-secret-abcdefgh";
+        // `sentry::protocol::Metric` (like `Log`) does not derive `Default` and
+        // there is no `sentry::metrics::Metric` builder type — the value that
+        // actually flows through `before_send_metric` is the wire/protocol
+        // `Metric` (see `ClientOptions::before_send_metric: Option<BeforeCallback<Metric>>`
+        // in sentry-core, importing `crate::protocol::Metric`). Every field is
+        // set explicitly, mirroring the `scrub_log` tests above.
+        let mut metric = sentry::protocol::Metric {
+            r#type: sentry::protocol::MetricType::Counter,
+            name: "search.requests".into(),
+            value: 1.0,
+            timestamp: std::time::SystemTime::now(),
+            trace_id: sentry::protocol::TraceId::default(),
+            span_id: None,
+            unit: None,
+            attributes: sentry::protocol::Map::new(),
+        };
+        // An allow-listed attribute survives.
+        metric.attributes.insert("topic".into(), "tokens".into());
+        // A non-allow-listed attribute carrying free-form text is stripped.
+        metric
+            .attributes
+            .insert("raw_query".into(), "how do I mint NIGHT".into());
+        // A secret anywhere is redacted.
+        metric
+            .attributes
+            .insert("outcome".into(), format!("err {secret}").into());
+
+        let scrubbed = scrub_metric(metric, &[secret.to_owned()]).expect("metric kept");
+        assert!(scrubbed.attributes.contains_key("topic"));
+        assert!(!scrubbed.attributes.contains_key("raw_query"), "unlisted key must be dropped");
+        let json = serde_json::to_string(&scrubbed).expect("serialize");
+        assert!(!json.contains(secret));
     }
 }
