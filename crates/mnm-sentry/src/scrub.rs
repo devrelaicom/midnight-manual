@@ -344,4 +344,47 @@ mod tests {
         assert!(!json.contains(secret), "secret leaked: {json}");
         assert!(json.contains("[REDACTED]"));
     }
+
+    #[test]
+    fn scrub_log_fails_closed_when_redacted_log_cannot_reparse() {
+        // The `scrub_log` counterpart to
+        // `scrub_fails_closed_when_redacted_event_cannot_reparse` (issue #166):
+        // if redaction produces JSON that no longer round-trips into a `Log`,
+        // the log MUST be dropped (`None`) — it must never be returned with the
+        // pre-scrub secret still resolvable.
+        //
+        // We trigger a reparse failure deterministically via `trace_id`, a
+        // strictly-typed 16-byte id (`#[serde(try_from = "String", into =
+        // "String")]`) that serializes to exactly 32 lowercase hex chars and
+        // deserializes via `hex::decode_to_slice` into a fixed 16-byte buffer.
+        // Registering that exact hex string as a "secret" makes redaction
+        // rewrite `"trace_id":"<hex>"` into `"trace_id":"[REDACTED]"` — and
+        // `"[REDACTED]"` is neither valid hex nor the right length, so
+        // `TraceId`'s `FromStr`/`TryFrom<String>` impl errors and the whole
+        // `Log` fails to reparse.
+        let trace_id = sentry::protocol::TraceId::default();
+        // `sentry::protocol::Log` does not derive `Default` (see the test
+        // above), so every field is set explicitly.
+        let log = sentry::protocol::Log {
+            level: sentry::protocol::LogLevel::Info,
+            body: "unrelated body, the secret only lives in trace_id".to_owned(),
+            trace_id: Some(trace_id),
+            timestamp: std::time::SystemTime::now(),
+            severity_number: None,
+            attributes: sentry::protocol::Map::new(),
+        };
+
+        // The exact serialized id, byte-for-byte what `scrub_log` produces
+        // internally, so the needle matches.
+        let trace_id_hex = trace_id.to_string();
+        assert_eq!(trace_id_hex.len(), 32, "TraceId must serialize to 32 hex chars");
+        assert!(trace_id_hex.len() >= 8, "trace_id hex must clear the length filter");
+
+        let result = scrub_log(log, &[trace_id_hex]);
+        assert!(
+            result.is_none(),
+            "a redacted log that cannot re-parse must be dropped (fail closed), \
+             not returned unscrubbed"
+        );
+    }
 }

@@ -32,13 +32,15 @@
 //! Every outgoing event passes through [`scrub_event`], which drops the hostname,
 //! pins the Sentry user to a single admin id (or clears it), and value-redacts
 //! every known secret from the serialized event body — both its verbatim and its
-//! JSON-escaped form. Note this covers secrets *configured at startup* (DSN, DB
+//! JSON-escaped form. Every outgoing structured log passes through
+//! [`scrub::scrub_log`], which applies the same value-redaction to the serialized
+//! log body/attributes. Note this covers secrets *configured at startup* (DSN, DB
 //! URL, API keys, signing secrets, the on-disk auth tokens); it cannot redact a
 //! credential *minted at runtime* (e.g. an OAuth token fetched mid-request) since
 //! that value is not known when the scrubber is built. Dropping breadcrumbs above
 //! is the primary defense for those. Redaction fails **closed**: if a secret is
-//! present but the scrubbed event cannot be re-serialized, [`scrub_event`] drops
-//! the event rather than transmit the secret in cleartext.
+//! present but the scrubbed event or log cannot be re-serialized, the scrubber
+//! drops the payload rather than transmit the secret in cleartext.
 
 use std::sync::Arc;
 
