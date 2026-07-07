@@ -21,3 +21,8 @@ serde_json         = { workspace = true }
 tracing            = { workspace = true }
 # Needed only for the `LookupSpan` bound on `tracing_layer`; no runtime use.
 tracing-subscriber = { workspace = true }
+# Already a workspace dep (used elsewhere for hashing); pseudonym HMAC reuses it.
+sha2               = { workspace = true }
+# Not yet workspace deps — declared directly here (only consumer today).
+hmac               = "0.12"
+hex                = "0.4"

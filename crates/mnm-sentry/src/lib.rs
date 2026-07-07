@@ -53,6 +53,7 @@
 
 use std::sync::Arc;
 
+pub mod helpers;
 pub mod layer;
 pub mod scrub;
 
