@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0](https://github.com/devrelaicom/midnight-manual/compare/v0.10.0...v0.11.0) - 2026-07-07
+
+### Changed
+
+- *(mcp)* align local rerank pool with CLI (RERANK_FETCH.max(limit)) ([#199](https://github.com/devrelaicom/midnight-manual/pull/199))
+
+### Fixed
+
+- *(search)* honor --limit above rerank floor; thread voyage_base_url through all embedder sites ([#170](https://github.com/devrelaicom/midnight-manual/pull/170)) ([#198](https://github.com/devrelaicom/midnight-manual/pull/198))
+- *(auth)* OAuth CSRF nonce, ed25519 verify_strict, version_match overflow guards ([#177](https://github.com/devrelaicom/midnight-manual/pull/177)) ([#196](https://github.com/devrelaicom/midnight-manual/pull/196))
+- *(skills/keys)* symlink/TOCTOU hardening for skill-dir + O_EXCL key writes ([#172](https://github.com/devrelaicom/midnight-manual/pull/172)) ([#195](https://github.com/devrelaicom/midnight-manual/pull/195))
+- *(cli)* ingest report exit-after-commit, plan preview kind, code.dim fallback ([#171](https://github.com/devrelaicom/midnight-manual/pull/171)) ([#194](https://github.com/devrelaicom/midnight-manual/pull/194))
+- *(cli)* surface false-success in models migrate + manifest check --strict ([#169](https://github.com/devrelaicom/midnight-manual/pull/169)) ([#191](https://github.com/devrelaicom/midnight-manual/pull/191))
+- *(embedding)* correct Voyage token accounting — timeout retry + conflict-retry undercount ([#164](https://github.com/devrelaicom/midnight-manual/pull/164)) ([#190](https://github.com/devrelaicom/midnight-manual/pull/190))
+- *(server)* stop ~2x content hold + validate min_confidence in /v1/search ([#187](https://github.com/devrelaicom/midnight-manual/pull/187))
+- *(cli)* honor --config when resolving target server; fail loud on missing config ([#163](https://github.com/devrelaicom/midnight-manual/pull/163)) ([#185](https://github.com/devrelaicom/midnight-manual/pull/185))
+- *(ingest)* isolate unknown attribution + capture full heading text ([#168](https://github.com/devrelaicom/midnight-manual/pull/168)) ([#188](https://github.com/devrelaicom/midnight-manual/pull/188))
+- *(mcp)* harden render.rs — guard author-controlled fields + overflow-safe arithmetic ([#186](https://github.com/devrelaicom/midnight-manual/pull/186))
+- *(mnm-core)* stop neutralize_tags panic on length-changing lowercase ([#159](https://github.com/devrelaicom/midnight-manual/pull/159)) ([#179](https://github.com/devrelaicom/midnight-manual/pull/179))
+- *(store,embedding)* enforce three data-layer contracts ([#175](https://github.com/devrelaicom/midnight-manual/pull/175)) ([#197](https://github.com/devrelaicom/midnight-manual/pull/197))
+- *(server)* request-handling hardening — charge invalid bearers, socket-peer IP, active-model 409 ([#176](https://github.com/devrelaicom/midnight-manual/pull/176)) ([#193](https://github.com/devrelaicom/midnight-manual/pull/193))
+- *(ingest)* gate frontmatter stripping to Markdown ([#161](https://github.com/devrelaicom/midnight-manual/pull/161)) ([#180](https://github.com/devrelaicom/midnight-manual/pull/180))
+- *(auth)* bound OAuth-state and challenge stores against OOM ([#181](https://github.com/devrelaicom/midnight-manual/pull/181))
+- *(mcp)* harden client transport, cloud URL joins, embed-pair length check ([#192](https://github.com/devrelaicom/midnight-manual/pull/192))
+- *(mcp)* JSON-RPC conformance for undetermined-id errors + malformed ids ([#173](https://github.com/devrelaicom/midnight-manual/pull/173)) ([#189](https://github.com/devrelaicom/midnight-manual/pull/189))
+- *(server)* retain NULL/absent-value rows in none_of search filters ([#162](https://github.com/devrelaicom/midnight-manual/pull/162)) ([#184](https://github.com/devrelaicom/midnight-manual/pull/184))
+
 ## [0.10.0](https://github.com/devrelaicom/midnight-manual/compare/v0.9.0...v0.10.0) - 2026-07-03
 
 ### Added
