@@ -81,6 +81,10 @@ pub fn env_gate_passes(env: &impl mnm_core::config::ConfigEnv) -> bool {
 }
 
 /// Knobs for [`init`].
+// The four `bool`s are independent per-pillar/gate toggles (admin presence,
+// logs, metrics, traces), not encodable as a single state machine or
+// two-variant enum — `struct_excessive_bools` does not apply here.
+#[allow(clippy::struct_excessive_bools)]
 pub struct InitOptions<'a> {
     /// Server passes `true` (admin gate N/A); client passes the real
     /// `auth.toml` `[admin]`-section presence check.
@@ -96,6 +100,18 @@ pub struct InitOptions<'a> {
     pub admin_user_id: Option<String>,
     /// Secret values to redact from every outgoing event.
     pub secrets: Vec<String>,
+    /// Enable structured logs (info+ tracing events → Sentry logs). Gated.
+    pub enable_logs: bool,
+    /// Enable metrics (counter/gauge/distribution). Gated.
+    pub enable_metrics: bool,
+    /// Enable performance traces/spans. Gated.
+    pub enable_traces: bool,
+    /// Head sample rate for ROOT transactions with no incoming trace (staff
+    /// requests continue an incoming sampled trace regardless). 0.0..=1.0.
+    pub traces_sample_rate: f32,
+    /// Surface tag applied to every event/transaction: `"cli"` | `"mcp"` |
+    /// `"server"`.
+    pub surface: &'a str,
 }
 
 /// Initialize Sentry iff the gate passes.
@@ -134,17 +150,39 @@ pub fn init(
         .unwrap_or_else(|| opts.default_environment.to_owned());
     let secrets = opts.secrets;
     let admin_user_id = opts.admin_user_id;
+    let enable_traces = opts.enable_traces;
+    let traces_sample_rate = opts.traces_sample_rate.clamp(0.0, 1.0);
+    let surface = opts.surface.to_owned();
 
     let guard = sentry::init(sentry::ClientOptions {
         dsn: Some(parsed_dsn),
         release: Some(opts.release.to_owned().into()),
         environment: Some(environment.into()),
         send_default_pii: false,
+        // Root-transaction head sampling. A request that continues an incoming
+        // (sampled) `sentry-trace` inherits that decision, so staff-originated
+        // traces are always kept; only trace-less regular traffic is sampled here.
+        traces_sampler: Some(Arc::new(move |ctx| {
+            if !enable_traces {
+                return 0.0;
+            }
+            // If a parent sampling decision exists (distributed continue), honor it.
+            ctx.sampled()
+                .map_or(traces_sample_rate, |s| if s { 1.0 } else { 0.0 })
+        })),
+        enable_logs: opts.enable_logs,
+        enable_metrics: opts.enable_metrics,
         before_send: Some(Arc::new(move |event| {
             scrub_event(event, &secrets, admin_user_id.as_deref())
         })),
+        // TODO(Task 2/3): replace these stubs with `scrub::scrub_log` /
+        // `scrub::scrub_metric` once the `scrub` module lands.
+        before_send_log: Some(Arc::new(Some)),
+        before_send_metric: Some(Arc::new(Some)),
         ..Default::default()
     });
+    // Tag every event/transaction from this process with its surface.
+    sentry::configure_scope(|scope| scope.set_tag("surface", &surface));
     Some(guard)
 }
 
@@ -521,9 +559,33 @@ mod tests {
                 default_environment: "test",
                 admin_user_id: None,
                 secrets: vec![],
+                enable_logs: false,
+                enable_metrics: false,
+                enable_traces: false,
+                traces_sample_rate: 0.0,
+                surface: "test",
             },
         );
         assert!(guard.is_none());
+    }
+
+    #[test]
+    fn init_options_carry_pillar_toggles() {
+        // Compile-level assertion that the new fields exist and are settable.
+        let opts = InitOptions {
+            admin_present: true,
+            release: "0.0.0",
+            default_environment: "test",
+            admin_user_id: None,
+            secrets: vec![],
+            enable_logs: true,
+            enable_metrics: true,
+            enable_traces: true,
+            traces_sample_rate: 0.25,
+            surface: "cli",
+        };
+        assert!((opts.traces_sample_rate - 0.25).abs() < f32::EPSILON);
+        assert_eq!(opts.surface, "cli");
     }
 
     #[test]
@@ -541,6 +603,11 @@ mod tests {
                 default_environment: "test",
                 admin_user_id: None,
                 secrets: vec![],
+                enable_logs: false,
+                enable_metrics: false,
+                enable_traces: false,
+                traces_sample_rate: 0.0,
+                surface: "test",
             },
         );
         assert!(guard.is_none());
