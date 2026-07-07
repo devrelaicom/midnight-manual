@@ -635,8 +635,13 @@ const DEFAULT_LIMIT: u32 = 10;
 const MAX_LIMIT: u32 = 50;
 /// `advanced_search` accepts at most this many query variants (RRF fusion).
 const MAX_QUERIES: usize = 10;
-/// When rerank is on, we always fetch up to this many candidates from the
-/// cloud so the cross-encoder has signal to work with.
+/// Candidate pool *floor* requested from the cloud when reranking locally, so
+/// the cross-encoder has signal to work with. The actual pool is
+/// `RERANK_FETCH.max(limit)` (see `build_search_request`) so a `limit` above
+/// this floor is honoured rather than capped; `parse_limit_arg` bounds `limit`
+/// to `MAX_LIMIT`, keeping the pool in range (today `MAX_LIMIT == RERANK_FETCH`,
+/// so the floor is the effective pool). The CLI mirrors this constant under the
+/// same name.
 const RERANK_FETCH: u32 = 50;
 
 /// Resolve the effective rerank placement, model, and Voyage base-url override
@@ -919,10 +924,12 @@ fn rerank_event_model(
 /// Build the outgoing `/v1/search` body, sizing the candidate pool and the
 /// `rerank` wire parameter for the resolved placement.
 ///
-/// The Local path widens the cloud `limit` to [`RERANK_FETCH`] in relevance
-/// order (`sort_by = "score"`) so the client-side reranker can *promote* a chunk
-/// the cloud ranked below the caller's limit — not merely reorder the top-N
-/// (mirrors the CLI); [`rerank_results`] later truncates back to the limit. On
+/// The Local path widens the cloud `limit` to at least [`RERANK_FETCH`]
+/// (`RERANK_FETCH.max(limit)`, so a `limit` above the pool floor is honoured
+/// rather than silently capped) in relevance order (`sort_by = "score"`) so the
+/// client-side reranker can *promote* a chunk the cloud ranked below the
+/// caller's limit — not merely reorder the top-N (mirrors the CLI);
+/// [`rerank_results`] later truncates back to the limit. On
 /// the Local path the reranker re-orders the pool afterwards, so it *overrides*
 /// any caller `sort_by`; Server/Off use the caller's limit and forward the
 /// caller's explicit `sort_by` (issue #137), letting the cloud order the pool
@@ -943,7 +950,14 @@ fn build_search_request(
     let (cloud_limit, sort_by) = if local {
         // Local: force score order for the over-fetched pool; the client rerank
         // re-orders afterwards, so the caller's sort_by cannot take effect here.
-        (RERANK_FETCH, Some("score"))
+        // Widen to at least the caller's `limit` (`RERANK_FETCH.max(limit)`) so a
+        // `limit` above the pool floor is honoured rather than silently capped —
+        // a cap would make `rerank_results`' later truncate-to-`limit` a no-op and
+        // under-return (mirrors the CLI fix for #170/PR #198). `parse_limit_arg`
+        // already bounds `limit` to `MAX_LIMIT`, so `.max()` can never request an
+        // oversized pool; today `MAX_LIMIT == RERANK_FETCH == 50`, so this is a
+        // forward-compatible floor rather than a currently reachable widening.
+        (RERANK_FETCH.max(parsed.limit), Some("score"))
     } else {
         // Server/Off: forward the caller's explicit ordering (None → cloud default).
         (parsed.limit, parsed.sort_by)
@@ -3123,6 +3137,36 @@ mod tests {
         assert_eq!(req.sort_by, Some("score"));
         assert_eq!(req.rerank.as_deref(), Some("none"));
         assert!(req.rerank_instructions.is_none());
+    }
+
+    #[test]
+    fn build_search_request_local_honors_limit_above_pool_floor() {
+        // Regression mirror of the CLI #170/PR #198 fix: when the caller's limit
+        // exceeds RERANK_FETCH, the cloud pool must widen to the limit, not cap
+        // at 50 — a cap would make `rerank_results`' later truncate-to-limit a
+        // no-op and under-return. `parse_limit_arg` bounds `limit` to MAX_LIMIT
+        // (== 50 == RERANK_FETCH today), so this over-floor value can't reach
+        // `build_search_request` through the parser; the test drives the helper's
+        // contract directly to lock in the floor for any future MAX_LIMIT bump.
+        use mnm_core::config::RerankPlacement;
+        use mnm_core::rerank::RerankParam;
+        let mut parsed = parsed_args(true);
+        parsed.limit = RERANK_FETCH + 30; // 80 — above the pool floor.
+        let req = build_search_request(
+            &parsed,
+            RerankPlacement::Local,
+            RerankParam::Rerank25,
+            Vec::new(),
+            "voyage-context-3@1".to_owned(),
+            None,
+        );
+        assert_eq!(
+            req.limit,
+            RERANK_FETCH + 30,
+            "cloud pool must be at least the caller's limit, not capped at RERANK_FETCH"
+        );
+        assert_eq!(req.sort_by, Some("score"));
+        assert_eq!(req.rerank.as_deref(), Some("none"));
     }
 
     #[test]
