@@ -16,7 +16,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version       = "0.10.0"
+version       = "0.11.0"
 edition       = "2021"
 rust-version  = "1.93"
 license       = "Apache-2.0 OR MIT"
@@ -52,17 +52,17 @@ must_use_candidate      = "allow"
 [workspace.dependencies]
 # Internal crates — path for local builds, version so `cargo publish` accepts the
 # dependency on crates.io. release-plz keeps these versions in sync on each bump.
-mnm-core        = { path = "crates/mnm-core", version = "0.10.0" }
-mnm-store       = { path = "crates/mnm-store", version = "0.10.0" }
-mnm-retrieval   = { path = "crates/mnm-retrieval", version = "0.10.0" }
-mnm-content     = { path = "crates/mnm-content", version = "0.10.0", default-features = false }
-mnm-embedding   = { path = "crates/mnm-embedding", version = "0.10.0" }
-mnm-auth        = { path = "crates/mnm-auth", version = "0.10.0" }
-mnm-telemetry   = { path = "crates/mnm-telemetry", version = "0.10.0" }
-mnm-skills      = { path = "crates/mnm-skills", version = "0.10.0" }
-mnm-mcp         = { path = "crates/mnm-mcp", version = "0.10.0" }
-mnm-sentry      = { path = "crates/mnm-sentry", version = "0.10.0" }
-midnight-manual = { path = "crates/midnight-manual", version = "0.10.0" }
+mnm-core        = { path = "crates/mnm-core", version = "0.11.0" }
+mnm-store       = { path = "crates/mnm-store", version = "0.11.0" }
+mnm-retrieval   = { path = "crates/mnm-retrieval", version = "0.11.0" }
+mnm-content     = { path = "crates/mnm-content", version = "0.11.0", default-features = false }
+mnm-embedding   = { path = "crates/mnm-embedding", version = "0.11.0" }
+mnm-auth        = { path = "crates/mnm-auth", version = "0.11.0" }
+mnm-telemetry   = { path = "crates/mnm-telemetry", version = "0.11.0" }
+mnm-skills      = { path = "crates/mnm-skills", version = "0.11.0" }
+mnm-mcp         = { path = "crates/mnm-mcp", version = "0.11.0" }
+mnm-sentry      = { path = "crates/mnm-sentry", version = "0.11.0" }
+midnight-manual = { path = "crates/midnight-manual", version = "0.11.0" }
 
 # Async runtime + HTTP
 tokio            = { version = "1", features = ["rt-multi-thread", "macros", "signal", "fs", "io-std"] }
