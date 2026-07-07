@@ -80,6 +80,29 @@ pub fn env_gate_passes(env: &impl mnm_core::config::ConfigEnv) -> bool {
     sentry_enabled(key.as_deref(), enable.as_deref(), true)
 }
 
+/// Resolve the head-sampling rate for a root transaction.
+///
+/// Precedence: the pillar gate wins (traces disabled → never sample); then an
+/// inherited distributed-trace decision is honored exactly (sampled → 1.0,
+/// dropped → 0.0); otherwise fall back to the configured base rate. A `NaN`
+/// base rate normalizes to `0.0` (fail-safe — never hand the SDK a NaN rate).
+#[must_use]
+fn resolve_trace_sample_rate(
+    enable_traces: bool,
+    base_rate: f32,
+    parent_sampled: Option<bool>,
+) -> f32 {
+    if !enable_traces {
+        return 0.0;
+    }
+    let base = if base_rate.is_nan() {
+        0.0
+    } else {
+        base_rate.clamp(0.0, 1.0)
+    };
+    parent_sampled.map_or(base, |s| if s { 1.0 } else { 0.0 })
+}
+
 /// Knobs for [`init`].
 // The four `bool`s are independent per-pillar/gate toggles (admin presence,
 // logs, metrics, traces), not encodable as a single state machine or
@@ -151,7 +174,7 @@ pub fn init(
     let secrets = opts.secrets;
     let admin_user_id = opts.admin_user_id;
     let enable_traces = opts.enable_traces;
-    let traces_sample_rate = opts.traces_sample_rate.clamp(0.0, 1.0);
+    let traces_sample_rate = opts.traces_sample_rate;
     let surface = opts.surface.to_owned();
 
     let guard = sentry::init(sentry::ClientOptions {
@@ -160,15 +183,11 @@ pub fn init(
         environment: Some(environment.into()),
         send_default_pii: false,
         // Root-transaction head sampling. A request that continues an incoming
-        // (sampled) `sentry-trace` inherits that decision, so staff-originated
-        // traces are always kept; only trace-less regular traffic is sampled here.
+        // (sampled) `sentry-trace` inherits that decision exactly, so staff-originated
+        // traces are kept whenever traces are enabled at all; only trace-less regular
+        // traffic is rate-sampled.
         traces_sampler: Some(Arc::new(move |ctx| {
-            if !enable_traces {
-                return 0.0;
-            }
-            // If a parent sampling decision exists (distributed continue), honor it.
-            ctx.sampled()
-                .map_or(traces_sample_rate, |s| if s { 1.0 } else { 0.0 })
+            resolve_trace_sample_rate(enable_traces, traces_sample_rate, ctx.sampled())
         })),
         enable_logs: opts.enable_logs,
         enable_metrics: opts.enable_metrics,
@@ -586,6 +605,32 @@ mod tests {
         };
         assert!((opts.traces_sample_rate - 0.25).abs() < f32::EPSILON);
         assert_eq!(opts.surface, "cli");
+    }
+
+    // These branches return the literal constants `0.0`/`1.0` (not a computed
+    // value), so bit-exact `assert_eq!` is the correct check; `clippy::float_cmp`
+    // exists to catch imprecision from arithmetic, which does not apply here.
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn trace_sample_rate_gate_off_is_zero() {
+        assert_eq!(resolve_trace_sample_rate(false, 1.0, Some(true)), 0.0);
+        assert_eq!(resolve_trace_sample_rate(false, 0.5, None), 0.0);
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn trace_sample_rate_honors_parent_decision() {
+        assert_eq!(resolve_trace_sample_rate(true, 0.1, Some(true)), 1.0);
+        assert_eq!(resolve_trace_sample_rate(true, 0.1, Some(false)), 0.0);
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn trace_sample_rate_falls_back_to_clamped_base() {
+        assert!((resolve_trace_sample_rate(true, 0.25, None) - 0.25).abs() < f32::EPSILON);
+        assert_eq!(resolve_trace_sample_rate(true, 5.0, None), 1.0);
+        assert_eq!(resolve_trace_sample_rate(true, -1.0, None), 0.0);
+        assert_eq!(resolve_trace_sample_rate(true, f32::NAN, None), 0.0);
     }
 
     #[test]

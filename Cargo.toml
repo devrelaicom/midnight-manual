@@ -158,6 +158,7 @@ tracing-subscriber         = { version = "0.3", features = ["env-filter", "json"
 # which violates this workspace's rustls-only TLS policy (reqwest uses
 # `rustls-tls`, sqlx uses `runtime-tokio-rustls`). The explicit feature list
 # below yields a rustls-only reqwest transport.
+# tracing/logs/metrics/tower-axum-matched-path: full observability pillars (errors+traces+logs+metrics).
 sentry          = { version = "0.48.4", default-features = false, features = ["backtrace", "contexts", "debug-images", "panic", "release-health", "reqwest", "rustls", "tracing", "logs", "metrics", "tower-axum-matched-path"] }
 sentry-tracing  = "0.48"
 # Privacy-first usage telemetry (Gauge). Pulls gauge-events (sender) → reqwest
