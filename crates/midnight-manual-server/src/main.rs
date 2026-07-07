@@ -55,6 +55,14 @@ async fn main() -> anyhow::Result<()> {
                 default_environment: "production",
                 admin_user_id: None,
                 secrets,
+                // Pillar toggles get their real values from full Sentry runtime
+                // wiring in a later change; inert defaults here keep the master
+                // gate the only switch until then.
+                enable_logs: false,
+                enable_metrics: false,
+                enable_traces: false,
+                traces_sample_rate: 0.0,
+                surface: "server",
             },
         )
     };
