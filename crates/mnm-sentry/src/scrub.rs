@@ -486,5 +486,83 @@ mod tests {
         assert!(!scrubbed.attributes.contains_key("raw_query"), "unlisted key must be dropped");
         let json = serde_json::to_string(&scrubbed).expect("serialize");
         assert!(!json.contains(secret));
+        assert!(json.contains("[REDACTED]"), "redaction marker must be present: {json}");
+    }
+
+    #[test]
+    fn scrub_metric_fails_closed_when_redacted_metric_cannot_reparse() {
+        // The `scrub_metric` counterpart to
+        // `scrub_log_fails_closed_when_redacted_log_cannot_reparse` /
+        // `scrub_fails_closed_when_redacted_event_cannot_reparse` (issue #166): if
+        // redaction produces JSON that no longer round-trips into a `Metric`, the
+        // metric MUST be dropped (`None`) — it must never be returned with the
+        // pre-scrub secret still resolvable. This is the highest-consequence path:
+        // a bug here ships a live secret.
+        //
+        // We trigger a reparse failure deterministically via `trace_id`, a
+        // strictly-typed 16-byte id (`#[serde(try_from = "String", into =
+        // "String")]`) that serializes to exactly 32 lowercase hex chars and
+        // deserializes via `hex::decode_to_slice` into a fixed 16-byte buffer.
+        // `Metric::trace_id` is non-optional, so it is set to `TraceId::default()`.
+        // Registering that exact hex string as a "secret" makes redaction rewrite
+        // `"trace_id":"<hex>"` into `"trace_id":"[REDACTED]"` — and `"[REDACTED]"`
+        // is neither valid hex nor the right length, so `TraceId`'s
+        // `FromStr`/`TryFrom<String>` impl errors and the whole `Metric` fails to
+        // reparse.
+        let trace_id = sentry::protocol::TraceId::default();
+        let metric = sentry::protocol::Metric {
+            r#type: sentry::protocol::MetricType::Counter,
+            name: "search.requests".into(),
+            value: 1.0,
+            timestamp: std::time::SystemTime::now(),
+            trace_id,
+            span_id: None,
+            unit: None,
+            attributes: sentry::protocol::Map::new(),
+        };
+
+        // The exact serialized id, byte-for-byte what `scrub_metric` produces
+        // internally, so the needle matches.
+        let trace_id_hex = trace_id.to_string();
+        assert_eq!(trace_id_hex.len(), 32, "TraceId must serialize to 32 hex chars");
+        assert!(trace_id_hex.len() >= 8, "trace_id hex must clear the length filter");
+
+        let result = scrub_metric(metric, &[trace_id_hex]);
+        assert!(
+            result.is_none(),
+            "a redacted metric that cannot re-parse must be dropped (fail closed), \
+             not returned unscrubbed"
+        );
+    }
+
+    #[test]
+    fn scrub_metric_drops_unlisted_attributes_even_with_no_secrets() {
+        // The allow-list retain must run unconditionally, even when `secrets` is
+        // empty and the fail-closed redaction path short-circuits via the
+        // `relevant.is_empty()` early return. This guards that the privacy
+        // allow-list is enforced independent of secret redaction.
+        let mut metric = sentry::protocol::Metric {
+            r#type: sentry::protocol::MetricType::Counter,
+            name: "search.requests".into(),
+            value: 1.0,
+            timestamp: std::time::SystemTime::now(),
+            trace_id: sentry::protocol::TraceId::default(),
+            span_id: None,
+            unit: None,
+            attributes: sentry::protocol::Map::new(),
+        };
+        // An allow-listed attribute survives.
+        metric.attributes.insert("topic".into(), "tokens".into());
+        // A non-allow-listed attribute carrying free-form text is stripped.
+        metric
+            .attributes
+            .insert("raw_query".into(), "how do I mint NIGHT".into());
+
+        let scrubbed = scrub_metric(metric, &[]).expect("metric with no secrets is always kept");
+        assert!(scrubbed.attributes.contains_key("topic"), "allow-listed key must survive");
+        assert!(
+            !scrubbed.attributes.contains_key("raw_query"),
+            "unlisted key must be dropped even with no secrets configured"
+        );
     }
 }
