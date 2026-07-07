@@ -2,10 +2,10 @@
 //!
 //! Two endpoints, both admin-tier gated (FR-058 + FR-117):
 //!
-//! 1. `POST /v1/admin/sources/:slug/versions/:revision/promote` — promote
+//! 1. `POST /v1/admin/sources/{slug}/versions/{revision}/promote` — promote
 //!    a previously-active version back to active (rollback per FR-072).
 //!    Returns `{promoted_revision, demoted_revision}`.
-//! 2. `POST /v1/admin/sources/:slug/versions/:revision/retire` — mark a
+//! 2. `POST /v1/admin/sources/{slug}/versions/{revision}/retire` — mark a
 //!    single historical version retired so the source-version retention
 //!    sweep can hard-delete it on its next tick.
 
@@ -27,8 +27,8 @@ use crate::middleware::request_id::RequestId;
 #[must_use]
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/v1/admin/sources/:slug/versions/:revision/promote", post(promote_version))
-        .route("/v1/admin/sources/:slug/versions/:revision/retire", post(retire_version))
+        .route("/v1/admin/sources/{slug}/versions/{revision}/promote", post(promote_version))
+        .route("/v1/admin/sources/{slug}/versions/{revision}/retire", post(retire_version))
 }
 
 /// Response shape for `POST .../promote`. Contains the promoted revision

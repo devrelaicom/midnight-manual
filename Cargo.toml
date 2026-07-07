@@ -66,7 +66,7 @@ midnight-manual = { path = "crates/midnight-manual", version = "0.11.0" }
 
 # Async runtime + HTTP
 tokio            = { version = "1", features = ["rt-multi-thread", "macros", "signal", "fs", "io-std"] }
-axum             = "0.7"
+axum             = "0.8"
 tower            = "0.5"
 tower-http       = { version = "0.6", features = ["cors", "limit", "trace", "set-header"] }
 hyper            = "1"

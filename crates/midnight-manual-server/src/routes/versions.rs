@@ -1,4 +1,4 @@
-//! `/v1/sources/:slug/versions` — public source-version inspection.
+//! `/v1/sources/{slug}/versions` — public source-version inspection.
 //!
 //! Anonymous reads: list every version (newest first) and show a single
 //! version by revision. Admin promote / retire writes live in
@@ -19,8 +19,8 @@ use crate::middleware::request_id::RequestId;
 #[must_use]
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/v1/sources/:slug/versions", get(list_versions))
-        .route("/v1/sources/:slug/versions/:revision", get(get_version))
+        .route("/v1/sources/{slug}/versions", get(list_versions))
+        .route("/v1/sources/{slug}/versions/{revision}", get(get_version))
 }
 
 async fn list_versions(

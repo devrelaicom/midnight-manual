@@ -20,7 +20,7 @@ use crate::middleware::request_id::RequestId;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/v1/sources", get(list_sources))
-        .route("/v1/sources/:slug", get(get_source))
+        .route("/v1/sources/{slug}", get(get_source))
 }
 
 /// Page size when `limit` is omitted.

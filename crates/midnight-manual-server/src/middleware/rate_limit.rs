@@ -88,12 +88,12 @@ pub async fn layer(
     Extension(req_id): Extension<RequestId>,
     auth: Option<Extension<AuthContext>>,
     rejection: Option<Extension<BearerRejection>>,
-    peer: Option<ConnectInfo<SocketAddr>>,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     mut req: Request,
     next: Next,
 ) -> Response {
     let rejected = rejection.map(|Extension(r)| r.remediation);
-    let peer_ip = peer.map(|ConnectInfo(sa)| sa.ip());
+    let peer_ip = peer.map(|Extension(ConnectInfo(sa))| sa.ip());
 
     // Pass-through paths (limiter disabled, or an operational exempt path) still
     // honor a deferred bearer rejection — an invalid token must be refused even

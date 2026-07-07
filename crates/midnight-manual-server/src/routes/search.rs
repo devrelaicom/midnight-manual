@@ -378,14 +378,14 @@ async fn search(
     rl: Option<Extension<RateLimitContext>>,
     headers: axum::http::HeaderMap,
     auth: Option<Extension<crate::middleware::bearer::AuthContext>>,
-    peer: Option<ConnectInfo<SocketAddr>>,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     Json(req): Json<SearchRequest>,
 ) -> Response {
     let rid = req_id.as_str();
     let rl_ctx = rl.as_ref().map(|Extension(c)| c);
     // Socket peer IP, used to key the token limiter when the trusted proxy
     // header is absent (issue #176 L15). Threaded into `rerank_stage`.
-    let peer_ip = peer.map(|ConnectInfo(sa)| sa.ip());
+    let peer_ip = peer.map(|Extension(ConnectInfo(sa))| sa.ip());
 
     // Which retrieval halves this mode runs (loop-invariant).
     let run_vector = matches!(req.mode, SearchMode::Hybrid | SearchMode::Vector);

@@ -2,16 +2,16 @@
 //!
 //! Four endpoints carry the ingest lifecycle:
 //!
-//! 1. `POST /v1/admin/sources/:slug/ingest-runs` — allocate a new
+//! 1. `POST /v1/admin/sources/{slug}/ingest-runs` — allocate a new
 //!    [`source_version`] in `building` state. Returns its UUID and revision.
-//! 2. `PUT  /v1/admin/sources/:slug/ingest-runs/:id/documents` — upload one
+//! 2. `PUT  /v1/admin/sources/{slug}/ingest-runs/{id}/documents` — upload one
 //!    batch of documents (with their chunks). May be called multiple times for
 //!    one run. Carries out the FR-014 carry-forward against the prior active
 //!    version when a per-path content_hash matches.
-//! 3. `POST /v1/admin/sources/:slug/ingest-runs/:id/finalize` — atomically
+//! 3. `POST /v1/admin/sources/{slug}/ingest-runs/{id}/finalize` — atomically
 //!    promote the building version to `active`, demoting the prior active
 //!    version to `inactive` in a single transaction.
-//! 4. `POST /v1/admin/sources/:slug/ingest-runs/:id/abort` — mark the run
+//! 4. `POST /v1/admin/sources/{slug}/ingest-runs/{id}/abort` — mark the run
 //!    `aborted`; subsequent writes against this id return 409 `run_aborted`
 //!    (FR-022).
 //!
@@ -61,13 +61,13 @@ use crate::middleware::request_id::RequestId;
 #[must_use]
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/v1/admin/sources/:slug/ingest-runs", post(start_ingest_run))
-        .route("/v1/admin/sources/:slug/ingest-runs/:id/documents", put(upload_documents))
-        .route("/v1/admin/sources/:slug/ingest-runs/:id/finalize", post(finalize_run))
-        .route("/v1/admin/sources/:slug/ingest-runs/:id/abort", post(abort_run))
+        .route("/v1/admin/sources/{slug}/ingest-runs", post(start_ingest_run))
+        .route("/v1/admin/sources/{slug}/ingest-runs/{id}/documents", put(upload_documents))
+        .route("/v1/admin/sources/{slug}/ingest-runs/{id}/finalize", post(finalize_run))
+        .route("/v1/admin/sources/{slug}/ingest-runs/{id}/abort", post(abort_run))
 }
 
-/// Body of `POST /v1/admin/sources/:slug/ingest-runs`.
+/// Body of `POST /v1/admin/sources/{slug}/ingest-runs`.
 #[derive(Debug, Deserialize)]
 pub struct StartIngestRunRequest {
     /// CLI version that produced the run (FR-019 reproducibility).
@@ -88,7 +88,7 @@ pub struct StartIngestRunRequest {
     pub note: Option<String>,
 }
 
-/// Body of `POST /v1/admin/sources/:slug/ingest-runs`'s response.
+/// Body of `POST /v1/admin/sources/{slug}/ingest-runs`'s response.
 #[derive(Debug, Serialize)]
 pub struct StartIngestRunResponse {
     /// Identifier for subsequent calls — also the `source_version.id`.

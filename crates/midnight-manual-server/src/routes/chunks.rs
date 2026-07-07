@@ -1,9 +1,9 @@
-//! `GET /v1/chunks?ids=` + `/v1/chunks/:id` + `/next` + `/prev` + `/parents`.
+//! `GET /v1/chunks?ids=` + `/v1/chunks/{id}` + `/next` + `/prev` + `/parents`.
 //!
 //! Each endpoint returns a chunk row with its document and source context
 //! bundled. The `/next` and `/prev` endpoints walk in `chunk_index` order;
 //! `embed_failed` chunks are skipped. `/siblings` (unbounded) was removed
-//! in favor of position-windowed `/v1/documents/:id/chunks`.
+//! in favor of position-windowed `/v1/documents/{id}/chunks`.
 
 use std::collections::HashMap;
 
@@ -24,10 +24,10 @@ use crate::middleware::request_id::RequestId;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/v1/chunks", get(get_chunks_batch))
-        .route("/v1/chunks/:id", get(get_chunk))
-        .route("/v1/chunks/:id/next", get(get_next))
-        .route("/v1/chunks/:id/prev", get(get_prev))
-        .route("/v1/chunks/:id/parents", get(get_parents))
+        .route("/v1/chunks/{id}", get(get_chunk))
+        .route("/v1/chunks/{id}/next", get(get_next))
+        .route("/v1/chunks/{id}/prev", get(get_prev))
+        .route("/v1/chunks/{id}/parents", get(get_parents))
 }
 
 /// Hard cap on ids per batch request (matches the MCP `get_chunks` cap).
