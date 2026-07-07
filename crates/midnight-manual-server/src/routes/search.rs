@@ -378,6 +378,10 @@ async fn search(
     rl: Option<Extension<RateLimitContext>>,
     headers: axum::http::HeaderMap,
     auth: Option<Extension<crate::middleware::bearer::AuthContext>>,
+    // NOTE: reads only the connect-info Extension set by
+    // `into_make_service_with_connect_info` (production); it does NOT observe
+    // axum's `MockConnectInfo` test helper — inject a peer addr in tests via
+    // `.layer(Extension(ConnectInfo(addr)))`, not `MockConnectInfo`.
     peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     Json(req): Json<SearchRequest>,
 ) -> Response {
