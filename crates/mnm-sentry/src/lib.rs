@@ -25,9 +25,13 @@
 //!
 //! # Privacy
 //!
-//! Only `error`-level `tracing` events (and panics) are sent — [`tracing_layer`]
-//! drops the default `info`/`warn` breadcrumbs so request-scoped context (logins,
-//! org names, error strings) does not leave the machine.
+//! [`tracing_layer`] maps `tracing` events by level: `error` becomes both a
+//! Sentry event and a structured log; `warn`/`info` become a structured log
+//! plus a breadcrumb (for trace context); `debug`/`trace` are ignored
+//! entirely — they are the widest leak surface and are never sent. Panics are
+//! captured independently by the panic integration. Every log that is sent
+//! still passes through [`scrub::scrub_log`] (see below), which remains the
+//! safety net for this wider capture surface.
 //!
 //! Every outgoing event passes through [`scrub_event`], which drops the hostname,
 //! pins the Sentry user to a single admin id (or clears it), and value-redacts
@@ -49,8 +53,10 @@
 
 use std::sync::Arc;
 
+pub mod layer;
 pub mod scrub;
 
+pub use layer::tracing_layer;
 pub use scrub::scrub_event;
 
 /// Environment variable holding the Sentry DSN (the project key). Setting this
@@ -226,26 +232,6 @@ pub fn init(
     // Tag every event/transaction from this process with its surface.
     sentry::configure_scope(|scope| scope.set_tag("surface", &surface));
     Some(guard)
-}
-
-/// The `sentry-tracing` layer to attach to a `tracing_subscriber` registry so
-/// `error`-level events and panics are captured. Inert if Sentry isn't
-/// initialized.
-///
-/// Only `ERROR` events are captured (as Sentry events). The default layer would
-/// also ship `info`/`warn` logs as breadcrumbs; we deliberately drop those to
-/// keep request-scoped context off the wire (see the crate `# Privacy` docs).
-/// Panics are captured independently by the Sentry panic integration, so this
-/// filter does not affect crash capture.
-#[must_use]
-pub fn tracing_layer<S>() -> sentry_tracing::SentryLayer<S>
-where
-    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
-{
-    sentry_tracing::layer().event_filter(|md| match *md.level() {
-        tracing::Level::ERROR => sentry_tracing::EventFilter::Event,
-        _ => sentry_tracing::EventFilter::Ignore,
-    })
 }
 
 #[cfg(test)]
