@@ -52,6 +52,34 @@ pub fn record_search_metrics(outcome: &str, latency_ms: f64, topic: &str, code_m
     mnm_sentry::helpers::record_ms("search.latency", latency_ms, &attrs);
 }
 
+/// Which Sentry span-data sinks to set, given role. The ONLY place raw query
+/// text is permitted, and only for admins (trust boundary). Pure so it is
+/// table-testable without a live hub.
+#[must_use]
+pub fn sinks_for(is_admin: bool, topic: &str, raw_query: &str) -> Vec<(&'static str, String)> {
+    let mut out = vec![("search.topic", topic.to_owned())];
+    if is_admin {
+        out.push(("search.query", raw_query.to_owned()));
+    }
+    out
+}
+
+/// Attach the sanctioned query sinks to the current scope's extras.
+///
+/// Deliberately uses `configure_scope`/`set_extra` (not span/transaction
+/// data): scope extras ride on ERROR EVENTS, which pass through
+/// `before_send`/`scrub_event` (fail-closed secret redaction). Transactions
+/// have no `before_send_transaction`, so raw query text must never be
+/// attached as transaction/span data.
+pub fn attach_query_sinks(is_admin: bool, topic: &str, raw_query: &str) {
+    let sinks = sinks_for(is_admin, topic, raw_query);
+    sentry::configure_scope(|scope| {
+        for (k, v) in sinks {
+            scope.set_extra(k, v.into());
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -67,5 +95,34 @@ mod tests {
         );
         assert_eq!(resolve_user_id(Some("k"), "aaron", true), Some("aaron".to_owned()));
         assert_eq!(resolve_user_id(None, "octocat", false), None);
+    }
+
+    #[test]
+    fn query_sink_selection_by_role() {
+        // Pure decision function underlying attach_query_sinks: returns which
+        // sinks would be set, without touching the Sentry hub.
+        assert_eq!(
+            sinks_for(false, "tokens", "mint NIGHT"),
+            vec![("search.topic", "tokens".to_owned())]
+        );
+        assert_eq!(
+            sinks_for(true, "tokens", "mint NIGHT"),
+            vec![
+                ("search.topic", "tokens".to_owned()),
+                ("search.query", "mint NIGHT".to_owned())
+            ]
+        );
+    }
+
+    #[test]
+    fn only_sanctioned_keys_carry_query_text() {
+        // For a non-admin, the raw query must NEVER appear among the sinks.
+        let sinks = sinks_for(false, "tokens", "SECRET-USER-QUERY");
+        let leaked = sinks.iter().any(|(_, v)| v.contains("SECRET-USER-QUERY"));
+        assert!(!leaked, "non-admin sink set leaked raw query: {sinks:?}");
+        // The only string-bearing keys allowed are exactly these two.
+        for (k, _) in sinks_for(true, "t", "q") {
+            assert!(matches!(k, "search.topic" | "search.query"), "unexpected sink key {k}");
+        }
     }
 }

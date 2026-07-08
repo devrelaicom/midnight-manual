@@ -995,12 +995,43 @@ async fn search(
         .map(|c| c.into_result(req.include_scores))
         .collect();
 
-    // Topic is a placeholder until the Task 11 tagger lands; only the success
-    // path is instrumented here (error-path metrics are out of scope).
+    // Classify the query into a bounded topic, then attach the sanctioned
+    // sinks (Task 11). Vector-based classification when the primary query
+    // carries an embedding; FTS-only queries (empty vector) fall back to
+    // "other" — the dominant-result source category is not exposed on
+    // SearchResult, so v1 does not compute it.
+    let is_admin = auth
+        .as_deref()
+        .is_some_and(|a| matches!(a.role, mnm_auth::Role::Admin));
+    let primary = queries.first();
+    let topic = match primary.filter(|q| !q.vector.is_empty()) {
+        // The centroid read guard is a scrutinee temporary: it lives just long
+        // enough for `classify` to borrow the centroids, then drops at the end
+        // of this match — never held across an await.
+        Some(q) => match state
+            .topic_centroids
+            .read()
+            .ok()
+            .as_ref()
+            .and_then(|g| g.as_ref())
+        {
+            Some(c) => {
+                observability::topic::classify(c, &q.vector, state.cfg.sentry.topic_min_similarity)
+            }
+            None => observability::topic::fallback_from_sources(None),
+        },
+        None => observability::topic::fallback_from_sources(None),
+    };
+    if let Some(q) = primary {
+        observability::attach_query_sinks(is_admin, &topic, &q.text);
+    }
+
+    // Only the success path is instrumented here (error-path metrics are out
+    // of scope for this task).
     observability::record_search_metrics(
         "ok",
         started.elapsed().as_secs_f64() * 1000.0,
-        "unknown",
+        &topic,
         !matches!(code_mode, CodeMode::Off),
     );
 
