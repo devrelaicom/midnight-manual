@@ -229,6 +229,20 @@ pub enum CloudError {
     Decode(String),
 }
 
+/// Attach the active Sentry trace's `sentry-trace` header to an outbound
+/// request so the server continues this distributed trace. No-op when Sentry
+/// is off (`get_span()` is `None`) — regular users are unaffected. Best-effort:
+/// relies on the thread-local hub, which is correct for the MCP's serial,
+/// single-hub dispatch (one tool call in flight at a time).
+fn with_trace_headers(mut rb: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    if let Some(span) = sentry::configure_scope(|scope| scope.get_span()) {
+        for (name, value) in span.iter_headers() {
+            rb = rb.header(name, value);
+        }
+    }
+    rb
+}
+
 /// HTTP wrapper around the cloud read API.
 #[derive(Debug, Clone)]
 pub struct CloudClient {
@@ -305,7 +319,7 @@ impl CloudClient {
     /// `POST /v1/search`.
     pub async fn search(&self, req: &SearchRequest) -> Result<serde_json::Value, CloudError> {
         let url = self.endpoint("v1/search")?;
-        let mut rb = self.http.post(url).json(req);
+        let mut rb = with_trace_headers(self.http.post(url).json(req));
         if let Some(b) = &self.bearer {
             rb = rb.bearer_auth(b);
         }
@@ -474,9 +488,7 @@ impl CloudClient {
     /// HTTP status (200 or not) is returned as data.
     pub async fn readyz(&self) -> Result<u16, CloudError> {
         let url = self.endpoint("readyz")?;
-        let resp = self
-            .http
-            .get(url)
+        let resp = with_trace_headers(self.http.get(url))
             .send()
             .await
             .map_err(|e| CloudError::Transport(e.to_string()))?;
@@ -501,7 +513,7 @@ impl CloudClient {
     }
 
     async fn get_json_url(&self, url: Url) -> Result<serde_json::Value, CloudError> {
-        let mut rb = self.http.get(url);
+        let mut rb = with_trace_headers(self.http.get(url));
         if let Some(b) = &self.bearer {
             rb = rb.bearer_auth(b);
         }

@@ -2935,6 +2935,7 @@ dependencies = [
  "mnm-telemetry",
  "once_cell",
  "reqwest 0.12.28",
+ "sentry",
  "serde",
  "serde_json",
  "tempfile",
