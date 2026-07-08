@@ -33,11 +33,19 @@ pub struct Centroids {
 /// aggregate query, the delete, or any insert fails.
 pub async fn recompute_centroids(pool: &PgPool, corpus_model_id: Uuid) -> anyhow::Result<usize> {
     let rows = sqlx::query(
+        // Scope to the CURRENT corpus exactly as search does (see
+        // `routes::search`): a chunk counts only when it is `ready` AND belongs
+        // to the still-`active` source_version. `finalize`/`promote` demote the
+        // prior version (`is_active = false`) but leave its chunk rows `ready`
+        // until the retention sweep hard-deletes them, so without the
+        // `sv.is_active` guard a re-ingest would pollute the centroid with the
+        // previous version's stale embeddings.
         "SELECT s.kind AS label, avg(c.embedding) AS centroid, count(*) AS n \
          FROM chunk c \
          JOIN source_version sv ON sv.id = c.source_version_id \
          JOIN source s ON s.id = sv.source_id \
-         WHERE c.embedding_model_id = $1 AND c.embedding IS NOT NULL AND c.status = 'ready' \
+         WHERE c.embedding_model_id = $1 AND c.embedding IS NOT NULL \
+           AND c.status = 'ready' AND sv.is_active = true \
          GROUP BY s.kind",
     )
     .bind(corpus_model_id)

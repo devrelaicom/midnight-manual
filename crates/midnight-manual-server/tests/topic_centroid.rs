@@ -18,23 +18,23 @@ use uuid::Uuid;
 
 const DIM: usize = 1024;
 
-/// Seed one `source` of the given `kind` with a single finalized
-/// `source_version`, one document, and `n` `ready` chunks whose embeddings
-/// are all `fill` (a constant, non-zero value) — enough to give the category
-/// a well-defined, non-zero mean.
-async fn seed_category(pool: &PgPool, kind: SourceKind, model_id: Uuid, fill: f32, n: usize) {
-    let slug = format!("topic-centroid-{}", Uuid::new_v4());
-    let source_id = source::insert(pool, &slug, &slug, kind, None, 5)
-        .await
-        .expect("insert source");
-
+/// Insert one *building* `source_version` for `source_id` with `n` `ready`
+/// chunks that all embed `embedding`. Returns the new version id; the caller
+/// calls `finalize` to activate it (which demotes any prior active version).
+/// The version `content_hash` is unique per call so repeated versions on one
+/// source never collide.
+async fn seed_version(
+    pool: &PgPool,
+    source_id: Uuid,
+    model_id: Uuid,
+    embedding: &[f32],
+    n: usize,
+) -> Uuid {
+    let content_hash = format!("sv-hash-{}", Uuid::new_v4());
     let (sv_id, _) =
-        source_version::create_building(pool, source_id, model_id, None, "0.1.0", "hash")
+        source_version::create_building(pool, source_id, model_id, None, "0.1.0", &content_hash)
             .await
             .expect("create source_version");
-    source_version::finalize(pool, sv_id)
-        .await
-        .expect("finalize source_version");
 
     let root = node::insert(pool, sv_id, None, NodeKind::Root, "root", 0)
         .await
@@ -88,7 +88,7 @@ async fn seed_category(pool: &PgPool, kind: SourceKind, model_id: Uuid, fill: f3
                 total_chunks: i32::try_from(n).unwrap(),
                 content: "topic centroid fixture chunk",
                 content_hash: &format!("chunk-hash-{i}"),
-                embedding: Some(vec![fill; DIM]),
+                embedding: Some(embedding.to_vec()),
                 embedding_model_id: model_id,
                 code_embedding: None,
                 heading_path: &[],
@@ -102,6 +102,22 @@ async fn seed_category(pool: &PgPool, kind: SourceKind, model_id: Uuid, fill: f3
         .await
         .expect("insert chunk");
     }
+
+    sv_id
+}
+
+/// Seed one `source` of the given `kind` with a single finalized (active)
+/// `source_version` whose `n` `ready` chunks all embed the constant `fill` —
+/// enough to give the category a well-defined, non-zero mean.
+async fn seed_category(pool: &PgPool, kind: SourceKind, model_id: Uuid, fill: f32, n: usize) {
+    let slug = format!("topic-centroid-{}", Uuid::new_v4());
+    let source_id = source::insert(pool, &slug, &slug, kind, None, 5)
+        .await
+        .expect("insert source");
+    let sv_id = seed_version(pool, source_id, model_id, &vec![fill; DIM], n).await;
+    source_version::finalize(pool, sv_id)
+        .await
+        .expect("finalize source_version");
 }
 
 #[tokio::test]
@@ -176,4 +192,65 @@ async fn recompute_is_idempotent_and_replaces_stale_rows() {
         .await
         .expect("load_centroids");
     assert_eq!(centroids.labels.len(), 2);
+}
+
+#[tokio::test]
+async fn recompute_excludes_inactive_source_version_chunks() {
+    let h = common::boot().await;
+    let model_id = embedding_model::upsert(
+        &h.pool,
+        "topic-centroid-fixture-3",
+        1,
+        i32::try_from(DIM).unwrap(),
+        "test",
+    )
+    .await
+    .expect("upsert embedding model");
+
+    // One source, two finalized versions on the same embedding model. v1 embeds
+    // along basis e0 and is demoted to `inactive` the instant v2 (basis e1)
+    // finalizes — but v1's chunks stay `status = 'ready'` (finalize never
+    // touches chunk rows), which is exactly the stale state the `sv.is_active`
+    // filter must exclude. A correct centroid points purely along e1; if the
+    // demoted v1 leaked in, the mean would be (e0 + e1)/2 and e0 would carry
+    // ~0.707 of the resulting unit vector.
+    let slug = format!("topic-centroid-{}", Uuid::new_v4());
+    let source_id = source::insert(&h.pool, &slug, &slug, SourceKind::DocsSite, None, 5)
+        .await
+        .expect("insert source");
+
+    let mut e0 = vec![0.0_f32; DIM];
+    e0[0] = 1.0;
+    let mut e1 = vec![0.0_f32; DIM];
+    e1[1] = 1.0;
+
+    let v1 = seed_version(&h.pool, source_id, model_id, &e0, 2).await;
+    source_version::finalize(&h.pool, v1)
+        .await
+        .expect("finalize v1 (becomes active)");
+    let v2 = seed_version(&h.pool, source_id, model_id, &e1, 2).await;
+    source_version::finalize(&h.pool, v2)
+        .await
+        .expect("finalize v2 (demotes v1)");
+
+    let written = topic::recompute_centroids(&h.pool, model_id)
+        .await
+        .expect("recompute_centroids");
+    assert_eq!(written, 1, "one active category -> one centroid");
+
+    let centroids = topic::load_centroids(&h.pool, model_id)
+        .await
+        .expect("load_centroids");
+    assert_eq!(centroids.labels, vec!["docs_site".to_string()]);
+    let c = &centroids.vectors[0];
+    assert!(
+        c[0].abs() < 1e-3,
+        "inactive version's chunks (basis e0) must be excluded; got c[0]={}",
+        c[0]
+    );
+    assert!(
+        (c[1] - 1.0).abs() < 1e-3,
+        "centroid must point along the active version's basis e1; got c[1]={}",
+        c[1]
+    );
 }
