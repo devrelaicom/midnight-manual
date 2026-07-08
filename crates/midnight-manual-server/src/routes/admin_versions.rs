@@ -70,13 +70,30 @@ async fn promote_version(
             // that already committed — log and move on (Task 9 / spec §9).
             match source_version::get_by_revision(&state.pool, src.id, promoted).await {
                 Ok(sv) => {
-                    if let Err(e) = crate::observability::topic::recompute_centroids(
+                    match crate::observability::topic::recompute_centroids(
                         &state.pool,
                         sv.embedding_model_id,
                     )
                     .await
                     {
-                        tracing::warn!(request_id = rid, error = %e, "topic centroid recompute failed after promotion");
+                        Ok(_) => match crate::observability::topic::load_centroids(
+                            &state.pool,
+                            sv.embedding_model_id,
+                        )
+                        .await
+                        {
+                            Ok(c) => {
+                                if let Ok(mut guard) = state.topic_centroids.write() {
+                                    *guard = Some(c);
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(request_id = rid, error = %e, "topic centroid cache refresh failed after recompute");
+                            }
+                        },
+                        Err(e) => {
+                            tracing::warn!(request_id = rid, error = %e, "topic centroid recompute failed after promotion");
+                        }
                     }
                 }
                 Err(e) => {

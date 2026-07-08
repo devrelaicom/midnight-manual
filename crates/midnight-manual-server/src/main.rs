@@ -160,9 +160,22 @@ async fn main() -> anyhow::Result<()> {
     let (voyage, voyage_ctx) =
         midnight_manual_server::app::resolved_embedders(&cfg, &corpus, code.as_ref());
 
+    // Captured before `corpus` moves into the `corpus_model` handle below —
+    // `Uuid` is `Copy` so this is a cheap read, not a borrow of `corpus`.
+    let corpus_model_id = corpus.id;
     let corpus_model = std::sync::Arc::new(std::sync::RwLock::new(Some(corpus)));
     let code_model: midnight_manual_server::code_model::Shared =
         std::sync::Arc::new(std::sync::RwLock::new(code));
+
+    // Best-effort load of the active model's topic centroids (Task 10). `None`
+    // on failure — the classifier (wired in a later task) then treats every
+    // query as unbounded/`"other"` rather than failing boot.
+    let topic_centroids = std::sync::Arc::new(std::sync::RwLock::new(
+        midnight_manual_server::observability::topic::load_centroids(&pool, corpus_model_id)
+            .await
+            .ok(),
+    ));
+
     let app = app::build_with_limiter(
         pool.clone(),
         cfg.clone(),
@@ -172,6 +185,7 @@ async fn main() -> anyhow::Result<()> {
         voyage,
         voyage_ctx,
         code_model,
+        topic_centroids,
     )
     .context("build app")?;
     let addr: SocketAddr = format!("0.0.0.0:{}", cfg.port)

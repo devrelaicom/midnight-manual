@@ -148,6 +148,7 @@ async fn success_carries_ratelimit_headers() {
         None,
         None,
         std::sync::Arc::new(std::sync::RwLock::new(None)),
+        std::sync::Arc::new(std::sync::RwLock::new(None)),
     )
     .expect("build");
     let (status, headers, _) = send(app, "GET", "/v1/sources", &unique_ip(), None).await;
@@ -172,6 +173,7 @@ async fn anonymous_over_budget_returns_429_with_retry_after() {
         token_limiter,
         None,
         None,
+        std::sync::Arc::new(std::sync::RwLock::new(None)),
         std::sync::Arc::new(std::sync::RwLock::new(None)),
     )
     .expect("build");
@@ -205,6 +207,7 @@ async fn health_is_exempt_from_limiting() {
         token_limiter,
         None,
         None,
+        std::sync::Arc::new(std::sync::RwLock::new(None)),
         std::sync::Arc::new(std::sync::RwLock::new(None)),
     )
     .expect("build");
@@ -248,6 +251,7 @@ async fn cidr_override_raises_the_limit() {
         None,
         None,
         std::sync::Arc::new(std::sync::RwLock::new(None)),
+        std::sync::Arc::new(std::sync::RwLock::new(None)),
     )
     .expect("build");
     // Anon floor of 1 would 429 the third request; the /24 override (50 rps)
@@ -280,6 +284,7 @@ async fn invalid_bearer_flood_is_charged() {
         token_limiter,
         None,
         None,
+        std::sync::Arc::new(std::sync::RwLock::new(None)),
         std::sync::Arc::new(std::sync::RwLock::new(None)),
     )
     .expect("build");
@@ -322,6 +327,7 @@ async fn invalid_bearer_401s_even_when_rate_limiting_disabled() {
         None,
         None,
         std::sync::Arc::new(std::sync::RwLock::new(None)),
+        std::sync::Arc::new(std::sync::RwLock::new(None)),
     )
     .expect("build");
     let (s, _, b) = send(app, "GET", "/v1/sources", &unique_ip(), Some("garbage")).await;
@@ -347,6 +353,7 @@ async fn admin_token_gets_the_top_tier() {
         token_limiter,
         None,
         None,
+        std::sync::Arc::new(std::sync::RwLock::new(None)),
         std::sync::Arc::new(std::sync::RwLock::new(None)),
     )
     .expect("build");

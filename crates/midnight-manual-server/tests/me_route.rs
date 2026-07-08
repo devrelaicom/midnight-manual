@@ -219,6 +219,7 @@ async fn rate_limit_enabled_reports_bucket_and_peek_does_not_spend() {
         None,
         None,
         Arc::new(RwLock::new(None)),
+        Arc::new(RwLock::new(None)),
     )
     .expect("build app");
 
@@ -296,6 +297,7 @@ async fn embeddings_charge_is_visible_in_me_token_budget() {
         voyage,
         None,
         code_model,
+        Arc::new(RwLock::new(None)),
     )
     .expect("build app");
 

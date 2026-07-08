@@ -144,6 +144,7 @@ async fn embeds_via_voyage_and_charges_tokens() {
         None,
         voyage_ctx,
         Arc::new(RwLock::new(None)),
+        Arc::new(RwLock::new(None)),
     )
     .expect("build app");
 
@@ -208,6 +209,7 @@ async fn code_type_embeds_via_flat_voyage_and_reports_code_model() {
         voyage,
         None,
         pinned_code_model(),
+        Arc::new(RwLock::new(None)),
     )
     .expect("build app");
 
@@ -254,6 +256,7 @@ async fn general_nested_groups_return_flattened_vectors() {
         generous_limiter(),
         None,
         voyage_ctx,
+        Arc::new(RwLock::new(None)),
         Arc::new(RwLock::new(None)),
     )
     .expect("build app");
@@ -303,6 +306,7 @@ async fn nested_input_with_code_type_returns_400() {
         Some(unreachable_voyage()),
         None,
         pinned_code_model(),
+        Arc::new(RwLock::new(None)),
     )
     .expect("build app");
 
@@ -344,6 +348,7 @@ async fn oversized_nested_group_returns_413() {
         Some(unreachable_voyage()),
         None,
         Arc::new(RwLock::new(None)),
+        Arc::new(RwLock::new(None)),
     )
     .expect("build app");
 
@@ -378,6 +383,7 @@ async fn model_pin_mismatching_type_resolved_model_returns_409() {
         Some(unreachable_voyage()),
         None,
         pinned_code_model(), // voyage-code-3@1
+        Arc::new(RwLock::new(None)),
     )
     .expect("build app");
 
@@ -446,6 +452,7 @@ async fn over_hourly_cap_returns_429_with_retry_after() {
         Some(unreachable_voyage()),
         None,
         Arc::new(RwLock::new(None)),
+        Arc::new(RwLock::new(None)),
     )
     .expect("build app");
 
@@ -503,6 +510,7 @@ async fn missing_voyage_key_returns_503() {
         None,
         None,
         Arc::new(RwLock::new(None)),
+        Arc::new(RwLock::new(None)),
     )
     .expect("build app");
 
@@ -540,6 +548,7 @@ async fn over_1000_inputs_returns_413() {
         token_limiter,
         Some(unreachable_voyage()),
         None,
+        Arc::new(RwLock::new(None)),
         Arc::new(RwLock::new(None)),
     )
     .expect("build app");

@@ -166,6 +166,7 @@ async fn off_model_chunks_excluded_from_results() {
         None,
         None,
         Arc::new(RwLock::new(None)),
+        Arc::new(RwLock::new(None)),
     )
     .expect("build app");
 

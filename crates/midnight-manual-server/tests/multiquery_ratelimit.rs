@@ -172,6 +172,7 @@ async fn over_cap_returns_400_and_refunds_the_base_token() {
         None,
         None,
         std::sync::Arc::new(std::sync::RwLock::new(None)),
+        std::sync::Arc::new(std::sync::RwLock::new(None)),
     )
     .expect("build");
     let ip = unique_ip();
@@ -207,6 +208,7 @@ async fn duplicate_queries_do_not_inflate_cost() {
         None,
         None,
         std::sync::Arc::new(std::sync::RwLock::new(None)),
+        std::sync::Arc::new(std::sync::RwLock::new(None)),
     )
     .expect("build");
     let ip = unique_ip();
@@ -233,6 +235,7 @@ async fn distinct_queries_charge_n_tokens() {
         token_limiter,
         None,
         None,
+        std::sync::Arc::new(std::sync::RwLock::new(None)),
         std::sync::Arc::new(std::sync::RwLock::new(None)),
     )
     .expect("build");
@@ -265,6 +268,7 @@ async fn insufficient_budget_returns_429() {
         token_limiter,
         None,
         None,
+        std::sync::Arc::new(std::sync::RwLock::new(None)),
         std::sync::Arc::new(std::sync::RwLock::new(None)),
     )
     .expect("build");

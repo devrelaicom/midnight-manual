@@ -119,9 +119,46 @@ fn l2_normalize(v: &mut [f32]) {
     }
 }
 
+/// Classify a (raw) query vector into a bounded topic label via cosine argmax.
+/// Returns `"other"` when there are no centroids or the best match is below
+/// `min_similarity`. The query vector need not be normalized.
+#[must_use]
+pub fn classify(centroids: &Centroids, query_vec: &[f32], min_similarity: f32) -> String {
+    let qn = {
+        let n: f32 = query_vec.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if n <= f32::EPSILON {
+            return "other".to_owned();
+        }
+        n
+    };
+    let mut best = ("other".to_owned(), min_similarity);
+    for (label, c) in centroids.labels.iter().zip(&centroids.vectors) {
+        // centroids are pre-normalized; divide only by the query norm.
+        let dot: f32 = c.iter().zip(query_vec).map(|(a, b)| a * b).sum();
+        let cos = dot / qn;
+        if cos >= best.1 {
+            best = (label.clone(), cos);
+        }
+    }
+    best.0
+}
+
+/// Fallback when there is no query vector (FTS-only): use the dominant result
+/// source category if present, else `other`.
+#[must_use]
+pub fn fallback_from_sources(top_source_category: Option<&str>) -> String {
+    top_source_category.map_or_else(|| "other".to_owned(), str::to_owned)
+}
+
+/// Shared, read-mostly handle for the active corpus model's topic centroids,
+/// mirroring [`crate::corpus_model::Shared`]. `None` until the boot load
+/// resolves (best-effort) or whenever a load fails; refreshed on
+/// corpus-version promotion.
+pub type Shared = std::sync::Arc<std::sync::RwLock<Option<Centroids>>>;
+
 #[cfg(test)]
 mod tests {
-    use super::l2_normalize;
+    use super::{classify, l2_normalize, Centroids};
 
     #[test]
     fn l2_normalize_unit_scales_vector_to_unit_length() {
@@ -138,5 +175,23 @@ mod tests {
         let mut v = vec![0.0_f32, 0.0, 0.0];
         l2_normalize(&mut v);
         assert_eq!(v, vec![0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn classify_picks_nearest_above_threshold_else_other() {
+        let centroids = Centroids {
+            labels: vec!["tokens".into(), "wallet".into()],
+            vectors: vec![vec![1.0, 0.0], vec![0.0, 1.0]],
+        };
+        // Close to "tokens".
+        assert_eq!(classify(&centroids, &[0.9, 0.1], 0.5), "tokens");
+        // Equidistant / weak → below threshold → other.
+        assert_eq!(classify(&centroids, &[0.7, 0.7], 0.99), "other");
+        // No centroids → other.
+        let empty = Centroids {
+            labels: vec![],
+            vectors: vec![],
+        };
+        assert_eq!(classify(&empty, &[1.0, 0.0], 0.1), "other");
     }
 }
