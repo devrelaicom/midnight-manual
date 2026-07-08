@@ -9,8 +9,10 @@
 
 /// `before_send` body: scrub PII and secrets from an outgoing event.
 ///
-/// Drops the hostname, pins the user to the admin id (or clears it), and
-/// value-redacts every known secret from the serialized event.
+/// Drops the hostname, normalizes the user to a bare id — preserving the
+/// per-request identity (pseudonym / admin sub) and falling back to the
+/// init-time admin id — and value-redacts every known secret from the
+/// serialized event.
 ///
 /// Fails **closed** on the secret-redaction path: if the event cannot be
 /// serialized for inspection, or the redacted JSON cannot be re-parsed back into
@@ -26,10 +28,20 @@ pub fn scrub_event(
     // 1. Hostname is PII.
     event.server_name = None;
 
-    // 2. Normalize the user: only the admin id (drops ip/email/username), or
-    //    nothing when there is no admin id.
-    event.user = admin_user_id.map(|id| sentry::protocol::User {
-        id: Some(id.to_owned()),
+    // 2. Normalize the user to a bare id — stripping any ip/email/username PII —
+    //    while PRESERVING the per-request identity. The server's
+    //    `set_request_identity` puts a pseudonym (regular users) or the admin
+    //    sub (admins) on the event's user via the scope, and that id is already
+    //    trust-boundary-correct, so keep it. Surfaces with no per-request
+    //    identity (CLI/MCP) carry no id on the event and fall back to the
+    //    init-time `admin_user_id`. `None` when neither is present.
+    let user_id = event
+        .user
+        .as_ref()
+        .and_then(|u| u.id.clone())
+        .or_else(|| admin_user_id.map(str::to_owned));
+    event.user = user_id.map(|id| sentry::protocol::User {
+        id: Some(id),
         ..Default::default()
     });
 
@@ -299,6 +311,31 @@ mod tests {
 
         let scrubbed = scrub_event(event, &[], None).expect("always Some");
         assert!(scrubbed.user.is_none(), "user must be cleared when no admin id");
+    }
+
+    #[test]
+    fn scrub_preserves_per_request_user_id_over_absent_admin_id() {
+        // The server sets a per-request identity — a pseudonym for regular users,
+        // the admin sub for admins — on the event's user via `set_request_identity`,
+        // and passes `admin_user_id: None` at init. `scrub_event` must PRESERVE
+        // that id (it is already trust-boundary-correct) while still stripping PII.
+        // Regression: the static `admin_user_id` overwrite previously wiped the
+        // per-request pseudonym on every server error event.
+        let event = sentry::protocol::Event {
+            user: Some(sentry::protocol::User {
+                id: Some("pseudonym-abc123".into()),
+                email: Some("leak@example.com".into()),
+                ip_address: Some(sentry::protocol::IpAddress::Auto),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let scrubbed = scrub_event(event, &[], None).expect("always Some");
+        let user = scrubbed.user.expect("per-request id must be preserved");
+        assert_eq!(user.id.as_deref(), Some("pseudonym-abc123"), "per-request id must survive");
+        assert!(user.email.is_none(), "email PII must be stripped");
+        assert!(user.ip_address.is_none(), "ip PII must be stripped");
     }
 
     #[test]
