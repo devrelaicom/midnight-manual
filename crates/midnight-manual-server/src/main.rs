@@ -32,6 +32,11 @@ async fn main() -> anyhow::Result<()> {
     // outgoing events. The server has no admin user, so `admin_present = true`
     // (the admin gate is client-only) and `admin_user_id = None`.
     let env = mnm_core::config::StdEnv;
+    // Single source of truth for the four Sentry pillars — mirrors what
+    // `ServerConfig::from_env` will resolve later, without duplicating the
+    // defaults here (config isn't parsed yet at this point in boot).
+    let sentry_cfg =
+        midnight_manual_server::config::SentryRuntime::from_env_with(|k| std::env::var(k).ok());
     let sentry_guard = {
         let mut secrets = Vec::new();
         for name in [
@@ -47,6 +52,9 @@ async fn main() -> anyhow::Result<()> {
                 secrets.push(v);
             }
         }
+        if let Some(id_secret) = sentry_cfg.identity_secret.clone() {
+            secrets.push(id_secret);
+        }
         mnm_sentry::init(
             &env,
             mnm_sentry::InitOptions {
@@ -55,13 +63,10 @@ async fn main() -> anyhow::Result<()> {
                 default_environment: "production",
                 admin_user_id: None,
                 secrets,
-                // Pillar toggles get their real values from full Sentry runtime
-                // wiring in a later change; inert defaults here keep the master
-                // gate the only switch until then.
-                enable_logs: false,
-                enable_metrics: false,
-                enable_traces: false,
-                traces_sample_rate: 0.0,
+                enable_logs: sentry_cfg.enable_logs,
+                enable_metrics: sentry_cfg.enable_metrics,
+                enable_traces: sentry_cfg.enable_traces,
+                traces_sample_rate: sentry_cfg.traces_sample_rate,
                 surface: "server",
             },
         )
@@ -70,9 +75,10 @@ async fn main() -> anyhow::Result<()> {
     // Structured JSON logs from day one (FR-105). RUST_LOG override permitted.
     // The EnvFilter is a per-layer filter on the fmt layer (not a global registry
     // filter), so it gates only the JSON logs; the sentry layer stays unfiltered
-    // and captures ERROR events regardless of RUST_LOG — consistent with the CLI.
-    // The sentry layer is attached only when Sentry initialized (inert otherwise);
-    // `Option<Layer>` is itself a `Layer`.
+    // and applies its own level mapping (ERROR -> event + log, WARN/INFO -> log)
+    // regardless of RUST_LOG — consistent with the CLI. The sentry layer is
+    // attached only when Sentry initialized (inert otherwise); `Option<Layer>`
+    // is itself a `Layer`.
     let sentry_layer = sentry_guard.as_ref().map(|_| mnm_sentry::tracing_layer());
     tracing_subscriber::registry()
         .with(

@@ -2,9 +2,11 @@
 
 use std::sync::Arc;
 
-use axum::extract::DefaultBodyLimit;
+use axum::body::Body;
+use axum::extract::{DefaultBodyLimit, Request};
 use axum::Router;
 use mnm_auth::{ChallengeStore, OAuthStateStore, SigningSecret, UserStore};
+use sentry::integrations::tower::{NewSentryLayer, SentryHttpLayer};
 use sqlx::PgPool;
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::TraceLayer;
@@ -551,6 +553,15 @@ pub fn build_with_limiter(
         ))
         .layer(axum::middleware::from_fn(request_id::layer))
         .layer(TraceLayer::new_for_http())
+        // Sentry: continue/start a transaction per request (outermost), each on
+        // its own Hub, so request<->error correlation and distributed tracing
+        // (incoming `sentry-trace`/`baggage`) work correctly. Bound directly on
+        // the Router (not via `ServiceBuilder`), so these bind in the OPPOSITE
+        // order to a `ServiceBuilder`: `SentryHttpLayer` first, then
+        // `NewSentryLayer`, which ends up outermost. Inert when Sentry's master
+        // gate is closed (default) — a Hub with no client bound is a no-op.
+        .layer(SentryHttpLayer::new().enable_transaction())
+        .layer(NewSentryLayer::<Request<Body>>::new_from_top())
         .with_state(state))
 }
 
