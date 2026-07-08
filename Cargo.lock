@@ -2725,6 +2725,7 @@ dependencies = [
  "mnm-skills",
  "mnm-telemetry",
  "reqwest 0.12.28",
+ "sentry",
  "serde",
  "serde_json",
  "tempfile",

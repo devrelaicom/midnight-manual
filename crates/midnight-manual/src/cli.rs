@@ -196,13 +196,10 @@ pub async fn run() -> Result<()> {
                 default_environment: "development",
                 admin_user_id,
                 secrets,
-                // Pillar toggles get their real values from full Sentry runtime
-                // wiring in a later change; inert defaults here keep the master
-                // gate the only switch until then.
-                enable_logs: false,
-                enable_metrics: false,
-                enable_traces: false,
-                traces_sample_rate: 0.0,
+                enable_logs: true,
+                enable_metrics: true,
+                enable_traces: true,
+                traces_sample_rate: 1.0,
                 surface: "cli",
             },
         )
