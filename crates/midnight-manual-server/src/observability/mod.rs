@@ -52,7 +52,7 @@ pub fn record_search_metrics(outcome: &str, latency_ms: f64, topic: &str, code_m
     mnm_sentry::helpers::record_ms("search.latency", latency_ms, &attrs);
 }
 
-/// Which Sentry span-data sinks to set, given role. The ONLY place raw query
+/// Which Sentry content sinks to set, given role. The ONLY place raw query
 /// text is permitted, and only for admins (trust boundary). Pure so it is
 /// table-testable without a live hub.
 #[must_use]
@@ -64,19 +64,29 @@ pub fn sinks_for(is_admin: bool, topic: &str, raw_query: &str) -> Vec<(&'static 
     out
 }
 
-/// Attach the sanctioned query sinks to the current scope's extras.
+/// Attach the sanctioned query sinks so they ride ONLY on captured error
+/// EVENTS — never on the request transaction.
 ///
-/// Deliberately uses `configure_scope`/`set_extra` (not span/transaction
-/// data): scope extras ride on ERROR EVENTS, which pass through
-/// `before_send`/`scrub_event` (fail-closed secret redaction). Transactions
-/// have no `before_send_transaction`, so raw query text must never be
-/// attached as transaction/span data.
+/// Uses `add_event_processor`, deliberately NOT `set_extra`. A scope extra is
+/// copied onto BOTH events (`Scope::apply_to_event`) AND the request
+/// transaction (`Scope::apply_to_transaction`), and transactions bypass
+/// `before_send` entirely — sentry 0.48.4 has no `before_send_transaction` — so
+/// a raw admin query left in a scope extra would ship UNSCRUBBED on any sampled
+/// trace. An event processor is invoked only from `apply_to_event`, so the
+/// sinks reach only captured events, which then pass through
+/// `before_send`/`scrub_event` (fail-closed secret redaction). `search.topic`
+/// is a bounded label that also flows to metrics; the raw, admin-only
+/// `search.query` therefore surfaces solely as scrubbed event context (i.e.
+/// alongside an actual error), never on a bare transaction.
 pub fn attach_query_sinks(is_admin: bool, topic: &str, raw_query: &str) {
     let sinks = sinks_for(is_admin, topic, raw_query);
     sentry::configure_scope(|scope| {
-        for (k, v) in sinks {
-            scope.set_extra(k, v.into());
-        }
+        scope.add_event_processor(move |mut event| {
+            for (key, value) in &sinks {
+                event.extra.insert((*key).to_owned(), value.clone().into());
+            }
+            Some(event)
+        });
     });
 }
 
