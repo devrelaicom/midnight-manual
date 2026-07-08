@@ -392,6 +392,16 @@ async fn search(
     // header is absent (issue #176 L15). Threaded into `rerank_stage`.
     let peer_ip = peer.map(|Extension(ConnectInfo(sa))| sa.ip());
 
+    // Pseudonymous identity + latency clock for observability (Task 8). Set
+    // identity here — before every early-return below — so a rejected request
+    // still carries the caller's identity on its Sentry transaction/events.
+    // Metadata only: no query content is attached in this task.
+    observability::set_request_identity(
+        auth.as_deref(),
+        state.cfg.sentry.identity_secret.as_deref(),
+    );
+    let started = std::time::Instant::now();
+
     // Which retrieval halves this mode runs (loop-invariant).
     let run_vector = matches!(req.mode, SearchMode::Hybrid | SearchMode::Vector);
     let run_fts = matches!(req.mode, SearchMode::Hybrid | SearchMode::Fts);
@@ -410,16 +420,6 @@ async fn search(
     // Exclusive replaces the general vector list with the code-vector list.
     let run_general_vector = run_vector && !matches!(code_mode, CodeMode::Exclusive);
     let run_code_vector = run_vector && !matches!(code_mode, CodeMode::Off);
-
-    // Pseudonymous identity + latency clock for observability (Task 8). Set
-    // identity here — before any of the error early-returns below — so a
-    // rejected request still carries the caller's identity on its Sentry
-    // events. Metadata only: no query content is attached in this task.
-    observability::set_request_identity(
-        auth.as_deref(),
-        state.cfg.sentry.identity_secret.as_deref(),
-    );
-    let started = std::time::Instant::now();
 
     // Normalize the single-query convenience form `{query, vector}` (#6) into
     // the canonical query list. Ambiguous/incomplete requests are rejected.

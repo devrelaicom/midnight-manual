@@ -9,7 +9,11 @@ use crate::middleware::bearer::AuthContext;
 /// Choose the Sentry `user.id`: a real admin `sub` for staff, a stable pseudonym
 /// for everyone else, or `None` when no identity secret is configured.
 #[must_use]
-pub fn resolve_user_id(identity_secret: Option<&str>, sub: &str, is_admin: bool) -> Option<String> {
+pub(crate) fn resolve_user_id(
+    identity_secret: Option<&str>,
+    sub: &str,
+    is_admin: bool,
+) -> Option<String> {
     if is_admin {
         Some(sub.to_owned())
     } else {
