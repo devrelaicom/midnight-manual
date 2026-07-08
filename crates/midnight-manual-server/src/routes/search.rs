@@ -29,6 +29,7 @@ use crate::app::AppState;
 use crate::error;
 use crate::middleware::rate_limit::RateLimitContext;
 use crate::middleware::request_id::RequestId;
+use crate::observability;
 use crate::ratelimit::Decision;
 
 /// Mount the search route.
@@ -409,6 +410,16 @@ async fn search(
     // Exclusive replaces the general vector list with the code-vector list.
     let run_general_vector = run_vector && !matches!(code_mode, CodeMode::Exclusive);
     let run_code_vector = run_vector && !matches!(code_mode, CodeMode::Off);
+
+    // Pseudonymous identity + latency clock for observability (Task 8). Set
+    // identity here — before any of the error early-returns below — so a
+    // rejected request still carries the caller's identity on its Sentry
+    // events. Metadata only: no query content is attached in this task.
+    observability::set_request_identity(
+        auth.as_deref(),
+        state.cfg.sentry.identity_secret.as_deref(),
+    );
+    let started = std::time::Instant::now();
 
     // Normalize the single-query convenience form `{query, vector}` (#6) into
     // the canonical query list. Ambiguous/incomplete requests are rejected.
@@ -983,6 +994,15 @@ async fn search(
         .into_iter()
         .map(|c| c.into_result(req.include_scores))
         .collect();
+
+    // Topic is a placeholder until the Task 11 tagger lands; only the success
+    // path is instrumented here (error-path metrics are out of scope).
+    observability::record_search_metrics(
+        "ok",
+        started.elapsed().as_secs_f64() * 1000.0,
+        "unknown",
+        !matches!(code_mode, CodeMode::Off),
+    );
 
     Json(SearchResponse {
         results,
