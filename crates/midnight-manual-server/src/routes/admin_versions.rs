@@ -2,10 +2,10 @@
 //!
 //! Two endpoints, both admin-tier gated (FR-058 + FR-117):
 //!
-//! 1. `POST /v1/admin/sources/:slug/versions/:revision/promote` — promote
+//! 1. `POST /v1/admin/sources/{slug}/versions/{revision}/promote` — promote
 //!    a previously-active version back to active (rollback per FR-072).
 //!    Returns `{promoted_revision, demoted_revision}`.
-//! 2. `POST /v1/admin/sources/:slug/versions/:revision/retire` — mark a
+//! 2. `POST /v1/admin/sources/{slug}/versions/{revision}/retire` — mark a
 //!    single historical version retired so the source-version retention
 //!    sweep can hard-delete it on its next tick.
 
@@ -27,8 +27,8 @@ use crate::middleware::request_id::RequestId;
 #[must_use]
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/v1/admin/sources/:slug/versions/:revision/promote", post(promote_version))
-        .route("/v1/admin/sources/:slug/versions/:revision/retire", post(retire_version))
+        .route("/v1/admin/sources/{slug}/versions/{revision}/promote", post(promote_version))
+        .route("/v1/admin/sources/{slug}/versions/{revision}/retire", post(retire_version))
 }
 
 /// Response shape for `POST .../promote`. Contains the promoted revision
@@ -64,11 +64,48 @@ async fn promote_version(
     };
 
     match source_version::promote_by_revision(&state.pool, src.id, revision).await {
-        Ok((promoted, demoted)) => Json(PromoteResult {
-            promoted_revision: promoted,
-            demoted_revision: demoted,
-        })
-        .into_response(),
+        Ok((promoted, demoted)) => {
+            // Best-effort: recompute per-category topic centroids for the
+            // newly-active model. A failure here must NOT fail the promotion
+            // that already committed — log and move on (Task 9 / spec §9).
+            match source_version::get_by_revision(&state.pool, src.id, promoted).await {
+                Ok(sv) => {
+                    match crate::observability::topic::recompute_centroids(
+                        &state.pool,
+                        sv.embedding_model_id,
+                    )
+                    .await
+                    {
+                        Ok(_) => match crate::observability::topic::load_centroids(
+                            &state.pool,
+                            sv.embedding_model_id,
+                        )
+                        .await
+                        {
+                            Ok(c) => {
+                                if let Ok(mut guard) = state.topic_centroids.write() {
+                                    *guard = Some(c);
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(request_id = rid, error = %e, "topic centroid cache refresh failed after recompute");
+                            }
+                        },
+                        Err(e) => {
+                            tracing::warn!(request_id = rid, error = %e, "topic centroid recompute failed after promotion");
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(request_id = rid, error = %e, "topic centroid recompute skipped: could not re-read promoted version");
+                }
+            }
+            Json(PromoteResult {
+                promoted_revision: promoted,
+                demoted_revision: demoted,
+            })
+            .into_response()
+        }
         Err(StoreError::NotFound) => {
             error::not_found(format!("source `{slug}` has no revision {revision}"), rid)
         }

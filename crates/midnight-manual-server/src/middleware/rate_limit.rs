@@ -88,12 +88,16 @@ pub async fn layer(
     Extension(req_id): Extension<RequestId>,
     auth: Option<Extension<AuthContext>>,
     rejection: Option<Extension<BearerRejection>>,
-    peer: Option<ConnectInfo<SocketAddr>>,
+    // NOTE: reads only the connect-info Extension set by
+    // `into_make_service_with_connect_info` (production); it does NOT observe
+    // axum's `MockConnectInfo` test helper — inject a peer addr in tests via
+    // `.layer(Extension(ConnectInfo(addr)))`, not `MockConnectInfo`.
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     mut req: Request,
     next: Next,
 ) -> Response {
     let rejected = rejection.map(|Extension(r)| r.remediation);
-    let peer_ip = peer.map(|ConnectInfo(sa)| sa.ip());
+    let peer_ip = peer.map(|Extension(ConnectInfo(sa))| sa.ip());
 
     // Pass-through paths (limiter disabled, or an operational exempt path) still
     // honor a deferred bearer rejection — an invalid token must be refused even

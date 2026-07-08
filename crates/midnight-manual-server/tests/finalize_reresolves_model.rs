@@ -198,6 +198,7 @@ async fn finalize_reresolves_corpus_model_shared() {
         None,
         None,
         Arc::new(RwLock::new(None)),
+        Arc::new(RwLock::new(None)),
     )
     .expect("build app");
     let token = mint_admin_token(app.clone(), "aaron", &kp).await;

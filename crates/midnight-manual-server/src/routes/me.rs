@@ -41,7 +41,11 @@ async fn me(
     headers: HeaderMap,
     auth: Option<Extension<AuthContext>>,
     rl: Option<Extension<RateLimitContext>>,
-    peer: Option<ConnectInfo<SocketAddr>>,
+    // NOTE: reads only the connect-info Extension set by
+    // `into_make_service_with_connect_info` (production); it does NOT observe
+    // axum's `MockConnectInfo` test helper — inject a peer addr in tests via
+    // `.layer(Extension(ConnectInfo(addr)))`, not `MockConnectInfo`.
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
 ) -> Response {
     let auth = auth.map(|Extension(a)| a);
     let (auth_type, identity, permission_level) =
@@ -82,7 +86,7 @@ async fn me(
     let client_ip = crate::middleware::rate_limit::client_ip(
         &headers,
         &state.cfg.rate_limit_client_ip_header,
-        peer.map(|ConnectInfo(sa)| sa.ip()),
+        peer.map(|Extension(ConnectInfo(sa))| sa.ip()),
     );
     let (subject, token_tier, limits) = state.token_limiter.resolve(&client_ip, auth.as_ref());
     let now = OffsetDateTime::now_utc().unix_timestamp();

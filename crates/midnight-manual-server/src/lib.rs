@@ -23,6 +23,7 @@ pub mod error;
 pub mod injection;
 pub mod jobs;
 pub mod middleware;
+pub mod observability;
 pub mod pagination;
 pub mod ratelimit;
 pub mod routes;

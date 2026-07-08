@@ -140,6 +140,7 @@ async fn spawn_server(pool: sqlx::PgPool, cfg: ServerConfig, voyage_mock_uri: &s
         voyage,
         voyage_ctx,
         Arc::new(RwLock::new(None)),
+        Arc::new(RwLock::new(None)),
     )
     .expect("build app");
 

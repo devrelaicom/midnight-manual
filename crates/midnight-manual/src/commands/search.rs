@@ -239,7 +239,14 @@ pub async fn run(
     let server_url = crate::shared::resolve_server_url(server_flag, config_path);
     let cfg_env = mnm_core::config::StdEnv;
     let auth_path = mnm_core::paths::auth_file_path(&cfg_env);
-    run_with_paths(
+    // Per-invocation Sentry transaction so `fetch_search` has an active span to
+    // propagate to the server (distributed tracing). Inert when Sentry is off
+    // (start_transaction returns a no-op transaction when no client is bound).
+    // Transaction has no Drop-based finish, so finish it explicitly — capturing
+    // the result first covers every return path.
+    let txn = sentry::start_transaction(sentry::TransactionContext::new("cli.search", "search"));
+    sentry::configure_scope(|scope| scope.set_span(Some(txn.clone().into())));
+    let outcome = run_with_paths(
         args,
         &server_url,
         auth_path.as_deref(),
@@ -248,7 +255,9 @@ pub async fn run(
         telemetry,
         json,
     )
-    .await
+    .await;
+    txn.finish();
+    outcome
 }
 
 /// Path-explicit driver. Embeds the query via VoyageAI (BYOK or server-proxy)
@@ -1190,6 +1199,14 @@ pub async fn fetch_search(
         .build()
         .context("build HTTP client")?;
     let mut req = client.post(format!("{server_url}/v1/search")).json(request);
+    // Propagate the active Sentry trace to the server so the CLI and server
+    // spans join one distributed trace. No-op when Sentry is off: `get_span`
+    // returns `None`, so no headers are added and regular users are unaffected.
+    if let Some(span) = sentry::configure_scope(|scope| scope.get_span()) {
+        for (name, value) in span.iter_headers() {
+            req = req.header(name, value);
+        }
+    }
     if let Some(token) = bearer {
         req = req.bearer_auth(token);
     }

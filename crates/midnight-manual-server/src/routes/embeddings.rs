@@ -184,7 +184,11 @@ async fn embeddings(
     Extension(req_id): Extension<RequestId>,
     headers: HeaderMap,
     auth: Option<Extension<AuthContext>>,
-    peer: Option<ConnectInfo<SocketAddr>>,
+    // NOTE: reads only the connect-info Extension set by
+    // `into_make_service_with_connect_info` (production); it does NOT observe
+    // axum's `MockConnectInfo` test helper — inject a peer addr in tests via
+    // `.layer(Extension(ConnectInfo(addr)))`, not `MockConnectInfo`.
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     Json(req): Json<EmbeddingsRequest>,
 ) -> Response {
     let rid = req_id.as_str();
@@ -299,7 +303,7 @@ async fn embeddings(
     let client_ip = crate::middleware::rate_limit::client_ip(
         &headers,
         &state.cfg.rate_limit_client_ip_header,
-        peer.map(|ConnectInfo(sa)| sa.ip()),
+        peer.map(|Extension(ConnectInfo(sa))| sa.ip()),
     );
     let auth_ctx = auth.as_ref().map(|Extension(c)| c.clone());
     let (subject, tier, limits) = state.token_limiter.resolve(&client_ip, auth_ctx.as_ref());

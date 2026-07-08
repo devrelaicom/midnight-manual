@@ -45,6 +45,7 @@ mnm-retrieval   = { workspace = true }
 mnm-telemetry   = { workspace = true }
 mnm-embedding   = { workspace = true }
 mnm-sentry      = { workspace = true }
+sentry          = { workspace = true }
 axum           = { workspace = true }
 tokio          = { workspace = true }
 tower          = { workspace = true }

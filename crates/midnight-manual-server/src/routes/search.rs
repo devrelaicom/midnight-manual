@@ -29,6 +29,7 @@ use crate::app::AppState;
 use crate::error;
 use crate::middleware::rate_limit::RateLimitContext;
 use crate::middleware::request_id::RequestId;
+use crate::observability;
 use crate::ratelimit::Decision;
 
 /// Mount the search route.
@@ -378,14 +379,28 @@ async fn search(
     rl: Option<Extension<RateLimitContext>>,
     headers: axum::http::HeaderMap,
     auth: Option<Extension<crate::middleware::bearer::AuthContext>>,
-    peer: Option<ConnectInfo<SocketAddr>>,
+    // NOTE: reads only the connect-info Extension set by
+    // `into_make_service_with_connect_info` (production); it does NOT observe
+    // axum's `MockConnectInfo` test helper — inject a peer addr in tests via
+    // `.layer(Extension(ConnectInfo(addr)))`, not `MockConnectInfo`.
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     Json(req): Json<SearchRequest>,
 ) -> Response {
     let rid = req_id.as_str();
     let rl_ctx = rl.as_ref().map(|Extension(c)| c);
     // Socket peer IP, used to key the token limiter when the trusted proxy
     // header is absent (issue #176 L15). Threaded into `rerank_stage`.
-    let peer_ip = peer.map(|ConnectInfo(sa)| sa.ip());
+    let peer_ip = peer.map(|Extension(ConnectInfo(sa))| sa.ip());
+
+    // Pseudonymous identity + latency clock for observability (Task 8). Set
+    // identity here — before every early-return below — so a rejected request
+    // still carries the caller's identity on its Sentry transaction/events.
+    // Metadata only: no query content is attached in this task.
+    observability::set_request_identity(
+        auth.as_deref(),
+        state.cfg.sentry.identity_secret.as_deref(),
+    );
+    let started = std::time::Instant::now();
 
     // Which retrieval halves this mode runs (loop-invariant).
     let run_vector = matches!(req.mode, SearchMode::Hybrid | SearchMode::Vector);
@@ -979,6 +994,46 @@ async fn search(
         .into_iter()
         .map(|c| c.into_result(req.include_scores))
         .collect();
+
+    // Classify the query into a bounded topic, then attach the sanctioned
+    // sinks (Task 11). Vector-based classification when the primary query
+    // carries an embedding; FTS-only queries (empty vector) fall back to
+    // "other" — the dominant-result source category is not exposed on
+    // SearchResult, so v1 does not compute it.
+    let is_admin = auth
+        .as_deref()
+        .is_some_and(|a| matches!(a.role, mnm_auth::Role::Admin));
+    let primary = queries.first();
+    let topic = match primary.filter(|q| !q.vector.is_empty()) {
+        // The centroid read guard is a scrutinee temporary: it lives just long
+        // enough for `classify` to borrow the centroids, then drops at the end
+        // of this match — never held across an await.
+        Some(q) => match state
+            .topic_centroids
+            .read()
+            .ok()
+            .as_ref()
+            .and_then(|g| g.as_ref())
+        {
+            Some(c) => {
+                observability::topic::classify(c, &q.vector, state.cfg.sentry.topic_min_similarity)
+            }
+            None => observability::topic::fallback_from_sources(None),
+        },
+        None => observability::topic::fallback_from_sources(None),
+    };
+    if let Some(q) = primary {
+        observability::attach_query_sinks(is_admin, &topic, &q.text);
+    }
+
+    // Only the success path is instrumented here (error-path metrics are out
+    // of scope for this task).
+    observability::record_search_metrics(
+        "ok",
+        started.elapsed().as_secs_f64() * 1000.0,
+        &topic,
+        !matches!(code_mode, CodeMode::Off),
+    );
 
     Json(SearchResponse {
         results,

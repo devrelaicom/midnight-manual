@@ -196,6 +196,11 @@ pub async fn run() -> Result<()> {
                 default_environment: "development",
                 admin_user_id,
                 secrets,
+                enable_logs: true,
+                enable_metrics: true,
+                enable_traces: true,
+                traces_sample_rate: 1.0,
+                surface: "cli",
             },
         )
     } else {

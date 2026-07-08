@@ -25,22 +25,40 @@
 //!
 //! # Privacy
 //!
-//! Only `error`-level `tracing` events (and panics) are sent — [`tracing_layer`]
-//! drops the default `info`/`warn` breadcrumbs so request-scoped context (logins,
-//! org names, error strings) does not leave the machine.
+//! [`tracing_layer`] maps `tracing` events by level: `error` becomes both a
+//! Sentry event and a structured log; `warn`/`info` become a structured log
+//! plus a breadcrumb (for trace context); `debug`/`trace` are ignored
+//! entirely — they are the widest leak surface and are never sent. Panics are
+//! captured independently by the panic integration. Every log that is sent
+//! still passes through [`scrub::scrub_log`] (see below), which remains the
+//! safety net for this wider capture surface.
 //!
 //! Every outgoing event passes through [`scrub_event`], which drops the hostname,
 //! pins the Sentry user to a single admin id (or clears it), and value-redacts
 //! every known secret from the serialized event body — both its verbatim and its
-//! JSON-escaped form. Note this covers secrets *configured at startup* (DSN, DB
-//! URL, API keys, signing secrets, the on-disk auth tokens); it cannot redact a
-//! credential *minted at runtime* (e.g. an OAuth token fetched mid-request) since
-//! that value is not known when the scrubber is built. Dropping breadcrumbs above
-//! is the primary defense for those. Redaction fails **closed**: if a secret is
-//! present but the scrubbed event cannot be re-serialized, [`scrub_event`] drops
-//! the event rather than transmit the secret in cleartext.
+//! JSON-escaped form. Every outgoing structured log passes through
+//! [`scrub::scrub_log`], which applies the same value-redaction to the serialized
+//! log body/attributes. Every outgoing metric passes through
+//! [`scrub::scrub_metric`], which first strips any attribute key outside
+//! [`scrub::METRIC_ATTR_ALLOWLIST`] (metric attributes are free-form key/value
+//! pairs, so this closed allow-list is the structural defense against a
+//! free-form-string leak) and then applies the same value-redaction. Note this
+//! covers secrets *configured at startup* (DSN, DB URL, API keys, signing
+//! secrets, the on-disk auth tokens); it cannot redact a credential *minted at
+//! runtime* (e.g. an OAuth token fetched mid-request) since that value is not
+//! known when the scrubber is built. Dropping breadcrumbs above is the primary
+//! defense for those. Redaction fails **closed**: if a secret is present but the
+//! scrubbed event, log, or metric cannot be re-serialized, the scrubber drops
+//! the payload rather than transmit the secret in cleartext.
 
 use std::sync::Arc;
+
+pub mod helpers;
+pub mod layer;
+pub mod scrub;
+
+pub use layer::tracing_layer;
+pub use scrub::scrub_event;
 
 /// Environment variable holding the Sentry DSN (the project key). Setting this
 /// to a non-empty value is one of the gate conditions; the value itself is the
@@ -80,7 +98,34 @@ pub fn env_gate_passes(env: &impl mnm_core::config::ConfigEnv) -> bool {
     sentry_enabled(key.as_deref(), enable.as_deref(), true)
 }
 
+/// Resolve the head-sampling rate for a root transaction.
+///
+/// Precedence: the pillar gate wins (traces disabled → never sample); then an
+/// inherited distributed-trace decision is honored exactly (sampled → 1.0,
+/// dropped → 0.0); otherwise fall back to the configured base rate. A `NaN`
+/// base rate normalizes to `0.0` (fail-safe — never hand the SDK a NaN rate).
+#[must_use]
+fn resolve_trace_sample_rate(
+    enable_traces: bool,
+    base_rate: f32,
+    parent_sampled: Option<bool>,
+) -> f32 {
+    if !enable_traces {
+        return 0.0;
+    }
+    let base = if base_rate.is_nan() {
+        0.0
+    } else {
+        base_rate.clamp(0.0, 1.0)
+    };
+    parent_sampled.map_or(base, |s| if s { 1.0 } else { 0.0 })
+}
+
 /// Knobs for [`init`].
+// The four `bool`s are independent per-pillar/gate toggles (admin presence,
+// logs, metrics, traces), not encodable as a single state machine or
+// two-variant enum — `struct_excessive_bools` does not apply here.
+#[allow(clippy::struct_excessive_bools)]
 pub struct InitOptions<'a> {
     /// Server passes `true` (admin gate N/A); client passes the real
     /// `auth.toml` `[admin]`-section presence check.
@@ -96,6 +141,18 @@ pub struct InitOptions<'a> {
     pub admin_user_id: Option<String>,
     /// Secret values to redact from every outgoing event.
     pub secrets: Vec<String>,
+    /// Enable structured logs (info+ tracing events → Sentry logs). Gated.
+    pub enable_logs: bool,
+    /// Enable metrics (counter/gauge/distribution). Gated.
+    pub enable_metrics: bool,
+    /// Enable performance traces/spans. Gated.
+    pub enable_traces: bool,
+    /// Head sample rate for ROOT transactions with no incoming trace (staff
+    /// requests continue an incoming sampled trace regardless). 0.0..=1.0.
+    pub traces_sample_rate: f32,
+    /// Surface tag applied to every event/transaction: `"cli"` | `"mcp"` |
+    /// `"server"`.
+    pub surface: &'a str,
 }
 
 /// Initialize Sentry iff the gate passes.
@@ -132,146 +189,50 @@ pub fn init(
         .var(ENVIRONMENT_ENV)
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| opts.default_environment.to_owned());
+    // `secrets` is captured by three closures below (`before_send`,
+    // `before_send_log`, `before_send_metric`), initialized in source order.
+    // Rust moves each closure's captures in order, so every closure but the
+    // last must `.clone()`; only the final one may take the move (a `.clone()`
+    // on the last would trip `clippy::redundant_clone` under `-D warnings`).
+    // No clone is needed here: `opts.secrets` is not read anywhere else, so
+    // this is a plain move out of `opts`.
     let secrets = opts.secrets;
     let admin_user_id = opts.admin_user_id;
+    let enable_traces = opts.enable_traces;
+    let traces_sample_rate = opts.traces_sample_rate;
+    let surface = opts.surface.to_owned();
 
     let guard = sentry::init(sentry::ClientOptions {
         dsn: Some(parsed_dsn),
         release: Some(opts.release.to_owned().into()),
         environment: Some(environment.into()),
         send_default_pii: false,
-        before_send: Some(Arc::new(move |event| {
-            scrub_event(event, &secrets, admin_user_id.as_deref())
+        // Root-transaction head sampling. A request that continues an incoming
+        // (sampled) `sentry-trace` inherits that decision exactly, so staff-originated
+        // traces are kept whenever traces are enabled at all; only trace-less regular
+        // traffic is rate-sampled.
+        traces_sampler: Some(Arc::new(move |ctx| {
+            resolve_trace_sample_rate(enable_traces, traces_sample_rate, ctx.sampled())
+        })),
+        enable_logs: opts.enable_logs,
+        enable_metrics: opts.enable_metrics,
+        before_send: Some(Arc::new({
+            let secrets = secrets.clone();
+            move |event| scrub_event(event, &secrets, admin_user_id.as_deref())
+        })),
+        before_send_log: Some(Arc::new({
+            let secrets = secrets.clone();
+            move |log| scrub::scrub_log(log, &secrets)
+        })),
+        before_send_metric: Some(Arc::new({
+            // Final use of `secrets` — move, no clone needed.
+            move |metric| scrub::scrub_metric(metric, &secrets)
         })),
         ..Default::default()
     });
+    // Tag every event/transaction from this process with its surface.
+    sentry::configure_scope(|scope| scope.set_tag("surface", &surface));
     Some(guard)
-}
-
-/// `before_send` body: scrub PII and secrets from an outgoing event.
-///
-/// Drops the hostname, pins the user to the admin id (or clears it), and
-/// value-redacts every known secret from the serialized event.
-///
-/// Fails **closed** on the secret-redaction path: if the event cannot be
-/// serialized for inspection, or the redacted JSON cannot be re-parsed back into
-/// an `Event`, this returns `None` (dropping the event) rather than fall back to
-/// the pre-scrub original and risk shipping a secret in cleartext. Events with no
-/// secrets configured to redact are always returned (still scrubbed of PII).
-#[must_use]
-pub fn scrub_event(
-    mut event: sentry::protocol::Event<'static>,
-    secrets: &[String],
-    admin_user_id: Option<&str>,
-) -> Option<sentry::protocol::Event<'static>> {
-    // 1. Hostname is PII.
-    event.server_name = None;
-
-    // 2. Normalize the user: only the admin id (drops ip/email/username), or
-    //    nothing when there is no admin id.
-    event.user = admin_user_id.map(|id| sentry::protocol::User {
-        id: Some(id.to_owned()),
-        ..Default::default()
-    });
-
-    // 3. Value-redact secrets by serializing the whole event, replacing every
-    //    known secret in the JSON, and deserializing back. This is field-agnostic
-    //    (it catches a secret wherever it landed: `extra`, `exception`,
-    //    `contexts`, `request`, breadcrumbs, ...) and trivially testable. For
-    //    each secret we redact both its verbatim bytes and its JSON-escaped form,
-    //    because a secret containing `"` or `\` (e.g. a DB-URL password)
-    //    serializes escaped and would otherwise dodge a raw match. It catches
-    //    only secrets that appear verbatim once serialized — a value
-    //    transformed/encoded before landing in the event is not covered.
-    //
-    //    The `>= 8` filter avoids over-redacting on trivially short strings; all
-    //    configured secrets (API keys, JWTs, DB URLs, DSNs) are long. Secrets
-    //    shorter than 8 chars are intentionally NOT redacted — do not add a short
-    //    secret to the list expecting protection.
-    let relevant: Vec<&String> = secrets.iter().filter(|s| s.len() >= 8).collect();
-    if !relevant.is_empty() {
-        // Serialize the whole event so a secret is caught wherever it landed. If
-        // serialization fails we cannot prove the event is secret-free, so fail
-        // CLOSED: drop the event rather than risk shipping an unredacted secret.
-        let mut json = match serde_json::to_string(&event) {
-            Ok(json) => json,
-            Err(error) => {
-                tracing::warn!(
-                    %error,
-                    "sentry scrub: event serialization failed; dropping event to avoid leaking secrets"
-                );
-                return None;
-            }
-        };
-
-        let mut changed = false;
-        for s in relevant {
-            for needle in secret_needles(s) {
-                if json.contains(needle.as_str()) {
-                    json = json.replace(needle.as_str(), "[REDACTED]");
-                    changed = true;
-                }
-            }
-        }
-
-        if changed {
-            // Re-parse the redacted JSON. If it does not round-trip back into an
-            // `Event`, the pre-scrub `event` still holds the secret verbatim, so
-            // fail CLOSED here too: drop the event instead of falling back to the
-            // unredacted original. Rich `error`-level events (exception, contexts,
-            // debug-images) are the ones most likely to trip this path.
-            match serde_json::from_str::<sentry::protocol::Event<'static>>(&json) {
-                Ok(scrubbed) => event = scrubbed,
-                Err(error) => {
-                    tracing::warn!(
-                        %error,
-                        "sentry scrub: redacted event failed to re-parse; dropping event to avoid leaking secrets"
-                    );
-                    return None;
-                }
-            }
-        }
-    }
-
-    Some(event)
-}
-
-/// The strings to search for when redacting `secret` from a serialized event:
-/// the verbatim value plus its JSON-escaped form (without the surrounding quotes
-/// serde adds), so a secret containing `"` or `\` is caught in the escaped event
-/// body too.
-fn secret_needles(secret: &str) -> Vec<String> {
-    let mut needles = vec![secret.to_owned()];
-    if let Ok(json_lit) = serde_json::to_string(secret) {
-        // `to_string` of a `&str` is always `"..."` (len >= 2); strip the quotes.
-        if json_lit.len() >= 2 {
-            let inner = &json_lit[1..json_lit.len() - 1];
-            if inner != secret {
-                needles.push(inner.to_owned());
-            }
-        }
-    }
-    needles
-}
-
-/// The `sentry-tracing` layer to attach to a `tracing_subscriber` registry so
-/// `error`-level events and panics are captured. Inert if Sentry isn't
-/// initialized.
-///
-/// Only `ERROR` events are captured (as Sentry events). The default layer would
-/// also ship `info`/`warn` logs as breadcrumbs; we deliberately drop those to
-/// keep request-scoped context off the wire (see the crate `# Privacy` docs).
-/// Panics are captured independently by the Sentry panic integration, so this
-/// filter does not affect crash capture.
-#[must_use]
-pub fn tracing_layer<S>() -> sentry_tracing::SentryLayer<S>
-where
-    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
-{
-    sentry_tracing::layer().event_filter(|md| match *md.level() {
-        tracing::Level::ERROR => sentry_tracing::EventFilter::Event,
-        _ => sentry_tracing::EventFilter::Ignore,
-    })
 }
 
 #[cfg(test)]
@@ -345,171 +306,6 @@ mod tests {
     }
 
     #[test]
-    fn scrub_redacts_secret_in_extra_and_message() {
-        let secret = "voyage-secret-abcdefgh";
-        let mut extra = sentry::protocol::Map::new();
-        extra.insert("api_key".into(), serde_json::Value::String(secret.to_owned()));
-        let event = sentry::protocol::Event {
-            message: Some(format!("boom while using {secret}")),
-            extra,
-            ..Default::default()
-        };
-
-        let scrubbed = scrub_event(event, &[secret.to_owned()], None).expect("always Some");
-        let json = serde_json::to_string(&scrubbed).expect("serialize");
-
-        assert!(!json.contains(secret), "secret must be absent after scrub: {json}");
-        assert!(json.contains("[REDACTED]"), "redaction marker must be present: {json}");
-    }
-
-    #[test]
-    fn scrub_redacts_secret_with_json_special_chars() {
-        // A DB-URL-style password containing `"` and `\` serializes JSON-escaped,
-        // so the scrub must match the escaped representation, not just the raw
-        // bytes. (Raw string: the `\` and `r` are two literal chars, not a CR.)
-        let secret = r#"pa"ss\rd-abcdefgh"#;
-        let mut extra = sentry::protocol::Map::new();
-        extra.insert(
-            "db".into(),
-            serde_json::Value::String(format!("postgres://u:{secret}@host/db")),
-        );
-        let event = sentry::protocol::Event { extra, ..Default::default() };
-
-        let scrubbed = scrub_event(event, &[secret.to_owned()], None).expect("always Some");
-        let json = serde_json::to_string(&scrubbed).expect("serialize");
-
-        // The escaped form that actually appears in the event JSON must be gone.
-        assert!(!json.contains(r#"pa\"ss\\rd-abcdefgh"#), "JSON-escaped secret leaked: {json}");
-        assert!(json.contains("[REDACTED]"), "redaction marker must be present: {json}");
-    }
-
-    #[test]
-    fn scrub_clears_server_name() {
-        let event = sentry::protocol::Event {
-            server_name: Some("my-private-hostname".into()),
-            ..Default::default()
-        };
-
-        let scrubbed = scrub_event(event, &[], None).expect("always Some");
-        assert!(scrubbed.server_name.is_none(), "hostname must be cleared");
-    }
-
-    #[test]
-    fn scrub_sets_user_to_admin_id() {
-        // A pre-existing user with PII should be replaced wholesale.
-        let event = sentry::protocol::Event {
-            user: Some(sentry::protocol::User {
-                email: Some("leak@example.com".into()),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-
-        let scrubbed = scrub_event(event, &[], Some("aaron")).expect("always Some");
-        let user = scrubbed.user.expect("user set to admin id");
-        assert_eq!(user.id.as_deref(), Some("aaron"));
-        assert!(user.email.is_none(), "pre-existing email must be dropped");
-    }
-
-    #[test]
-    fn scrub_clears_user_when_no_admin_id() {
-        let event = sentry::protocol::Event {
-            user: Some(sentry::protocol::User {
-                email: Some("leak@example.com".into()),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-
-        let scrubbed = scrub_event(event, &[], None).expect("always Some");
-        assert!(scrubbed.user.is_none(), "user must be cleared when no admin id");
-    }
-
-    #[test]
-    fn scrub_ignores_short_secrets() {
-        // A short string (< 8 chars) is not redacted, to avoid over-matching.
-        let event = sentry::protocol::Event {
-            message: Some("the value is abc".to_owned()),
-            ..Default::default()
-        };
-
-        let scrubbed = scrub_event(event, &["abc".to_owned()], None).expect("short secret kept");
-        let json = serde_json::to_string(&scrubbed).expect("serialize");
-        assert!(json.contains("abc"), "short secret must not be redacted");
-        assert!(!json.contains("[REDACTED]"));
-    }
-
-    #[test]
-    fn scrub_redacts_secret_in_rich_event() {
-        // Real `error`-level events carry an `exception` and rich `contexts`
-        // (the `contexts`/`debug-images` features are enabled in Cargo.toml), not
-        // just a bare message. Redaction must reach the secret wherever it landed
-        // AND the redacted event must still round-trip back into an `Event`
-        // (i.e. return `Some`, not fail closed) on this realistic payload.
-        let secret = "postgres-pw-abcdefghijkl";
-
-        let mut ctx = sentry::protocol::Map::new();
-        ctx.insert(
-            "database_url".into(),
-            serde_json::Value::String(format!("postgres://user:{secret}@db.internal/app")),
-        );
-        let mut contexts = sentry::protocol::Map::new();
-        contexts.insert("runtime".into(), sentry::protocol::Context::Other(ctx));
-
-        let exception = sentry::protocol::Exception {
-            ty: "ConfigError".to_owned(),
-            value: Some(format!("could not connect using secret {secret}")),
-            ..Default::default()
-        };
-
-        let event = sentry::protocol::Event {
-            message: Some(format!("boom while starting up: {secret}")),
-            exception: vec![exception].into(),
-            contexts,
-            ..Default::default()
-        };
-
-        let scrubbed =
-            scrub_event(event, &[secret.to_owned()], None).expect("rich event round-trips");
-        let json = serde_json::to_string(&scrubbed).expect("serialize");
-
-        assert!(!json.contains(secret), "secret must be gone from every field: {json}");
-        assert!(json.contains("[REDACTED]"), "redaction marker must be present: {json}");
-    }
-
-    #[test]
-    fn scrub_fails_closed_when_redacted_event_cannot_reparse() {
-        // The security-critical guard (issue #166): if redaction produces JSON
-        // that no longer round-trips into an `Event`, the event MUST be dropped
-        // (`None`) — it must never be returned with the pre-scrub secret intact.
-        //
-        // We trigger a reparse failure deterministically. `event_id` is a
-        // strictly-typed UUID that serializes to 32 hex chars; registering that
-        // exact hex as a "secret" makes redaction rewrite `"event_id":"<hex>"`
-        // into `"event_id":"[REDACTED]"`, which no longer deserializes as a UUID.
-        // This stands in for any rich-event field whose redaction breaks the
-        // schema round-trip.
-        let event = sentry::protocol::Event::default();
-
-        // The exact serialized id, byte-for-byte what `scrub_event` produces
-        // internally, so the needle matches.
-        let json = serde_json::to_string(&event).expect("serialize");
-        let value: serde_json::Value = serde_json::from_str(&json).expect("parse");
-        let event_id_hex = value["event_id"]
-            .as_str()
-            .expect("event_id serializes as a string")
-            .to_owned();
-        assert!(event_id_hex.len() >= 8, "event_id hex must clear the length filter");
-
-        let result = scrub_event(event, &[event_id_hex], None);
-        assert!(
-            result.is_none(),
-            "a redacted event that cannot re-parse must be dropped (fail closed), \
-             not returned unscrubbed"
-        );
-    }
-
-    #[test]
     fn init_returns_none_when_disabled() {
         // No env at all -> no init, no guard.
         let env = FakeEnv::default();
@@ -521,9 +317,59 @@ mod tests {
                 default_environment: "test",
                 admin_user_id: None,
                 secrets: vec![],
+                enable_logs: false,
+                enable_metrics: false,
+                enable_traces: false,
+                traces_sample_rate: 0.0,
+                surface: "test",
             },
         );
         assert!(guard.is_none());
+    }
+
+    #[test]
+    fn init_options_carry_pillar_toggles() {
+        // Compile-level assertion that the new fields exist and are settable.
+        let opts = InitOptions {
+            admin_present: true,
+            release: "0.0.0",
+            default_environment: "test",
+            admin_user_id: None,
+            secrets: vec![],
+            enable_logs: true,
+            enable_metrics: true,
+            enable_traces: true,
+            traces_sample_rate: 0.25,
+            surface: "cli",
+        };
+        assert!((opts.traces_sample_rate - 0.25).abs() < f32::EPSILON);
+        assert_eq!(opts.surface, "cli");
+    }
+
+    // These branches return the literal constants `0.0`/`1.0` (not a computed
+    // value), so bit-exact `assert_eq!` is the correct check; `clippy::float_cmp`
+    // exists to catch imprecision from arithmetic, which does not apply here.
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn trace_sample_rate_gate_off_is_zero() {
+        assert_eq!(resolve_trace_sample_rate(false, 1.0, Some(true)), 0.0);
+        assert_eq!(resolve_trace_sample_rate(false, 0.5, None), 0.0);
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn trace_sample_rate_honors_parent_decision() {
+        assert_eq!(resolve_trace_sample_rate(true, 0.1, Some(true)), 1.0);
+        assert_eq!(resolve_trace_sample_rate(true, 0.1, Some(false)), 0.0);
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn trace_sample_rate_falls_back_to_clamped_base() {
+        assert!((resolve_trace_sample_rate(true, 0.25, None) - 0.25).abs() < f32::EPSILON);
+        assert_eq!(resolve_trace_sample_rate(true, 5.0, None), 1.0);
+        assert_eq!(resolve_trace_sample_rate(true, -1.0, None), 0.0);
+        assert_eq!(resolve_trace_sample_rate(true, f32::NAN, None), 0.0);
     }
 
     #[test]
@@ -541,6 +387,11 @@ mod tests {
                 default_environment: "test",
                 admin_user_id: None,
                 secrets: vec![],
+                enable_logs: false,
+                enable_metrics: false,
+                enable_traces: false,
+                traces_sample_rate: 0.0,
+                surface: "test",
             },
         );
         assert!(guard.is_none());

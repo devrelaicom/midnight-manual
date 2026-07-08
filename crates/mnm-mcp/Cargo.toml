@@ -29,6 +29,7 @@ tracing       = { workspace = true }
 tokio         = { workspace = true }
 once_cell     = { workspace = true }
 reqwest       = { workspace = true }
+sentry        = { workspace = true }
 url           = { workspace = true }
 uuid          = { workspace = true }
 

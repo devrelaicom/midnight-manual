@@ -4,9 +4,9 @@
 //! admin-tier gated (FR-058 + FR-117).
 //!
 //! 1. `POST   /v1/admin/sources` — create a new source.
-//! 2. `PATCH  /v1/admin/sources/:slug` — update display name, origin URL, or
+//! 2. `PATCH  /v1/admin/sources/{slug}` — update display name, origin URL, or
 //!    retention count. Each field is independently optional.
-//! 3. `DELETE /v1/admin/sources/:slug` — retire a source (soft delete: sets
+//! 3. `DELETE /v1/admin/sources/{slug}` — retire a source (soft delete: sets
 //!    `retired_at = now()`). Source versions and chunks are NOT cascaded;
 //!    the retention sweep handles those out-of-band.
 //! 4. `GET    /v1/admin/sources` — list every source including retired ones
@@ -37,9 +37,9 @@ use crate::middleware::request_id::RequestId;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/v1/admin/sources", post(create_source).get(list_sources))
-        .route("/v1/admin/sources/:slug", patch(update_source).delete(retire_source))
+        .route("/v1/admin/sources/{slug}", patch(update_source).delete(retire_source))
         .route(
-            "/v1/admin/sources/:slug/active-version/documents",
+            "/v1/admin/sources/{slug}/active-version/documents",
             axum::routing::get(active_version_documents),
         )
 }
@@ -90,7 +90,7 @@ pub struct CreateSourceRequest {
     pub retention_count: Option<i32>,
 }
 
-/// Body of `PATCH /v1/admin/sources/:slug`. All fields optional; an empty
+/// Body of `PATCH /v1/admin/sources/{slug}`. All fields optional; an empty
 /// body returns the current row unchanged.
 #[derive(Debug, Default, Deserialize)]
 pub struct UpdateSourceRequest {
@@ -366,7 +366,7 @@ struct InventoryDocResponse {
     embed_complete: bool,
 }
 
-/// Response shape for `GET /v1/admin/sources/:slug/active-version/documents`.
+/// Response shape for `GET /v1/admin/sources/{slug}/active-version/documents`.
 #[derive(serde::Serialize)]
 struct ActiveInventoryResponse {
     /// Primary embedding model wire id, e.g. `"voyage-context-3@1"`.

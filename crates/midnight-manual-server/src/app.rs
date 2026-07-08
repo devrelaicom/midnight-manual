@@ -2,9 +2,11 @@
 
 use std::sync::Arc;
 
-use axum::extract::DefaultBodyLimit;
+use axum::body::Body;
+use axum::extract::{DefaultBodyLimit, Request};
 use axum::Router;
 use mnm_auth::{ChallengeStore, OAuthStateStore, SigningSecret, UserStore};
+use sentry::integrations::tower::{NewSentryLayer, SentryHttpLayer};
 use sqlx::PgPool;
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::TraceLayer;
@@ -83,6 +85,11 @@ pub struct AppState {
     /// the model leg is unconfigured; the whole scan is a no-op when
     /// `injection_enabled = false`.
     pub injection: std::sync::Arc<crate::injection::scan::InjectionState>,
+    /// Active corpus model's per-category topic centroids, cached read-mostly.
+    /// `None` until the boot load resolves (best-effort) and whenever a load
+    /// fails; refreshed on corpus-version promotion. Feeds the bounded
+    /// `search.topic` classification (wired in a later task).
+    pub topic_centroids: crate::observability::topic::Shared,
 }
 
 /// Resolved auth subsystem state — set once at boot when both the user
@@ -203,6 +210,7 @@ pub fn build(pool: PgPool, cfg: ServerConfig) -> Result<Router, AuthStateError> 
     let voyage = voyage_from_config(&cfg);
     let voyage_ctx = voyage_ctx_from_config(&cfg);
     let code_model = std::sync::Arc::new(std::sync::RwLock::new(None));
+    let topic_centroids = std::sync::Arc::new(std::sync::RwLock::new(None));
     build_with_limiter(
         pool,
         cfg,
@@ -212,6 +220,7 @@ pub fn build(pool: PgPool, cfg: ServerConfig) -> Result<Router, AuthStateError> 
         voyage,
         voyage_ctx,
         code_model,
+        topic_centroids,
     )
 }
 
@@ -446,6 +455,15 @@ pub async fn build_resolved(pool: PgPool, cfg: ServerConfig) -> Result<Router, A
     let km = crate::code_model::resolve(&pool, &cfg.code_model_wire)
         .await
         .ok();
+    let topic_centroids = {
+        let loaded = match cm.as_ref() {
+            Some(c) => crate::observability::topic::load_centroids(&pool, c.id)
+                .await
+                .ok(),
+            None => None,
+        };
+        std::sync::Arc::new(std::sync::RwLock::new(loaded))
+    };
     let limiter = crate::ratelimit::RateLimiter::from_config(&cfg);
     let token_limiter = crate::tokenlimit::TokenUsageLimiter::from_config(&cfg);
     // Derive embedders from the resolved models when available (the production
@@ -467,6 +485,7 @@ pub async fn build_resolved(pool: PgPool, cfg: ServerConfig) -> Result<Router, A
         voyage,
         voyage_ctx,
         code_model,
+        topic_centroids,
     )
 }
 
@@ -491,6 +510,7 @@ pub fn build_with_limiter(
     voyage: Option<Arc<mnm_embedding::voyage::VoyageEmbedder>>,
     voyage_ctx: Option<Arc<mnm_embedding::contextualized::ContextualizedVoyageEmbedder>>,
     code_model: crate::code_model::Shared,
+    topic_centroids: crate::observability::topic::Shared,
 ) -> Result<Router, AuthStateError> {
     let auth = AuthState::from_config(&cfg)?.map(Arc::new);
     let scoring_policy = Arc::new(cfg.scoring_policy.clone());
@@ -515,6 +535,7 @@ pub fn build_with_limiter(
         cache_dir,
         facets_cache: crate::routes::facets::new_cache(),
         injection,
+        topic_centroids,
     };
 
     Ok(Router::new()
@@ -551,6 +572,15 @@ pub fn build_with_limiter(
         ))
         .layer(axum::middleware::from_fn(request_id::layer))
         .layer(TraceLayer::new_for_http())
+        // Sentry: continue/start a transaction per request (outermost), each on
+        // its own Hub, so request<->error correlation and distributed tracing
+        // (incoming `sentry-trace`/`baggage`) work correctly. Bound directly on
+        // the Router (not via `ServiceBuilder`), so these bind in the OPPOSITE
+        // order to a `ServiceBuilder`: `SentryHttpLayer` first, then
+        // `NewSentryLayer`, which ends up outermost. Inert when Sentry's master
+        // gate is closed (default) — a Hub with no client bound is a no-op.
+        .layer(SentryHttpLayer::new().enable_transaction())
+        .layer(NewSentryLayer::<Request<Body>>::new_from_top())
         .with_state(state))
 }
 

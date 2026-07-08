@@ -7,8 +7,8 @@
 //!
 //! 1. `POST   /v1/admin/ratelimits` — create an override.
 //! 2. `GET    /v1/admin/ratelimits` — list overrides still in effect.
-//! 3. `PATCH  /v1/admin/ratelimits/:id` — extend / adjust one.
-//! 4. `DELETE /v1/admin/ratelimits/:id` — hard-delete one.
+//! 3. `PATCH  /v1/admin/ratelimits/{id}` — extend / adjust one.
+//! 4. `DELETE /v1/admin/ratelimits/{id}` — hard-delete one.
 
 use std::net::IpAddr;
 
@@ -35,7 +35,7 @@ use crate::middleware::request_id::RequestId;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/v1/admin/ratelimits", post(create_override).get(list_overrides))
-        .route("/v1/admin/ratelimits/:id", patch(update_override).delete(delete_override))
+        .route("/v1/admin/ratelimits/{id}", patch(update_override).delete(delete_override))
 }
 
 /// Body of `POST /v1/admin/ratelimits`.
@@ -53,7 +53,7 @@ pub struct CreateOverrideRequest {
     pub note: Option<String>,
 }
 
-/// Body of `PATCH /v1/admin/ratelimits/:id`. All fields optional; an empty
+/// Body of `PATCH /v1/admin/ratelimits/{id}`. All fields optional; an empty
 /// body returns the current row unchanged.
 #[derive(Debug, Default, Deserialize)]
 pub struct UpdateOverrideRequest {

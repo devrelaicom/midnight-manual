@@ -1,4 +1,4 @@
-//! `GET /v1/documents/:id` + `/chunks`.
+//! `GET /v1/documents/{id}` + `/chunks`.
 //!
 //! Read-only document navigation endpoints. Both are public reads;
 //! bearer token only affects rate-limit tier.
@@ -31,8 +31,8 @@ const fn default_limit() -> usize {
 #[must_use]
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/v1/documents/:id", get(get_document))
-        .route("/v1/documents/:id/chunks", get(get_document_chunks))
+        .route("/v1/documents/{id}", get(get_document))
+        .route("/v1/documents/{id}/chunks", get(get_document_chunks))
 }
 
 async fn get_document(

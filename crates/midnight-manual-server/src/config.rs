@@ -193,6 +193,61 @@ pub struct ServerConfig {
     /// [`mnm_core::injection::InjectionPolicy::default`] is used when the env var
     /// is unset. An invalid file fails startup (Constitution VI / VIII).
     pub injection_policy: mnm_core::injection::InjectionPolicy,
+    /// Runtime knobs for the expanded Sentry integration (`MIDNIGHT_MANUAL_SENTRY_*`).
+    /// Config-only here: nothing initializes Sentry from this struct alone —
+    /// it's inert unless the master gate (KEY + ENABLE) is satisfied at init.
+    pub sentry: SentryRuntime,
+}
+
+/// Runtime knobs for the expanded Sentry integration. All are inert unless the
+/// master gate (KEY + ENABLE) is satisfied at init.
+#[derive(Debug, Clone)]
+pub struct SentryRuntime {
+    /// `MIDNIGHT_MANUAL_SENTRY_TRACES_SAMPLE_RATE` — fraction of transactions
+    /// sampled for tracing. Defaults to `0.1`.
+    pub traces_sample_rate: f32,
+    /// `MIDNIGHT_MANUAL_SENTRY_ENABLE_TRACES` — pillar toggle for tracing.
+    /// Defaults to `true`.
+    pub enable_traces: bool,
+    /// `MIDNIGHT_MANUAL_SENTRY_ENABLE_LOGS` — pillar toggle for structured
+    /// logs. Defaults to `true`.
+    pub enable_logs: bool,
+    /// `MIDNIGHT_MANUAL_SENTRY_ENABLE_METRICS` — pillar toggle for metrics.
+    /// Defaults to `true`.
+    pub enable_metrics: bool,
+    /// `MIDNIGHT_MANUAL_SENTRY_IDENTITY_SECRET` — HMAC key for pseudonymous
+    /// user ids. Unset (or empty) → `None`, meaning no user id is attached
+    /// (fail-safe).
+    pub identity_secret: Option<String>,
+    /// `MIDNIGHT_MANUAL_SENTRY_TOPIC_MIN_SIMILARITY` — cosine threshold below
+    /// which a query classifies as `other`. Defaults to `0.30`.
+    pub topic_min_similarity: f32,
+}
+
+impl SentryRuntime {
+    /// Resolve `SentryRuntime` from an injected env-lookup closure. Production
+    /// calls this with `|k| std::env::var(k).ok()`; tests inject a fake map
+    /// without touching process env.
+    pub fn from_env_with(get: impl Fn(&str) -> Option<String>) -> Self {
+        let f32_or = |k: &str, d: f32| get(k).and_then(|v| v.parse().ok()).unwrap_or(d);
+        let bool_or =
+            |k: &str, d: bool| get(k).map_or(d, |v| !matches!(v.as_str(), "0" | "false" | "off"));
+        Self {
+            traces_sample_rate: f32_or("MIDNIGHT_MANUAL_SENTRY_TRACES_SAMPLE_RATE", 0.1),
+            enable_traces: bool_or("MIDNIGHT_MANUAL_SENTRY_ENABLE_TRACES", true),
+            enable_logs: bool_or("MIDNIGHT_MANUAL_SENTRY_ENABLE_LOGS", true),
+            enable_metrics: bool_or("MIDNIGHT_MANUAL_SENTRY_ENABLE_METRICS", true),
+            identity_secret: get("MIDNIGHT_MANUAL_SENTRY_IDENTITY_SECRET")
+                .filter(|s| !s.is_empty()),
+            topic_min_similarity: f32_or("MIDNIGHT_MANUAL_SENTRY_TOPIC_MIN_SIMILARITY", 0.30),
+        }
+    }
+}
+
+impl Default for SentryRuntime {
+    fn default() -> Self {
+        Self::from_env_with(|_| None)
+    }
 }
 
 impl Default for ServerConfig {
@@ -249,6 +304,7 @@ impl Default for ServerConfig {
             injection_hf_token: None,
             injection_hf_model: None,
             injection_policy: mnm_core::injection::InjectionPolicy::default(),
+            sentry: SentryRuntime::default(),
         }
     }
 }
@@ -401,6 +457,7 @@ impl ServerConfig {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .map_or(10_800, |v: u64| v.max(60));
+        let sentry = SentryRuntime::from_env_with(|k| env::var(k).ok());
         Ok(Self {
             database_url,
             port,
@@ -450,6 +507,7 @@ impl ServerConfig {
             injection_hf_token,
             injection_hf_model,
             injection_policy,
+            sentry,
         })
     }
 }
@@ -669,5 +727,25 @@ mod tests {
 
         let missing = resolve_injection_policy(Some("/nonexistent/mnm/injection.toml".to_owned()));
         assert!(matches!(missing.unwrap_err(), ConfigError::InjectionPolicyRead { .. }));
+    }
+
+    #[test]
+    fn sentry_runtime_defaults_and_overrides() {
+        let d = SentryRuntime::from_env_with(|_| None);
+        assert!((d.traces_sample_rate - 0.1).abs() < f32::EPSILON);
+        assert!(d.enable_traces && d.enable_logs && d.enable_metrics);
+        assert!(d.identity_secret.is_none());
+
+        let o = SentryRuntime::from_env_with(|k| match k {
+            "MIDNIGHT_MANUAL_SENTRY_TRACES_SAMPLE_RATE" => Some("0.5".into()),
+            "MIDNIGHT_MANUAL_SENTRY_ENABLE_LOGS" => Some("false".into()),
+            "MIDNIGHT_MANUAL_SENTRY_IDENTITY_SECRET" => Some("s3cr3t".into()),
+            "MIDNIGHT_MANUAL_SENTRY_TOPIC_MIN_SIMILARITY" => Some("0.35".into()),
+            _ => None,
+        });
+        assert!((o.traces_sample_rate - 0.5).abs() < f32::EPSILON);
+        assert!(!o.enable_logs);
+        assert_eq!(o.identity_secret.as_deref(), Some("s3cr3t"));
+        assert!((o.topic_min_similarity - 0.35).abs() < f32::EPSILON);
     }
 }

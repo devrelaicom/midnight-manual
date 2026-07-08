@@ -9,8 +9,8 @@
 //!
 //! 1. `POST   /v1/admin/tokenlimits` — create an override.
 //! 2. `GET    /v1/admin/tokenlimits` — list overrides still in effect.
-//! 3. `PATCH  /v1/admin/tokenlimits/:id` — extend / adjust one.
-//! 4. `DELETE /v1/admin/tokenlimits/:id` — hard-delete one.
+//! 3. `PATCH  /v1/admin/tokenlimits/{id}` — extend / adjust one.
+//! 4. `DELETE /v1/admin/tokenlimits/{id}` — hard-delete one.
 //!
 //! The validation helpers (`admin_reject`, `sub_of`, `parse_future_timestamp`,
 //! `validate_cidr`) are shared with [`crate::routes::admin_ratelimits`] to keep
@@ -40,7 +40,7 @@ use crate::routes::admin_ratelimits::{
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/v1/admin/tokenlimits", post(create).get(list))
-        .route("/v1/admin/tokenlimits/:id", patch(update).delete(remove))
+        .route("/v1/admin/tokenlimits/{id}", patch(update).delete(remove))
 }
 
 /// Body of `POST /v1/admin/tokenlimits`.
@@ -64,7 +64,7 @@ pub struct CreateRequest {
     pub note: Option<String>,
 }
 
-/// Body of `PATCH /v1/admin/tokenlimits/:id`. All fields optional; an empty
+/// Body of `PATCH /v1/admin/tokenlimits/{id}`. All fields optional; an empty
 /// body returns the current row unchanged.
 #[derive(Debug, Default, Deserialize)]
 pub struct UpdateRequest {

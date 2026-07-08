@@ -129,6 +129,15 @@ pub async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error + Se
         startup_ms,
         model_state: ModelState::Missing,
     });
+    // Tag every Sentry event/transaction from this process as MCP (overriding
+    // the CLI init's `surface="cli"` tag, which is process-global and would
+    // otherwise leak into MCP events) plus a per-session id so events from one
+    // `mnm mcp serve` invocation can be correlated. Inert when Sentry is off.
+    let session_id = uuid::Uuid::new_v4().to_string();
+    sentry::configure_scope(|scope| {
+        scope.set_tag("surface", "mcp");
+        scope.set_tag("session_id", &session_id);
+    });
     let state = ServerState {
         cfg,
         cloud: Arc::new(cloud),
@@ -492,6 +501,19 @@ async fn dispatch_tool(id: RequestId, mut params: ToolCallParams, state: &Server
         _ => false,
     };
 
+    // Per-tool-call Sentry transaction so the cloud requests in
+    // `dispatch_tool_inner` propagate this trace to the server. Inert when
+    // Sentry is off. The span lives on the thread-local hub; MCP dispatch is
+    // serial (one tool call at a time, see the `next_message` loop in `run`)
+    // so there is never a competing span. `sentry::Transaction` has no
+    // Drop-based finish, so it is finished explicitly below, after the match
+    // captures the outcome on every path.
+    let txn = sentry::start_transaction(sentry::TransactionContext::new(
+        &format!("mcp.{}", params.name),
+        "mcp.tool",
+    ));
+    sentry::configure_scope(|scope| scope.set_span(Some(txn.clone().into())));
+
     let (response, telemetry, rerank, outcome) =
         match dispatch_tool_inner(id.clone(), params, state).await {
             Ok(tr) => (
@@ -502,6 +524,9 @@ async fn dispatch_tool(id: RequestId, mut params: ToolCallParams, state: &Server
             ),
             Err(resp) => (resp, None, None, Outcome::Error),
         };
+
+    txn.finish();
+    sentry::configure_scope(|scope| scope.set_span(None));
 
     let latency_ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
     state.tools_served.fetch_add(1, Ordering::Relaxed);

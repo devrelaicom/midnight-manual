@@ -32,6 +32,11 @@ async fn main() -> anyhow::Result<()> {
     // outgoing events. The server has no admin user, so `admin_present = true`
     // (the admin gate is client-only) and `admin_user_id = None`.
     let env = mnm_core::config::StdEnv;
+    // Single source of truth for the four Sentry pillars — mirrors what
+    // `ServerConfig::from_env` will resolve later, without duplicating the
+    // defaults here (config isn't parsed yet at this point in boot).
+    let sentry_cfg =
+        midnight_manual_server::config::SentryRuntime::from_env_with(|k| std::env::var(k).ok());
     let sentry_guard = {
         let mut secrets = Vec::new();
         for name in [
@@ -47,6 +52,9 @@ async fn main() -> anyhow::Result<()> {
                 secrets.push(v);
             }
         }
+        if let Some(id_secret) = sentry_cfg.identity_secret.clone() {
+            secrets.push(id_secret);
+        }
         mnm_sentry::init(
             &env,
             mnm_sentry::InitOptions {
@@ -55,6 +63,11 @@ async fn main() -> anyhow::Result<()> {
                 default_environment: "production",
                 admin_user_id: None,
                 secrets,
+                enable_logs: sentry_cfg.enable_logs,
+                enable_metrics: sentry_cfg.enable_metrics,
+                enable_traces: sentry_cfg.enable_traces,
+                traces_sample_rate: sentry_cfg.traces_sample_rate,
+                surface: "server",
             },
         )
     };
@@ -62,9 +75,10 @@ async fn main() -> anyhow::Result<()> {
     // Structured JSON logs from day one (FR-105). RUST_LOG override permitted.
     // The EnvFilter is a per-layer filter on the fmt layer (not a global registry
     // filter), so it gates only the JSON logs; the sentry layer stays unfiltered
-    // and captures ERROR events regardless of RUST_LOG — consistent with the CLI.
-    // The sentry layer is attached only when Sentry initialized (inert otherwise);
-    // `Option<Layer>` is itself a `Layer`.
+    // and applies its own level mapping (ERROR -> event + log, WARN/INFO -> log)
+    // regardless of RUST_LOG — consistent with the CLI. The sentry layer is
+    // attached only when Sentry initialized (inert otherwise); `Option<Layer>`
+    // is itself a `Layer`.
     let sentry_layer = sentry_guard.as_ref().map(|_| mnm_sentry::tracing_layer());
     tracing_subscriber::registry()
         .with(
@@ -146,9 +160,22 @@ async fn main() -> anyhow::Result<()> {
     let (voyage, voyage_ctx) =
         midnight_manual_server::app::resolved_embedders(&cfg, &corpus, code.as_ref());
 
+    // Captured before `corpus` moves into the `corpus_model` handle below —
+    // `Uuid` is `Copy` so this is a cheap read, not a borrow of `corpus`.
+    let corpus_model_id = corpus.id;
     let corpus_model = std::sync::Arc::new(std::sync::RwLock::new(Some(corpus)));
     let code_model: midnight_manual_server::code_model::Shared =
         std::sync::Arc::new(std::sync::RwLock::new(code));
+
+    // Best-effort load of the active model's topic centroids (Task 10). `None`
+    // on failure — the classifier (wired in a later task) then treats every
+    // query as unbounded/`"other"` rather than failing boot.
+    let topic_centroids = std::sync::Arc::new(std::sync::RwLock::new(
+        midnight_manual_server::observability::topic::load_centroids(&pool, corpus_model_id)
+            .await
+            .ok(),
+    ));
+
     let app = app::build_with_limiter(
         pool.clone(),
         cfg.clone(),
@@ -158,6 +185,7 @@ async fn main() -> anyhow::Result<()> {
         voyage,
         voyage_ctx,
         code_model,
+        topic_centroids,
     )
     .context("build app")?;
     let addr: SocketAddr = format!("0.0.0.0:{}", cfg.port)
