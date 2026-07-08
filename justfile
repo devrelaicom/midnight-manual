@@ -6,7 +6,7 @@ default:
 
 # === Quality gates (matches CI) ===
 
-check: fmt-check clippy test
+check: fmt-check clippy check-tracing test
     @echo "✓ All checks passed"
 
 # MSRV is pinned to 1.91.0 in rust-toolchain.toml, Cargo.toml, and clippy.toml.
@@ -22,6 +22,10 @@ fmt-check:
 
 clippy:
     cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+# Two-sinks rule: no raw query text in tracing macros (see the script header).
+check-tracing:
+    bash scripts/check-tracing-no-query.sh
 
 test:
     cargo test --workspace --all-features --no-fail-fast
