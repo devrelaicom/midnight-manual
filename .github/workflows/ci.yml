@@ -27,7 +27,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # ripgrep is pre-installed on the ubuntu-latest runner image.
+      # ripgrep is NOT pre-installed on the ubuntu-latest runner image.
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq ripgrep
       - run: bash scripts/check-tracing-no-query.sh
 
   clippy:

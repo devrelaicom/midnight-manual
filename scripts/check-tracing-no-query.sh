@@ -20,7 +20,7 @@ fi
 # 2 on a real error (e.g. bad regex). Distinguish them explicitly so a scanner
 # error can never masquerade as "clean".
 set +e
-matches=$(rg -n --pcre2 \
+matches=$(rg -n \
     'tracing::(info|warn|error|debug|trace)!\([^)]*(\bq\.text\b|\breq\.query\b|queries\[[^]]*\]\.text|\bquery\s*=\s*%)' \
     crates/*/src)
 status=$?
