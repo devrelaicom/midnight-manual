@@ -64,11 +64,31 @@ async fn promote_version(
     };
 
     match source_version::promote_by_revision(&state.pool, src.id, revision).await {
-        Ok((promoted, demoted)) => Json(PromoteResult {
-            promoted_revision: promoted,
-            demoted_revision: demoted,
-        })
-        .into_response(),
+        Ok((promoted, demoted)) => {
+            // Best-effort: recompute per-category topic centroids for the
+            // newly-active model. A failure here must NOT fail the promotion
+            // that already committed — log and move on (Task 9 / spec §9).
+            match source_version::get_by_revision(&state.pool, src.id, promoted).await {
+                Ok(sv) => {
+                    if let Err(e) = crate::observability::topic::recompute_centroids(
+                        &state.pool,
+                        sv.embedding_model_id,
+                    )
+                    .await
+                    {
+                        tracing::warn!(request_id = rid, error = %e, "topic centroid recompute failed after promotion");
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(request_id = rid, error = %e, "topic centroid recompute skipped: could not re-read promoted version");
+                }
+            }
+            Json(PromoteResult {
+                promoted_revision: promoted,
+                demoted_revision: demoted,
+            })
+            .into_response()
+        }
         Err(StoreError::NotFound) => {
             error::not_found(format!("source `{slug}` has no revision {revision}"), rid)
         }

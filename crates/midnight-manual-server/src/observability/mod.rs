@@ -6,6 +6,11 @@ use mnm_auth::Role;
 
 use crate::middleware::bearer::AuthContext;
 
+/// Per-category query-topic centroid storage (Task 9). Corpus-derived data
+/// only — this module never touches Sentry; classification against these
+/// centroids to produce the bounded `search.topic` tag lands in Task 10.
+pub mod topic;
+
 /// Choose the Sentry `user.id`: a real admin `sub` for staff, a stable pseudonym
 /// for everyone else, or `None` when no identity secret is configured.
 #[must_use]
