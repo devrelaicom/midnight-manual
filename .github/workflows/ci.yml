@@ -129,6 +129,16 @@ jobs:
       - uses: rustsec/audit-check@v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+        env:
+          # audit-check compiles cargo-audit from source inside the checkout,
+          # where rust-toolchain.toml pins the workspace MSRV toolchain — and
+          # cargo-audit's own (unlocked) deps track stable, so any dep MSRV
+          # bump reddens this gate repo-wide (2026-07-25: kstring@2.0.4
+          # requires rustc 1.96 vs our pinned 1.93). RUSTUP_TOOLCHAIN
+          # outranks rust-toolchain.toml, so the tool builds on the runner's
+          # stable while the workspace itself stays MSRV-pinned everywhere
+          # it is actually compiled.
+          RUSTUP_TOOLCHAIN: stable
 
   docs:
     name: cargo doc
