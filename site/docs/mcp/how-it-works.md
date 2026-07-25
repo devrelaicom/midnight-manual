@@ -6,7 +6,7 @@ description: What the Midnight Manual MCP server is, what it exposes, and how it
 
 # How the MCP server works
 
-`mnm mcp serve` runs a small MCP server that speaks JSON-RPC 2.0 over stdio. It starts in well under half a second because there are no local models to load; embedding and reranking are both remote VoyageAI calls.
+`mnm mcp serve` runs a small MCP server that speaks JSON-RPC 2.0 over stdio — or, with `--http`, over stateless Streamable HTTP (`POST /mcp`, loopback-bound by default; see [Add to your AI client](/docs/add-to-ai-client#serving-over-http)). It starts in well under half a second because there are no local models to load; embedding and reranking are both remote VoyageAI calls.
 
 ## What it exposes
 

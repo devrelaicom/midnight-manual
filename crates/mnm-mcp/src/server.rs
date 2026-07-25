@@ -2,6 +2,11 @@
 //! dispatches them to handlers, writes responses to stdout.
 //!
 //! Logging goes to stderr (FR-021): stdout is reserved for the MCP wire.
+//!
+//! The message-handling core ([`handle_message`] → [`HandleOutcome`]) is
+//! transport-blind; the Streamable HTTP transport in [`crate::http`] reuses it
+//! along with the shared runtime setup ([`build_runtime`]) and shutdown tail
+//! ([`shutdown`]) extracted from [`run`].
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -81,24 +86,59 @@ impl ServerConfig {
 }
 
 /// Shared per-process state — the cloud HTTP client lives here so we don't
-/// rebuild it on every tool call.
+/// rebuild it on every tool call. `pub(crate)` (fields included) so the
+/// Streamable HTTP transport in [`crate::http`] can carry it as router state.
 #[derive(Clone)]
-struct ServerState {
-    cfg: ServerConfig,
-    cloud: Arc<CloudClient>,
-    telemetry: Arc<Telemetry>,
-    started_at: Arc<Instant>,
-    tools_served: Arc<AtomicU32>,
+pub(crate) struct ServerState {
+    /// The resolved per-instance config.
+    pub(crate) cfg: ServerConfig,
+    /// Shared cloud HTTP client (connection pool lives for the process).
+    pub(crate) cloud: Arc<CloudClient>,
+    /// Telemetry handle (three-mechanism opt-out already resolved inside).
+    pub(crate) telemetry: Arc<Telemetry>,
+    /// Process start marker for the `McpShutdown` uptime.
+    pub(crate) started_at: Arc<Instant>,
+    /// Tool calls served (atomic: HTTP dispatch is concurrent).
+    pub(crate) tools_served: Arc<AtomicU32>,
 }
 
-/// Run the MCP server until EOF on stdin.
+/// Which transport a server instance speaks. Stamped into the Sentry scope as
+/// the `transport` tag so events from stdio and HTTP sessions can be told
+/// apart in issue triage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TransportKind {
+    /// Newline-delimited stdio framing (the default `mnm mcp serve`).
+    Stdio,
+    /// Streamable HTTP (`mnm mcp serve --http`).
+    Http,
+}
+
+impl TransportKind {
+    /// The Sentry `transport` tag value.
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Stdio => "stdio",
+            Self::Http => "http",
+        }
+    }
+}
+
+/// Build the shared per-process runtime both transports run on: the telemetry
+/// handle (+ 30s background flusher), the cloud HTTP client, the `McpStartup`
+/// emit, and the Sentry scope tags (`surface=mcp`, a per-session `session_id`,
+/// and the caller's `transport`).
+///
+/// The returned [`Flusher`] must be handed back to [`shutdown`] at exit so the
+/// background drain thread is stopped and joined before the final blocking
+/// flush.
 ///
 /// # Errors
 ///
-/// Returns the underlying io error if stdin or stdout fails, or a string
-/// error if the cloud client cannot be built. JSON-RPC and tool-level errors
-/// are translated into wire responses and do NOT bubble up.
-pub async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+/// Returns a string error if the cloud client cannot be built.
+pub(crate) fn build_runtime(
+    cfg: ServerConfig,
+    transport: TransportKind,
+) -> Result<(ServerState, Option<Flusher>), Box<dyn std::error::Error + Send + Sync>> {
     let env = mnm_core::config::StdEnv;
     let marker = mnm_core::paths::telemetry_marker_path(&env);
     let runtime_enabled = !mnm_telemetry::optout::env_disabled(&env)
@@ -122,22 +162,33 @@ pub async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error + Se
         .map_err(|e| format!("build cloud client: {e}"))?;
     let started_at = Arc::new(Instant::now());
     // Emit `mcp_startup` right away. The `startup_ms` field measures
-    // process-start → here; for stdio MCP that's effectively 0 because the
-    // event fires before the first JSON-RPC frame.
+    // process-start → here; for MCP that's effectively 0 because the event
+    // fires before the first JSON-RPC message on either transport.
     let startup_ms = u32::try_from(started_at.elapsed().as_millis()).unwrap_or(u32::MAX);
     telemetry.emit(&McpStartup {
         startup_ms,
         model_state: ModelState::Missing,
     });
     // Tag every Sentry event/transaction from this process as MCP (overriding
-    // the CLI init's `surface="cli"` tag, which is process-global and would
-    // otherwise leak into MCP events) plus a per-session id so events from one
-    // `mnm mcp serve` invocation can be correlated. Inert when Sentry is off.
+    // the CLI init's `surface="cli"` tag, which would otherwise leak into MCP
+    // events), plus a per-session id so events from one `mnm mcp serve`
+    // invocation can be correlated, plus the transport. Inert when Sentry is
+    // off. Set on TWO scopes because sentry hubs are thread-local derivations:
+    // the current thread's hub (which already exists carrying the CLI init's
+    // tags — this is where every stdio-loop event is captured), AND
+    // `Hub::main()` itself, so hubs derived LATER inherit the tags — in
+    // particular the HTTP transport's per-request hubs, which are
+    // `Hub::new_from_top(Hub::main())` and never see this thread's hub.
     let session_id = uuid::Uuid::new_v4().to_string();
-    sentry::configure_scope(|scope| {
+    let tag_scope = |scope: &mut sentry::Scope| {
         scope.set_tag("surface", "mcp");
         scope.set_tag("session_id", &session_id);
-    });
+        scope.set_tag("transport", transport.as_str());
+    };
+    // `tag_scope` only holds Copy captures (`&session_id`, a Copy enum), so
+    // the closure itself is Copy and can be handed to both scope calls.
+    sentry::Hub::main().configure_scope(tag_scope);
+    sentry::configure_scope(tag_scope);
     let state = ServerState {
         cfg,
         cloud: Arc::new(cloud),
@@ -145,6 +196,30 @@ pub async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error + Se
         started_at,
         tools_served: Arc::new(AtomicU32::new(0)),
     };
+    Ok((state, flusher))
+}
+
+/// Shared shutdown tail for both transports: emit `McpShutdown`, stop + join
+/// the background flusher, then run the final blocking drain.
+pub(crate) fn shutdown(state: &ServerState, flusher: Option<Flusher>) {
+    let uptime_s = u32::try_from(state.started_at.elapsed().as_secs()).unwrap_or(u32::MAX);
+    let tools_served = state.tools_served.load(Ordering::Relaxed);
+    state
+        .telemetry
+        .emit(&McpShutdown { uptime_s, tools_served });
+    drop(flusher); // stop the background loop + join
+    state.telemetry.flush_blocking(DEFAULT_FLUSH_TIMEOUT); // final drain
+}
+
+/// Run the MCP server until EOF on stdin.
+///
+/// # Errors
+///
+/// Returns the underlying io error if stdin or stdout fails, or a string
+/// error if the cloud client cannot be built. JSON-RPC and tool-level errors
+/// are translated into wire responses and do NOT bubble up.
+pub async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let (state, flusher) = build_runtime(cfg, TransportKind::Stdio)?;
 
     let stdin: Stdin = stdin();
     let stdout: Stdout = stdout();
@@ -154,32 +229,60 @@ pub async fn run(cfg: ServerConfig) -> Result<(), Box<dyn std::error::Error + Se
     info!("mnm-mcp server: handshake ready, awaiting initialize");
 
     while let Some(body) = reader.next_message().await? {
-        let response_body = match handle_message(&body, &state).await {
-            Some(bytes) => bytes,
-            None => continue, // notification — no response
+        // `into_bytes` collapses `Reply` and `Invalid` to one framed message
+        // apiece — identical stdio wire behavior for both (the split exists
+        // only for HTTP status mapping) — and `NoReply` to nothing.
+        let Some(response_body) = handle_message(&body, &state).await.into_bytes() else {
+            continue; // notification — no response
         };
         writer.write_message(&response_body).await?;
     }
 
     info!("mnm-mcp server: stdin EOF, shutting down");
-    let uptime_s = u32::try_from(state.started_at.elapsed().as_secs()).unwrap_or(u32::MAX);
-    let tools_served = state.tools_served.load(Ordering::Relaxed);
-    state
-        .telemetry
-        .emit(&McpShutdown { uptime_s, tools_served });
-    drop(flusher); // stop the background loop + join
-    state.telemetry.flush_blocking(DEFAULT_FLUSH_TIMEOUT); // final drain
+    shutdown(&state, flusher);
     Ok(())
 }
 
-/// Decode and dispatch a single framed message. Returns `Some(response_bytes)`
-/// for a request and `None` for a notification.
-async fn handle_message(body: &[u8], state: &ServerState) -> Option<Vec<u8>> {
+/// Transport-agnostic outcome of handling one JSON-RPC message.
+///
+/// The stdio loop writes `Reply` and `Invalid` identically — one framed
+/// JSON-RPC message each, via [`HandleOutcome::into_bytes`] — while the HTTP
+/// transport maps `Reply` → `200`, `Invalid` → `400`, and `NoReply` → `202`
+/// per the Streamable HTTP spec.
+pub(crate) enum HandleOutcome {
+    /// A request was dispatched; carries the serialized JSON-RPC response
+    /// (success or error envelope alike — a tool failure is still a `Reply`).
+    Reply(Vec<u8>),
+    /// The message could not be dispatched (bad JSON, non-object, missing
+    /// method, malformed id); carries the serialized JSON-RPC error that
+    /// `Incoming::classify` built — `id: null` when the id is unrecoverable
+    /// (issue #173 semantics, preserved verbatim on both transports).
+    Invalid(Vec<u8>),
+    /// A notification (or stray client→server response) — nothing to send.
+    NoReply,
+}
+
+impl HandleOutcome {
+    /// Collapse to the stdio wire behavior: one framed message for `Reply` and
+    /// `Invalid` alike, nothing for `NoReply`. Keeping the collapse here (not
+    /// inline at the call site) makes "invalid messages still get a framed
+    /// error response over stdio" structural rather than re-derived per caller.
+    pub(crate) fn into_bytes(self) -> Option<Vec<u8>> {
+        match self {
+            Self::Reply(bytes) | Self::Invalid(bytes) => Some(bytes),
+            Self::NoReply => None,
+        }
+    }
+}
+
+/// Decode and dispatch a single message body. Transport-blind: the caller
+/// decides how each [`HandleOutcome`] reaches the wire.
+pub(crate) async fn handle_message(body: &[u8], state: &ServerState) -> HandleOutcome {
     match Incoming::classify(body) {
-        Incoming::Request(req) => Some(handle_request(req, state).await),
+        Incoming::Request(req) => HandleOutcome::Reply(handle_request(req, state).await),
         Incoming::Notification(n) => {
             debug!(method = %n.method, "notification");
-            None
+            HandleOutcome::NoReply
         }
         // A request we can't dispatch (bad JSON, non-object, missing method, or a
         // malformed id) still gets a JSON-RPC error response — never a silent
@@ -187,7 +290,7 @@ async fn handle_message(body: &[u8], state: &ServerState) -> Option<Vec<u8>> {
         Incoming::Invalid { id, code, message } => {
             warn!(error = %message, code = code as i32, "invalid message");
             let resp = Response::err(id, code, message);
-            Some(serde_json::to_vec(&resp).expect("serialize error response"))
+            HandleOutcome::Invalid(serde_json::to_vec(&resp).expect("serialize error response"))
         }
     }
 }
@@ -503,11 +606,13 @@ async fn dispatch_tool(id: RequestId, mut params: ToolCallParams, state: &Server
 
     // Per-tool-call Sentry transaction so the cloud requests in
     // `dispatch_tool_inner` propagate this trace to the server. Inert when
-    // Sentry is off. The span lives on the thread-local hub; MCP dispatch is
-    // serial (one tool call at a time, see the `next_message` loop in `run`)
-    // so there is never a competing span. `sentry::Transaction` has no
-    // Drop-based finish, so it is finished explicitly below, after the match
-    // captures the outcome on every path.
+    // Sentry is off. The span lives on the current hub's scope, and neither
+    // transport lets spans compete: stdio dispatch is serial (one tool call at
+    // a time, see the `next_message` loop in `run`), while HTTP binds each
+    // request future to a fresh hub (`Hub::new_from_top` + `bind_hub` in
+    // `http::post_mcp`), so concurrent tool calls set spans on distinct hubs.
+    // `sentry::Transaction` has no Drop-based finish, so it is finished
+    // explicitly below, after the match captures the outcome on every path.
     let txn = sentry::start_transaction(sentry::TransactionContext::new(
         &format!("mcp.{}", params.name),
         "mcp.tool",
@@ -1060,6 +1165,7 @@ mod tests {
             let body = serde_json::to_vec(&req).expect("serialize tools/call");
             let out = handle_message(&body, state)
                 .await
+                .into_bytes()
                 .expect("search yields a response");
             serde_json::from_slice::<serde_json::Value>(&out).expect("parse response")
         };
@@ -1130,6 +1236,7 @@ mod tests {
         let body = serde_json::to_vec(&req).expect("serialize tools/call");
         let out = handle_message(&body, &state)
             .await
+            .into_bytes()
             .expect("advanced_search yields a response");
         let resp: serde_json::Value = serde_json::from_slice(&out).expect("parse response");
 
@@ -1250,6 +1357,7 @@ mod tests {
         let body = serde_json::to_vec(&call).expect("serialize tools/call");
         let out = handle_message(&body, &state)
             .await
+            .into_bytes()
             .expect("status request yields a response");
         let resp: serde_json::Value = serde_json::from_slice(&out).expect("parse response");
 
@@ -1301,6 +1409,7 @@ mod tests {
         let body = serde_json::to_vec(&req).expect("serialize initialize");
         let out = handle_message(&body, &state)
             .await
+            .into_bytes()
             .expect("initialize yields a response");
         let resp: serde_json::Value = serde_json::from_slice(&out).expect("parse response");
 
@@ -1331,6 +1440,7 @@ mod tests {
         let body = br#"{"jsonrpc":"2.0","id":12345678901234567890,"method":"tools/list"}"#;
         let out = handle_message(body, &state)
             .await
+            .into_bytes()
             .expect("a request with an out-of-range id must get a response, not be dropped");
         let resp: serde_json::Value = serde_json::from_slice(&out).expect("parse response");
 
@@ -1348,6 +1458,7 @@ mod tests {
         // Truncated object — not valid JSON.
         let out = handle_message(b"{\"jsonrpc\":\"2.0\"", &state)
             .await
+            .into_bytes()
             .expect("parse error must produce a response");
         let resp: serde_json::Value = serde_json::from_slice(&out).expect("parse response");
 
@@ -1358,6 +1469,38 @@ mod tests {
         );
     }
 
+    /// Stdio wire-behavior guard for the `HandleOutcome` refactor: an invalid
+    /// message classifies as `Invalid`, and the `into_bytes` collapse the `run`
+    /// loop uses still yields wire bytes — framed by `FrameWriter` exactly like
+    /// a `Reply` would be. The Reply/Invalid split exists ONLY for HTTP status
+    /// mapping; if `into_bytes` ever started dropping `Invalid`, stdio clients
+    /// would hang on malformed messages (the pre-#173 bug class), and this
+    /// turns red.
+    #[tokio::test]
+    async fn invalid_message_still_gets_framed_error_over_stdio() {
+        let state = test_state(mnm_core::injection::SecurityLevel::Moderate);
+        let outcome = handle_message(b"{\"jsonrpc\":\"2.0\"", &state).await;
+        assert!(
+            matches!(outcome, HandleOutcome::Invalid(_)),
+            "malformed JSON must classify as Invalid, not Reply/NoReply"
+        );
+        let bytes = outcome
+            .into_bytes()
+            .expect("Invalid must still produce wire bytes over stdio");
+
+        // Frame it exactly as the stdio loop does and check the wire form:
+        // one newline-terminated line carrying the JSON-RPC error, id null.
+        let mut wire: Vec<u8> = Vec::new();
+        {
+            let mut w = crate::transport::FrameWriter::new(&mut wire);
+            w.write_message(&bytes).await.expect("write frame");
+        }
+        assert_eq!(wire.last(), Some(&b'\n'), "framed error must end with a newline");
+        let resp: serde_json::Value = serde_json::from_slice(&bytes).expect("parse error body");
+        assert_eq!(resp["error"]["code"], -32700, "must be ParseError: {resp}");
+        assert!(resp["id"].is_null(), "undetermined id → null (issue #173): {resp}");
+    }
+
     /// Issue #173 (L7): a well-formed JSON object that is not a valid request
     /// (no `method`) must return `InvalidRequest` (-32600), not `ParseError`.
     #[tokio::test]
@@ -1365,6 +1508,7 @@ mod tests {
         let state = test_state(mnm_core::injection::SecurityLevel::Moderate);
         let out = handle_message(br#"{"jsonrpc":"2.0"}"#, &state)
             .await
+            .into_bytes()
             .expect("invalid request must produce a response");
         let resp: serde_json::Value = serde_json::from_slice(&out).expect("parse response");
 

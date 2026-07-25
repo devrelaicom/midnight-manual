@@ -148,7 +148,7 @@ MCP server and related tooling: the subcommand AI clients invoke.
 
 | Subcommand | Description |
 |---|---|
-| `serve` | Run the MCP server over stdio (long-running). This is the subcommand you add to your AI client config. |
+| `serve` | Run the MCP server (long-running). Speaks stdio by default — this is the subcommand you add to your AI client config. Pass `--http` for stateless Streamable HTTP on `127.0.0.1:2400`, and `--bind <IP:PORT>` (requires `--http`; env `MIDNIGHT_MANUAL_MCP_BIND`) to move the listener. |
 
 See [Add to an AI client](/docs/add-to-ai-client) and [How the MCP server works](/docs/mcp/how-it-works).
 

@@ -141,6 +141,15 @@ Add to `~/.cursor/mcp.json` (global) or `.cursor/mcp.json` (per-project):
 ```
 </details>
 
+Prefer HTTP? `mnm mcp serve --http` serves the same tool surface as Streamable HTTP on `127.0.0.1:2400`:
+
+```bash
+mnm mcp serve --http
+claude mcp add --transport http midnight-manual http://127.0.0.1:2400/mcp
+```
+
+Pass `--bind <IP:PORT>` (or set `MIDNIGHT_MANUAL_MCP_BIND`) to move the listener. The HTTP transport has no authentication — a non-loopback bind means every caller spends your rate tier and your `VOYAGE_API_KEY`, so the server warns loudly when you do it, never silently.
+
 Restart your client and ask it something Midnight-specific. It will reach for the `search` tool, pull back grounded passages, and cite the source it used.
 
 ---
@@ -149,7 +158,7 @@ Restart your client and ask it something Midnight-specific. It will reach for th
 
 ## The MCP server
 
-`mnm mcp serve` is a hand-rolled MCP server (JSON-RPC 2.0 framed over stdio) — it starts in well under half a second with no local models to load (both embedding and reranking are remote VoyageAI calls), so adding it to your client costs you nothing at idle.
+`mnm mcp serve` is a hand-rolled MCP server (JSON-RPC 2.0 over stdio, or stateless Streamable HTTP with `--http`) — it starts in well under half a second with no local models to load (both embedding and reranking are remote VoyageAI calls), so adding it to your client costs you nothing at idle.
 
 It exposes **13 tools**, grouped by what they do:
 
@@ -320,7 +329,7 @@ mnm telemetry disable | enable | status opt out (or back in)
 mnm auth     github | status | logout  GitHub OAuth for rate-limit uplift
 mnm manifest init | check | generate   author ingestion manifests
 mnm skills   add | status | remove     install the advanced-search skill
-mnm mcp      serve                      run the MCP server (stdio JSON-RPC)
+mnm mcp      serve                      run the MCP server (stdio; --http for HTTP)
 mnm doctor                             environment & connectivity report
 mnm status                             connectivity, auth & model readiness
 mnm version                            build metadata

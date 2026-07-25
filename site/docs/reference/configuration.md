@@ -90,6 +90,7 @@ enabled  = true
 | `MIDNIGHT_MANUAL_CONFIG` | Config file path. |
 | `MIDNIGHT_MANUAL_DISABLE_TELEMETRY` | Set to `1` to opt out of telemetry. |
 | `MIDNIGHT_MANUAL_GAUGE_ENDPOINT` | Override the Gauge telemetry endpoint (default `https://gauge-telemetry.fly.dev`). |
+| `MIDNIGHT_MANUAL_MCP_BIND` | Bind address for `mnm mcp serve --http` (default `127.0.0.1:2400`). The `--bind` flag wins over this. |
 | `VOYAGE_API_KEY` | Your Voyage key for BYOK embedding and reranking. Unset means embedding and reranking are proxied by the hosted server. |
 | `VOYAGE_TIMEOUT_SECS` | Per-request timeout in seconds for Voyage embedding calls (default `120`). Flag form: `--voyage-timeout-secs`. |
 | `MIDNIGHT_MANUAL_RERANK` | Rerank placement: `auto` \| `local` \| `server` \| `off`. Same as `--rerank`. |
