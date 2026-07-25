@@ -1,4 +1,9 @@
-//! `mnm-mcp` — MCP JSON-RPC server (stdio framing) + the retrieval tool surface.
+//! `mnm-mcp` — MCP JSON-RPC server (stdio framing and stateless Streamable
+//! HTTP) + the retrieval tool surface.
+//!
+//! Two transports over one message-handling core: newline-delimited stdio
+//! ([`run`]) and Streamable HTTP ([`run_http`] — `POST /mcp` + `GET /healthz`,
+//! loopback-guarded by default).
 //!
 //! Thirteen tools across four categories:
 //!
@@ -26,6 +31,7 @@
 )]
 
 pub mod cloud_client;
+pub mod http;
 pub mod prompts;
 pub mod protocol;
 pub mod render;
@@ -36,6 +42,7 @@ pub mod tools;
 pub mod transport;
 
 pub use cloud_client::{CloudClient, CloudError};
+pub use http::run_http;
 pub use server::{run, ServerConfig};
 
 /// Crate version stamped at build time.

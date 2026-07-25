@@ -1,14 +1,22 @@
-//! `mnm mcp serve` — run the MCP server over stdio.
+//! `mnm mcp serve` — run the MCP server over stdio or Streamable HTTP.
 //!
 //! This is the subcommand AI clients (Claude Code, Cursor, etc.) invoke as
-//! their MCP transport. Stdout is the wire — only logging goes to stderr
-//! (FR-021).
+//! their MCP transport. By default it speaks stdio: stdout is the wire — only
+//! logging goes to stderr (FR-021). With `--http` it serves the same tool
+//! surface over Streamable HTTP (`POST /mcp`), bound to `127.0.0.1:2400`
+//! unless `--bind` / `MIDNIGHT_MANUAL_MCP_BIND` says otherwise.
 
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
 use clap::{Args as ClapArgs, Subcommand};
 use mnm_core::config::Config;
+
+/// Default Streamable HTTP bind address: loopback, port 2400 (24:00 —
+/// midnight). Loopback-only unless the operator opts out via `--bind` /
+/// `MIDNIGHT_MANUAL_MCP_BIND`.
+const DEFAULT_HTTP_BIND: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 2400);
 
 /// `mnm mcp <subcommand>`.
 #[derive(Debug, ClapArgs)]
@@ -21,8 +29,19 @@ pub struct Args {
 /// `mcp` sub-subcommands.
 #[derive(Debug, Subcommand)]
 pub enum McpCmd {
-    /// Run the MCP server over stdio (long-running).
-    Serve,
+    /// Run the MCP server (long-running). Speaks stdio by default; `--http`
+    /// switches to the Streamable HTTP transport.
+    Serve {
+        /// Serve Streamable HTTP (`POST /mcp`) instead of stdio.
+        #[arg(long)]
+        http: bool,
+        /// Bind address for the HTTP transport. Requires `--http` (an
+        /// explicit transport choice — `--bind` alone errors rather than
+        /// silently implying it). Falls back to `MIDNIGHT_MANUAL_MCP_BIND`,
+        /// then `127.0.0.1:2400`.
+        #[arg(long, requires = "http", value_name = "IP:PORT")]
+        bind: Option<SocketAddr>,
+    },
 }
 
 /// Dispatch.
@@ -33,11 +52,16 @@ pub enum McpCmd {
 /// server loop exits abnormally.
 pub async fn run(args: Args, server_flag: Option<&str>, config_path: Option<&Path>) -> Result<()> {
     match args.cmd {
-        McpCmd::Serve => serve(server_flag, config_path).await,
+        McpCmd::Serve { http, bind } => serve(server_flag, config_path, http, bind).await,
     }
 }
 
-async fn serve(server_flag: Option<&str>, config_path: Option<&Path>) -> Result<()> {
+async fn serve(
+    server_flag: Option<&str>,
+    config_path: Option<&Path>,
+    http: bool,
+    bind_flag: Option<SocketAddr>,
+) -> Result<()> {
     // Discover config FIRST so the `[models].cache_dir` override can take part in
     // cache-dir resolution. Falling back to defaults keeps `serve` working even
     // when no config file exists. This single read backs every config-derived
@@ -75,10 +99,54 @@ async fn serve(server_flag: Option<&str>, config_path: Option<&Path>) -> Result<
     server_cfg.bearer_token = bearer_token;
     server_cfg.security = mnm_core::config::resolve_security_level(None, &cfg.security, &cfg_env)?;
 
-    mnm_mcp::run(server_cfg)
-        .await
-        .map_err(|e| anyhow::anyhow!("MCP server loop failed: {e}"))?;
+    // Every config resolved above is transport-independent — the transport
+    // switch changes only how the wire is served, never what it serves.
+    if http {
+        let bind = resolve_http_bind(bind_flag, &cfg_env)?;
+        mnm_mcp::run_http(server_cfg, bind)
+            .await
+            .map_err(|e| anyhow::anyhow!("MCP HTTP server failed: {e}"))?;
+    } else {
+        mnm_mcp::run(server_cfg)
+            .await
+            .map_err(|e| anyhow::anyhow!("MCP server loop failed: {e}"))?;
+    }
     Ok(())
+}
+
+/// Resolve the Streamable HTTP bind address: `--bind` flag >
+/// `MIDNIGHT_MANUAL_MCP_BIND` env > [`DEFAULT_HTTP_BIND`].
+///
+/// Pure over a [`ConfigEnv`](mnm_core::config::ConfigEnv) accessor (house
+/// pattern — see `resolve_security_level`) so the precedence is unit-testable
+/// without mutating process env. An empty/whitespace env value falls through
+/// to the default like an absent one; a non-empty unparsable value is an error
+/// (never a silent fallback). No config-file layer for now — the resolver
+/// leaves room to slot `[mcp].http_bind` under the env layer later.
+///
+/// # Errors
+///
+/// Returns an error if `MIDNIGHT_MANUAL_MCP_BIND` is set to a value that does
+/// not parse as `IP:PORT`.
+fn resolve_http_bind(
+    flag: Option<SocketAddr>,
+    env: &impl mnm_core::config::ConfigEnv,
+) -> Result<SocketAddr> {
+    if let Some(addr) = flag {
+        return Ok(addr);
+    }
+    if let Some(raw) = env.var("MIDNIGHT_MANUAL_MCP_BIND") {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            return trimmed.parse().map_err(|e| {
+                anyhow::anyhow!(
+                    "invalid MIDNIGHT_MANUAL_MCP_BIND value {trimmed:?}: {e} \
+                     (expected IP:PORT, e.g. 127.0.0.1:2400)"
+                )
+            });
+        }
+    }
+    Ok(DEFAULT_HTTP_BIND)
 }
 
 /// Assemble the MCP [`ServerConfig`](mnm_mcp::ServerConfig) for `mnm mcp serve`.
@@ -189,5 +257,113 @@ mod tests {
         let level = mnm_core::config::resolve_security_level(None, &cfg.security, &NoEnv)
             .expect("config level=strict resolves cleanly");
         assert_eq!(level, mnm_core::injection::SecurityLevel::Strict);
+    }
+
+    // ── HTTP transport flags + bind precedence ──────────────────────────────
+
+    /// A `ConfigEnv` that answers only `MIDNIGHT_MANUAL_MCP_BIND`, with a
+    /// caller-chosen value — precedence tests without process-env mutation
+    /// (house pattern, same as the `NoEnv` above).
+    struct BindEnv(Option<&'static str>);
+    impl mnm_core::config::ConfigEnv for BindEnv {
+        fn var(&self, name: &str) -> Option<String> {
+            (name == "MIDNIGHT_MANUAL_MCP_BIND")
+                .then(|| self.0.map(str::to_owned))
+                .flatten()
+        }
+    }
+
+    /// `--bind` is an HTTP-transport knob: clap must reject it without
+    /// `--http` (`requires = "http"`) rather than silently implying the
+    /// transport switch.
+    #[test]
+    fn clap_rejects_bind_without_http() {
+        use clap::Parser as _;
+
+        use crate::cli::Cli;
+
+        let err = Cli::try_parse_from(["mnm", "mcp", "serve", "--bind", "127.0.0.1:2400"])
+            .expect_err("--bind without --http must be a clap error");
+        assert!(
+            err.to_string().contains("--http"),
+            "the error must name the missing --http flag: {err}"
+        );
+    }
+
+    /// `--http --bind 0.0.0.0:9999` parses into the struct variant with both
+    /// fields populated (the deliberate-public-exposure form).
+    #[test]
+    fn clap_parses_http_with_bind() {
+        use clap::Parser as _;
+
+        use crate::cli::{Cli, Command};
+
+        let cli = Cli::parse_from(["mnm", "mcp", "serve", "--http", "--bind", "0.0.0.0:9999"]);
+        let Command::Mcp(args) = cli.cmd else {
+            panic!("expected the Mcp subcommand");
+        };
+        let McpCmd::Serve { http, bind } = args.cmd;
+        assert!(http, "--http must set the transport switch");
+        assert_eq!(bind, Some("0.0.0.0:9999".parse().unwrap()));
+    }
+
+    /// Bare `mnm mcp serve` still parses (stdio default): both fields at rest.
+    #[test]
+    fn clap_parses_bare_serve_as_stdio() {
+        use clap::Parser as _;
+
+        use crate::cli::{Cli, Command};
+
+        let cli = Cli::parse_from(["mnm", "mcp", "serve"]);
+        let Command::Mcp(args) = cli.cmd else {
+            panic!("expected the Mcp subcommand");
+        };
+        let McpCmd::Serve { http, bind } = args.cmd;
+        assert!(!http, "no --http → stdio transport");
+        assert_eq!(bind, None);
+    }
+
+    #[test]
+    fn resolve_http_bind_flag_wins_over_env() {
+        let flag: SocketAddr = "10.0.0.5:8000".parse().unwrap();
+        let got =
+            resolve_http_bind(Some(flag), &BindEnv(Some("127.0.0.1:1234"))).expect("flag resolves");
+        assert_eq!(got, flag);
+    }
+
+    #[test]
+    fn resolve_http_bind_env_wins_over_default() {
+        let got = resolve_http_bind(None, &BindEnv(Some("0.0.0.0:2500"))).expect("env resolves");
+        assert_eq!(got, "0.0.0.0:2500".parse::<SocketAddr>().unwrap());
+    }
+
+    #[test]
+    fn resolve_http_bind_defaults_to_loopback_2400() {
+        let got = resolve_http_bind(None, &BindEnv(None)).expect("default resolves");
+        assert_eq!(got, "127.0.0.1:2400".parse::<SocketAddr>().unwrap());
+        assert!(got.ip().is_loopback(), "the default MUST be loopback-only");
+    }
+
+    /// An empty (or whitespace) env value falls through to the default like an
+    /// absent one — matching how every other env layer in the config resolvers
+    /// treats empties.
+    #[test]
+    fn resolve_http_bind_empty_env_falls_through() {
+        let got = resolve_http_bind(None, &BindEnv(Some("  "))).expect("empty env falls through");
+        assert_eq!(got, DEFAULT_HTTP_BIND);
+    }
+
+    /// A garbage env value is a loud error naming the variable — never a
+    /// silent fallback to the default (which would mask a typo'd operator
+    /// intent to bind elsewhere).
+    #[test]
+    fn resolve_http_bind_bad_env_value_errors() {
+        let err = resolve_http_bind(None, &BindEnv(Some("not-an-addr")))
+            .expect_err("garbage env value must error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("MIDNIGHT_MANUAL_MCP_BIND") && msg.contains("not-an-addr"),
+            "error must name the env var and the bad value: {msg}"
+        );
     }
 }

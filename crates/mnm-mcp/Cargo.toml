@@ -1,6 +1,6 @@
 [package]
 name = "mnm-mcp"
-description = "MCP JSON-RPC server over stdio: thirteen tools plus the add_midnight_skills prompt."
+description = "MCP JSON-RPC server over stdio and Streamable HTTP: thirteen tools plus the add_midnight_skills prompt."
 
 version       = { workspace = true }
 edition       = { workspace = true }
@@ -17,6 +17,7 @@ workspace = true
 integration = []
 
 [dependencies]
+axum          = { workspace = true }
 mnm-core       = { workspace = true }
 mnm-embedding  = { workspace = true }
 mnm-retrieval  = { workspace = true }
@@ -37,3 +38,7 @@ uuid          = { workspace = true }
 jsonschema    = { workspace = true }
 wiremock      = { workspace = true }
 tempfile      = { workspace = true }
+# `util` is additive over the featureless workspace line: it carries
+# `ServiceExt::oneshot`, which the HTTP-transport tests use to drive the axum
+# `Router` in-process (no sockets — the test sandbox kills local-network tests).
+tower         = { workspace = true, features = ["util"] }

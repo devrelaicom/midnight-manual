@@ -89,7 +89,8 @@ pub enum Command {
     Versions(commands::versions::Args),
     /// Show the resolved config.
     Config(commands::config::Args),
-    /// MCP server (stdio JSON-RPC) and related tooling.
+    /// MCP server (stdio JSON-RPC, or Streamable HTTP via `serve --http`) and
+    /// related tooling.
     Mcp(commands::mcp::Args),
     /// Local model management — `mnm models {pull,active}`.
     Models(commands::models::Args),

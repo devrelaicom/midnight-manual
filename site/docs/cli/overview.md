@@ -23,7 +23,7 @@ mnm telemetry disable | enable | status opt out (or back in)
 mnm auth     github | status | logout  GitHub OAuth for rate-limit uplift
 mnm manifest init | check | generate   author ingestion manifests
 mnm skills   add | status | remove     install the advanced-search skill
-mnm mcp      serve                     run the MCP server (stdio JSON-RPC)
+mnm mcp      serve                     run the MCP server (stdio; --http for HTTP)
 mnm doctor                             environment & connectivity report
 mnm status                             connectivity, auth & model readiness
 mnm version                            build metadata

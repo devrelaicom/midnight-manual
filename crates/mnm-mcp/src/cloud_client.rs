@@ -232,8 +232,11 @@ pub enum CloudError {
 /// Attach the active Sentry trace's `sentry-trace` header to an outbound
 /// request so the server continues this distributed trace. No-op when Sentry
 /// is off (`get_span()` is `None`) — regular users are unaffected. Best-effort:
-/// relies on the thread-local hub, which is correct for the MCP's serial,
-/// single-hub dispatch (one tool call in flight at a time).
+/// reads the current hub, which resolves to the right span on both transports —
+/// stdio dispatch is serial (one tool call in flight at a time), and HTTP binds
+/// each request future to its own hub (`Hub::new_from_top` + `bind_hub` in
+/// `http::post_mcp`), so `get_span()` here sees that request's span, never a
+/// competing one.
 fn with_trace_headers(mut rb: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
     if let Some(span) = sentry::configure_scope(|scope| scope.get_span()) {
         for (name, value) in span.iter_headers() {
