@@ -3,10 +3,10 @@
 //!
 //! Logging goes to stderr (FR-021): stdout is reserved for the MCP wire.
 //!
-//! The message-handling core ([`handle_message`] → [`HandleOutcome`]) is
-//! transport-blind; the Streamable HTTP transport in [`crate::http`] reuses it
-//! along with the shared runtime setup ([`build_runtime`]) and shutdown tail
-//! ([`shutdown`]) extracted from [`run`].
+//! The message-handling core (`handle_message` → `HandleOutcome`, both
+//! `pub(crate)`) is transport-blind; the Streamable HTTP transport in
+//! [`crate::http`] reuses it along with the shared runtime setup
+//! (`build_runtime`) and shutdown tail (`shutdown`) extracted from [`run`].
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
