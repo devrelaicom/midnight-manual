@@ -2707,7 +2707,7 @@ checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
 name = "midnight-manual"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2741,7 +2741,7 @@ dependencies = [
 
 [[package]]
 name = "midnight-manual-server"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2813,7 +2813,7 @@ dependencies = [
 
 [[package]]
 name = "mnm-auth"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek",
@@ -2836,7 +2836,7 @@ dependencies = [
 
 [[package]]
 name = "mnm-content"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "anyhow",
  "cc",
@@ -2888,7 +2888,7 @@ dependencies = [
 
 [[package]]
 name = "mnm-core"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "base64 0.22.1",
  "insta",
@@ -2908,7 +2908,7 @@ dependencies = [
 
 [[package]]
 name = "mnm-embedding"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "mnm-core",
  "once_cell",
@@ -2925,7 +2925,7 @@ dependencies = [
 
 [[package]]
 name = "mnm-mcp"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "axum",
  "jsonschema",
@@ -2952,7 +2952,7 @@ dependencies = [
 
 [[package]]
 name = "mnm-retrieval"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "mnm-core",
  "mnm-store",
@@ -2967,7 +2967,7 @@ dependencies = [
 
 [[package]]
 name = "mnm-sentry"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "hex",
  "hmac 0.12.1",
@@ -2982,7 +2982,7 @@ dependencies = [
 
 [[package]]
 name = "mnm-skills"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "mnm-core",
  "regex",
@@ -2996,7 +2996,7 @@ dependencies = [
 
 [[package]]
 name = "mnm-store"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "mnm-core",
  "pgvector",
@@ -3014,7 +3014,7 @@ dependencies = [
 
 [[package]]
 name = "mnm-telemetry"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "gauge-telemetry",
  "mnm-core",
