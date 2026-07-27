@@ -24,14 +24,16 @@
 //! protect here, but the two transports share one logging story (FR-021).
 
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, HeaderName, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use sentry::SentryFutureExt as _;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::{debug, info, warn};
 
 use crate::server::{
@@ -115,7 +117,46 @@ fn router(state: HttpState) -> Router {
         // Same 16 MiB cap as the stdio framing (`transport::MAX_BODY_BYTES`),
         // raising axum's 2 MB default; excess → 413.
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
+        // Browser-based MCP clients (MCP Inspector's UI, web IDEs) fetch
+        // cross-origin — `localhost:6274` → `127.0.0.1:2400` is two origins —
+        // so without preflight handling and `Access-Control-Allow-*` response
+        // headers the *browser* blocks every request before it reaches the
+        // wire (CLI/desktop clients never notice). The allow-list mirrors the
+        // Origin guard's posture exactly; see [`cors_layer`].
+        .layer(cors_layer(state.enforce_loopback_origin))
         .with_state(state)
+}
+
+/// CORS policy for the HTTP transport, mirroring the Origin guard in
+/// [`post_mcp`]: loopback binds allow loopback origins only; deliberate
+/// public binds reflect any origin (the guard is off there by design — an
+/// authless public port gains nothing from browser-side origin math).
+///
+/// The layer also answers `OPTIONS /mcp` preflights (previously a bare `405`,
+/// which browsers treat as a hard CORS failure). It never *rejects* an actual
+/// request — a disallowed origin simply gets no `Access-Control-Allow-Origin`
+/// header (the browser enforces), while the 403 Origin guard in [`post_mcp`]
+/// remains the server-side backstop for non-browser callers.
+fn cors_layer(enforce_loopback_origin: bool) -> CorsLayer {
+    let allow_origin = if enforce_loopback_origin {
+        AllowOrigin::predicate(|origin, _| origin.to_str().is_ok_and(origin_is_loopback))
+    } else {
+        AllowOrigin::mirror_request()
+    };
+    CorsLayer::new()
+        .allow_origin(allow_origin)
+        .allow_methods([Method::POST])
+        // The headers Streamable HTTP clients send: the JSON body's
+        // content-type plus the two MCP-specific headers (we ignore
+        // `Mcp-Session-Id` — stateless — but refusing it in preflight would
+        // break clients that always send it).
+        .allow_headers([
+            header::CONTENT_TYPE,
+            HeaderName::from_static("mcp-protocol-version"),
+            HeaderName::from_static("mcp-session-id"),
+        ])
+        // Cache preflight verdicts so the browser doesn't re-ask per call.
+        .max_age(Duration::from_secs(3600))
 }
 
 /// `POST /mcp` — one JSON-RPC message in, at most one JSON-RPC message out.
@@ -501,6 +542,111 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    /// Browser preflight (`OPTIONS /mcp`) from a loopback origin must succeed
+    /// with the CORS grant — before the CORS layer this was a bare 405, which
+    /// browsers treat as a hard CORS failure, blocking every browser-based
+    /// client (e.g. the MCP Inspector UI) while CLI clients worked fine.
+    #[tokio::test]
+    async fn preflight_from_loopback_origin_is_granted() {
+        let req = Request::builder()
+            .method("OPTIONS")
+            .uri("/mcp")
+            .header(header::ORIGIN, "http://localhost:6274")
+            .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+            .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "content-type,mcp-protocol-version")
+            .body(Body::empty())
+            .unwrap();
+        let resp = loopback_router().oneshot(req).await.unwrap();
+
+        assert!(resp.status().is_success(), "preflight must not 405, got {}", resp.status());
+        assert_eq!(
+            resp.headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .and_then(|v| v.to_str().ok()),
+            Some("http://localhost:6274"),
+            "the loopback origin must be granted"
+        );
+        let allow_headers = resp
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_HEADERS)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        assert!(
+            allow_headers.contains("content-type")
+                && allow_headers.contains("mcp-protocol-version"),
+            "preflight must grant the Streamable HTTP request headers, got {allow_headers:?}"
+        );
+    }
+
+    /// Preflight from a non-loopback origin on a loopback bind gets NO
+    /// `Access-Control-Allow-Origin` — the browser then refuses to send the
+    /// actual request. (CORS never rejects server-side; the 403 Origin guard
+    /// stays the backstop for non-browser callers, proven elsewhere.)
+    #[tokio::test]
+    async fn preflight_from_remote_origin_gets_no_grant_in_loopback_mode() {
+        let req = Request::builder()
+            .method("OPTIONS")
+            .uri("/mcp")
+            .header(header::ORIGIN, "https://evil.example")
+            .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+            .body(Body::empty())
+            .unwrap();
+        let resp = loopback_router().oneshot(req).await.unwrap();
+
+        assert!(
+            resp.headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .is_none(),
+            "a remote origin must not be granted on a loopback bind"
+        );
+    }
+
+    /// Actual (non-preflight) POSTs from a granted origin carry the CORS
+    /// grant on the response — without it the browser discards the reply of
+    /// an otherwise-successful call.
+    #[tokio::test]
+    async fn post_response_carries_cors_grant_for_loopback_origin() {
+        let ping = serde_json::to_vec(&serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "ping", "params": {}
+        }))
+        .unwrap();
+        let resp = loopback_router()
+            .oneshot(mcp_post(ping, Some("http://127.0.0.1:6274")))
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .and_then(|v| v.to_str().ok()),
+            Some("http://127.0.0.1:6274"),
+        );
+    }
+
+    /// Public-bind mode mirrors ANY origin in the CORS grant, matching the
+    /// skipped Origin guard: the operator has deliberately exposed an
+    /// authless port, so browser-side origin math gains nothing.
+    #[tokio::test]
+    async fn public_mode_grants_any_origin() {
+        let req = Request::builder()
+            .method("OPTIONS")
+            .uri("/mcp")
+            .header(header::ORIGIN, "https://evil.example")
+            .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router(test_state(false)).oneshot(req).await.unwrap();
+
+        assert_eq!(
+            resp.headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .and_then(|v| v.to_str().ok()),
+            Some("https://evil.example"),
+        );
     }
 
     #[tokio::test]
