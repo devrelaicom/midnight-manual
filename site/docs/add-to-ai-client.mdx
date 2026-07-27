@@ -54,6 +54,6 @@ mnm mcp serve --http
 claude mcp add --transport http midnight-manual http://127.0.0.1:2400/mcp
 ```
 
-One long-running server can back several clients at once — useful when stdio would spawn a process per client, or when the server runs in a container.
+One long-running server can back several clients at once — useful when stdio would spawn a process per client, or when the server runs in a container. To poke at it interactively, point the [MCP Inspector](https://github.com/modelcontextprotocol/inspector) (`npx @modelcontextprotocol/inspector`) at `http://127.0.0.1:2400/mcp` with the transport set to Streamable HTTP; the server answers browser preflights and grants loopback origins, so both the Inspector UI and its CLI mode work.
 
 Pass `--bind <IP:PORT>` (or set `MIDNIGHT_MANUAL_MCP_BIND`) to move the listener. The HTTP transport has no authentication: on the default loopback bind that costs you nothing, but a non-loopback bind means every caller spends your rate tier and your `VOYAGE_API_KEY`. The server refuses cross-site browser origins on loopback binds, and warns loudly when you bind a public address — never silently.
