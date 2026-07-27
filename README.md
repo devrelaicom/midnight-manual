@@ -306,7 +306,7 @@ mnm ratelimits remove <id>          # revoke early
 
 Overrides are time-boxed (they expire on their `--ttl`) and the server refreshes its override cache every ~30s, so grants and revocations take effect promptly. This is the recommended path for events — far simpler than minting tokens for every participant.
 
-> Self-hosting? Every limit is tunable via env (`MIDNIGHT_MANUAL_RATE_LIMIT_ANONYMOUS_RPS`, `…_UPLIFT_RPS`, `…_ADMIN_RPS`), and the whole subsystem can be toggled with `MIDNIGHT_MANUAL_RATE_LIMIT_ENABLED`.
+> Self-hosting? Every limit is tunable via env (`MIDNIGHT_MANUAL_RATE_LIMIT_ANONYMOUS_RPS`, `…_UPLIFT_RPS`, `…_ADMIN_RPS`). The subsystem is on by default — set `MIDNIGHT_MANUAL_RATE_LIMIT_ENABLED=false` to switch it off; the server warns at boot when it's running unmetered.
 
 ---
 
