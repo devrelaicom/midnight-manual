@@ -137,14 +137,14 @@ Removal is interactive by default. Pass `--yes` for scripts and non-interactive 
 
 ### Tuning the limits
 
-The per-tier refill rates, and the subsystem itself, are set by environment variable on the server. The defaults match the tiers the hosted instance serves: 10 req/s anonymous, 60 req/s read-uplift, 1000 req/s admin.
+The per-tier refill rates, and the subsystem itself, are set by environment variable on the server. Rate limiting is on by default; the refill defaults match the tiers the hosted instance serves: 10 req/s anonymous, 60 req/s read-uplift, 1000 req/s admin.
 
 | Variable | Controls |
 |---|---|
 | `MIDNIGHT_MANUAL_RATE_LIMIT_ANONYMOUS_RPS` | Anonymous tier refill rate |
 | `MIDNIGHT_MANUAL_RATE_LIMIT_UPLIFT_RPS` | Read-uplift tier refill rate |
 | `MIDNIGHT_MANUAL_RATE_LIMIT_ADMIN_RPS` | Admin tier refill rate |
-| `MIDNIGHT_MANUAL_RATE_LIMIT_ENABLED` | Toggle the whole subsystem |
+| `MIDNIGHT_MANUAL_RATE_LIMIT_ENABLED` | Toggle the whole subsystem — on unless set to `false` (or `0`/`no`/`off`); a server running without it warns at boot |
 
 ## Token-limit knobs
 

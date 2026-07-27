@@ -80,8 +80,12 @@ pub struct ServerConfig {
     /// `MIDNIGHT_MANUAL_ABORT_GRACE` default). Clamped to `[1, 24 * 365]`.
     pub abort_grace_hours: i64,
     /// `MIDNIGHT_MANUAL_RATE_LIMIT_ENABLED` — master switch (Phase 17).
-    /// Default `false` so `Default::default()` (used by tests) never
-    /// throttles; production opts in.
+    /// Unset means ENABLED: a deployment that never heard of the var still
+    /// gets request rate limiting, and opting out takes an explicit falsy
+    /// value (`0`/`false`/`no`/`off`). `Default::default()` stays `false` —
+    /// it is the test fixture, not the deployment surface, and the
+    /// integration suite would throttle itself through one shared bucket if
+    /// it defaulted on. `from_env` is where the deployment default lives.
     pub rate_limit_enabled: bool,
     /// `MIDNIGHT_MANUAL_RATE_LIMIT_ANONYMOUS_RPS` — per-IP requests/sec for
     /// the anonymous tier. Default 10.
@@ -364,9 +368,11 @@ impl ServerConfig {
             .ok()
             .and_then(|s| s.parse::<i64>().ok())
             .map_or(1, |v| v.clamp(1, 24 * 365));
-        let rate_limit_enabled = env::var("MIDNIGHT_MANUAL_RATE_LIMIT_ENABLED")
-            .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
-            .unwrap_or(false);
+        let rate_limit_enabled = rate_limit_switch(
+            env::var("MIDNIGHT_MANUAL_RATE_LIMIT_ENABLED")
+                .ok()
+                .as_deref(),
+        );
         let rate_limit_anonymous_rps = env::var("MIDNIGHT_MANUAL_RATE_LIMIT_ANONYMOUS_RPS")
             .ok()
             .and_then(|s| s.parse::<u32>().ok())
@@ -512,6 +518,18 @@ impl ServerConfig {
     }
 }
 
+/// Interpret `MIDNIGHT_MANUAL_RATE_LIMIT_ENABLED`. Factored out of
+/// [`ServerConfig::from_env`] so it can be unit-tested without mutating
+/// process env.
+///
+/// Unset defaults to enabled, and only a recognized falsy value opts out —
+/// an unrecognized value (a typo like `flase`) fails toward enabled, because
+/// the failure mode of "throttled when you meant not to" is a support
+/// question while "unmetered when you meant throttled" is an incident.
+fn rate_limit_switch(raw: Option<&str>) -> bool {
+    raw.is_none_or(|v| !matches!(v, "0" | "false" | "FALSE" | "no" | "NO" | "off" | "OFF"))
+}
+
 /// Resolve the confidence-scoring policy from `MIDNIGHT_MANUAL_SCORING_POLICY`.
 ///
 /// The env var, when set, names a TOML file path. Absent → compiled-in
@@ -614,8 +632,11 @@ pub enum ConfigError {
 mod tests {
     use super::*;
 
+    /// The `Default` fixture keeps the limiter OFF so integration tests never
+    /// throttle themselves through one shared bucket. The deployment default
+    /// is the opposite — see `rate_limit_switch_defaults_to_enabled`.
     #[test]
-    fn rate_limit_defaults_are_disabled() {
+    fn default_fixture_keeps_rate_limit_disabled() {
         let c = ServerConfig::default();
         assert!(!c.rate_limit_enabled);
         assert_eq!(c.rate_limit_anonymous_rps, 10);
@@ -624,6 +645,30 @@ mod tests {
         assert_eq!(c.rate_limit_client_ip_header, "fly-client-ip");
         assert_eq!(c.rate_limit_override_refresh_secs, 30);
         assert_eq!(c.max_queries_per_request, 10);
+    }
+
+    /// Unset env means the limiter is ON — a deployment must say `false` to
+    /// run unmetered, never discover it was unmetered all along.
+    #[test]
+    fn rate_limit_switch_defaults_to_enabled() {
+        assert!(rate_limit_switch(None));
+    }
+
+    #[test]
+    fn rate_limit_switch_recognizes_explicit_opt_out() {
+        for v in ["0", "false", "FALSE", "no", "NO", "off", "OFF"] {
+            assert!(!rate_limit_switch(Some(v)), "{v} must disable the limiter");
+        }
+    }
+
+    /// The pre-flip truthy vocabulary still enables, and an unrecognized
+    /// value (typo'd opt-out) fails toward enabled rather than silently
+    /// running unmetered.
+    #[test]
+    fn rate_limit_switch_truthy_and_garbage_enable() {
+        for v in ["1", "true", "TRUE", "yes", "YES", "on", "flase", ""] {
+            assert!(rate_limit_switch(Some(v)), "{v:?} must leave the limiter enabled");
+        }
     }
 
     #[test]

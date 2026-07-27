@@ -124,6 +124,15 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let rate_limiter = midnight_manual_server::ratelimit::RateLimiter::from_config(&cfg);
+    if rate_limiter.is_none() {
+        // Opting out is legitimate (e.g. a limiter upstream), but it must
+        // never be silent — an unmetered server should be a decision, not a
+        // discovery.
+        tracing::warn!(
+            "request rate limiting DISABLED (MIDNIGHT_MANUAL_RATE_LIMIT_ENABLED is falsy); \
+             every caller has unmetered request throughput"
+        );
+    }
     // Token-usage limiter (tiered embedding-token ceilings). Kept in a binding
     // so Task 4.8's snapshot/reaper job can share this exact instance.
     let token_limiter = midnight_manual_server::tokenlimit::TokenUsageLimiter::from_config(&cfg);
