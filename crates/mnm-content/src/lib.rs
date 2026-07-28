@@ -17,6 +17,7 @@ pub mod language;
 pub mod manifest;
 pub mod markdown;
 pub mod package;
+pub mod preprocess;
 pub mod tokens;
 
 /// Detect Compact module-based package membership from file contents.
