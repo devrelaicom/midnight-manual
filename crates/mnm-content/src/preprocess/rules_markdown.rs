@@ -106,12 +106,13 @@ pub fn apply_markdown_rules(body: &str, is_mdx: bool) -> MarkdownRuleOutcome {
                 continue; // unterminated: leave it
             };
             let mut end = abs + close_rel + close.len();
-            // If closing sits inside a fence, leave the comment alone
-            // (pathological; accepted).
-            if lines
+            // Skip the whole comment if ANY fenced line intersects [abs, end)
+            // — a comment must never strip content inside a code fence, even
+            // when it opens before and closes after the fence.
+            let crosses_fence = lines
                 .iter()
-                .any(|&(ls2, ll2, f2)| f2 && ls2 < end && end - 1 < ls2 + ll2)
-            {
+                .any(|&(ls2, ll2, f2)| f2 && ls2 < end && abs < ls2 + ll2);
+            if crosses_fence {
                 continue;
             }
             // Extend over a following newline when the strip empties the line.
@@ -298,5 +299,20 @@ mod tests {
     fn lowercase_html_tags_untouched_in_mdx() {
         let body = "<div>\nhi\n</div>\n";
         assert_eq!(run(body, true), body);
+    }
+
+    #[test]
+    fn comment_spanning_across_a_fence_is_left_untouched() {
+        // A multi-line comment whose opener precedes a fence and closer follows
+        // it must NOT strip the fenced block — the whole comment is skipped.
+        let body = "<!--\n```\ncode\n```\n-->\ntext\n";
+        let s = run(body, false);
+        assert!(s.contains("```"), "fence must survive");
+        assert!(s.contains("code"), "fenced code must survive");
+        assert!(s.contains("text"));
+        // MDX comment variant, same protection.
+        let mdx = "{/*\n```\nkeep me\n```\n*/}\nprose\n";
+        let sm = run(mdx, true);
+        assert!(sm.contains("keep me"), "fenced code inside mdx comment span survives");
     }
 }
