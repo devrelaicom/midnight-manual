@@ -5,6 +5,7 @@
 //! Spec: docs/superpowers/specs/2026-07-27-preprocess-license-design.md
 
 pub mod comment_syntax;
+pub mod detect;
 pub mod lexer;
 pub mod normalize;
 pub mod rules_code;

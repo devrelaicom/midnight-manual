@@ -411,8 +411,10 @@ impl Walker {
 
     /// Perform the walk and return the [`WalkOutcome`].
     ///
-    /// The license detector is always `None` here in Phase A; a real detector
-    /// will be threaded in once `preprocess::detect` lands (Task 12).
+    /// Uses the process-wide `spdx`-backed detector
+    /// ([`crate::preprocess::detect::global`]) when its inline cache loaded
+    /// successfully; `None` (degraded mode: heuristic head-stripping +
+    /// SPDX-tag parsing only) otherwise.
     ///
     /// # Errors
     ///
@@ -425,7 +427,8 @@ impl Walker {
             self.max_line_bytes,
             self.filter_opts,
             self.strict,
-            None,
+            crate::preprocess::detect::global()
+                .map(|d| d as &dyn crate::preprocess::LicenseDetector),
         )
     }
 }
