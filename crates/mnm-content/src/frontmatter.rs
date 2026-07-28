@@ -22,6 +22,11 @@ pub struct FrontmatterSplit {
     pub provenance: Provenance,
     /// The body of the document with the frontmatter block stripped.
     pub body: String,
+    /// Verbatim frontmatter fence text (both `---` fences + trailing
+    /// newline), `None` when no frontmatter was present. Feeds the document
+    /// hash so frontmatter-only edits still invalidate carry-forward (spec
+    /// §Architecture).
+    pub raw: Option<String>,
 }
 
 /// Strip a leading `---\n…\n---\n` YAML frontmatter block from `input`, parse it,
@@ -37,6 +42,7 @@ pub fn split(input: &str) -> FrontmatterSplit {
             frontmatter: None,
             provenance: Provenance::default(),
             body: normalized,
+            raw: None,
         };
     };
     let Some(end_pos) = rest.find("\n---\n") else {
@@ -45,9 +51,11 @@ pub fn split(input: &str) -> FrontmatterSplit {
             frontmatter: None,
             provenance: Provenance::default(),
             body: normalized,
+            raw: None,
         };
     };
     let (yaml, body_with_closing) = rest.split_at(end_pos);
+    let raw = format!("---\n{yaml}\n---\n");
     let body = body_with_closing
         .strip_prefix("\n---\n")
         .map_or_else(|| body_with_closing.to_owned(), str::to_owned);
@@ -64,7 +72,12 @@ pub fn split(input: &str) -> FrontmatterSplit {
         })
         .unwrap_or_default();
 
-    FrontmatterSplit { frontmatter, provenance, body }
+    FrontmatterSplit {
+        frontmatter,
+        provenance,
+        body,
+        raw: Some(raw),
+    }
 }
 
 /// Build a frontmatter-free split for a non-Markdown document.
@@ -87,6 +100,7 @@ pub fn passthrough(input: &str) -> FrontmatterSplit {
         frontmatter: None,
         provenance: Provenance::default(),
         body: input.replace("\r\n", "\n"),
+        raw: None,
     }
 }
 

@@ -47,6 +47,10 @@ pub struct WalkedDocument {
     /// Filesystem modification timestamp captured at walk time.
     /// `None` if the OS could not supply `mtime` for the file.
     pub source_modified_at: Option<OffsetDateTime>,
+    /// SPDX expressions detected in-file by the preprocess step (may be empty).
+    pub licenses: Vec<String>,
+    /// Per-rule byte counters from the preprocess step.
+    pub preprocess_stats: crate::preprocess::PreprocessStats,
 }
 
 /// Errors the walker can surface. Per-file content problems (oversize, binary,
@@ -65,6 +69,17 @@ pub enum WalkError {
         /// Underlying IO error.
         #[source]
         source: std::io::Error,
+    },
+    /// A preprocess rule (or a dependency it calls) panicked while
+    /// preprocessing this file. Only surfaced under strict mode; the default
+    /// path degrades the file to its raw (unprocessed) body with a warning and
+    /// the walk continues.
+    #[error("preprocess panicked on {path}: {reason}")]
+    PreprocessPanic {
+        /// Repo-relative path of the file whose preprocessing panicked.
+        path: PathBuf,
+        /// The caught panic's message.
+        reason: String,
     },
 }
 
@@ -104,6 +119,10 @@ pub enum SkipReason {
     /// drops them rather than uploading a doc that can never persist (issue:
     /// finalize completeness mismatch).
     EmptyNoChunks,
+    /// The preprocess step identified the file as machine-generated (a banner
+    /// comment within the first 10 lines). Generated files carry no
+    /// hand-authored content worth indexing.
+    GeneratedFile,
 }
 
 impl std::fmt::Display for SkipReason {
@@ -119,6 +138,7 @@ impl std::fmt::Display for SkipReason {
             Self::Binary => write!(f, "looks binary (NUL byte in first {BINARY_SNIFF_LEN} bytes)"),
             Self::NotUtf8 => write!(f, "not valid UTF-8"),
             Self::EmptyNoChunks => write!(f, "empty / no searchable content (produced 0 chunks)"),
+            Self::GeneratedFile => write!(f, "generated file (banner within first 10 lines)"),
         }
     }
 }
@@ -187,15 +207,19 @@ fn longest_line_bytes(bytes: &[u8]) -> usize {
 ///
 /// # Errors
 ///
-/// Returns [`WalkError::MissingFile`] if any manifest file is absent, or
-/// [`WalkError::Io`] on read/metadata failure. The walk stops at the first
-/// such error.
+/// Returns [`WalkError::MissingFile`] if any manifest file is absent,
+/// [`WalkError::Io`] on read/metadata failure, or (in `strict` mode only)
+/// [`WalkError::PreprocessPanic`] if a preprocess rule panics. The walk stops
+/// at the first such error.
+#[allow(clippy::too_many_lines)] // per-file resilience: each skip condition is a small, readable arm
 pub fn walk(
     manifest: &Manifest,
     base: &Path,
     max_file_bytes: u64,
     max_line_bytes: usize,
     opts: FilterRunOptions,
+    strict: bool,
+    detector: Option<&dyn crate::preprocess::LicenseDetector>,
 ) -> Result<WalkOutcome, WalkError> {
     let leaves = crate::manifest::resolve::resolve(manifest, base, opts);
     let mut documents: Vec<WalkedDocument> = Vec::with_capacity(leaves.len());
@@ -271,6 +295,38 @@ pub fn walk(
         } else {
             passthrough_frontmatter(&content)
         };
+        // Preprocess (strip noise) BEFORE anything downstream sees the body.
+        // Guarded: a panicking rule degrades this one file to its raw body
+        // (or aborts in strict mode), mirroring the chunker's panic policy.
+        let pre = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::preprocess::preprocess(leaf.kind, &leaf.rel_path, &split.body, detector)
+        }));
+        let (split, licenses, preprocess_stats) = match pre {
+            Ok(p) if p.generated => {
+                skipped.push(SkippedFile {
+                    rel_path: leaf.rel_path,
+                    reason: SkipReason::GeneratedFile,
+                });
+                continue;
+            }
+            Ok(p) => {
+                let mut split = split;
+                split.body = p.body;
+                (split, p.licenses, p.stats)
+            }
+            Err(payload) => {
+                let reason = crate::chunk::panic_reason(payload.as_ref());
+                if strict {
+                    return Err(WalkError::PreprocessPanic { path: leaf.rel_path, reason });
+                }
+                tracing::warn!(
+                    path = %leaf.rel_path.display(),
+                    reason = %reason,
+                    "preprocess panicked; file kept unprocessed (run continues)",
+                );
+                (split, Vec::new(), crate::preprocess::PreprocessStats::default())
+            }
+        };
         let modified = meta.modified().ok().map(OffsetDateTime::from);
         documents.push(WalkedDocument {
             rel_path: leaf.rel_path.clone(),
@@ -278,6 +334,8 @@ pub fn walk(
             split,
             resolved: leaf,
             source_modified_at: modified,
+            licenses,
+            preprocess_stats,
         });
     }
     Ok(WalkOutcome { documents, skipped })
@@ -293,6 +351,9 @@ pub struct Walker {
     max_file_bytes: u64,
     max_line_bytes: usize,
     filter_opts: FilterRunOptions,
+    /// When `true`, a caught preprocess panic fails the walk instead of
+    /// degrading the offending file to its raw (unprocessed) body.
+    strict: bool,
 }
 
 impl Walker {
@@ -306,6 +367,7 @@ impl Walker {
             max_file_bytes: DEFAULT_MAX_FILE_BYTES,
             max_line_bytes: DEFAULT_MAX_LINE_BYTES,
             filter_opts: FilterRunOptions::HERMETIC,
+            strict: false,
         }
     }
 
@@ -337,7 +399,20 @@ impl Walker {
         self.filter_opts
     }
 
+    /// Enable strict mode (defaults to off). In strict mode a preprocess panic
+    /// on any file fails the whole walk via [`WalkError::PreprocessPanic`]
+    /// instead of degrading that one file to its raw body with a warning.
+    /// Mirrors the `--strict` flag on `mnm ingest plan` / `mnm ingest run`.
+    #[must_use]
+    pub const fn with_strict(mut self, strict: bool) -> Self {
+        self.strict = strict;
+        self
+    }
+
     /// Perform the walk and return the [`WalkOutcome`].
+    ///
+    /// The license detector is always `None` here in Phase A; a real detector
+    /// will be threaded in once `preprocess::detect` lands (Task 12).
     ///
     /// # Errors
     ///
@@ -349,6 +424,8 @@ impl Walker {
             self.max_file_bytes,
             self.max_line_bytes,
             self.filter_opts,
+            self.strict,
+            None,
         )
     }
 }
@@ -771,5 +848,50 @@ root:
             default_ignore_list: false,
         });
         assert!(w2.filter_options().respect_gitignore);
+    }
+
+    #[test]
+    fn walker_preprocesses_bodies_and_captures_licenses() {
+        let dir = tempdir();
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "// SPDX-License-Identifier: MIT\n// Copyright Foo\n\nfn lib() {}\n",
+        );
+        let manifest = Manifest::parse(&manifest_yaml(&["src/lib.rs"])).unwrap();
+        let outcome = Walker::new(manifest, dir.path().to_path_buf())
+            .walk()
+            .unwrap();
+        let doc = &outcome.documents[0];
+        assert_eq!(doc.split.body, "fn lib() {}\n");
+        assert_eq!(doc.licenses, vec!["MIT".to_owned()]);
+        assert!(doc.preprocess_stats.license_bytes > 0);
+        // Raw content is retained unmodified.
+        assert!(doc.content.contains("SPDX-License-Identifier"));
+    }
+
+    #[test]
+    fn walker_skips_generated_files_with_reason() {
+        let dir = tempdir();
+        write_file(dir.path(), "gen.rs", "// @generated by build.rs\nfn g() {}\n");
+        let manifest = Manifest::parse(&manifest_yaml(&["gen.rs"])).unwrap();
+        let outcome = Walker::new(manifest, dir.path().to_path_buf())
+            .walk()
+            .unwrap();
+        assert!(outcome.documents.is_empty());
+        assert_eq!(outcome.skipped.len(), 1);
+        assert_eq!(outcome.skipped[0].reason, SkipReason::GeneratedFile);
+    }
+
+    #[test]
+    fn frontmatter_raw_is_retained_for_markdown() {
+        let dir = tempdir();
+        write_file(dir.path(), "doc.md", "---\nverified: true\n---\n# T\n\nBody.\n");
+        let manifest = Manifest::parse(&manifest_yaml(&["doc.md"])).unwrap();
+        let doc = &Walker::new(manifest, dir.path().to_path_buf())
+            .walk()
+            .unwrap()
+            .documents[0];
+        assert_eq!(doc.split.raw.as_deref(), Some("---\nverified: true\n---\n"));
     }
 }

@@ -399,7 +399,8 @@ async fn run_inner(
         .with_filter_options(mnm_content::manifest::resolve::FilterRunOptions {
             respect_gitignore: args.respect_gitignore,
             default_ignore_list: !args.disable_default_ignore_list,
-        });
+        })
+        .with_strict(args.strict);
     let outcome = walker.walk().context("walk source tree")?;
     for skip in &outcome.skipped {
         tracing::warn!(

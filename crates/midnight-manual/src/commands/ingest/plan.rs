@@ -99,12 +99,12 @@ pub async fn run(
     // machine-generated data like chain-specs). Skipped files are warned,
     // mirroring the resilient behavior of `ingest run`; the loop below prints
     // each `skip.reason` generically, so LongLine skips surface automatically.
-    let w = Walker::new(manifest.clone(), base.clone()).with_filter_options(
-        mnm_content::manifest::resolve::FilterRunOptions {
+    let w = Walker::new(manifest.clone(), base.clone())
+        .with_filter_options(mnm_content::manifest::resolve::FilterRunOptions {
             respect_gitignore: args.respect_gitignore,
             default_ignore_list: !args.disable_default_ignore_list,
-        },
-    );
+        })
+        .with_strict(args.strict);
     let outcome = w.walk().context("walk source tree")?;
     for skip in &outcome.skipped {
         tracing::warn!(
@@ -426,6 +426,8 @@ mod plan_walk_context_tests {
                 no_extract: false,
             },
             source_modified_at: None,
+            licenses: Vec::new(),
+            preprocess_stats: mnm_content::preprocess::PreprocessStats::default(),
         }
     }
 

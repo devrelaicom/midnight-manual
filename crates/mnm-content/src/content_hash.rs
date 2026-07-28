@@ -29,6 +29,16 @@ pub fn chunk_hash(content: &str) -> String {
     hex_lower(&digest)
 }
 
+/// Compose the document-hash input (spec §Architecture).
+///
+/// The verbatim frontmatter fence + NUL + the PROCESSED body. NUL keeps the
+/// two segments unambiguous (a fence line can never contain NUL — non-UTF8 is
+/// skipped upstream).
+#[must_use]
+pub fn hash_input(raw_frontmatter: Option<&str>, body: &str) -> String {
+    format!("{}\0{}", raw_frontmatter.unwrap_or(""), body)
+}
+
 fn normalize(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let s = s.replace("\r\n", "\n");
