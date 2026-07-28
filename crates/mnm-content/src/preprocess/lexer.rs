@@ -155,13 +155,33 @@ fn classify(trimmed: &str, line_no: usize, syntax: &CommentSyntax) -> LineClass 
     if line_no == 0 && trimmed.starts_with("#!") {
         return LineClass::Code;
     }
-    let opens_comment = syntax.line.iter().any(|o| trimmed.starts_with(o))
-        || syntax.block.iter().any(|(o, _)| trimmed.starts_with(o));
-    if opens_comment {
-        LineClass::CommentOnly
-    } else {
-        LineClass::Code
+
+    // Check for line comment openers.
+    if syntax.line.iter().any(|o| trimmed.starts_with(o)) {
+        return LineClass::CommentOnly;
     }
+
+    // Check for block comment openers. If a block opens and closes on the same
+    // line with trailing code, treat it as Code (not CommentOnly) so the line
+    // is processed through the Code path and flushes any preceding comment run.
+    if let Some(&(open, close)) = syntax
+        .block
+        .iter()
+        .find(|&&(open, _)| trimmed.starts_with(open))
+    {
+        let rest = &trimmed[open.len()..];
+        if let Some(pos) = rest.find(close) {
+            let after = rest[pos + close.len()..].trim();
+            if !after.is_empty() {
+                // Mid-line close with trailing code: treat as Code.
+                return LineClass::Code;
+            }
+        }
+        // Block opener with no close on same line, or close-only: CommentOnly.
+        return LineClass::CommentOnly;
+    }
+
+    LineClass::Code
 }
 
 /// How many leading `blocks` form the file's head run: every block whose span
@@ -251,5 +271,14 @@ mod tests {
         let syn = comment_syntax(Language::Bash).unwrap();
         let body = "#!/bin/sh\necho hi\n";
         assert!(lex_blocks(body, &syn).is_empty());
+    }
+
+    #[test]
+    fn mid_line_closed_block_with_trailing_code_flushes_run() {
+        let body = "// header a\n// header b\n/* inline */ let x = 1;\nlet y = 2;\n";
+        let blocks = lex_blocks(body, &rust_syntax());
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].text, "header a\nheader b");
+        assert_eq!(&body[blocks[0].span.clone()], "// header a\n// header b\n");
     }
 }
