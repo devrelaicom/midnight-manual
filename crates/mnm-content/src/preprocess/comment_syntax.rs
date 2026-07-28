@@ -28,26 +28,37 @@ pub const fn comment_syntax(lang: Language) -> Option<CommentSyntax> {
     };
     Some(match lang {
         Language::Rust | Language::Go => CommentSyntax { strings: &['"'], ..C_LIKE },
-        Language::TypeScript | Language::JavaScript | Language::Solidity => {
-            CommentSyntax { strings: &['"', '\'', '`'], ..C_LIKE }
-        }
+        Language::TypeScript | Language::JavaScript | Language::Solidity => CommentSyntax {
+            strings: &['"', '\'', '`'],
+            ..C_LIKE
+        },
         Language::Swift
         | Language::Kotlin
         | Language::CSharp
         | Language::Java
         | Language::Compact => C_LIKE,
         Language::Bash | Language::Toml | Language::Yaml | Language::Python | Language::Ruby => {
-            CommentSyntax { line: &["#"], block: &[], strings: &['"', '\''] }
+            CommentSyntax {
+                line: &["#"],
+                block: &[],
+                strings: &['"', '\''],
+            }
         }
-        Language::Scheme => {
-            CommentSyntax { line: &[";"], block: &[("#|", "|#")], strings: &['"'] }
-        }
-        Language::Haskell => {
-            CommentSyntax { line: &["--"], block: &[("{-", "-}")], strings: &['"'] }
-        }
-        Language::Html | Language::Xml => {
-            CommentSyntax { line: &[], block: &[("<!--", "-->")], strings: &[] }
-        }
+        Language::Scheme => CommentSyntax {
+            line: &[";"],
+            block: &[("#|", "|#")],
+            strings: &['"'],
+        },
+        Language::Haskell => CommentSyntax {
+            line: &["--"],
+            block: &[("{-", "-}")],
+            strings: &['"'],
+        },
+        Language::Html | Language::Xml => CommentSyntax {
+            line: &[],
+            block: &[("<!--", "-->")],
+            strings: &[],
+        },
         Language::Other => return None,
     })
 }
@@ -67,7 +78,12 @@ mod tests {
 
     #[test]
     fn python_and_bash_are_hash_line_only() {
-        for lang in [Language::Python, Language::Bash, Language::Toml, Language::Yaml] {
+        for lang in [
+            Language::Python,
+            Language::Bash,
+            Language::Toml,
+            Language::Yaml,
+        ] {
             let cs = comment_syntax(lang).unwrap();
             assert_eq!(cs.line, ["#"], "{lang:?}");
             assert!(cs.block.is_empty(), "{lang:?}");
