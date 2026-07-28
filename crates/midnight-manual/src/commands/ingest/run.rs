@@ -463,17 +463,7 @@ async fn run_inner(
         .iter()
         .filter(|d| !d.licenses.is_empty())
         .count();
-    let licenses_by_path: std::collections::HashMap<PathBuf, Option<Vec<String>>> = walked_docs
-        .iter()
-        .map(|d| {
-            let lic = if d.licenses.is_empty() {
-                license_resolver.resolve_for(d.rel_path.parent().unwrap_or_else(|| Path::new("")))
-            } else {
-                Some(d.licenses.clone())
-            };
-            (d.rel_path.clone(), lic)
-        })
-        .collect();
+    let licenses_by_path = build_licenses_by_path(&walked_docs, &mut license_resolver);
     let source_license = license_resolver.root_license();
     eprintln!(
         "license: {in_file_license_count} document(s) with in-file detections; source license: {}",
@@ -2193,6 +2183,30 @@ struct CarriedUploadInput {
     /// resolved by the caller (`build_carried_inputs`) from the run's
     /// `licenses_by_path` map.
     license: Option<Vec<String>>,
+}
+
+/// Build the per-document license map: in-file SPDX detections (`d.licenses`,
+/// Task 6's preprocess step) take precedence over the walk-up resolver
+/// (manifest fields, then LICENSE-family files, walking up from the
+/// document's directory to `source_root`) — spec §License detection &
+/// resolution. `resolver` is borrowed mutably for the duration of the walk
+/// (its walk-up cache is populated as a side effect) and released once this
+/// returns, so callers are free to call `resolver.root_license()` afterward.
+fn build_licenses_by_path(
+    walked: &[mnm_content::ingest::WalkedDocument],
+    resolver: &mut mnm_content::preprocess::resolver::LicenseResolver,
+) -> std::collections::HashMap<PathBuf, Option<Vec<String>>> {
+    walked
+        .iter()
+        .map(|d| {
+            let lic = if d.licenses.is_empty() {
+                resolver.resolve_for(d.rel_path.parent().unwrap_or_else(|| Path::new("")))
+            } else {
+                Some(d.licenses.clone())
+            };
+            (d.rel_path.clone(), lic)
+        })
+        .collect()
 }
 
 /// Map one new (`PlannedDocument`) into the upload wire shape: full chunks,
@@ -4277,6 +4291,64 @@ mod tests {
         let upload =
             build_new_upload(&sample_planned_new("b.md"), None, Some(vec!["MIT".to_owned()]));
         assert_eq!(upload.license, Some(vec!["MIT".to_owned()]));
+    }
+
+    /// Minimal `WalkedDocument` for `build_licenses_by_path` tests: a rel path,
+    /// the doc's in-file `licenses` (empty means "no in-file detection"), and
+    /// otherwise-inert field values (no frontmatter, no provenance override).
+    fn walked_doc(rel: &str, licenses: Vec<String>) -> mnm_content::ingest::WalkedDocument {
+        let body = "content";
+        mnm_content::ingest::WalkedDocument {
+            rel_path: PathBuf::from(rel),
+            content: body.to_owned(),
+            split: mnm_content::frontmatter::passthrough(body),
+            resolved: mnm_content::manifest::resolve::ResolvedLeaf {
+                rel_path: PathBuf::from(rel),
+                kind: DocumentKind::Code,
+                name: None,
+                published_url: None,
+                source_url: None,
+                provenance_override: mnm_core::provenance::Provenance::default(),
+                no_extract: false,
+            },
+            source_modified_at: None,
+            licenses,
+            preprocess_stats: mnm_content::preprocess::PreprocessStats::default(),
+        }
+    }
+
+    /// THE precedence property (Task 13): in-file SPDX detections win over the
+    /// walk-up resolver, even when the walk-up would find a *different*
+    /// license. Doc A carries an in-file `MIT` detection, so it must stay MIT
+    /// despite the root `Cargo.toml` declaring `Apache-2.0`. Doc B has no
+    /// in-file detection, so it must fall through to that same walk-up
+    /// `Apache-2.0`. A precedence-branch swap (walk-up winning over in-file)
+    /// would flip doc A's result to `Apache-2.0`, failing this test.
+    #[test]
+    fn licenses_by_path_prefers_in_file_over_walk_up() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"x\"\nlicense = \"Apache-2.0\"\n",
+        )
+        .unwrap();
+
+        let doc_a = walked_doc("a/x.rs", vec!["MIT".to_owned()]);
+        let doc_b = walked_doc("b/y.rs", Vec::new());
+
+        let mut resolver = mnm_content::preprocess::resolver::LicenseResolver::new(dir.path());
+        let licenses_by_path = build_licenses_by_path(&[doc_a, doc_b], &mut resolver);
+
+        assert_eq!(
+            licenses_by_path.get(Path::new("a/x.rs")),
+            Some(&Some(vec!["MIT".to_owned()])),
+            "in-file detection must win over the walk-up resolver's Apache-2.0",
+        );
+        assert_eq!(
+            licenses_by_path.get(Path::new("b/y.rs")),
+            Some(&Some(vec!["Apache-2.0".to_owned()])),
+            "no in-file detection must fall through to the walk-up resolver",
+        );
     }
 
     /// `ReportSelection` is a pure selector — no I/O. Verify the four render
