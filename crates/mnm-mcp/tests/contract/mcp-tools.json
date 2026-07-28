@@ -1902,6 +1902,16 @@
               "null"
             ]
           },
+          "license": {
+            "description": "Detected SPDX license expression(s) for this document; null/absent when undetected.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "source": {
             "additionalProperties": true,
             "type": "object"
@@ -2159,6 +2169,16 @@
                 },
                 "kind": {
                   "type": "string"
+                },
+                "license": {
+                  "description": "Detected SPDX license expression(s) for the source; null/absent when undetected.",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": [
+                    "array",
+                    "null"
+                  ]
                 },
                 "slug": {
                   "type": "string"

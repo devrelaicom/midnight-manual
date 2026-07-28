@@ -1615,7 +1615,7 @@ pub fn project_document(env: Value) -> ToolOutcome {
     }
     let trimmed = json!({
         "id": id, "source_path": path, "chunk_count": n, "total_tokens": tokens,
-        "outline": outline,
+        "outline": outline, "license": env.get("license").cloned().unwrap_or(Value::Null),
     });
     let suggested_next_actions = vec![NextAction::call(
         "Read the document's chunk bodies from the beginning",
@@ -1729,6 +1729,7 @@ pub fn project_sources(env: Value) -> ToolOutcome {
                 "slug": s.get("slug").cloned().unwrap_or(Value::Null),
                 "display_name": s.get("display_name").cloned().unwrap_or(Value::Null),
                 "kind": s.get("kind").cloned().unwrap_or(Value::Null),
+                "license": s.get("license").cloned().unwrap_or(Value::Null),
             })
         })
         .collect();
