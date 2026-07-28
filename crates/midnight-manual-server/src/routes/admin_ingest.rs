@@ -142,6 +142,11 @@ pub struct DocumentUpload {
     /// old clients (which never set it) deserializing as `false`.
     #[serde(default)]
     pub carried: bool,
+    /// Detected SPDX license expression(s) for this document, if any.
+    /// `#[serde(default)]` keeps old clients (which never set it)
+    /// deserializing as `None`.
+    #[serde(default)]
+    pub license: Option<Vec<String>>,
 }
 
 /// One chunk to upload.
@@ -161,10 +166,12 @@ pub struct ChunkUpload {
     /// Symbol path (code, structured segments).
     #[serde(default)]
     pub symbol_path: Vec<mnm_core::types::SymbolSegment>,
-    /// Start byte in source.
+    /// Start byte in source. Post-processed text coordinates (offsets into
+    /// the preprocessed body, not the original file).
     #[serde(default)]
     pub start_byte: i32,
-    /// End byte in source.
+    /// End byte in source. Post-processed text coordinates (offsets into
+    /// the preprocessed body, not the original file).
     #[serde(default)]
     pub end_byte: i32,
     /// Token count.
@@ -238,6 +245,13 @@ pub struct FinalizeRequest {
     /// unaffected; the incremental-ingest CLI always sends it.
     #[serde(default)]
     pub expected_document_total: Option<i64>,
+    /// Source-level SPDX license expression(s) resolved for this run, if any.
+    /// Always applied to `source.license` on a successful finalize — including
+    /// `None`, which overwrites to `NULL` (a source that lost its license file
+    /// goes back to unlicensed). `#[serde(default)]` keeps a bodyless finalize
+    /// (or an older client) deserializing as `None`.
+    #[serde(default)]
+    pub source_license: Option<Vec<String>>,
 }
 
 /// Response from `POST .../finalize`.
@@ -770,7 +784,12 @@ async fn finalize_run(
     // count persisted documents for this run and refuse to activate a version
     // whose count differs. A bodyless finalize (existing callers, every server
     // test) supplies no body → `expected` is `None` → guard skipped entirely.
-    let expected = body.and_then(|Json(r)| r.expected_document_total);
+    //
+    // Both `expected_document_total` and `source_license` are read out of the
+    // SAME body extraction so neither field silently drops the other.
+    let req = body.map(|Json(r)| r);
+    let expected = req.as_ref().and_then(|r| r.expected_document_total);
+    let source_license = req.and_then(|r| r.source_license);
     if let Some(expected) = expected {
         let persisted = match source_version::count_documents(&state.pool, run_id).await {
             Ok(n) => n,
@@ -802,6 +821,15 @@ async fn finalize_run(
             // model; re-resolve the corpus model so search reflects it without a
             // restart (Task 3.4).
             crate::corpus_model::refresh(&state.pool, &state.corpus_model).await;
+            // Always applied, even `None` — a source that lost its license
+            // file (or never sent one) goes back to NULL. Non-fatal: the
+            // version is already promoted, so a license-write failure must
+            // not fail the finalize response.
+            if let Err(e) =
+                source::set_license(&state.pool, src.id, source_license.as_deref()).await
+            {
+                tracing::warn!(request_id = rid, op = "finalize_run", error = %e, "source license update failed (non-fatal)");
+            }
             Json(FinalizeResult {
                 source_version_id: run_id,
                 revision: promoted,
@@ -1192,7 +1220,7 @@ async fn insert_new_document(
             package_id,
             char_count: doc.char_count,
             token_count: doc.token_count,
-            license: None,
+            license: doc.license.as_deref(),
         },
     )
     .await?;
@@ -1268,7 +1296,7 @@ async fn carry_forward_one(
             package_id,
             char_count: doc.char_count,
             token_count: doc.token_count,
-            license: None,
+            license: doc.license.as_deref(),
         },
     )
     .await?;
@@ -1417,7 +1445,27 @@ mod tests {
             chunks,
             package: None,
             carried: false,
+            license: None,
         }
+    }
+
+    #[test]
+    fn finalize_request_deserializes_source_license() {
+        let r: FinalizeRequest = serde_json::from_str(
+            r#"{"expected_document_total": 3, "source_license": ["Apache-2.0 OR MIT"]}"#,
+        )
+        .unwrap();
+        assert_eq!(r.source_license.as_deref(), Some(&["Apache-2.0 OR MIT".to_owned()][..]));
+        let bodyless: FinalizeRequest = serde_json::from_str("{}").unwrap();
+        assert!(bodyless.source_license.is_none());
+    }
+
+    #[test]
+    fn document_upload_license_defaults_none() {
+        let d: DocumentUpload =
+            serde_json::from_str(r#"{"path":"a.rs","kind":"code","content_hash":"h","chunks":[]}"#)
+                .unwrap();
+        assert!(d.license.is_none());
     }
 
     #[test]

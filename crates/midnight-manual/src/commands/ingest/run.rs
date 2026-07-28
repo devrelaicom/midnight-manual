@@ -1002,6 +1002,9 @@ async fn run_inner(
         &token,
         &FinalizeRequest {
             expected_document_total: expected_total,
+            // The license resolver is wired in a later task; this run has no
+            // resolved source-level license to send yet.
+            source_license: None,
         },
     )
     .await
@@ -2145,6 +2148,9 @@ struct CarriedUploadInput {
     char_count: i32,
     token_count: i32,
     package: Option<mnm_core::types::PackageRef>,
+    /// Detected SPDX license expression(s) for this document, if any. `None`
+    /// here for now — the license resolver is wired in a later task.
+    license: Option<Vec<String>>,
 }
 
 /// Map one new (`PlannedDocument`) into the upload wire shape: full chunks,
@@ -2191,6 +2197,9 @@ fn build_new_upload(
             .collect(),
         package: d.package.clone(),
         carried: false,
+        // The license resolver is wired in a later task; `PlannedDocument`
+        // does not carry a license yet.
+        license: None,
     }
 }
 
@@ -2215,6 +2224,7 @@ fn build_carried_upload(d: &CarriedUploadInput) -> DocumentUpload {
         chunks: Vec::new(),
         package: d.package.clone(),
         carried: true,
+        license: d.license.clone(),
     }
 }
 
@@ -2301,6 +2311,9 @@ fn build_carried_inputs(
                 char_count: i32::try_from(w.content.chars().count()).unwrap_or(i32::MAX),
                 token_count: i32::try_from(token_count).unwrap_or(i32::MAX),
                 package: detect_package_ref(source_root, &w.rel_path, &w.content),
+                // The license resolver is wired in a later task; no resolved
+                // license to carry yet.
+                license: None,
             })
         })
         .collect()
@@ -2391,6 +2404,7 @@ fn build_reembed_uploads(
                 chunks,
                 package: meta.package,
                 carried: false,
+                license: meta.license,
             })
         })
         .collect()
@@ -2448,6 +2462,9 @@ struct DocumentUpload {
     package: Option<mnm_core::types::PackageRef>,
     /// True for carry-forward docs (no chunks; server clones prior chunks).
     carried: bool,
+    /// Detected SPDX license expression(s) for this document, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    license: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -2458,7 +2475,11 @@ struct ChunkUpload {
     content_hash: String,
     heading_path: Vec<String>,
     symbol_path: Vec<mnm_core::types::SymbolSegment>,
+    /// Post-processed text coordinates (offsets into the preprocessed body,
+    /// not the original file).
     start_byte: i32,
+    /// Post-processed text coordinates (offsets into the preprocessed body,
+    /// not the original file).
     end_byte: i32,
     token_count: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2487,6 +2508,12 @@ struct UploadDocumentsResponse {
 #[derive(Debug, Serialize)]
 struct FinalizeRequest {
     expected_document_total: i64,
+    /// Source-level SPDX license expression(s) resolved for this run, if any.
+    /// The server always applies this to `source.license` on a successful
+    /// finalize (including overwriting to `NULL` when omitted), so a source
+    /// that lost its license file goes back to unlicensed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_license: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3243,6 +3270,7 @@ mod tests {
                 token_count: 0,
                 package: None,
                 carried: false,
+                license: None,
                 chunks: vec![mk_chunk(0), mk_chunk(1)],
             },
             DocumentUpload {
@@ -3259,6 +3287,7 @@ mod tests {
                 token_count: 0,
                 package: None,
                 carried: false,
+                license: None,
                 chunks: vec![mk_chunk(0)],
             },
         ];
@@ -3381,6 +3410,7 @@ mod tests {
             token_count: 0,
             package: None,
             carried: false,
+            license: None,
             chunks: vec![mk_chunk(0)],
         }];
         assert!(attach_embeddings(&mut docs, vec![]).is_err());
@@ -3435,6 +3465,7 @@ mod tests {
             token_count: 0,
             package: None,
             carried: false,
+            license: None,
             chunks,
         }
     }
@@ -3746,6 +3777,7 @@ mod tests {
                 token_count: 0,
                 package: None,
                 carried: false,
+                license: None,
                 chunks: vec![ChunkUpload {
                     chunk_index: 0,
                     total_chunks: 1,
@@ -4153,6 +4185,7 @@ mod tests {
             char_count: 100,
             token_count: 25,
             package: None,
+            license: None,
         }
     }
 
