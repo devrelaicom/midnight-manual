@@ -23,7 +23,9 @@ use crate::code::language::Language;
 /// (heuristic head stripping + SPDX-tag parsing only).
 pub trait LicenseDetector: Sync {
     /// Return the SPDX expression for `text` when identified at >= 0.9
-    /// confidence, else `None`. Input should already be capped at 8 KB.
+    /// confidence, else `None`. The implementation caps its own analysis
+    /// window (16 KiB — enough for the full Apache-2.0 text); callers need
+    /// not pre-truncate.
     fn detect(&self, text: &str) -> Option<String>;
 }
 

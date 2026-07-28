@@ -253,6 +253,10 @@ impl FileFilter {
             // PATENTS, optionally followed by `-` or `.` + anything.
             let basename = rel_path.rsplit('/').next().unwrap_or(rel_path);
             if is_license_filename(basename) {
+                // Discovery-time exclusions are otherwise silent; trace this one
+                // so the rare false positive (e.g. `NOTICE-BOARD.md`) is at least
+                // greppable rather than vanishing without a record.
+                tracing::debug!(path = rel_path, "excluding LICENSE-family file from ingest");
                 return false;
             }
         }
