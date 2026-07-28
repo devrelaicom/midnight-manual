@@ -417,6 +417,36 @@ async fn run_inner(
         serde_json::json!({"files": walked_docs.len(), "skipped": walk_skipped.len()}),
     );
 
+    // Per-rule strip stats, aggregated across every walked document, plus a
+    // count of files the walker dropped as machine-generated (a preprocess
+    // skip, not a walk error). `eprintln!` (not the `reporter`/stdout report
+    // path): this is auxiliary operator-facing detail, not part of the
+    // `--json` JSONL phase stream or the final `IngestReport` — printing it
+    // to stdout would interleave free text into that machine-readable
+    // contract (mirrors the existing `eprintln!` warnings elsewhere in this
+    // file, e.g. `render_abort_artifacts`'s report-file-write warning).
+    let mut pre_stats = mnm_content::preprocess::PreprocessStats::default();
+    for d in &walked_docs {
+        pre_stats.absorb(&d.preprocess_stats);
+    }
+    let generated_skips = walk_skipped
+        .iter()
+        .filter(|s| matches!(s.reason, mnm_content::ingest::SkipReason::GeneratedFile))
+        .count();
+    if pre_stats.total() > 0 || generated_skips > 0 {
+        eprintln!(
+            "preprocessing: stripped {} bytes (license {}, decorative {}, comments {}, mdx {}, badges {}, whitespace {}); {} generated file(s) skipped",
+            pre_stats.total(),
+            pre_stats.license_bytes,
+            pre_stats.decorative_bytes,
+            pre_stats.html_comment_bytes,
+            pre_stats.mdx_esm_bytes + pre_stats.mdx_jsx_bytes,
+            pre_stats.badge_bytes,
+            pre_stats.whitespace_bytes,
+            generated_skips,
+        );
+    }
+
     // ── Resolve auth + corpus wire ids + prior state (before chunking) ───────
     // The plan's new-vs-carried classification depends on the prior active
     // version's inventory, gated by the embedding-model identity, so both must
