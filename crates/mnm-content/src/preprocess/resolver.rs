@@ -61,6 +61,17 @@ impl LicenseResolver {
     }
 }
 
+/// Push `e` onto `exprs` unless already present. Position-independent
+/// dedup (unlike `Vec::dedup`, which only collapses adjacent duplicates);
+/// first occurrence wins, order is otherwise preserved.
+fn push_unique(exprs: &mut Vec<String>, e: Option<String>) {
+    if let Some(e) = e {
+        if !exprs.contains(&e) {
+            exprs.push(e);
+        }
+    }
+}
+
 /// Parse + validate one candidate expression; `None` (logged) when invalid.
 fn valid_expr(s: &str, origin: &Path) -> Option<String> {
     let s = s.trim();
@@ -117,11 +128,12 @@ fn package_json_license(dir: &Path) -> Option<Vec<String>> {
     let body = std::fs::read_to_string(&pkg).ok()?;
     let v: serde_json::Value = serde_json::from_str(&body).ok()?;
 
-    let mut exprs = Vec::new();
+    let mut exprs: Vec<String> = Vec::new();
     match v.get("license") {
-        Some(serde_json::Value::String(s)) => exprs.extend(valid_expr(s, &pkg)),
+        Some(serde_json::Value::String(s)) => push_unique(&mut exprs, valid_expr(s, &pkg)),
         Some(serde_json::Value::Object(o)) => {
-            exprs.extend(
+            push_unique(
+                &mut exprs,
                 o.get("type")
                     .and_then(|t| t.as_str())
                     .and_then(|s| valid_expr(s, &pkg)),
@@ -131,7 +143,8 @@ fn package_json_license(dir: &Path) -> Option<Vec<String>> {
     }
     if let Some(arr) = v.get("licenses").and_then(|l| l.as_array()) {
         for entry in arr {
-            exprs.extend(
+            push_unique(
+                &mut exprs,
                 entry
                     .get("type")
                     .and_then(|t| t.as_str())
@@ -139,7 +152,6 @@ fn package_json_license(dir: &Path) -> Option<Vec<String>> {
             );
         }
     }
-    exprs.dedup();
     if exprs.is_empty() {
         None
     } else {
@@ -250,12 +262,22 @@ mod tests {
 
     #[test]
     fn manifest_beats_license_file_at_same_level() {
+        // LICENSE holds real, detectable Apache-2.0 text -- a *different*
+        // license than the manifest declares -- so this test only passes
+        // under correct manifest-first precedence. Reversed precedence
+        // (license file checked before/instead of manifest) would detect
+        // Apache-2.0 from the file and fail this assertion.
+        let apache = spdx::text::LICENSE_TEXTS
+            .iter()
+            .find(|(n, _)| *n == "Apache-2.0")
+            .unwrap()
+            .1;
         let dir = setup(&[
             ("Cargo.toml", "[package]\nname=\"x\"\nlicense = \"MIT\"\n"),
-            ("LICENSE", "irrelevant text"),
+            ("LICENSE", apache),
         ]);
         let mut r = LicenseResolver::new(dir.path());
-        assert_eq!(r.resolve_for(Path::new("")), Some(vec!["MIT".into()]));
+        assert_eq!(r.resolve_for(Path::new("")), Some(vec!["MIT".to_owned()]));
     }
 
     #[test]
@@ -306,6 +328,31 @@ mod tests {
         let dir = setup(&[("src/a.rs", "fn a() {}")]);
         let mut r = LicenseResolver::new(dir.path());
         assert_eq!(r.resolve_for(Path::new("src")), None);
-        assert_eq!(r.resolve_for(Path::new("src")), None);
+
+        // Introduce a license source at base *after* the first (negative)
+        // resolution -- a fresh disk read from "src" would now find it via
+        // the walk-up to "". If per-level memoization were removed, this
+        // second call would return Some(["MIT"]) instead of None.
+        fs::write(dir.path().join("Cargo.toml"), "[package]\nname=\"x\"\nlicense = \"MIT\"\n")
+            .unwrap();
+
+        assert_eq!(
+            r.resolve_for(Path::new("src")),
+            None,
+            "memoized None must survive a disk change"
+        );
+    }
+
+    #[test]
+    fn package_json_license_dedups_position_independently() {
+        // `licenses` repeats "MIT" (already the primary `license`) after
+        // "Apache-2.0"; adjacent-only dedup (`Vec::dedup`) would miss this
+        // non-adjacent duplicate and yield ["MIT", "Apache-2.0", "MIT"].
+        let dir = setup(&[(
+            "package.json",
+            r#"{"license":"MIT","licenses":[{"type":"Apache-2.0"},{"type":"MIT"}]}"#,
+        )]);
+        let got = package_json_license(dir.path()).unwrap();
+        assert_eq!(got, vec!["MIT".to_owned(), "Apache-2.0".to_owned()]);
     }
 }
