@@ -84,7 +84,7 @@ pub fn apply_code_rules(
     let mut removed: Vec<Range<usize>> = Vec::new();
 
     for (i, block) in blocks.iter().enumerate() {
-        let capped = &block.text[..block.text.len().min(8 * 1024)];
+        let capped = &block.text[..floor_char_boundary(&block.text, 8 * 1024)];
         let tag_expr = SPDX_TAG.captures(capped).map(|c| c[1].trim().to_owned());
         let licenseish = LICENSEISH.is_match(capped);
         let strip = if i < head {
@@ -116,6 +116,19 @@ pub fn apply_code_rules(
 
     out.edits.sort_by_key(|(r, _)| r.start);
     out
+}
+
+/// Largest byte index <= `max` that is a char boundary of `s` (so slicing
+/// `&s[..floor_char_boundary(s, max)]` never panics on multibyte input).
+const fn floor_char_boundary(s: &str, max: usize) -> usize {
+    if max >= s.len() {
+        return s.len();
+    }
+    let mut i = max;
+    while !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
 }
 
 fn push_unique(v: &mut Vec<String>, s: String) {
@@ -295,5 +308,25 @@ mod tests {
     #[test]
     fn edits_apply_cleanly() {
         assert_eq!(apply_edits("abcdef", &[(1..3, String::new()), (4..5, "X".into())]), "adXf");
+    }
+
+    #[test]
+    fn oversized_multibyte_license_block_does_not_panic() {
+        // A head license block whose text crosses the 8 KB cap on a multibyte
+        // char boundary must not panic the slice.
+        let mut header = String::from("// Copyright");
+        // Pad with odd-length prefix + '©' (2 bytes) to ensure byte 8192
+        // lands mid-multibyte character. 8192 - len("// Copyright") = 8180;
+        // 8180 is even, so we add 1 extra byte to make it odd, then fill with ©.
+        header.push('X');
+        for _ in 0..4090 {
+            header.push('©');
+        }
+        header.push('\n');
+        let body = format!("{header}fn main() {{}}\n");
+        // Must not panic; head block is licenseish so it strips.
+        let out = apply_code_rules(&body, Language::Rust, "m.rs", None);
+        let stripped = apply_edits(&body, &out.edits);
+        assert!(stripped.contains("fn main()"));
     }
 }
