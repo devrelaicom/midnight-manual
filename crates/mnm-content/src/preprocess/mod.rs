@@ -7,6 +7,7 @@
 pub mod comment_syntax;
 pub mod lexer;
 pub mod rules_code;
+pub mod rules_markdown;
 
 /// Confidence-thresholded license text identification. Implemented in Phase B
 /// by `spdx::detection`; `None` everywhere = the spec's degraded mode
