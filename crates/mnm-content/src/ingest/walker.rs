@@ -894,4 +894,81 @@ root:
             .documents[0];
         assert_eq!(doc.split.raw.as_deref(), Some("---\nverified: true\n---\n"));
     }
+
+    struct PanicDetector;
+    impl crate::preprocess::LicenseDetector for PanicDetector {
+        fn detect(&self, _text: &str) -> Option<String> {
+            panic!("preprocess detector panic (test)")
+        }
+    }
+
+    #[test]
+    fn preprocess_panic_non_strict_degrades_to_raw_body_and_continues() {
+        let dir = tempdir();
+        // Write a Code file with a mid-file comment block containing a license
+        // keyword so the detector is actually invoked. The body has both a
+        // function def and a mid-file license-like comment.
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "fn a() {}\n\n// Copyright 2024 Example, licensed under MIT\nfn b() {}\n",
+        );
+        let manifest = Manifest::parse(&manifest_yaml(&["src/lib.rs"])).unwrap();
+        // Call the free walk() function directly with strict=false and the PanicDetector.
+        let outcome = walk(
+            &manifest,
+            dir.path(),
+            DEFAULT_MAX_FILE_BYTES,
+            DEFAULT_MAX_LINE_BYTES,
+            FilterRunOptions::HERMETIC,
+            false,
+            Some(&PanicDetector),
+        );
+        // Should succeed even though detector panicked.
+        assert!(outcome.is_ok());
+        let outcome = outcome.unwrap();
+        assert_eq!(outcome.documents.len(), 1);
+        assert!(outcome.skipped.is_empty());
+        // The panic degraded preprocessing to raw; body should still contain
+        // both the original function and the copyright line.
+        let doc = &outcome.documents[0];
+        assert!(doc.split.body.contains("fn a()"));
+        assert!(doc.split.body.contains("fn b()"));
+        assert!(doc.split.body.contains("Copyright 2024 Example"));
+        // No licenses were captured (preprocessing was degraded).
+        assert!(doc.licenses.is_empty());
+    }
+
+    #[test]
+    fn preprocess_panic_strict_mode_aborts_with_error() {
+        let dir = tempdir();
+        // Same file as above: mid-file comment with license keyword.
+        write_file(
+            dir.path(),
+            "src/lib.rs",
+            "fn a() {}\n\n// Copyright 2024 Example, licensed under MIT\nfn b() {}\n",
+        );
+        let manifest = Manifest::parse(&manifest_yaml(&["src/lib.rs"])).unwrap();
+        // Call the free walk() function directly with strict=true and the PanicDetector.
+        let outcome = walk(
+            &manifest,
+            dir.path(),
+            DEFAULT_MAX_FILE_BYTES,
+            DEFAULT_MAX_LINE_BYTES,
+            FilterRunOptions::HERMETIC,
+            true,
+            Some(&PanicDetector),
+        );
+        // Should fail with PreprocessPanic in strict mode.
+        assert!(outcome.is_err());
+        let err = outcome.unwrap_err();
+        // Check that the error is PreprocessPanic with the correct path.
+        match err {
+            WalkError::PreprocessPanic { path, reason } => {
+                assert_eq!(path, PathBuf::from("src/lib.rs"));
+                assert!(reason.contains("preprocess detector panic"));
+            }
+            other => panic!("Expected WalkError::PreprocessPanic, got: {other:?}"),
+        }
+    }
 }
