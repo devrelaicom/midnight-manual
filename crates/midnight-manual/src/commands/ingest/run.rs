@@ -447,6 +447,41 @@ async fn run_inner(
         );
     }
 
+    // ── License resolution ────────────────────────────────────────────────────
+    // Resolve every document's license, plus the source-level license, once per
+    // run. In-file SPDX detections (`d.licenses`, Task 6's preprocess step) take
+    // precedence over the walk-up resolver (Task 10: manifest fields, then
+    // LICENSE-family files, walking up from the document's directory to
+    // `source_root`) — spec §Pipeline placement. One `LicenseResolver` is reused
+    // for both the per-document map and the root lookup so its walk-up cache is
+    // shared; `resolve_for`/`root_license` both take `&mut self`, so the map is
+    // built first (borrowing the resolver for the iteration) and `root_license`
+    // is read afterward into a local, before the resolver goes out of scope.
+    let mut license_resolver =
+        mnm_content::preprocess::resolver::LicenseResolver::new(&source_root);
+    let in_file_license_count = walked_docs
+        .iter()
+        .filter(|d| !d.licenses.is_empty())
+        .count();
+    let licenses_by_path: std::collections::HashMap<PathBuf, Option<Vec<String>>> = walked_docs
+        .iter()
+        .map(|d| {
+            let lic = if d.licenses.is_empty() {
+                license_resolver.resolve_for(d.rel_path.parent().unwrap_or_else(|| Path::new("")))
+            } else {
+                Some(d.licenses.clone())
+            };
+            (d.rel_path.clone(), lic)
+        })
+        .collect();
+    let source_license = license_resolver.root_license();
+    eprintln!(
+        "license: {in_file_license_count} document(s) with in-file detections; source license: {}",
+        source_license
+            .as_ref()
+            .map_or_else(|| "none detected".to_owned(), |exprs| exprs.join(" AND ")),
+    );
+
     // ── Resolve auth + corpus wire ids + prior state (before chunking) ───────
     // The plan's new-vs-carried classification depends on the prior active
     // version's inventory, gated by the embedding-model identity, so both must
@@ -736,7 +771,10 @@ async fn run_inner(
     let new_docs: Vec<DocumentUpload> = plan
         .new_documents
         .iter()
-        .map(|d| build_new_upload(d, args.source_base_url.as_deref()))
+        .map(|d| {
+            let license = licenses_by_path.get(&d.path).cloned().flatten();
+            build_new_upload(d, args.source_base_url.as_deref(), license)
+        })
         .collect();
 
     // Carried docs: join the carry-forward set back to the walked source for
@@ -748,6 +786,7 @@ async fn run_inner(
         &source_root,
         args.source_base_url.as_deref(),
         chunker_config,
+        &licenses_by_path,
     );
     let carried_docs: Vec<DocumentUpload> =
         carried_inputs.iter().map(build_carried_upload).collect();
@@ -1002,9 +1041,11 @@ async fn run_inner(
         &token,
         &FinalizeRequest {
             expected_document_total: expected_total,
-            // The license resolver is wired in a later task; this run has no
-            // resolved source-level license to send yet.
-            source_license: None,
+            // Resolved once, up-front, alongside `licenses_by_path` (see the
+            // "License resolution" block above). The server always applies
+            // this on a successful finalize, including clearing a source's
+            // license back to `NULL` when this is `None`.
+            source_license: source_license.clone(),
         },
     )
     .await
@@ -2148,18 +2189,22 @@ struct CarriedUploadInput {
     char_count: i32,
     token_count: i32,
     package: Option<mnm_core::types::PackageRef>,
-    /// Detected SPDX license expression(s) for this document, if any. `None`
-    /// here for now — the license resolver is wired in a later task.
+    /// Detected SPDX license expression(s) for this document, if any —
+    /// resolved by the caller (`build_carried_inputs`) from the run's
+    /// `licenses_by_path` map.
     license: Option<Vec<String>>,
 }
 
 /// Map one new (`PlannedDocument`) into the upload wire shape: full chunks,
 /// `carried: false`. Chunk embeddings are left unset here and attached later by
 /// [`embed_batch`]. `source_base_url`, when set, supplies a `source_url` for
-/// documents the manifest did not give one (trailing slash trimmed).
+/// documents the manifest did not give one (trailing slash trimmed). `license`
+/// is this document's resolved license (in-file detection, else the walk-up
+/// resolver — see the caller's `licenses_by_path`).
 fn build_new_upload(
     d: &mnm_content::ingest::PlannedDocument,
     source_base_url: Option<&str>,
+    license: Option<Vec<String>>,
 ) -> DocumentUpload {
     DocumentUpload {
         path: d.path.display().to_string(),
@@ -2197,9 +2242,7 @@ fn build_new_upload(
             .collect(),
         package: d.package.clone(),
         carried: false,
-        // The license resolver is wired in a later task; `PlannedDocument`
-        // does not carry a license yet.
-        license: None,
+        license,
     }
 }
 
@@ -2245,6 +2288,7 @@ fn build_carried_inputs(
     source_root: &Path,
     source_base_url: Option<&str>,
     chunker_config: mnm_content::chunk::ChunkerConfig,
+    licenses_by_path: &std::collections::HashMap<PathBuf, Option<Vec<String>>>,
 ) -> Vec<CarriedUploadInput> {
     use std::collections::HashMap;
     let walked_by_path: HashMap<&Path, &mnm_content::ingest::WalkedDocument> =
@@ -2311,9 +2355,7 @@ fn build_carried_inputs(
                 char_count: i32::try_from(w.content.chars().count()).unwrap_or(i32::MAX),
                 token_count: i32::try_from(token_count).unwrap_or(i32::MAX),
                 package: detect_package_ref(source_root, &w.rel_path, &w.content),
-                // The license resolver is wired in a later task; no resolved
-                // license to carry yet.
-                license: None,
+                license: licenses_by_path.get(&w.rel_path).cloned().flatten(),
             })
         })
         .collect()
@@ -4208,7 +4250,7 @@ mod tests {
 
     #[test]
     fn new_doc_uploaded_with_chunks_and_no_carry_flag() {
-        let up = build_new_upload(&sample_planned_new("b.md"), None);
+        let up = build_new_upload(&sample_planned_new("b.md"), None, None);
         assert!(!up.carried, "new docs are never carry-forward");
         assert!(!up.chunks.is_empty(), "new docs carry their freshly-chunked content");
         assert_eq!(up.path, "b.md");
@@ -4222,12 +4264,19 @@ mod tests {
     #[test]
     fn new_upload_applies_source_base_url_fallback() {
         // When a PlannedDocument has no source_url, --source-base-url supplies one.
-        let up = build_new_upload(&sample_planned_new("b.md"), Some("https://base/"));
+        let up = build_new_upload(&sample_planned_new("b.md"), Some("https://base/"), None);
         assert_eq!(
             up.source_url.as_deref(),
             Some("https://base/b.md"),
             "trailing slash trimmed; path appended",
         );
+    }
+
+    #[test]
+    fn new_upload_carries_license() {
+        let upload =
+            build_new_upload(&sample_planned_new("b.md"), None, Some(vec!["MIT".to_owned()]));
+        assert_eq!(upload.license, Some(vec!["MIT".to_owned()]));
     }
 
     /// `ReportSelection` is a pure selector — no I/O. Verify the four render
