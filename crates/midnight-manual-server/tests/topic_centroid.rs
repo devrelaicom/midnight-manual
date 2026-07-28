@@ -61,6 +61,7 @@ async fn seed_version(
             package_id: None,
             char_count: 40,
             token_count: 10,
+            license: None,
         },
     )
     .await

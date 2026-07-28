@@ -82,6 +82,7 @@ pub async fn ingest_minimal_two_chunk_doc(pool: &PgPool, slug: &str) -> MinimalD
             package_id: None,
             char_count: 40,
             token_count: 10,
+            license: None,
         },
     )
     .await
@@ -205,6 +206,7 @@ pub async fn ingest_n_chunk_doc(pool: &PgPool, slug: &str, n: usize) -> MinimalD
             package_id: None,
             char_count: 40,
             token_count: 10,
+            license: None,
         },
     )
     .await
@@ -330,6 +332,7 @@ pub async fn ingest_code_chunk_doc(pool: &PgPool, slug: &str) -> MinimalDocFixtu
             package_id: None,
             char_count: 43,
             token_count: 12,
+            license: None,
         },
     )
     .await

@@ -83,6 +83,7 @@ regex                 = { workspace = true }
 url                   = { workspace = true }
 uuid                  = { workspace = true }
 reqwest               = { workspace = true }
+spdx                  = { workspace = true }
 
 [build-dependencies]
 cc = { workspace = true }

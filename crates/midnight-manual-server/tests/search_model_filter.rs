@@ -81,6 +81,7 @@ async fn seed_on_model(
             package_id: None,
             char_count: 0,
             token_count: 0,
+            license: None,
         },
     )
     .await

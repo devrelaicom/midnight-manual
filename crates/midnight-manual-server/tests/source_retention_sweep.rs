@@ -52,6 +52,7 @@ async fn seed_retired_source(pool: &PgPool, prefix: &str, retired_seconds_ago: i
             package_id: None,
             char_count: 1,
             token_count: 1,
+            license: None,
         },
     )
     .await

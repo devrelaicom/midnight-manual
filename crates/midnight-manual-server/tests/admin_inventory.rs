@@ -145,6 +145,7 @@ async fn seed_active_version(pool: &PgPool, prefix: &str, paths: &[&str]) -> (St
                 package_id: None,
                 char_count: 0,
                 token_count: 0,
+                license: None,
             },
         )
         .await

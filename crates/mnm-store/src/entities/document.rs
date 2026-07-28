@@ -41,6 +41,8 @@ pub struct NewDocument<'a> {
     pub char_count: i32,
     /// Token count by the embedding tokenizer.
     pub token_count: i32,
+    /// Detected SPDX license expression(s), if any.
+    pub license: Option<&'a [String]>,
 }
 
 /// Insert a document row, returning the newly-minted id.
@@ -61,8 +63,8 @@ pub async fn insert(pool: &PgPool, doc: NewDocument<'_>) -> Result<Uuid> {
     let row: (Uuid,) = sqlx::query_as(
         "INSERT INTO document ( \
             source_version_id, node_id, kind, source_url, published_url, source_path, language, \
-            content_hash, source_modified_at, frontmatter, provenance, package_id, char_count, token_count \
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING id",
+            content_hash, source_modified_at, frontmatter, provenance, package_id, char_count, token_count, license \
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING id",
     )
     .bind(doc.source_version_id)
     .bind(doc.node_id)
@@ -78,6 +80,7 @@ pub async fn insert(pool: &PgPool, doc: NewDocument<'_>) -> Result<Uuid> {
     .bind(doc.package_id)
     .bind(doc.char_count)
     .bind(doc.token_count)
+    .bind(doc.license)
     .fetch_one(pool)
     .await?;
     Ok(row.0)
@@ -92,7 +95,7 @@ pub async fn get_by_id(pool: &PgPool, id: Uuid) -> Result<Document> {
     let row = sqlx::query_as::<_, DocumentRow>(
         "SELECT id, source_version_id, node_id, kind, source_url, published_url, source_path, \
                 language, content_hash, source_modified_at, frontmatter, provenance, \
-                package_id, char_count, token_count, created_at \
+                package_id, char_count, token_count, created_at, license \
          FROM document WHERE id = $1",
     )
     .bind(id)
@@ -462,6 +465,7 @@ struct DocumentRow {
     char_count: i32,
     token_count: i32,
     created_at: OffsetDateTime,
+    license: Option<Vec<String>>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -499,6 +503,7 @@ impl TryFrom<DocumentRow> for Document {
             char_count: r.char_count,
             token_count: r.token_count,
             created_at: r.created_at,
+            license: r.license,
         })
     }
 }

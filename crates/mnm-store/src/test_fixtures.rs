@@ -83,6 +83,7 @@ pub async fn seed_two_doc_version(pool: &PgPool) -> TwoDocFixture {
             package_id: None,
             char_count: 40,
             token_count: 10,
+            license: None,
         },
     )
     .await
@@ -168,6 +169,7 @@ pub async fn seed_two_doc_version(pool: &PgPool) -> TwoDocFixture {
             package_id: None,
             char_count: 40,
             token_count: 10,
+            license: None,
         },
     )
     .await

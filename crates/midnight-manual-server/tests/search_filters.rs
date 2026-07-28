@@ -86,6 +86,7 @@ async fn seed(pool: &sqlx::PgPool) -> (Uuid, Uuid) {
             package_id: None,
             char_count: 0,
             token_count: 0,
+            license: None,
         },
     )
     .await
@@ -138,6 +139,7 @@ async fn seed(pool: &sqlx::PgPool) -> (Uuid, Uuid) {
             package_id: None,
             char_count: 0,
             token_count: 0,
+            license: None,
         },
     )
     .await
@@ -447,6 +449,7 @@ async fn seed_pair(pool: &sqlx::PgPool, a: &Doc, b: &Doc) -> (Uuid, Uuid) {
                 package_id,
                 char_count: 0,
                 token_count: 0,
+                license: None,
             },
         )
         .await

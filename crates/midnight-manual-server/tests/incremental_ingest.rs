@@ -680,6 +680,7 @@ async fn embed_failed_doc_is_repaired_on_reingest() {
             package_id: None,
             char_count: 40,
             token_count: 10,
+            license: None,
         },
     )
     .await

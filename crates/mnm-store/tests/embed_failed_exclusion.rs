@@ -52,6 +52,7 @@ async fn embed_failed_excluded_from_read_path_but_admin_visible() {
             package_id: None,
             char_count: 0,
             token_count: 0,
+            license: None,
         },
     )
     .await

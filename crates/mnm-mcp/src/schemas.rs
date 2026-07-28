@@ -287,6 +287,8 @@ pub fn document_output_schema() -> Value {
                 "required": ["id", "chunk_index"],
                 "additionalProperties": true
             } },
+            "license": { "type": ["array", "null"], "items": { "type": "string" },
+                "description": "Detected SPDX license expression(s) for this document; null/absent when undetected." },
             "suggested_next_actions": suggested_next_actions_fragment()
         },
         "required": ["id", "source_path", "chunks", "suggested_next_actions"],
@@ -343,7 +345,9 @@ pub fn sources_output_schema() -> Value {
                     "id": { "type": "string" },
                     "slug": { "type": "string" },
                     "display_name": { "type": "string" },
-                    "kind": { "type": "string" }
+                    "kind": { "type": "string" },
+                    "license": { "type": ["array", "null"], "items": { "type": "string" },
+                        "description": "Detected SPDX license expression(s) for the source; null/absent when undetected." }
                 },
                 "required": ["id", "slug"],
                 "additionalProperties": true

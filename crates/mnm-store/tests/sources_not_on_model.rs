@@ -65,6 +65,7 @@ async fn lists_sources_whose_active_version_is_not_on_target_ordered_by_provenan
             package_id: None,
             char_count: 100,
             token_count: 20,
+            license: None,
         },
     )
     .await
@@ -112,6 +113,7 @@ async fn lists_sources_whose_active_version_is_not_on_target_ordered_by_provenan
             package_id: None,
             char_count: 80,
             token_count: 15,
+            license: None,
         },
     )
     .await

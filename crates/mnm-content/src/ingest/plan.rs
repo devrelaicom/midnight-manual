@@ -12,7 +12,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::chunk::ChunkerConfig;
-use crate::content_hash::{chunk_hash, document_hash};
+use crate::content_hash::{chunk_hash, document_hash, hash_input};
 use crate::frontmatter::FrontmatterSplit;
 use crate::ingest::walker::{SkipReason, SkippedFile};
 
@@ -57,9 +57,12 @@ pub struct PlannedChunk {
     pub chunk_index: u32,
     /// Total chunks in the document, for `total_chunks` column.
     pub total_chunks: u32,
-    /// Byte offset of the chunk's first character within the source document.
+    /// Byte offset of the chunk's first character, in post-processed text
+    /// coordinates (offsets into the preprocessed body, not the original file).
     pub start_byte: usize,
-    /// Byte offset just past the chunk's last character.
+    /// Byte offset just past the chunk's last character, in post-processed
+    /// text coordinates (offsets into the preprocessed body, not the original
+    /// file).
     pub end_byte: usize,
     /// SHA-256 over the chunk's verbatim content.
     pub content_hash: String,
@@ -289,7 +292,7 @@ impl PlanBuilder {
             return Err(IngestError::DuplicatePath(walked.path.clone()));
         }
 
-        let hash = document_hash(walked.content);
+        let hash = document_hash(&hash_input(walked.split.raw.as_deref(), &walked.split.body));
 
         if let Some(prior) = self.prior_by_path.get(&walked.path) {
             if prior.content_hash == hash {
@@ -499,10 +502,16 @@ mod tests {
     use super::*;
     use crate::frontmatter::split as split_frontmatter;
 
+    /// Build a `PriorDocument` whose `content_hash` matches what
+    /// `add_walked_document` computes for the same `content` via `feed()` —
+    /// i.e. `hash_input(split.raw, split.body)`, not a raw `document_hash`.
+    /// Mirrors the real carry-forward pipeline (the prior hash always comes
+    /// from a previous run of the same `hash_input`-based computation).
     fn prior(path: &str, content: &str, id: Uuid) -> PriorDocument {
+        let split = split_frontmatter(content);
         PriorDocument {
             path: PathBuf::from(path),
-            content_hash: document_hash(content),
+            content_hash: document_hash(&hash_input(split.raw.as_deref(), &split.body)),
             document_id: id,
         }
     }
@@ -1070,6 +1079,28 @@ mod tests {
         // no frontmatter → extracted wins the lists
         let merged2 = merge_provenance(&Provenance::default(), &extracted, &manifest);
         assert_eq!(merged2.language_targets[0].version_constraint.as_deref(), Some(">=0.23"));
+    }
+
+    #[test]
+    fn hash_covers_frontmatter_and_processed_body() {
+        use std::path::Path;
+
+        use crate::content_hash::{document_hash, hash_input};
+        use crate::preprocess::preprocess;
+        use mnm_core::types::DocumentKind;
+
+        // Copyright-year-only upstream changes vanish in preprocessing, so the
+        // hash is identical — the spec's noise-only carry-forward invariant.
+        let v2024 = "// Copyright 2024 Foo Corp\n// Licensed under the Apache License, Version 2.0\nfn main() {}\n";
+        let v2025 = "// Copyright 2025 Foo Corp\n// Licensed under the Apache License, Version 2.0\nfn main() {}\n";
+        let a = preprocess(DocumentKind::Code, Path::new("m.rs"), v2024, None);
+        let b = preprocess(DocumentKind::Code, Path::new("m.rs"), v2025, None);
+        assert_eq!(a.body, b.body);
+        let ha = document_hash(&hash_input(None, &a.body));
+        assert_eq!(ha, document_hash(&hash_input(None, &b.body)));
+        // …frontmatter changes still invalidate.
+        let hc = document_hash(&hash_input(Some("---\nx: 1\n---\n"), &a.body));
+        assert_ne!(ha, hc);
     }
 }
 

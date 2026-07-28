@@ -292,8 +292,20 @@ async fn reembed_retry_tokens_are_counted_in_total() {
 
     // The doc carries forward only if its `document_hash` matches the prior
     // inventory's entry for the same path, under the same embedding model.
+    // The hash is computed over the frontmatter fence (none here) + the
+    // PREPROCESSED body, exactly like the walker/planner pipeline — not the
+    // raw body — so this mirrors `split` + `preprocess` + `hash_input`.
     let body = "# Carried\n\nStable body that survives unchanged.\n";
-    let content_hash = mnm_content::content_hash::document_hash(body);
+    let split = mnm_content::frontmatter::split(body);
+    let processed = mnm_content::preprocess::preprocess(
+        mnm_core::types::DocumentKind::Markdown,
+        std::path::Path::new("carried.md"),
+        &split.body,
+        None,
+    );
+    let content_hash = mnm_content::content_hash::document_hash(
+        &mnm_content::content_hash::hash_input(split.raw.as_deref(), &processed.body),
+    );
     let inventory = json!({
         "embedding_model": "voyage-code-3@1",
         "code_embedding_model": null,

@@ -399,7 +399,8 @@ async fn run_inner(
         .with_filter_options(mnm_content::manifest::resolve::FilterRunOptions {
             respect_gitignore: args.respect_gitignore,
             default_ignore_list: !args.disable_default_ignore_list,
-        });
+        })
+        .with_strict(args.strict);
     let outcome = walker.walk().context("walk source tree")?;
     for skip in &outcome.skipped {
         tracing::warn!(
@@ -414,6 +415,61 @@ async fn run_inner(
     reporter.phase_done(
         "walk",
         serde_json::json!({"files": walked_docs.len(), "skipped": walk_skipped.len()}),
+    );
+
+    // Per-rule strip stats, aggregated across every walked document, plus a
+    // count of files the walker dropped as machine-generated (a preprocess
+    // skip, not a walk error). `eprintln!` (not the `reporter`/stdout report
+    // path): this is auxiliary operator-facing detail, not part of the
+    // `--json` JSONL phase stream or the final `IngestReport` — printing it
+    // to stdout would interleave free text into that machine-readable
+    // contract (mirrors the existing `eprintln!` warnings elsewhere in this
+    // file, e.g. `render_abort_artifacts`'s report-file-write warning).
+    let mut pre_stats = mnm_content::preprocess::PreprocessStats::default();
+    for d in &walked_docs {
+        pre_stats.absorb(&d.preprocess_stats);
+    }
+    let generated_skips = walk_skipped
+        .iter()
+        .filter(|s| matches!(s.reason, mnm_content::ingest::SkipReason::GeneratedFile))
+        .count();
+    if pre_stats.total() > 0 || generated_skips > 0 {
+        eprintln!(
+            "preprocessing: stripped {} bytes (license {}, decorative {}, comments {}, mdx {}, badges {}, whitespace {}); {} generated file(s) skipped",
+            pre_stats.total(),
+            pre_stats.license_bytes,
+            pre_stats.decorative_bytes,
+            pre_stats.html_comment_bytes,
+            pre_stats.mdx_esm_bytes + pre_stats.mdx_jsx_bytes,
+            pre_stats.badge_bytes,
+            pre_stats.whitespace_bytes,
+            generated_skips,
+        );
+    }
+
+    // ── License resolution ────────────────────────────────────────────────────
+    // Resolve every document's license, plus the source-level license, once per
+    // run. In-file SPDX detections (`d.licenses`, Task 6's preprocess step) take
+    // precedence over the walk-up resolver (Task 10: manifest fields, then
+    // LICENSE-family files, walking up from the document's directory to
+    // `source_root`) — spec §Pipeline placement. One `LicenseResolver` is reused
+    // for both the per-document map and the root lookup so its walk-up cache is
+    // shared; `resolve_for`/`root_license` both take `&mut self`, so the map is
+    // built first (borrowing the resolver for the iteration) and `root_license`
+    // is read afterward into a local, before the resolver goes out of scope.
+    let mut license_resolver =
+        mnm_content::preprocess::resolver::LicenseResolver::new(&source_root);
+    let in_file_license_count = walked_docs
+        .iter()
+        .filter(|d| !d.licenses.is_empty())
+        .count();
+    let licenses_by_path = build_licenses_by_path(&walked_docs, &mut license_resolver);
+    let source_license = license_resolver.root_license();
+    eprintln!(
+        "license: {in_file_license_count} document(s) with in-file detections; source license: {}",
+        source_license
+            .as_ref()
+            .map_or_else(|| "none detected".to_owned(), |exprs| exprs.join(" AND ")),
     );
 
     // ── Resolve auth + corpus wire ids + prior state (before chunking) ───────
@@ -705,7 +761,10 @@ async fn run_inner(
     let new_docs: Vec<DocumentUpload> = plan
         .new_documents
         .iter()
-        .map(|d| build_new_upload(d, args.source_base_url.as_deref()))
+        .map(|d| {
+            let license = licenses_by_path.get(&d.path).cloned().flatten();
+            build_new_upload(d, args.source_base_url.as_deref(), license)
+        })
         .collect();
 
     // Carried docs: join the carry-forward set back to the walked source for
@@ -717,6 +776,7 @@ async fn run_inner(
         &source_root,
         args.source_base_url.as_deref(),
         chunker_config,
+        &licenses_by_path,
     );
     let carried_docs: Vec<DocumentUpload> =
         carried_inputs.iter().map(build_carried_upload).collect();
@@ -971,6 +1031,11 @@ async fn run_inner(
         &token,
         &FinalizeRequest {
             expected_document_total: expected_total,
+            // Resolved once, up-front, alongside `licenses_by_path` (see the
+            // "License resolution" block above). The server always applies
+            // this on a successful finalize, including clearing a source's
+            // license back to `NULL` when this is `None`.
+            source_license: source_license.clone(),
         },
     )
     .await
@@ -2114,15 +2179,46 @@ struct CarriedUploadInput {
     char_count: i32,
     token_count: i32,
     package: Option<mnm_core::types::PackageRef>,
+    /// Detected SPDX license expression(s) for this document, if any —
+    /// resolved by the caller (`build_carried_inputs`) from the run's
+    /// `licenses_by_path` map.
+    license: Option<Vec<String>>,
+}
+
+/// Build the per-document license map: in-file SPDX detections (`d.licenses`,
+/// Task 6's preprocess step) take precedence over the walk-up resolver
+/// (manifest fields, then LICENSE-family files, walking up from the
+/// document's directory to `source_root`) — spec §License detection &
+/// resolution. `resolver` is borrowed mutably for the duration of the walk
+/// (its walk-up cache is populated as a side effect) and released once this
+/// returns, so callers are free to call `resolver.root_license()` afterward.
+fn build_licenses_by_path(
+    walked: &[mnm_content::ingest::WalkedDocument],
+    resolver: &mut mnm_content::preprocess::resolver::LicenseResolver,
+) -> std::collections::HashMap<PathBuf, Option<Vec<String>>> {
+    walked
+        .iter()
+        .map(|d| {
+            let lic = if d.licenses.is_empty() {
+                resolver.resolve_for(d.rel_path.parent().unwrap_or_else(|| Path::new("")))
+            } else {
+                Some(d.licenses.clone())
+            };
+            (d.rel_path.clone(), lic)
+        })
+        .collect()
 }
 
 /// Map one new (`PlannedDocument`) into the upload wire shape: full chunks,
 /// `carried: false`. Chunk embeddings are left unset here and attached later by
 /// [`embed_batch`]. `source_base_url`, when set, supplies a `source_url` for
-/// documents the manifest did not give one (trailing slash trimmed).
+/// documents the manifest did not give one (trailing slash trimmed). `license`
+/// is this document's resolved license (in-file detection, else the walk-up
+/// resolver — see the caller's `licenses_by_path`).
 fn build_new_upload(
     d: &mnm_content::ingest::PlannedDocument,
     source_base_url: Option<&str>,
+    license: Option<Vec<String>>,
 ) -> DocumentUpload {
     DocumentUpload {
         path: d.path.display().to_string(),
@@ -2160,6 +2256,7 @@ fn build_new_upload(
             .collect(),
         package: d.package.clone(),
         carried: false,
+        license,
     }
 }
 
@@ -2184,6 +2281,7 @@ fn build_carried_upload(d: &CarriedUploadInput) -> DocumentUpload {
         chunks: Vec::new(),
         package: d.package.clone(),
         carried: true,
+        license: d.license.clone(),
     }
 }
 
@@ -2204,6 +2302,7 @@ fn build_carried_inputs(
     source_root: &Path,
     source_base_url: Option<&str>,
     chunker_config: mnm_content::chunk::ChunkerConfig,
+    licenses_by_path: &std::collections::HashMap<PathBuf, Option<Vec<String>>>,
 ) -> Vec<CarriedUploadInput> {
     use std::collections::HashMap;
     let walked_by_path: HashMap<&Path, &mnm_content::ingest::WalkedDocument> =
@@ -2270,6 +2369,7 @@ fn build_carried_inputs(
                 char_count: i32::try_from(w.content.chars().count()).unwrap_or(i32::MAX),
                 token_count: i32::try_from(token_count).unwrap_or(i32::MAX),
                 package: detect_package_ref(source_root, &w.rel_path, &w.content),
+                license: licenses_by_path.get(&w.rel_path).cloned().flatten(),
             })
         })
         .collect()
@@ -2360,6 +2460,7 @@ fn build_reembed_uploads(
                 chunks,
                 package: meta.package,
                 carried: false,
+                license: meta.license,
             })
         })
         .collect()
@@ -2417,6 +2518,9 @@ struct DocumentUpload {
     package: Option<mnm_core::types::PackageRef>,
     /// True for carry-forward docs (no chunks; server clones prior chunks).
     carried: bool,
+    /// Detected SPDX license expression(s) for this document, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    license: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -2427,7 +2531,11 @@ struct ChunkUpload {
     content_hash: String,
     heading_path: Vec<String>,
     symbol_path: Vec<mnm_core::types::SymbolSegment>,
+    /// Post-processed text coordinates (offsets into the preprocessed body,
+    /// not the original file).
     start_byte: i32,
+    /// Post-processed text coordinates (offsets into the preprocessed body,
+    /// not the original file).
     end_byte: i32,
     token_count: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2456,6 +2564,12 @@ struct UploadDocumentsResponse {
 #[derive(Debug, Serialize)]
 struct FinalizeRequest {
     expected_document_total: i64,
+    /// Source-level SPDX license expression(s) resolved for this run, if any.
+    /// The server always applies this to `source.license` on a successful
+    /// finalize (including overwriting to `NULL` when omitted), so a source
+    /// that lost its license file goes back to unlicensed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_license: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3212,6 +3326,7 @@ mod tests {
                 token_count: 0,
                 package: None,
                 carried: false,
+                license: None,
                 chunks: vec![mk_chunk(0), mk_chunk(1)],
             },
             DocumentUpload {
@@ -3228,6 +3343,7 @@ mod tests {
                 token_count: 0,
                 package: None,
                 carried: false,
+                license: None,
                 chunks: vec![mk_chunk(0)],
             },
         ];
@@ -3350,6 +3466,7 @@ mod tests {
             token_count: 0,
             package: None,
             carried: false,
+            license: None,
             chunks: vec![mk_chunk(0)],
         }];
         assert!(attach_embeddings(&mut docs, vec![]).is_err());
@@ -3404,6 +3521,7 @@ mod tests {
             token_count: 0,
             package: None,
             carried: false,
+            license: None,
             chunks,
         }
     }
@@ -3715,6 +3833,7 @@ mod tests {
                 token_count: 0,
                 package: None,
                 carried: false,
+                license: None,
                 chunks: vec![ChunkUpload {
                     chunk_index: 0,
                     total_chunks: 1,
@@ -4122,6 +4241,7 @@ mod tests {
             char_count: 100,
             token_count: 25,
             package: None,
+            license: None,
         }
     }
 
@@ -4144,7 +4264,7 @@ mod tests {
 
     #[test]
     fn new_doc_uploaded_with_chunks_and_no_carry_flag() {
-        let up = build_new_upload(&sample_planned_new("b.md"), None);
+        let up = build_new_upload(&sample_planned_new("b.md"), None, None);
         assert!(!up.carried, "new docs are never carry-forward");
         assert!(!up.chunks.is_empty(), "new docs carry their freshly-chunked content");
         assert_eq!(up.path, "b.md");
@@ -4158,11 +4278,76 @@ mod tests {
     #[test]
     fn new_upload_applies_source_base_url_fallback() {
         // When a PlannedDocument has no source_url, --source-base-url supplies one.
-        let up = build_new_upload(&sample_planned_new("b.md"), Some("https://base/"));
+        let up = build_new_upload(&sample_planned_new("b.md"), Some("https://base/"), None);
         assert_eq!(
             up.source_url.as_deref(),
             Some("https://base/b.md"),
             "trailing slash trimmed; path appended",
+        );
+    }
+
+    #[test]
+    fn new_upload_carries_license() {
+        let upload =
+            build_new_upload(&sample_planned_new("b.md"), None, Some(vec!["MIT".to_owned()]));
+        assert_eq!(upload.license, Some(vec!["MIT".to_owned()]));
+    }
+
+    /// Minimal `WalkedDocument` for `build_licenses_by_path` tests: a rel path,
+    /// the doc's in-file `licenses` (empty means "no in-file detection"), and
+    /// otherwise-inert field values (no frontmatter, no provenance override).
+    fn walked_doc(rel: &str, licenses: Vec<String>) -> mnm_content::ingest::WalkedDocument {
+        let body = "content";
+        mnm_content::ingest::WalkedDocument {
+            rel_path: PathBuf::from(rel),
+            content: body.to_owned(),
+            split: mnm_content::frontmatter::passthrough(body),
+            resolved: mnm_content::manifest::resolve::ResolvedLeaf {
+                rel_path: PathBuf::from(rel),
+                kind: DocumentKind::Code,
+                name: None,
+                published_url: None,
+                source_url: None,
+                provenance_override: mnm_core::provenance::Provenance::default(),
+                no_extract: false,
+            },
+            source_modified_at: None,
+            licenses,
+            preprocess_stats: mnm_content::preprocess::PreprocessStats::default(),
+        }
+    }
+
+    /// THE precedence property (Task 13): in-file SPDX detections win over the
+    /// walk-up resolver, even when the walk-up would find a *different*
+    /// license. Doc A carries an in-file `MIT` detection, so it must stay MIT
+    /// despite the root `Cargo.toml` declaring `Apache-2.0`. Doc B has no
+    /// in-file detection, so it must fall through to that same walk-up
+    /// `Apache-2.0`. A precedence-branch swap (walk-up winning over in-file)
+    /// would flip doc A's result to `Apache-2.0`, failing this test.
+    #[test]
+    fn licenses_by_path_prefers_in_file_over_walk_up() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"x\"\nlicense = \"Apache-2.0\"\n",
+        )
+        .unwrap();
+
+        let doc_a = walked_doc("a/x.rs", vec!["MIT".to_owned()]);
+        let doc_b = walked_doc("b/y.rs", Vec::new());
+
+        let mut resolver = mnm_content::preprocess::resolver::LicenseResolver::new(dir.path());
+        let licenses_by_path = build_licenses_by_path(&[doc_a, doc_b], &mut resolver);
+
+        assert_eq!(
+            licenses_by_path.get(Path::new("a/x.rs")),
+            Some(&Some(vec!["MIT".to_owned()])),
+            "in-file detection must win over the walk-up resolver's Apache-2.0",
+        );
+        assert_eq!(
+            licenses_by_path.get(Path::new("b/y.rs")),
+            Some(&Some(vec!["Apache-2.0".to_owned()])),
+            "no in-file detection must fall through to the walk-up resolver",
         );
     }
 

@@ -215,7 +215,7 @@ fn guard(
 }
 
 /// Best-effort human-readable message from a caught panic payload.
-fn panic_reason(payload: &(dyn std::any::Any + Send)) -> String {
+pub(crate) fn panic_reason(payload: &(dyn std::any::Any + Send)) -> String {
     payload
         .downcast_ref::<&str>()
         .map(|s| (*s).to_owned())

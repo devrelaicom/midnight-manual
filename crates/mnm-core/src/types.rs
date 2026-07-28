@@ -64,6 +64,9 @@ pub struct Source {
     pub created_at: OffsetDateTime,
     /// If set, the source has been retired and is eligible for sweep.
     pub retired_at: Option<OffsetDateTime>,
+    /// Detected SPDX license expression(s) for the source as a whole, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license: Option<Vec<String>>,
 }
 
 /// Lifecycle states of a `source_version`.
@@ -373,6 +376,9 @@ pub struct Document {
     pub token_count: i32,
     /// When ingested.
     pub created_at: OffsetDateTime,
+    /// Detected SPDX license expression(s) for this document, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license: Option<Vec<String>>,
 }
 
 /// `chunk.status` — the lifecycle states of a chunk row.

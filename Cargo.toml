@@ -123,6 +123,11 @@ tree-sitter-language = "0.1"  # selects 0.1.7
 text-splitter    = { version = "0.27", features = ["code", "tokenizers"] }
 # Directory walker honoring .gitignore (used by the code ingest walker).
 ignore           = "0.4"
+# SPDX license expression parsing + askalono-derived text detection (Phase B
+# license-text detector). `detection-inline-cache` ships a prebuilt corpus so
+# `Store::load_inline()` needs no network/build step; `text` exposes
+# `spdx::text::LICENSE_TEXTS`, needed by Task 10's resolver test.
+spdx             = { version = "0.13", features = ["detection", "detection-inline-cache", "text"] }
 # tree-sitter grammars. All are optional + feature-gated in mnm-content. Each
 # depends on tree-sitter-language ^0.1 for ABI, unifying against runtime 0.25.
 tree-sitter-rust       = "0.24"   # selects 0.24.2

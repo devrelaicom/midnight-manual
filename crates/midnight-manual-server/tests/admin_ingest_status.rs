@@ -144,6 +144,7 @@ async fn seed_active_source_with_chunks(pool: &sqlx::PgPool) -> String {
                 package_id: None,
                 char_count: 1,
                 token_count: 1,
+                license: None,
             },
         )
         .await
