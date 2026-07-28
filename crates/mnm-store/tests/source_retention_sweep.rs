@@ -58,6 +58,7 @@ async fn seed_source_with_chunks(pool: &PgPool, prefix: &str) -> (Uuid, Uuid, Uu
             package_id: None,
             char_count: 1,
             token_count: 1,
+            license: None,
         },
     )
     .await

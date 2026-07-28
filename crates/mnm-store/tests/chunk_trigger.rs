@@ -60,6 +60,7 @@ async fn chunk_with_mismatched_model_id_is_rejected() {
             package_id: None,
             char_count: 0,
             token_count: 0,
+            license: None,
         },
     )
     .await
@@ -174,6 +175,7 @@ async fn chunk_symbol_path_roundtrips_structured() {
             package_id: None,
             char_count: 0,
             token_count: 0,
+            license: None,
         },
     )
     .await

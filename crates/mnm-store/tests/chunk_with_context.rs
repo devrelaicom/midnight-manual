@@ -72,6 +72,7 @@ async fn get_with_context_embed_failed_returns_not_found() {
             package_id: None,
             char_count: 0,
             token_count: 0,
+            license: None,
         },
     )
     .await

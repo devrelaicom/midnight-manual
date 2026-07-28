@@ -75,6 +75,7 @@ pub async fn ingest_n_chunk_doc(pool: &PgPool, slug: &str, n: usize) -> MinimalD
             package_id: None,
             char_count: 40,
             token_count: 10,
+            license: None,
         },
     )
     .await

@@ -46,7 +46,7 @@ pub async fn insert(
 /// Returns [`crate::error::StoreError::NotFound`] if slug does not exist.
 pub async fn get_by_slug(pool: &PgPool, slug: &str) -> Result<Source> {
     let row = sqlx::query_as::<_, SourceRow>(
-        "SELECT id, slug, display_name, kind, origin_url, retention_count, created_at, retired_at \
+        "SELECT id, slug, display_name, kind, origin_url, retention_count, created_at, retired_at, license \
          FROM source WHERE slug = $1",
     )
     .bind(slug)
@@ -62,7 +62,7 @@ pub async fn get_by_slug(pool: &PgPool, slug: &str) -> Result<Source> {
 /// Returns [`crate::error::StoreError::Database`] on driver failure.
 pub async fn list_active(pool: &PgPool) -> Result<Vec<Source>> {
     let rows = sqlx::query_as::<_, SourceRow>(
-        "SELECT id, slug, display_name, kind, origin_url, retention_count, created_at, retired_at \
+        "SELECT id, slug, display_name, kind, origin_url, retention_count, created_at, retired_at, license \
          FROM source WHERE retired_at IS NULL ORDER BY slug",
     )
     .fetch_all(pool)
@@ -130,7 +130,7 @@ pub async fn list_paged(pool: &PgPool, q: &SourcePageQuery) -> Result<SourcePage
     let total: i64 = count.build_query_scalar().fetch_one(pool).await?;
 
     let mut page = sqlx::QueryBuilder::new(
-        "SELECT id, slug, display_name, kind, origin_url, retention_count, created_at, retired_at \
+        "SELECT id, slug, display_name, kind, origin_url, retention_count, created_at, retired_at, license \
          FROM source",
     );
     push_filters(&mut page, q);
@@ -170,7 +170,7 @@ pub async fn list_paged(pool: &PgPool, q: &SourcePageQuery) -> Result<SourcePage
 /// Returns [`crate::error::StoreError::Database`] on driver failure.
 pub async fn list_all(pool: &PgPool) -> Result<Vec<Source>> {
     let rows = sqlx::query_as::<_, SourceRow>(
-        "SELECT id, slug, display_name, kind, origin_url, retention_count, created_at, retired_at \
+        "SELECT id, slug, display_name, kind, origin_url, retention_count, created_at, retired_at, license \
          FROM source ORDER BY slug",
     )
     .fetch_all(pool)
@@ -190,12 +190,12 @@ pub async fn list_all(pool: &PgPool) -> Result<Vec<Source>> {
 /// Returns a store error on driver failure or a malformed `kind`.
 pub async fn list_active_not_on_model(pool: &PgPool, target_model_id: Uuid) -> Result<Vec<Source>> {
     let rows = sqlx::query_as::<_, SourceRow>(
-        "SELECT s.id, s.slug, s.display_name, s.kind, s.origin_url, s.retention_count, s.created_at, s.retired_at \
+        "SELECT s.id, s.slug, s.display_name, s.kind, s.origin_url, s.retention_count, s.created_at, s.retired_at, s.license \
          FROM source s \
          JOIN source_version sv ON sv.source_id = s.id AND sv.is_active = true \
          LEFT JOIN document d ON d.source_version_id = sv.id \
          WHERE s.retired_at IS NULL AND sv.embedding_model_id <> $1 \
-         GROUP BY s.id, s.slug, s.display_name, s.kind, s.origin_url, s.retention_count, s.created_at, s.retired_at \
+         GROUP BY s.id, s.slug, s.display_name, s.kind, s.origin_url, s.retention_count, s.created_at, s.retired_at, s.license \
          ORDER BY MIN(CASE d.provenance->>'attribution' \
                         WHEN 'foundation' THEN 1 WHEN 'partner' THEN 2 WHEN 'third_party' THEN 3 \
                         WHEN 'community' THEN 4 ELSE 5 END) ASC NULLS LAST, s.slug ASC",
@@ -237,7 +237,7 @@ pub async fn update(pool: &PgPool, slug: &str, patch: SourcePatch) -> Result<Sou
             origin_url = COALESCE($3, origin_url), \
             retention_count = COALESCE($4, retention_count) \
          WHERE slug = $1 \
-         RETURNING id, slug, display_name, kind, origin_url, retention_count, created_at, retired_at",
+         RETURNING id, slug, display_name, kind, origin_url, retention_count, created_at, retired_at, license",
     )
     .bind(slug)
     .bind(patch.display_name)
@@ -293,6 +293,20 @@ pub async fn retire(pool: &PgPool, slug: &str) -> Result<()> {
     Ok(())
 }
 
+/// Overwrite a source's detected license (called on ingest finalize).
+///
+/// # Errors
+///
+/// Returns [`crate::error::StoreError::Database`] on driver failure.
+pub async fn set_license(pool: &PgPool, source_id: Uuid, license: Option<&[String]>) -> Result<()> {
+    sqlx::query("UPDATE source SET license = $2 WHERE id = $1")
+        .bind(source_id)
+        .bind(license)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 #[derive(sqlx::FromRow)]
 struct SourceRow {
     id: Uuid,
@@ -303,6 +317,7 @@ struct SourceRow {
     retention_count: i32,
     created_at: OffsetDateTime,
     retired_at: Option<OffsetDateTime>,
+    license: Option<Vec<String>>,
 }
 
 impl TryFrom<SourceRow> for Source {
@@ -320,6 +335,7 @@ impl TryFrom<SourceRow> for Source {
             retention_count: r.retention_count,
             created_at: r.created_at,
             retired_at: r.retired_at,
+            license: r.license,
         })
     }
 }

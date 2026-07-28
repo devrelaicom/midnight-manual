@@ -611,6 +611,7 @@ async fn db_trigger_rejects_code_embedding_without_code_model() {
             package_id: None,
             char_count: 0,
             token_count: 0,
+            license: None,
         },
     )
     .await

@@ -71,6 +71,7 @@ async fn seed(pool: &sqlx::PgPool) -> (Uuid, Uuid) {
             package_id: None,
             char_count: 0,
             token_count: 0,
+            license: None,
         },
     )
     .await
@@ -402,6 +403,7 @@ async fn seed_hybrid(pool: &sqlx::PgPool) -> (Uuid, Uuid) {
             package_id: None,
             char_count: 0,
             token_count: 0,
+            license: None,
         },
     )
     .await
@@ -577,6 +579,7 @@ async fn seed_scored_chunk(
             package_id: None,
             char_count: 0,
             token_count: 0,
+            license: None,
         },
     )
     .await
@@ -670,6 +673,7 @@ async fn seed_filter_fixture(pool: &sqlx::PgPool) -> (Uuid, String, String, Stri
             package_id: Some(package_id),
             char_count: 0,
             token_count: 0,
+            license: None,
         },
     )
     .await

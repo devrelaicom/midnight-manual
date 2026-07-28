@@ -1192,6 +1192,7 @@ async fn insert_new_document(
             package_id,
             char_count: doc.char_count,
             token_count: doc.token_count,
+            license: None,
         },
     )
     .await?;
@@ -1267,6 +1268,7 @@ async fn carry_forward_one(
             package_id,
             char_count: doc.char_count,
             token_count: doc.token_count,
+            license: None,
         },
     )
     .await?;

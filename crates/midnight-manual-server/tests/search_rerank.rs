@@ -71,6 +71,7 @@ async fn seed3(pool: &sqlx::PgPool) -> [Uuid; 3] {
             package_id: None,
             char_count: 0,
             token_count: 0,
+            license: None,
         },
     )
     .await

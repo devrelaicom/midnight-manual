@@ -83,6 +83,7 @@ async fn seed_documents_kind(pool: &sqlx::PgPool, kind: SourceKind, docs: &[(&st
                 package_id: None,
                 char_count: 0,
                 token_count: 0,
+                license: None,
             },
         )
         .await
