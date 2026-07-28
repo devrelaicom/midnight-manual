@@ -30,6 +30,27 @@ use std::path::{Path, PathBuf};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
 // ---------------------------------------------------------------------------
+// License file detection
+// ---------------------------------------------------------------------------
+
+/// True for LICENSE-family filenames.
+///
+/// Matches stems {LICENSE, LICENCE, COPYING, NOTICE, PATENTS} (case-insensitive),
+/// alone or followed by `-`/`.` + suffix (`LICENSE-MIT`, `COPYING.lesser`).
+/// Does not match `licensed-features.md` or `notices.md` where the stem does
+/// not end exactly at the separator.
+#[must_use]
+pub fn is_license_filename(basename: &str) -> bool {
+    const STEMS: &[&str] = &["LICENSE", "LICENCE", "COPYING", "NOTICE", "PATENTS"];
+    let upper = basename.to_ascii_uppercase();
+    STEMS.iter().any(|stem| {
+        upper == *stem
+            || (upper.starts_with(stem)
+                && matches!(upper.as_bytes().get(stem.len()), Some(b'-' | b'.')))
+    })
+}
+
+// ---------------------------------------------------------------------------
 // FilterOptions
 // ---------------------------------------------------------------------------
 
@@ -224,6 +245,14 @@ impl FileFilter {
 
             // 2b. Filename glob check (`*.min.js` etc.).
             if Self::glob_matches(&self.default_file_set, rel_path) {
+                return false;
+            }
+
+            // 2c. License-family files by stem (spec §License files stop
+            // being documents): LICENSE / LICENCE / COPYING / NOTICE /
+            // PATENTS, optionally followed by `-` or `.` + anything.
+            let basename = rel_path.rsplit('/').next().unwrap_or(rel_path);
+            if is_license_filename(basename) {
                 return false;
             }
         }
@@ -599,5 +628,34 @@ mod tests {
             vec!["prerelease/sub/deep.md", "prerelease/top.md"],
             "paths are base-relative and confined to the subtree"
         );
+    }
+
+    #[test]
+    fn license_files_are_default_skipped_by_stem() {
+        let f = FileFilter::new(FilterOptions {
+            includes: vec![],
+            excludes: vec![],
+            respect_gitignore: false,
+            default_ignore_list: true,
+            skip_hidden: true,
+            require_known_kind: false,
+        });
+        for path in [
+            "LICENSE",
+            "LICENSE.md",
+            "LICENSE-MIT",
+            "license.txt",
+            "COPYING",
+            "COPYING.lesser",
+            "NOTICE",
+            "NOTICE.md",
+            "PATENTS",
+            "docs/LICENCE.md",
+        ] {
+            assert!(!f.allows(path), "{path} should be skipped");
+        }
+        for path in ["licensed-features.md", "notices.md", "src/licenser.rs"] {
+            assert!(f.allows(path), "{path} should be allowed");
+        }
     }
 }
