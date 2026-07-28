@@ -8,6 +8,7 @@ pub mod comment_syntax;
 pub mod detect;
 pub mod lexer;
 pub mod normalize;
+pub mod resolver;
 pub mod rules_code;
 pub mod rules_markdown;
 
