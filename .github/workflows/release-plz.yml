@@ -55,13 +55,47 @@ jobs:
           persist-credentials: false
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@1.93.0
-      - name: Run release-plz release
+      # crates.io's sparse index is CDN-served with per-node propagation lag, so
+      # the LAST crate's `cargo publish` verification build can fail to resolve a
+      # workspace dependency that was published seconds earlier. This wedged the
+      # v0.13.0 release: `midnight-manual` couldn't resolve the just-published
+      # `mnm-retrieval ^0.13.0` ("failed to select a version ... location searched:
+      # crates.io index"), the bins never published, and the pipeline got stuck.
+      #
+      # `release-plz release` is idempotent — it queries crates.io and skips any
+      # version already published — so retrying it simply gives the index time to
+      # catch up and publishes only whatever is still missing. Attempt 1 runs the
+      # full action (which installs release-plz onto PATH via cargo-binstall and
+      # sets the git identity globally); the retry re-invokes THAT SAME installed
+      # binary directly, so the CLI version and auth context stay identical. On a
+      # normal release attempt 1 succeeds and the retry step is skipped entirely.
+      - name: Run release-plz release (attempt 1)
+        id: release
         uses: release-plz/action@v0.5.130
+        continue-on-error: true
         with:
           command: release
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      - name: Retry release-plz release (wait out crates.io index propagation)
+        if: ${{ steps.release.outcome == 'failure' }}
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          for wait in 30 60; do
+            echo "::notice::release-plz release failed; waiting ${wait}s for the crates.io index to propagate, then retrying (idempotent — already-published crates are skipped)"
+            sleep "${wait}"
+            if release-plz release; then
+              echo "release-plz release succeeded on retry"
+              exit 0
+            fi
+          done
+          echo "::error::release-plz release still failing after retries; likely a genuine (non-transient) failure — investigate before re-running"
+          exit 1
 
   # Maintain the "Release vX.Y.Z" PR. Sequenced AFTER the release job so it sees
   # an up-to-date crates.io and never opens a duplicate PR.
