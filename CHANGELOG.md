@@ -7,10 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.13.0](https://github.com/devrelaicom/midnight-manual/compare/v0.12.3...v0.13.0) - 2026-07-27
+## [0.14.0](https://github.com/devrelaicom/midnight-manual/compare/v0.12.3...v0.14.0) - 2026-07-29
 
 ### Added
 
+- [**breaking**] pre-chunk preprocessing and license detection ([#213](https://github.com/devrelaicom/midnight-manual/pull/213))
 - *(server)* [**breaking**] enable request rate limiting by default ([#211](https://github.com/devrelaicom/midnight-manual/pull/211))
 
 ## [0.12.3](https://github.com/devrelaicom/midnight-manual/compare/v0.12.2...v0.12.3) - 2026-07-27
