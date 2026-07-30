@@ -31,6 +31,26 @@ jobs:
       - run: sudo apt-get update -qq && sudo apt-get install -y -qq ripgrep
       - run: bash scripts/check-tracing-no-query.sh
 
+  manifest-validate:
+    name: midnight manifest set
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.93.0
+      - uses: Swatinem/rust-cache@v2
+      # Offline gate: manifest schema + path safety via the real loader,
+      # provenance fields, and sources.tsv <-> manifest agreement. `jq` is
+      # pre-installed on the ubuntu-latest image (unlike ripgrep above); the
+      # script fails loudly if that ever stops being true.
+      #
+      # Deliberately runs on every PR rather than behind a `paths:` filter —
+      # the sources.tsv <-> manifest invariant can also be broken by moving or
+      # deleting a manifest from elsewhere in the tree.
+      #
+      # `file:`-leaf existence is NOT checked here (no repo checkouts); that is
+      # manifest-smoke.yml's job, against fresh clones.
+      - run: bash scripts/validate-midnight-manifests.sh
+
   clippy:
     name: clippy
     runs-on: ubuntu-latest
