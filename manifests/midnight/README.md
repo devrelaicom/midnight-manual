@@ -85,7 +85,7 @@ is preferred so `kind`/`origin_url` are set.)
 | create-mn-app | midnightntwrk/create-mn-app | main | code_repo | Foundation | foundation | true | high |
 | setup-compact-action | midnightntwrk/setup-compact-action | main | code_repo | Foundation | foundation | true | high |
 | midnight-node-docker | midnightntwrk/midnight-node-docker | main | code_repo | Foundation | foundation | false | high |
-| contributor-hub | midnightntwrk/contributor-hub | main | docs_site | Foundation | foundation | true | high |
+| contributor-hub | midnightntwrk/dApp-idea-board | main | docs_site | Foundation | foundation | true | high |
 | servicedesk | midnightntwrk/servicedesk | main | docs_site | Foundation | foundation | false | high |
 | midnight-reserve-contracts | midnightntwrk/midnight-reserve-contracts | main | code_repo | Foundation | foundation | true | high |
 | night-token-distribution | midnightntwrk/night-token-distribution | main | code_repo | Foundation | foundation | true | high |

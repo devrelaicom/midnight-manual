@@ -37,7 +37,10 @@ compact	LFDT-Minokawa/compact	main	code_repo
 create-mn-app	midnightntwrk/create-mn-app	main	code_repo
 setup-compact-action	midnightntwrk/setup-compact-action	main	code_repo
 midnight-node-docker	midnightntwrk/midnight-node-docker	main	code_repo
-contributor-hub	midnightntwrk/contributor-hub	main	docs_site
+# `contributor-hub` was renamed to `dApp-idea-board` upstream. The repo column
+# uses the canonical new path (redirect-independent); the slug is kept as
+# originally added so the ingested source keeps its identity.
+contributor-hub	midnightntwrk/dApp-idea-board	main	docs_site
 servicedesk	midnightntwrk/servicedesk	main	docs_site
 midnight-reserve-contracts	midnightntwrk/midnight-reserve-contracts	main	code_repo
 night-token-distribution	midnightntwrk/night-token-distribution	main	code_repo
