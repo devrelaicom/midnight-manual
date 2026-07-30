@@ -1,0 +1,13 @@
+manifest_version: 1
+root:
+  name: midnight-did-resolver
+  path: .
+  exclude:
+    # Deployment compose files / env templates for the standalone and preprod
+    # stacks — operational wiring, not resolver source or docs.
+    - "infrastructure/**"
+  provenance:
+    attribution: foundation
+    verified: false
+    verified_by: midnight-foundation
+    tags: [trust:high]

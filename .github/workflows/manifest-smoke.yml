@@ -15,6 +15,12 @@ name: Manifest smoke
 # Runs daily at 04:00 UTC (matching embedder-smoke.yml) and on demand via the
 # "Run workflow" button (workflow_dispatch). A failure simply turns the run
 # red (normal GitHub failed-workflow notifications); no issue is opened.
+#
+# Both jobs here need the network (GitHub API / clones), which is why this stays
+# scheduled rather than per-PR. The offline half — manifest schema, path safety,
+# provenance fields and sources.tsv <-> manifest agreement — runs on every PR as
+# the `manifest-validate` job in ci.yml, via the same
+# scripts/validate-midnight-manifests.sh.
 
 on:
   schedule:
