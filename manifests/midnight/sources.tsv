@@ -47,6 +47,20 @@ night-token-distribution	midnightntwrk/night-token-distribution	main	code_repo
 midnight-cnight-to-dust-dapp	midnightntwrk/midnight-cnight-to-dust-dapp	main	mixed
 midnight-zk	midnightntwrk/midnight-zk	main	code_repo
 passport	midnightntwrk/passport	main	mixed
+midnight-did	midnightntwrk/midnight-did	main	mixed
+partner-chains-smart-contracts	midnightntwrk/partner-chains-smart-contracts	main	code_repo
+#
+# The four rows below track NON-DEFAULT branches: each repo's `main` holds only
+# public-release scaffolding (LICENSE/CODEOWNERS/CHANGELOG) while the actual
+# content lives on its integration branch. Re-check these at ingest time — once
+# the work lands on `main`, switch the branch column back and drop this note.
+# CAVEAT: `mnm models migrate` re-clones from origin_url WITHOUT `-b`
+# (commands/models.rs), so an embedding-model migration silently re-ingests
+# these from `main`. Re-run scripts/ingest-midnight.sh after any migration.
+midnight-verifiable-credentials	midnightntwrk/midnight-verifiable-credentials	develop	code_repo
+midnight-trust-registry	midnightntwrk/midnight-trust-registry	develop	code_repo
+midnight-did-resolver	midnightntwrk/midnight-did-resolver	develop	mixed
+example-locker	midnightntwrk/example-locker	uploading-dapp	code_repo
 #
 # ── partner sources (manifests/midnight/partner/<slug>.yaml) ──────────────────
 # Formal partner orgs: attribution: partner, verified: false. OpenZeppelin is

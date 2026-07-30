@@ -48,7 +48,7 @@ mnm ingest run manifests/midnight/midnight-docs.yaml \
 also auto-creates the source on 404 with `--yes`, but explicit `sources create`
 is preferred so `kind`/`origin_url` are set.)
 
-## Index (121 sources)
+## Index (127 sources)
 
 > This index is generated from `sources.tsv` (slug / repo / branch / kind) and
 > each manifest's `root.provenance` (attribution / verified / trust). It is **not**
@@ -92,6 +92,16 @@ is preferred so `kind`/`origin_url` are set.)
 | midnight-cnight-to-dust-dapp | midnightntwrk/midnight-cnight-to-dust-dapp | main | mixed | Foundation | foundation | false | high |
 | midnight-zk | midnightntwrk/midnight-zk | main | code_repo | Foundation | foundation | true | high |
 | passport | midnightntwrk/passport | main | mixed | Foundation | foundation | false | high |
+| midnight-did | midnightntwrk/midnight-did | main | mixed | Foundation | foundation | true | high |
+| partner-chains-smart-contracts | midnightntwrk/partner-chains-smart-contracts | main | code_repo | Foundation | foundation | true | high |
+| midnight-verifiable-credentials | midnightntwrk/midnight-verifiable-credentials | develop | code_repo | Foundation | foundation | false | high |
+| midnight-trust-registry | midnightntwrk/midnight-trust-registry | develop | code_repo | Foundation | foundation | false | high |
+| midnight-did-resolver | midnightntwrk/midnight-did-resolver | develop | mixed | Foundation | foundation | false | high |
+| example-locker | midnightntwrk/example-locker | uploading-dapp | code_repo | Foundation | foundation | false | high |
+
+The last four rows track non-default branches — their `main` holds only
+public-release scaffolding while the content sits on an integration branch. See
+the note above those rows in `sources.tsv`.
 
 ## Partner sources (`manifests/midnight/partner/`)
 

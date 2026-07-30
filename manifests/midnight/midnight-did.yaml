@@ -1,0 +1,13 @@
+manifest_version: 1
+root:
+  name: midnight-did
+  path: .
+  exclude:
+    # Superseded historical notes (ledger4→7 migration deck, develop-PR
+    # transition) kept for the record — the current docs live in docs-site/.
+    - "docs/archive/**"
+  provenance:
+    attribution: foundation
+    verified: true
+    verified_by: midnight-foundation
+    tags: [trust:high]

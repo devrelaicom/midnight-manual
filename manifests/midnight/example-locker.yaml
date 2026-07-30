@@ -1,0 +1,12 @@
+manifest_version: 1
+root:
+  name: example-locker
+  path: .
+  # Small example DApp: the Compact contract (contract/), the CLI
+  # (locker-cli/), and README + TUTORIAL prose. Nothing repo-specific to
+  # exclude — the lockfile and boilerplate markdown are dropped by default.
+  provenance:
+    attribution: foundation
+    verified: false
+    verified_by: midnight-foundation
+    tags: [trust:high]

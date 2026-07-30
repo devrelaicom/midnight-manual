@@ -1,0 +1,12 @@
+manifest_version: 1
+root:
+  name: midnight-trust-registry
+  path: .
+  # Compact contract + TypeScript API/adapters (TRQP, OpenID Federation) with
+  # docs/ prose. The only non-signal trees are tooling/vendor/ and the nix/
+  # flake inputs, both already dropped by the walker's defaults.
+  provenance:
+    attribution: foundation
+    verified: false
+    verified_by: midnight-foundation
+    tags: [trust:high]
